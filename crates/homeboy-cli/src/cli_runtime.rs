@@ -2897,17 +2897,12 @@ fn preflight_hot_command_with_input(
             // A cached/projection-based inventory is enough for normal routing,
             // but not for a terminal local-resource refusal. A stale inventory
             // receives exactly one bounded runner-owned refresh before placement.
-            if hot_command.lab_offload_supported
-                && cli.runner.is_none()
-                && !matches!(cli.placement, crate::cli_surface::Placement::Local)
-                && !nonlocal_cook_requires_durable_admission(cli)
-                && resource_policy::evaluate_with_runner_hint(
-                    hot_command,
-                    &resources,
-                    lab_readiness.as_ref(),
-                )
-                .is_some()
-            {
+            if should_refresh_terminal_lab_inventory(
+                cli,
+                hot_command,
+                &resources,
+                lab_readiness.as_ref(),
+            ) {
                 if let Some(observed) = lab_readiness.take() {
                     let (resolved, diagnostic) = resolve_terminal_lab_inventory(
                         observed,
@@ -3115,6 +3110,22 @@ fn preflight_hot_command_with_input(
     }
 
     None
+}
+
+fn should_refresh_terminal_lab_inventory(
+    cli: &Cli,
+    hot_command: resource_policy::HotCommand,
+    resources: &crate::commands::resources::DoctorOutput,
+    lab_readiness: Option<&crate::runner::runners::LabRunnerReadiness>,
+) -> bool {
+    hot_command.lab_offload_supported
+        && cli.runner.is_none()
+        && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+        && lab_readiness.is_some_and(|readiness| {
+            readiness.state == crate::runner::runners::LabRunnerReadinessState::Stale
+        })
+        && resource_policy::evaluate_with_runner_hint(hot_command, resources, lab_readiness)
+            .is_some()
 }
 
 fn parsed_lab_readiness_snapshot(
@@ -4507,6 +4518,156 @@ mod tests {
         assert_eq!(diagnostic.source_freshness.as_deref(), Some("stale"));
         assert_eq!(diagnostic.refreshed_at_ms, Some(200));
         assert_eq!(diagnostic.terminal_reason, "ready_after_refresh");
+    }
+
+    #[test]
+    fn auto_cook_refreshes_stale_disconnected_inventory_then_uses_local_fallback() {
+        use crate::core::parsed_command_preflight::{
+            FallbackDirective, ParsedCommandPolicySnapshot,
+        };
+        use homeboy_lab_runner_contract::EffectiveExecutionPlacement;
+
+        let auto = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "route after runner refresh",
+            "--to-worktree",
+            "fixture@stale-disconnected",
+            "--verify",
+            "true",
+        ]);
+        let explicit_runner = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "do not substitute local execution",
+            "--to-worktree",
+            "fixture@explicit-disconnected",
+            "--verify",
+            "true",
+        ]);
+        let mut resources = hot_resources();
+        resources.load.one = Some(0.5);
+        resources.load.five = Some(0.5);
+        resources.load.cpu_count = 2;
+        let command = cook_hot_command();
+
+        // Fresh inventory is authoritative, while stale auto placement gets one
+        // bounded refresh before the durable placement decision is captured.
+        assert!(should_refresh_terminal_lab_inventory(
+            &auto,
+            command,
+            &resources,
+            Some(&lab_readiness(
+                crate::runner::runners::LabRunnerReadinessState::Stale
+            )),
+        ));
+        for state in [
+            crate::runner::runners::LabRunnerReadinessState::ConnectedReady,
+            crate::runner::runners::LabRunnerReadinessState::Disconnected,
+        ] {
+            assert!(!should_refresh_terminal_lab_inventory(
+                &auto,
+                command,
+                &resources,
+                Some(&lab_readiness(state)),
+            ));
+        }
+        assert!(!should_refresh_terminal_lab_inventory(
+            &explicit_runner,
+            command,
+            &resources,
+            Some(&lab_readiness(
+                crate::runner::runners::LabRunnerReadinessState::Stale
+            )),
+        ));
+
+        let (disconnected, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
+            100,
+            || {
+                Ok((
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::Disconnected),
+                    200,
+                ))
+            },
+        );
+        assert!(diagnostic.refresh_attempted);
+        assert_eq!(diagnostic.refreshed_state.as_deref(), Some("disconnected"));
+        assert!(disconnected.selected_runner_id.is_none());
+        assert!(resource_policy::admits_auto_local_capacity_fallback(
+            command,
+            &resources,
+            Some(&disconnected),
+            auto.placement,
+        ));
+
+        let context = resource_policy::resource_policy_context_from_evaluation(
+            command,
+            &resources,
+            None,
+            false,
+            true,
+            Some(&disconnected),
+            false,
+        );
+        let input = resource_policy::parsed_command_preflight_input(&auto, &[]);
+        let result = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+            Vec::new(),
+            input,
+            ParsedCommandPolicySnapshot {
+                resource_admission_evidence: resource_policy::resource_admission_evidence(
+                    &resources,
+                ),
+                resource_policy: Some(context),
+                lab_readiness: Some(parsed_lab_readiness_snapshot(&auto, &disconnected)),
+                selected_runner_id: None,
+                generic_route: generic_route_policy_snapshot(&auto, None),
+                deferred_pressure_refusal: false,
+                runner_admitted: false,
+                runner_incompatible: false,
+                auto_local_capacity_fallback: true,
+            },
+        )
+        .expect("auto placement permits its audited local fallback");
+        assert_eq!(
+            result.placement.selected,
+            EffectiveExecutionPlacement::Local
+        );
+        assert!(result.placement.runner.is_none());
+        assert_eq!(result.fallback, FallbackDirective::LocalCapacity);
+
+        let input = resource_policy::parsed_command_preflight_input(&explicit_runner, &[]);
+        let error = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+            Vec::new(),
+            input,
+            ParsedCommandPolicySnapshot {
+                resource_admission_evidence: resource_policy::resource_admission_evidence(
+                    &resources,
+                ),
+                resource_policy: None,
+                lab_readiness: Some(parsed_lab_readiness_snapshot(
+                    &explicit_runner,
+                    &disconnected,
+                )),
+                selected_runner_id: Some("homeboy-lab".to_string()),
+                generic_route: generic_route_policy_snapshot(
+                    &explicit_runner,
+                    Some("homeboy-lab".to_string()),
+                ),
+                deferred_pressure_refusal: false,
+                runner_admitted: false,
+                runner_incompatible: false,
+                auto_local_capacity_fallback: false,
+            },
+        )
+        .expect_err("an explicit disconnected runner must fail closed");
+        assert_eq!(error.details["field"], "selected_runner_id");
     }
 
     #[test]

@@ -3173,7 +3173,33 @@ fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
 }
 
 #[test]
-fn only_detached_cook_without_local_fallback_enters_deferred_admission() {
+fn cook_requires_unmaterialized_admission_when_detached_or_local_is_not_authorized() {
+    use homeboy::core::parsed_command_preflight::{
+        DeferredWorkloadDecision, FallbackDirective, ParsedCommandPreflightResult,
+        ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
+    };
+
+    let preflight = |cli: &Cli, fallback| {
+        let normalized = vec!["homeboy".to_string()];
+        let mut result = ParsedCommandPreflightResult::new(
+            normalized.clone(),
+            resource_policy::parsed_command_preflight_input(cli, &normalized),
+            None,
+            None,
+            DeferredWorkloadDecision::NotApplicable,
+            fallback,
+            crate::cli_runtime::placement_directive(cli, None, false),
+            None,
+        );
+        result.resource_admission = ResourceAdmissionDecision::Rejected {
+            label: "cook".to_string(),
+            engages_at: ResourceHeat::Warm,
+            evidence: ResourceAdmissionEvidence::Observed {
+                pressure: ResourceHeat::Warm,
+            },
+        };
+        result
+    };
     let queued = Cli::parse_from([
         "homeboy",
         "--detach-after-handoff",
@@ -3186,7 +3212,10 @@ fn only_detached_cook_without_local_fallback_enters_deferred_admission() {
         "--prompt",
         "queue this on Lab",
     ]);
-    assert!(detached_cook_requires_deferred_admission(&queued));
+    assert!(cook_requires_unmaterialized_admission(
+        &queued,
+        &preflight(&queued, FallbackDirective::None),
+    ));
 
     let local = Cli::parse_from([
         "homeboy",
@@ -3202,7 +3231,10 @@ fn only_detached_cook_without_local_fallback_enters_deferred_admission() {
         "--prompt",
         "remain local",
     ]);
-    assert!(!detached_cook_requires_deferred_admission(&local));
+    assert!(!cook_requires_unmaterialized_admission(
+        &local,
+        &preflight(&local, FallbackDirective::None),
+    ));
 
     let fallback = Cli::parse_from([
         "homeboy",
@@ -3218,7 +3250,30 @@ fn only_detached_cook_without_local_fallback_enters_deferred_admission() {
         "--prompt",
         "run locally when Lab is unavailable",
     ]);
-    assert!(!detached_cook_requires_deferred_admission(&fallback));
+    assert!(!cook_requires_unmaterialized_admission(
+        &fallback,
+        &preflight(&fallback, FallbackDirective::None),
+    ));
+
+    let automatic = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@stale-refresh-timeout",
+        "--verify",
+        "true",
+        "--prompt",
+        "wait for a confirmed placement",
+    ]);
+    assert!(cook_requires_unmaterialized_admission(
+        &automatic,
+        &preflight(&automatic, FallbackDirective::None),
+    ));
+    assert!(!cook_requires_unmaterialized_admission(
+        &automatic,
+        &preflight(&automatic, FallbackDirective::LocalCapacity),
+    ));
 }
 
 #[test]
