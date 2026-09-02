@@ -957,6 +957,144 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
 }
 
 #[test]
+fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
+    use crate::agent_task::{AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+    };
+
+    const SECRET: &str = "rotation-projection-secret";
+    let attempts = serde_json::json!([
+        {"attempt": 1, "rotation_index": 0, "backend": "xai", "model": "grok-4.6", "attempted_model": "grok-4.6", "status": "failed", "failure_classification": "provider_account_blocked", "summary": "token=rotation-projection-secret"},
+        {"attempt": 2, "rotation_index": 1, "backend": "zai-coding-plan", "model": "glm-5.3", "attempted_model": "glm-5.3", "status": "failed", "failure_classification": "rate_limited"},
+        {"attempt": 3, "rotation_index": 2, "backend": "opencode-go", "model": "kimi-k3", "attempted_model": "kimi-k3", "status": "failed", "failure_classification": "stalled"},
+        {"attempt": 4, "rotation_index": 3, "backend": "anthropic", "model": "claude-sonnet-5", "attempted_model": "claude-sonnet-5", "status": "failed", "failure_classification": "stalled"}
+    ]);
+    let aggregate = AgentTaskAggregate {
+        schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: "rotation-projection".to_string(),
+        status: AgentTaskAggregateStatus::Failed,
+        totals: AgentTaskAggregateTotals {
+            failed: 1,
+            ..Default::default()
+        },
+        outcomes: vec![AgentTaskOutcome {
+            task_id: "rotation-task".to_string(),
+            status: AgentTaskOutcomeStatus::Failed,
+            metadata: serde_json::json!({ "provider_rotation": { "attempts": attempts } }),
+            diagnostics: vec![
+                AgentTaskDiagnostic {
+                    class: "agent_task.provider_rotation_exhausted".to_string(),
+                    message: "all configured provider routes were rejected: token=rotation-projection-secret".to_string(),
+                    data: serde_json::json!({ "attempts": attempts, "token": SECRET }),
+                },
+                AgentTaskDiagnostic {
+                    class: "agent_task.execution_budget_exhausted".to_string(),
+                    message: "provider execution stopped because its configured execution budget was exhausted".to_string(),
+                    data: serde_json::json!({ "exhausted_budget": "max_provider_rotations" }),
+                },
+            ],
+            ..Default::default()
+        }],
+        events: Vec::new(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: Default::default(),
+    };
+    let mut report = AgentTaskRunResult {
+        value: AgentTaskCookReport {
+            schema: "homeboy/agent-task-cook/v1",
+            cook_id: "rotation-projection".to_string(),
+            latest_run_id: Some("rotation-run".to_string()),
+            history_run_ids: vec!["rotation-run".to_string()],
+            invocation_run_ids: vec!["rotation-run".to_string()],
+            status: "provider_failure".to_string(),
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            intentional_no_change: None,
+            selected_candidate: None,
+            stop_reason: None,
+            terminal_phase: None,
+            terminal_failure_classification: None,
+            primary_failure: None,
+            moving_base_recovery: None,
+            failure_context: Some(AgentTaskCookFailureContext {
+                cook_id: "rotation-projection".to_string(),
+                latest_run_id: "rotation-run".to_string(),
+                selected_run_id: None,
+                selected_task_id: None,
+                selected_artifact_id: None,
+                promotion_provenance: None,
+                durable_recipe_ref: "recipe".to_string(),
+                lifecycle_state: "failed".to_string(),
+                phase: "provider".to_string(),
+                reason_code: "failed".to_string(),
+                diagnostic: None,
+                continuation_admission: None,
+                blocking_claim: None,
+                provider_budget_consumed: true,
+                provider_executions_consumed: 4,
+                recovery_legal: false,
+                recovery_reason: "provider budget exhausted".to_string(),
+                next_actions: Vec::new(),
+                legal_actions: Vec::new(),
+            }),
+        },
+        exit_code: 1,
+    };
+
+    make_provider_rotation_actionable(&mut report, &aggregate, "rotation-run");
+
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_rotation_exhausted")
+    );
+    assert_eq!(
+        report
+            .value
+            .primary_failure
+            .as_ref()
+            .and_then(|failure| failure.diagnostic.as_ref())
+            .and_then(|diagnostic| diagnostic.get("class"))
+            .and_then(Value::as_str),
+        Some("agent_task.provider_rotation_exhausted")
+    );
+    let stop_reason = report.value.stop_reason.as_deref().expect("stop reason");
+    for route in [
+        "xai/grok-4.6: provider_account_blocked",
+        "zai-coding-plan/glm-5.3: rate_limited",
+        "opencode-go/kimi-k3: stalled",
+        "anthropic/claude-sonnet-5: stalled",
+    ] {
+        assert!(
+            stop_reason.contains(route),
+            "missing {route}: {stop_reason}"
+        );
+    }
+    let context = report
+        .value
+        .failure_context
+        .as_ref()
+        .expect("failure context");
+    assert_eq!(context.reason_code, "provider_rotation_exhausted");
+    assert_eq!(
+        context.diagnostic.as_ref().expect("diagnostic")["class"],
+        "agent_task.provider_rotation_exhausted"
+    );
+    let rendered = serde_json::to_string(&report.value).expect("rotation report serializes");
+    assert!(
+        !rendered.contains(SECRET),
+        "rotation report leaked {SECRET}"
+    );
+    assert!(
+        rendered.contains("[REDACTED]"),
+        "rotation report was not redacted"
+    );
+}
+
+#[test]
 fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
     let mut plan = compile_options("review-form-timeout-report")
         .identity

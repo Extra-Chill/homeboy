@@ -208,8 +208,9 @@ pub(crate) fn route_after_parse_with_provenance(
                 .map(|runner| runner.runner_id.clone())
         })
         .flatten();
-    if detached_cook_requires_deferred_admission(cli) && !is_unmaterialized_replay_worker() {
-        // Persist before any bounded refresh. The scoped replay selector owns
+    if cook_requires_unmaterialized_admission(cli, &preflight) && !is_unmaterialized_replay_worker()
+    {
+        // Persist before provider execution. The scoped replay selector owns
         // ready and reverse-capacity admission after this durable boundary.
         return admit_unmaterialized_cook(
             cli,
@@ -957,19 +958,33 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
     }
 }
 
-/// Deferred replay is only needed after an explicitly detached Cook loses its
-/// Lab route. Attached Cooks continue to observe their terminal execution, and
-/// `lab-or-local` continues through its authorized controller fallback.
-fn detached_cook_requires_deferred_admission(cli: &Cli) -> bool {
-    cli.detach_after_handoff
-        && !cli.placement.allows_local_fallback()
-        && !matches!(cli.placement, homeboy::cli_surface::Placement::Local)
-        && matches!(
-            cli.command,
-            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-            })
-        )
+/// Preserve durable Cook admission when no provider route is currently
+/// executable. Automatic local execution under pressure needs the separately
+/// audited local-capacity fallback; a stale or failed runner refresh is not it.
+fn cook_requires_unmaterialized_admission(
+    cli: &Cli,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+) -> bool {
+    let is_cook = matches!(
+        cli.command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+        })
+    );
+    is_cook
+        && ((cli.detach_after_handoff
+            && !cli.placement.allows_local_fallback()
+            && !matches!(cli.placement, homeboy::cli_surface::Placement::Local))
+            || (matches!(cli.placement, homeboy::cli_surface::Placement::Auto)
+                && preflight.selected_runner_id.is_none()
+                && matches!(
+                    preflight.resource_admission,
+                    homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+                )
+                && !matches!(
+                    preflight.fallback,
+                    homeboy::core::parsed_command_preflight::FallbackDirective::LocalCapacity
+                )))
 }
 
 fn admission_digest(value: impl AsRef<[u8]>) -> String {

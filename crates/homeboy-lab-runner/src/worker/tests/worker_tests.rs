@@ -220,7 +220,7 @@ fn reverse_worker_restart_cannot_replay_a_consumed_receipt_and_keeps_context_evi
 #[test]
 fn reverse_provider_dispatch_rejects_runner_mismatch_before_provider_script() {
     assert_tampered_claim_rejects_before_provider(|claim| {
-        claim["job"]["claimed_by_runner_id"] = serde_json::json!("other-runner");
+        claim["execution_context"]["runner_id"] = serde_json::json!("other-runner");
     });
 }
 
