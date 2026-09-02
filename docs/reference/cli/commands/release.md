@@ -173,7 +173,7 @@ Report which release first contained a commit, and whether the installed build h
 | `--issue` | `<N>` | Resolve the commit through the merged pull request that closed this issue, so the operator does not have to find the sha first |
 | `--component` | `<COMPONENT_ID>` | Component whose release tag namespace to search (default: the component discovered from the working directory) |
 | `--path` | `<PATH>` | Checkout to inspect directly. Useful for unregistered clones, CI runners, and worktrees |
-| `--installed` | `<VERSION>` | Version to treat as installed instead of the running binary's version |
+| `--installed` | `<VERSION>` | Version to treat as installed instead of the component checkout's version |
 
 ## `homeboy release gap`
 
@@ -191,7 +191,7 @@ Report how far the installed build is behind the newest release
 | --- | --- | --- |
 | `--component` | `<COMPONENT_ID>` | Component whose release tag namespace to search (alternative to the positional component target) |
 | `--path` | `<PATH>` | Checkout to inspect directly. Useful for unregistered clones, CI runners, and worktrees |
-| `--installed` | `<VERSION>` | Version to treat as installed instead of the running binary's version |
+| `--installed` | `<VERSION>` | Version to treat as installed instead of the component checkout's version |
 
 ## `homeboy release readiness`
 
