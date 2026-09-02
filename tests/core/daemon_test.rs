@@ -3148,7 +3148,6 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission_fence() {
     let _home = HomeGuard::new();
@@ -3188,6 +3187,75 @@ fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission
         .expect("submission resumes after reconciliation");
     assert_eq!(response.status_code, 200);
     assert_eq!(store.list().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admission() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let (started_tx, _started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.parallel-build-admission",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: release_tx,
+        executions: Arc::new(AtomicUsize::new(0)),
+        cancellations: Arc::new(AtomicUsize::new(0)),
+    }))
+    .expect("register parallel-build controller driver");
+
+    // This is the guard retained by LocalControllerJobClient after it has
+    // verified the resident build but before it posts the Cook job.
+    let preflight_guard =
+        super::acquire_daemon_admission_lock(super::DaemonAdmissionLockMode::Shared)
+            .expect("Cook preflight acquires shared generation guard");
+    let (recovery_attempt_tx, recovery_attempt_rx) = mpsc::channel();
+    let (recovery_acquired_tx, recovery_acquired_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        recovery_attempt_tx
+            .send(())
+            .expect("report recovery attempt");
+        let fence = super::acquire_daemon_job_admission_fence()
+            .expect("parallel build acquires recovery fence");
+        recovery_acquired_tx
+            .send(())
+            .expect("report recovery fence");
+        drop(fence);
+    });
+    recovery_attempt_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("parallel build attempts recovery");
+    assert!(
+        recovery_acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "a sibling build must not replace the preflighted generation"
+    );
+
+    let admitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.parallel-build-admission",
+            "version": 1,
+            "idempotency_key": "parallel-cook",
+            "request": {}
+        })),
+        &store,
+    );
+    assert_eq!(admitted.status_code, 200);
+    assert_eq!(
+        store.list().len(),
+        1,
+        "Cook admission is durable before recovery"
+    );
+
+    drop(preflight_guard);
+    recovery_acquired_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("recovery can proceed after Cook admission");
 }
 
 #[test]
