@@ -56,12 +56,19 @@ pub(crate) fn committed_changes_patch(
     }
 
     let (base_ref, historical_task_base, adoption_merge) = if options.candidate_ref.is_some() {
-        resolve_adoption_candidate_base(
-            worktree_path,
-            &candidate,
-            options.task_base_sha.as_deref(),
-            options.base_ref.as_deref(),
-        )?
+        let (candidate_base, historical_task_base, adoption_merge) =
+            resolve_adoption_candidate_base(
+                worktree_path,
+                &candidate,
+                options.task_base_sha.as_deref(),
+                options.base_ref.as_deref(),
+            )?;
+        // Native direct promotion applies a patch to the recorded task
+        // destination rather than replacing it with the source commit. Its
+        // patch must therefore materialize the whole authenticated candidate
+        // from that immutable task base, not merely the candidate's final
+        // parent delta.
+        (candidate_base, historical_task_base, adoption_merge)
     } else {
         let Some(base_ref) = resolve_committed_changes_base(
             worktree_path,
@@ -87,9 +94,10 @@ pub(crate) fn committed_changes_patch(
             None,
         ));
     }
+    let patch_base = historical_task_base.as_deref().unwrap_or(&base_ref);
     let changed_files = git_lines(
         worktree_path,
-        &["diff", "--name-only", &base_ref, &candidate],
+        &["diff", "--name-only", patch_base, &candidate],
     )?;
     if changed_files.is_empty() {
         return Ok(None);
@@ -101,14 +109,14 @@ pub(crate) fn committed_changes_patch(
             "--binary",
             "--full-index",
             "--find-renames",
-            &base_ref,
+            patch_base,
             &candidate,
         ],
     )?;
     if patch.trim().is_empty() {
         return Ok(None);
     }
-    let commit_range = format!("{base_ref}..{candidate}");
+    let commit_range = format!("{patch_base}..{candidate}");
     let commits = committed_change_evidence(worktree_path, &commit_range)?;
     if commits.is_empty() {
         return Ok(None);

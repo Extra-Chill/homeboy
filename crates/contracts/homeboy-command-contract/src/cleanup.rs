@@ -69,7 +69,6 @@ pub struct CleanupArgs {
 pub enum CleanupCategoryArg {
     RepoArtifacts,
     TaskWorktrees,
-    WorktreeProviders,
     TerminalRuns,
     PersistedRunArtifacts,
     OrphanedArtifactBytes,
@@ -93,8 +92,6 @@ pub enum CleanupCategoryArg {
 pub enum CleanupCommand {
     /// Inspect or remove declared reconstructable artifacts across repo worktrees
     Artifacts(CleanupArtifactsArgs),
-    /// Aggregate cleanup across configured external worktree providers
-    Worktrees(CleanupWorktreesArgs),
     /// Explain retained Homeboy storage without deleting or reconciling resources.
     ///
     /// Reports lifecycle aggregates alongside root filesystem accounting, top-level
@@ -184,25 +181,6 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     } else {
         Ok(limit)
     }
-}
-
-#[derive(Args, Debug, PartialEq, Eq)]
-pub struct CleanupWorktreesArgs {
-    /// Cleanup a specific configured provider. Repeatable.
-    #[arg(long = "provider", value_name = "ID", conflicts_with = "all_providers")]
-    pub provider: Vec<String>,
-    /// Cleanup every enabled configured provider.
-    #[arg(long)]
-    pub all_providers: bool,
-    /// Apply cleanup. Omit for provider preview/dry-run output.
-    #[arg(long)]
-    pub apply: bool,
-    /// Reviewed provider run identity. Must be paired with `--provider-plan-id` and exactly one provider. Omit both to plan then apply.
-    #[arg(long = "provider-run-id", value_name = "ID")]
-    pub provider_run_id: Option<String>,
-    /// Reviewed provider plan identity. Must be paired with `--provider-run-id` and exactly one provider. Omit both to plan then apply.
-    #[arg(long = "provider-plan-id", value_name = "ID")]
-    pub provider_plan_id: Option<String>,
 }
 
 /// Naming for one cleanup category plus its specialist command.

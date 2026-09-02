@@ -422,7 +422,6 @@ fn cook_preview_bypasses_every_placement_route_without_durable_state() {
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tempfile::tempdir;
 
 #[test]
@@ -2456,125 +2455,6 @@ fn detached_cook_without_a_lab_runner_does_not_fall_back_to_local_execution() {
 #[test]
 fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
-        let workspace = tempfile::tempdir().expect("workspace");
-        git_init(workspace.path());
-        // The provider-derived destination is validated against the requested
-        // Cook repository through its remote (#11987). The linked worktree
-        // created below inherits this remote from its primary.
-        git_add_remote(workspace.path(), FIXTURE_REPOSITORY_REMOTE);
-        let provider_dir = tempfile::tempdir().expect("provider dir");
-        let provider_workspace = provider_dir.path().join("worktree");
-        let mut commit_command = Command::new("git");
-        commit_command
-            .args([
-                "-c",
-                "user.email=fixture@example.com",
-                "-c",
-                "user.name=Fixture",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "fixture",
-            ])
-            .current_dir(workspace.path());
-        let commit = homeboy::core::test_support::bounded_output(commit_command);
-        assert!(commit.status.success(), "{:?}", commit);
-        let mut worktree_command = Command::new("git");
-        worktree_command
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                "fix/issue-11291-homeboy",
-                provider_workspace
-                    .to_str()
-                    .expect("utf8 provider workspace"),
-            ])
-            .current_dir(workspace.path());
-        let worktree = homeboy::core::test_support::bounded_output(worktree_command);
-        assert!(worktree.status.success(), "{:?}", worktree);
-        let provider = provider_dir.path().join("provider");
-        let payload = serde_json::json!({
-            "worktrees": [{
-                "handle": "homeboy@fix-issue-11291-homeboy",
-                "path": provider_workspace,
-                "branch": "fix/issue-11291-homeboy",
-                "safety": { "dirty": false, "unpushed": false, "primary": false }
-            }]
-        });
-        fs::write(
-            &provider,
-            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", payload),
-        )
-        .expect("write provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = fs::metadata(&provider)
-                .expect("provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&provider, permissions).expect("make provider executable");
-        }
-        let mut config = homeboy::core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy::core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy::core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
-                    ensure: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy::core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy::core::defaults::save_config(&config).expect("save provider config");
-
-        let cook_cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--repo",
-            "homeboy",
-            "--task-url",
-            "https://github.com/Extra-Chill/homeboy/issues/11291",
-            "--verify",
-            "true",
-            "--backend",
-            "fixture",
-            "--prompt",
-            "retry this task",
-        ]);
-        let plan = materialize_agent_task_cook_plan(&cook_cli, None)
-            .expect("materialize cook plan")
-            .expect("cook plan");
-        assert_eq!(plan.tasks[0].workspace.root, None);
-        assert_eq!(
-            plan.tasks[0].metadata["worktree_provision"]["action"],
-            "lookup_pending"
-        );
-        assert_eq!(
-            plan.tasks[0].metadata["worktree_provision"]["handle"],
-            "homeboy@fix-issue-11291-homeboy"
-        );
         let admission_args = [
             "homeboy",
             "agent-task",
@@ -2583,6 +2463,8 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
             "homeboy",
             "--task-url",
             "https://github.com/Extra-Chill/homeboy/issues/11291",
+            "--to-worktree",
+            "homeboy@fix-issue-11291-homeboy",
             "--verify",
             "true",
             "--backend",

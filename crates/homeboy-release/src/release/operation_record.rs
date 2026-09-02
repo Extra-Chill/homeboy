@@ -257,14 +257,6 @@ impl OperationRecordStore {
         })
     }
 
-    pub(crate) fn pending_for_subject(
-        &self,
-        operation: &str,
-        subject: &str,
-    ) -> Result<Vec<OperationRecord>> {
-        self.for_subject(operation, subject, true)
-    }
-
     pub fn for_subject(
         &self,
         operation: &str,
@@ -437,7 +429,7 @@ mod tests {
             .expect("atomic update");
         assert_eq!(updated.attempt_count, 1);
         assert!(!store
-            .pending_for_subject("provider_workspace", "component")
+            .for_subject("provider_workspace", "component", true)
             .expect("pending")
             .iter()
             .any(|record| record.owner_run_ref == "release/test-owner"));

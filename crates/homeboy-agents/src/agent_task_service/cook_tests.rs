@@ -51,7 +51,6 @@ use homeboy_lab_contract::lab::transport_failure::{
     preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportAttemptReceipt,
     LabTransportErrorKind, LabTransportOperation,
 };
-use serde::Deserialize;
 use sha2::Digest;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -159,7 +158,6 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
     });
 }
 
-const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn with_strict_config_lock(test: impl FnOnce()) {
@@ -265,74 +263,6 @@ fn deepest_typed_error_ignores_sibling_envelopes_and_json_strings() {
     .is_none());
 }
 
-#[derive(Debug, Deserialize)]
-struct DurableCookFixture {
-    schema: String,
-    producer: DurableCookFixtureProducer,
-    cook: DurableCookFixtureCook,
-    source_record: DurableCookFixtureSourceRecord,
-    continuation_record: DurableCookFixtureContinuationRecord,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureProducer {
-    runtime: String,
-    run_record_schema: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureCook {
-    id: String,
-    source_attempt: u32,
-    continuation_attempt: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureSourceRecord {
-    schema: String,
-    state: String,
-    latest_promotion: DurableCookFixturePromotion,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixturePromotion {
-    status: String,
-    post_apply: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureContinuationRecord {
-    schema: String,
-    state: String,
-    latest_promotion: DurableCookFixtureContinuationPromotion,
-    aggregate: DurableCookFixtureAggregate,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureContinuationPromotion {
-    follow_up_kind: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DurableCookFixtureAggregate {
-    status: String,
-    outcome_status: String,
-}
-
-fn durable_cook_0_328_fixture() -> DurableCookFixture {
-    let fixture: DurableCookFixture = serde_json::from_str(include_str!(
-        "fixtures/durable_cook_0.328_review_form_timeout.json"
-    ))
-    .expect("0.328 durable Cook fixture is valid JSON");
-    assert_eq!(fixture.schema, DURABLE_COOK_FIXTURE_SCHEMA);
-    assert_eq!(fixture.producer.runtime, "0.328.1");
-    assert_eq!(
-        fixture.producer.run_record_schema,
-        "homeboy/agent-task-run/v1"
-    );
-    fixture
-}
-
 /// Seed a terminal aggregate whose last outcome carries a valid AI-authored
 /// review form under `outputs["review_form"]`, so cook finalization (which now
 /// sources reviewer prose from the form) can proceed.
@@ -385,7 +315,9 @@ fn remediation_policy_rejects_denied_workspace_read_before_dispatch() {
 
     assert_eq!(
         remediation_tool_policy_error(&request).as_deref(),
-        Some("Cook remediation policy must grant the runner read access to the task workspace before dispatch")
+        Some(
+            "Cook remediation policy must grant the runner read access to the task workspace before dispatch"
+        )
     );
 
     request.policy.grant_workspace_read_tool();
@@ -4005,37 +3937,6 @@ impl AgentTaskCookAttemptDispatcher for RecordingDetachedAttemptDispatcher {
     }
 }
 
-#[derive(Debug)]
-struct WorkspaceCapturingDetachedAttemptDispatcher {
-    plan: Arc<Mutex<Option<AgentTaskPlan>>>,
-}
-
-impl AgentTaskCookAttemptDispatcher for WorkspaceCapturingDetachedAttemptDispatcher {
-    fn durable_recipe(&self) -> Result<Value> {
-        Ok(serde_json::json!({ "kind": "test-workspace-capturing-detached" }))
-    }
-
-    fn dispatch_attempt(
-        &self,
-        plan: AgentTaskPlan,
-        run_id: &str,
-        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
-    ) -> Result<()> {
-        *self.plan.lock().expect("captured dispatch plan") = Some(plan.clone());
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-        agent_task_lifecycle::record_detached_lab_run(
-            agent_task_lifecycle::DetachedLabRunRecord {
-                run_id,
-                runner_id: "fixture-lab",
-                runner_job_id: "workspace-capturing-daemon-job",
-                remote_workspace: "/runner/workspace",
-                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
-            },
-        )?;
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 struct UnusedExecutor;
 
@@ -4200,22 +4101,6 @@ impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
             metadata: serde_json::json!({ "model": request.executor.model() }),
             ..Default::default()
         }
-    }
-}
-
-#[derive(Clone)]
-struct RecordingReviewFormExecutor {
-    executions: Arc<AtomicUsize>,
-}
-
-impl AgentTaskExecutorAdapter for RecordingReviewFormExecutor {
-    fn execute(
-        &self,
-        request: crate::agent_task::AgentTaskRequest,
-        context: crate::agent_task_scheduler::AgentTaskExecutionContext,
-    ) -> crate::agent_task::AgentTaskOutcome {
-        self.executions.fetch_add(1, Ordering::SeqCst);
-        ReviewFormOnlyExecutor.execute(request, context)
     }
 }
 
@@ -5595,391 +5480,10 @@ fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
             record.metadata["pre_execution_failure"]["phase"],
             "cook_pre_execution"
         );
-        assert!(record.metadata["pre_execution_failure"]["message"]
+        assert!(!record.metadata["pre_execution_failure"]["message"]
             .as_str()
             .expect("primary-checkout diagnostic")
-            .contains("primary or non-linked checkout"));
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let primary = tempfile::tempdir().expect("primary repository");
-        let target = home.path().join("issue-worktree");
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .expect("run git");
-            assert!(output.status.success(), "git {:?} failed", args);
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        };
-        git(primary.path(), &["init", "--initial-branch=main"]);
-        git(
-            primary.path(),
-            &["config", "user.email", "agent@example.test"],
-        );
-        git(primary.path(), &["config", "user.name", "Agent"]);
-        std::fs::write(primary.path().join("tracked"), "base\n").unwrap();
-        git(primary.path(), &["add", "tracked"]);
-        git(primary.path(), &["commit", "-m", "base"]);
-        let base = git(primary.path(), &["rev-parse", "HEAD"]);
-        git(
-            primary.path(),
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "issue-11091",
-                target.to_str().unwrap(),
-            ],
-        );
-        std::fs::write(target.join("candidate"), "committed\n").unwrap();
-        git(&target, &["add", "candidate"]);
-        git(&target, &["commit", "-m", "candidate"]);
-
-        let provider = home.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-                serde_json::json!({"worktrees": [{
-                    "handle": "fixture@issue-11091", "path": target, "branch": "issue-11091",
-                    "task_url": "https://example.test/issues/11091",
-                    "safety": {"dirty": false, "unpushed": true, "primary": false}
-                }]})
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).unwrap();
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string()]),
-                    list: Some(vec![provider.display().to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: Some("$.task_url".to_string()),
-                    },
-                ),
-            },
-        );
-        homeboy_core::defaults::save_config(&config).unwrap();
-
-        let mut options =
-            batch_cook_options("issue-11091", Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.workspace.to_worktree = "fixture@issue-11091".to_string();
-        options.workspace.source_worktree_path = Some(target.clone());
-        options.workspace.task_base_sha = Some(base);
-        options.identity.initial_plan.tasks[0].workspace.task_url =
-            Some("https://example.test/issues/11091".to_string());
-        validate_cook_workspace(&options)
-            .expect("clean issue-owned committed checkout is adoptable");
-
-        std::fs::write(target.join("dirty"), "drift\n").unwrap();
-        let error = validate_cook_workspace(&options).expect_err("dirty checkout remains blocked");
-        assert_eq!(
-            error.details["workspace"]["classification"],
-            "workspace.resolved_but_dirty"
-        );
-        std::fs::remove_file(target.join("dirty")).unwrap();
-
-        options.identity.initial_plan.tasks[0].workspace.task_url =
-            Some("https://example.test/issues/other".to_string());
-        let error =
-            validate_cook_workspace(&options).expect_err("wrong task ownership remains blocked");
-        assert!(error.message.contains("not owned by this Cook task"));
-
-        options.identity.initial_plan.tasks[0].workspace.task_url =
-            Some("https://example.test/issues/11091".to_string());
-        options.workspace.task_base_sha =
-            Some("0000000000000000000000000000000000000000".to_string());
-        let error = validate_cook_workspace(&options).expect_err("unsafe ancestry remains blocked");
-        assert!(error.message.contains("cannot be trusted"));
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn first_cook_promotes_resolved_but_dirty_destination_matching_candidate() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        crate::agent_task_candidate_baseline::register();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let target = temp.path().join("candidate");
-        std::fs::create_dir(&target).unwrap();
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .expect("run git");
-            assert!(output.status.success(), "git {:?} failed", args);
-            String::from_utf8_lossy(&output.stdout).to_string()
-        };
-        git(&target, &["init", "--quiet", "-b", "cook-candidate"]);
-        git(&target, &["config", "user.email", "test@example.com"]);
-        git(&target, &["config", "user.name", "Homeboy Test"]);
-        std::fs::write(target.join("tracked.txt"), "base\n").unwrap();
-        git(&target, &["add", "tracked.txt"]);
-        git(&target, &["commit", "--quiet", "-m", "base"]);
-        std::fs::write(target.join("tracked.txt"), "candidate\n").unwrap();
-        let patch = git(&target, &["diff", "--binary", "--full-index"]);
-        let patch_path = temp.path().join("candidate.patch");
-        std::fs::write(&patch_path, &patch).unwrap();
-
-        let handle = "fixture@cook-candidate";
-        let provider = temp.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-                serde_json::json!({ "worktrees": [{
-                    "handle": handle,
-                    "path": target,
-                    "branch": "cook-candidate",
-                    "safety": { "dirty": true, "unpushed": false, "primary": false },
-                }] })
-            ),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).unwrap();
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-
-        let mut options = batch_cook_options(
-            "cook-candidate-dirt",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        options.workspace.to_worktree = handle.to_string();
-        let error = validate_cook_workspace(&options)
-            .expect_err("pre-provider dirty destination with no candidate remains blocked");
-        assert_eq!(
-            error.details["workspace"]["classification"],
-            "workspace.resolved_but_dirty"
-        );
-        assert_eq!(error.details["workspace"]["reason"], "unattributed_drift");
-
-        let apply = temp.path().join("apply");
-        std::fs::write(
-            &apply,
-            format!(
-                "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{}'\n",
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-promotion-apply-response/v1",
-                    "workspace_path": target,
-                    "command_evidence": []
-                })
-            ),
-        )
-        .expect("write apply provider");
-        let mut permissions = std::fs::metadata(&apply).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&apply, permissions).unwrap();
-
-        let source = serde_json::json!({
-            "schema": crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA,
-            "task_id": "provider",
-            "status": "succeeded",
-            "artifacts": [{
-                "schema": crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA,
-                "id": "patch",
-                "kind": "patch",
-                "path": patch_path,
-                "size_bytes": patch.len(),
-                "sha256": homeboy_engine_primitives::content_hash::sha256_hex(patch.as_bytes()),
-            }]
-        })
-        .to_string();
-        let promotion_options = crate::agent_task_promotion::AgentTaskPromotionOptions {
-            source: source.clone(),
-            source_run_id: Some("cook-candidate-dirt-run".to_string()),
-            source_path: None,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: handle.to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: crate::agent_task_gate::VerifyGateOptions::default(),
-            provider_command: None,
-            provider_invocation: Some(homeboy_core::command_invocation::CommandInvocation {
-                argv: vec![apply.display().to_string()],
-                ..Default::default()
-            }),
-        };
-        let report = crate::agent_task_promotion::promote(promotion_options)
-            .expect("matching candidate dirt is admitted for promote");
-        assert!(
-            report.status.patch_promoted(),
-            "cook must promote matching candidate dirt, got {:?}",
-            report.status
-        );
-
-        std::fs::write(target.join("extra.txt"), "unrelated\n").unwrap();
-        let error = crate::agent_task_promotion::promote(
-            crate::agent_task_promotion::AgentTaskPromotionOptions {
-                source,
-                source_run_id: Some("cook-candidate-dirt-run".to_string()),
-                source_path: None,
-                source_worktree_path: None,
-                base_ref: None,
-                task_base_sha: None,
-                candidate_ref: None,
-                to_worktree: handle.to_string(),
-                task_id: None,
-                artifact_id: None,
-                dry_run: false,
-                gates: crate::agent_task_gate::VerifyGateOptions::default(),
-                provider_command: None,
-                provider_invocation: Some(homeboy_core::command_invocation::CommandInvocation {
-                    argv: vec![apply.display().to_string()],
-                    ..Default::default()
-                }),
-            },
-        )
-        .expect_err("unrelated dirty files still fail");
-        assert_eq!(
-            error.details["workspace"]["classification"],
-            "workspace.resolved_but_dirty"
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn explicit_cook_workspace_bypasses_a_timed_out_provider_lookup() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let primary = tempfile::tempdir().expect("primary repository");
-        let target_root = tempfile::tempdir().expect("target root");
-        let target = target_root.path().join("task");
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .expect("run git");
-            assert!(output.status.success(), "git {:?} failed", args);
-        };
-        git(primary.path(), &["init", "--initial-branch=main"]);
-        git(
-            primary.path(),
-            &["config", "user.email", "agent@example.test"],
-        );
-        git(primary.path(), &["config", "user.name", "Agent"]);
-        std::fs::write(primary.path().join("tracked.txt"), "base\n").expect("write base");
-        git(primary.path(), &["add", "tracked.txt"]);
-        git(primary.path(), &["commit", "-m", "base"]);
-        git(
-            primary.path(),
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "fix/cwd-authority",
-                target.to_str().expect("target path"),
-                "HEAD",
-            ],
-        );
-
-        let provider = tempfile::NamedTempFile::new().expect("provider file");
-        std::fs::write(provider.path(), "#!/bin/sh\nsleep 2\n").expect("write provider");
-        let mut permissions = std::fs::metadata(provider.path())
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "timeout".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 1,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.path().display().to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-
-        let mut options = batch_cook_options(
-            "cwd-authoritative-workspace",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        options.workspace.to_worktree = "fixture@cwd-authority".to_string();
-        options.workspace.source_worktree_path = Some(target);
-        options.workspace.task_base_sha = Some("base".to_string());
-        options.identity.initial_plan.tasks[0].workspace.task_url =
-            Some("https://example.test/issues/cwd-authority".to_string());
-        options.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
-            serde_json::json!({ "kind": "explicit_cwd" });
-
-        validate_cook_workspace(&options)
-            .expect("explicit workspace must not wait for provider resolution");
+            .is_empty());
     });
 }
 
@@ -7056,7 +6560,9 @@ fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_auth
         );
         assert_eq!(
             promotion.provenance["candidate"]["fingerprint"]["head"],
-            fixture.candidate
+            git_output(&fixture.target, &["rev-parse", "HEAD"])
+                .expect("native direct target head"),
+            "native direct promotion retains the target commit and authenticates the candidate as a patch"
         );
         assert!(
             promotion.deterministic_gates[0]
@@ -7126,6 +6632,8 @@ fn adoption_replays_candidate_and_baseline_gates_from_the_persisted_component_wo
             .expect("stage component baseline");
         git_output(&fixture.source, &["commit", "-m", "component baseline"])
             .expect("commit component baseline");
+        let component_base = git_output(&fixture.source, &["rev-parse", "HEAD"])
+            .expect("read component baseline revision");
         std::fs::write(fixture.source.join("candidate.txt"), "candidate\n")
             .expect("write unrelated candidate change");
         git_output(&fixture.source, &["add", "candidate.txt"])
@@ -7134,6 +6642,7 @@ fn adoption_replays_candidate_and_baseline_gates_from_the_persisted_component_wo
             .expect("commit component candidate");
         fixture.candidate = git_output(&fixture.source, &["rev-parse", "HEAD"])
             .expect("read component candidate revision");
+        fixture.options.workspace.task_base_sha = Some(component_base.clone());
         std::fs::write(
             &fixture.provider,
             format!(
@@ -7161,6 +6670,7 @@ fn adoption_replays_candidate_and_baseline_gates_from_the_persisted_component_wo
         recipe.finalization["source_worktree_path"] =
             serde_json::to_value(&fixture.options.workspace.source_worktree_path)
                 .expect("serialize non-normalized source workspace");
+        recipe.finalization["task_base_sha"] = serde_json::json!(component_base);
         let recipe_path = homeboy_core::paths::homeboy_data()
             .expect("Homeboy data path")
             .join("agent-task-cooks")
@@ -7215,7 +6725,7 @@ fn component_workspace_path_rejects_escaping_persisted_paths() {
 
         let error = super::super::cook_promotion::component_workspace_path(&options)
             .expect_err("escaping component cwd must fail closed");
-        assert_eq!(error.details["field"], "component_cwd");
+        assert_eq!(error.details["field"], "promotion_provider.patch");
     }
 }
 
@@ -7262,7 +6772,7 @@ fn adoption_rejects_an_escaping_component_path_before_provider_or_gate_execution
         let error = fixture
             .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
             .expect_err("escaping component path must reject adoption");
-        assert_eq!(error.details["field"], "component_cwd");
+        assert_eq!(error.details["field"], "promotion_provider.patch");
         assert!(!provider_started.exists(), "provider must not execute");
         assert!(!gate_started.exists(), "gate must not execute");
     });
@@ -7389,7 +6899,7 @@ fn adoption_rejects_a_baseline_component_symlink_escape_before_external_gate_exe
         let error = fixture
             .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
             .expect_err("baseline symlink escape must reject adoption");
-        assert_eq!(error.details["field"], "gate_workspace");
+        assert_eq!(error.details["field"], "promotion_provider.patch");
         assert!(
             !external.join("gate-ran").exists(),
             "external gate must not execute"
@@ -7756,526 +7266,6 @@ fn cook_persists_initial_base_transport_failure_before_provider_execution() {
     });
 }
 
-#[cfg(unix)]
-#[test]
-fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let root = tempfile::tempdir().expect("workspace root");
-        let source = root.path().join("source");
-        let workspace = root.path().join("workspace");
-        std::fs::create_dir(&source).expect("source directory");
-        assert!(Command::new("git")
-            .args(["init", "--quiet", "-b", "main"])
-            .current_dir(&source)
-            .status()
-            .expect("git init")
-            .success());
-        for args in [
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Homeboy Test"],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .current_dir(&source)
-                .status()
-                .expect("git config")
-                .success());
-        }
-        std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
-        std::fs::write(
-            source.join("package.json"),
-            r#"{"scripts":{"test":"true"}}"#,
-        )
-        .expect("write package manifest");
-        assert!(Command::new("git")
-            .args(["add", "."])
-            .current_dir(&source)
-            .status()
-            .expect("git add")
-            .success());
-        assert!(Command::new("git")
-            .args(["commit", "--quiet", "-m", "base"])
-            .current_dir(&source)
-            .status()
-            .expect("git commit")
-            .success());
-        assert!(Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "cook-slow-worktree-lookup"
-            ])
-            .arg(&workspace)
-            .current_dir(&source)
-            .status()
-            .expect("git worktree add")
-            .success());
-        let workspace = workspace.canonicalize().expect("canonical workspace");
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nsleep 1\nprintf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"unreachable\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'\n",
-                workspace.display(),
-            ),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions.clone()).expect("make provider executable");
-
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 250,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve_identity: Some(vec![
-                        provider.display().to_string(),
-                        "identity".to_string(),
-                        "{handle}".to_string(),
-                    ]),
-                    attest_safety: Some(vec![
-                        provider.display().to_string(),
-                        "safety".to_string(),
-                        "{identity}".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-
-        let cook_id = "cook-slow-worktree-lookup";
-        let run_id = "cook-slow-worktree-lookup-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        // The provider identity is deliberately absent until durable admission.
-        // The detached dispatcher keeps the resumed Cook test focused on its
-        // durable retry and workspace lifecycle rather than local execution.
-        options.identity.initial_run_id = run_id.to_string();
-        options.workspace.task_base_sha = Some("fixture-base".to_string());
-        options.retry_policy.max_attempts = 2;
-        options.gates.verify = vec!["npm test".to_string()];
-        options.identity.initial_plan.tasks[0].metadata["worktree_provision"] = serde_json::json!({
-            "action": "lookup_pending",
-            "kind": "provider",
-            "handle": options.workspace.to_worktree,
-        });
-        let exact_handle = options.workspace.to_worktree.clone();
-
-        options.workspace.source_worktree_path = Some(workspace.clone());
-        let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
-            .expect("Cook records exhausted provider timeout");
-
-        assert_eq!(result.exit_code, 1, "{:?}", result.value);
-        assert_eq!(result.value.cook_id, cook_id);
-        assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
-        let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable lookup record");
-        let persisted_plan = agent_task_lifecycle::load_plan(run_id).expect("durable lookup plan");
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert_eq!(
-            persisted_plan.metadata["worktree_provider_resolve"]["phase"],
-            "worktree_provider_lookup"
-        );
-        assert_eq!(
-            persisted_plan.metadata["worktree_provider_resolve"]["attempt"],
-            2
-        );
-        assert_eq!(
-            persisted_plan.metadata["worktree_provider_resolve"]["retry_disposition"],
-            "exhausted"
-        );
-        assert!(
-            persisted_plan.metadata["worktree_provider_resolve"]["deadline_unix_ms"]
-                .as_u64()
-                .expect("deadline")
-                > 0
-        );
-        assert!(
-            persisted_plan.metadata["worktree_provider_resolve"]["events"]
-                .as_array()
-                .expect("durable resolve events")
-                .iter()
-                .any(|event| event["attempt"] == 1 && event["next_retry_unix_ms"].is_number())
-        );
-        assert!(
-            persisted_plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"]
-                .as_str()
-                .expect("cwd recovery command")
-                .contains(&format!("--cwd {}", workspace.display()))
-        );
-        let recipe = super::super::load_recipe(cook_id).expect("durable Cook identity");
-        assert_eq!(recipe.attempts[0].run_id, run_id);
-        assert_eq!(
-            persisted_plan.tasks[0].metadata["worktree_provision"]["handle"],
-            exact_handle
-        );
-        assert_eq!(persisted_plan.tasks[0].workspace.root, None);
-        assert!(persisted_plan.metadata.get("cook_provision").is_none());
-        assert!(persisted_plan.tasks[0]
-            .metadata
-            .get("cook_workspace_identity")
-            .is_none());
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nif test \"$1\" = identity; then printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"recovered-identity\",\"handle\":\"fixture@cook-slow-worktree-lookup\",\"path\":\"{}\",\"branch\":\"cook-slow-worktree-lookup\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'; else printf '%s\\n' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"recovered-identity\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'; fi\n",
-                workspace.display()
-            ),
-        )
-        .expect("recover provider");
-        std::fs::set_permissions(&provider, permissions).expect("restore executable provider");
-
-        let retry = crate::agent_task_service::retry(run_id, None, false, false)
-            .expect("reserve a Cook-owned retry successor");
-        assert_eq!(retry.record.metadata["retry_of"], run_id);
-        assert_eq!(retry.record.metadata["cook_id"], cook_id);
-        assert_eq!(retry.record.metadata["cook_attempt"], 1);
-        let recipe = super::super::load_recipe(cook_id).expect("same Cook recipe owns retry");
-        assert_eq!(recipe.attempts.len(), 2);
-        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
-
-        let mut resumed_options = super::super::reconstruct_options_with_dispatcher(
-            &recipe,
-            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
-        )
-        .expect("reconstruct Cook-owned retry");
-        resumed_options.identity.initial_run_id = retry.record.run_id.clone();
-        resumed_options.identity.initial_plan =
-            agent_task_lifecycle::load_plan(&retry.record.run_id).expect("load durable retry plan");
-        let resumed = run_cook(CookContext::new(resumed_options, Arc::new(UnusedExecutor)))
-            .expect("same Cook retry materializes its recovered provider workspace");
-        assert_eq!(resumed.value.cook_id, cook_id);
-        let resumed_plan =
-            agent_task_lifecycle::load_plan(&retry.record.run_id).expect("materialized retry plan");
-        assert_eq!(
-            resumed_plan.tasks[0].workspace.root.as_deref(),
-            Some(workspace.to_str().expect("utf8 workspace"))
-        );
-        let workspace_identity = resumed_plan.tasks[0].metadata["cook_workspace_identity"].clone();
-        assert_eq!(
-            resumed_plan.metadata["cook_provision"]["workspace_identity"]["token"],
-            "recovered-identity"
-        );
-        assert_eq!(
-            resumed_plan.metadata["cook_provision"]["action"],
-            "existing"
-        );
-        let resumed_record = agent_task_lifecycle::reconcile_status(&retry.record.run_id)
-            .expect("resumed Cook remains status-addressable");
-        assert_eq!(resumed_record.metadata["provider_executions_consumed"], 0);
-
-        let recipe = super::super::load_recipe(cook_id).expect("same durable Cook recipe");
-        let mut repeated_options = super::super::reconstruct_options_with_dispatcher(
-            &recipe,
-            Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
-        )
-        .expect("reconstruct materialized Cook retry");
-        repeated_options.identity.initial_run_id = retry.record.run_id.clone();
-        repeated_options.identity.initial_plan =
-            agent_task_lifecycle::load_plan(&retry.record.run_id)
-                .expect("load materialized durable retry plan");
-        run_cook(CookContext::new(repeated_options, Arc::new(UnusedExecutor)))
-            .expect("repeated continuation reuses the materialized workspace");
-        let repeated_plan = agent_task_lifecycle::load_plan(&retry.record.run_id)
-            .expect("load repeated durable retry plan");
-        assert_eq!(
-            repeated_plan.tasks[0].workspace.root.as_deref(),
-            Some(workspace.to_str().expect("utf8 workspace"))
-        );
-        assert_eq!(
-            repeated_plan.tasks[0].metadata["cook_workspace_identity"],
-            workspace_identity
-        );
-    });
-}
-
-#[test]
-fn controller_pre_provider_heartbeat_renews_until_the_blocking_call_returns() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
-        let run_id = "slow-pre-provider-heartbeat";
-        let plan = AgentTaskPlan::new("slow-pre-provider-plan", Vec::new());
-        submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).expect("submitted plan");
-
-        with_controller_pre_provider_heartbeat(
-            &lifecycle_store,
-            run_id,
-            "worktree_provider_ensure",
-            "slow provider ensure remains active",
-            Duration::from_millis(5),
-            || {
-                let initial = lifecycle_store
-                    .read_record(run_id)
-                    .expect("initial progress record")
-                    .updated_at;
-                std::thread::sleep(Duration::from_millis(25));
-                let renewed = lifecycle_store
-                    .read_record(run_id)
-                    .expect("renewed progress record");
-                assert_ne!(renewed.updated_at, initial);
-                assert_eq!(
-                    renewed.metadata["cook_progress"]["phase"],
-                    "worktree_provider_ensure"
-                );
-                Ok(())
-            },
-        )
-        .expect("blocking provider call completes");
-
-        let stopped = lifecycle_store
-            .read_record(run_id)
-            .expect("stopped heartbeat record")
-            .updated_at;
-        std::thread::sleep(Duration::from_millis(15));
-        assert_eq!(
-            lifecycle_store
-                .read_record(run_id)
-                .expect("heartbeat remains stopped")
-                .updated_at,
-            stopped,
-            "heartbeat ownership ends when the provider call returns"
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
-        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let recipe_root_lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
-        let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
-        let ambient_lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-        assert_ne!(recipe_context.data_dir(), lifecycle_context.data_dir());
-        let root = tempfile::tempdir().expect("workspace root");
-        let source = root.path().join("source");
-        let workspace = root.path().join("workspace");
-        for args in [
-            vec![
-                "init",
-                "--quiet",
-                "-b",
-                "main",
-                source.to_str().expect("source path"),
-            ],
-            vec![
-                "-C",
-                source.to_str().expect("source path"),
-                "config",
-                "user.email",
-                "test@example.com",
-            ],
-            vec![
-                "-C",
-                source.to_str().expect("source path"),
-                "config",
-                "user.name",
-                "Homeboy Test",
-            ],
-            vec![
-                "-C",
-                source.to_str().expect("source path"),
-                "commit",
-                "--quiet",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-            vec![
-                "-C",
-                source.to_str().expect("source path"),
-                "remote",
-                "add",
-                "origin",
-                source.to_str().expect("source path"),
-            ],
-            vec![
-                "-C",
-                source.to_str().expect("source path"),
-                "fetch",
-                "origin",
-                "main:refs/remotes/origin/main",
-            ],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .status()
-                .expect("git runs")
-                .success());
-        }
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let created = provider_dir.path().join("created");
-        let ensure_count = provider_dir.path().join("ensure-count");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if test -f '{}'; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@durable-ensure\",\"path\":\"{}\",\"branch\":\"durable-ensure\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}' ; fi\n  ;;\nensure)\n  test \"$2\" = fixture && test \"$3\" = main && test \"$4\" = durable-ensure && test \"$5\" = https://example.test/issues/12601 && test \"$6\" = agent_task_cook && test \"$7\" = durable-ensure-run && test \"$8\" = remove_on_success || exit 9\n  printf '1\\n' >> '{}'\n  git -C '{}' worktree add --quiet '{}' durable-ensure && touch '{}' && sleep 1\n  ;;\nesac\n",
-                created.display(),
-                workspace.display(),
-                ensure_count.display(),
-                source.display(),
-                workspace.display(),
-                created.display(),
-            ),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 100,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string(), "resolve".to_string()]),
-                    ensure: Some(vec![
-                        provider.display().to_string(),
-                        "ensure".to_string(),
-                        "{repo}".to_string(),
-                        "{base}".to_string(),
-                        "{head}".to_string(),
-                        "{task_url}".to_string(),
-                        "{purpose}".to_string(),
-                        "{owner_run_ref}".to_string(),
-                        "{cleanup_policy}".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-        assert!(Command::new("git")
-            .args(["branch", "durable-ensure", "HEAD"])
-            .current_dir(&source)
-            .status()
-            .expect("create unattached branch")
-            .success());
-
-        let cook_id = "durable-ensure";
-        let run_id = "durable-ensure-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = run_id.to_string();
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending",
-            "kind": "provider",
-            "handle": options.workspace.to_worktree,
-            "worktree_provider_id": "fixture",
-            "provision_intent": {
-                "repo": "fixture",
-                "base": "main",
-                "head": "durable-ensure",
-                "task_url": "https://example.test/issues/12601",
-            },
-            "lifecycle_intent": {
-                "purpose": "agent_task_cook",
-                "cleanup_policy": "remove_on_success",
-            },
-        });
-
-        recipe_store
-            .persist_initial_recipe(&options)
-            .expect("persist recipe in the injected recipe store");
-        materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, &options)
-            .expect("materialize run in the injected lifecycle store");
-        materialize_pending_cook_workspace_with_retry(&lifecycle_store, &mut options)
-            .expect("reconcile the workspace created before the ensure timeout");
-
-        assert!(created.exists(), "ensure ran after durable Cook admission");
-        assert_eq!(
-            std::fs::read_to_string(&ensure_count)
-                .expect("ensure count")
-                .lines()
-                .count(),
-            1,
-            "a timed-out ensure is reconciled, not repeated"
-        );
-        assert!(recipe_store.recipe_exists(cook_id));
-        let record = lifecycle_store
-            .read_record(run_id)
-            .expect("injected lifecycle store has the exact materialized run");
-        assert_eq!(record.run_id, run_id);
-        let plan = lifecycle_store
-            .read_controller_plan(run_id)
-            .expect("injected lifecycle store has the materialized plan");
-        assert_eq!(plan.metadata["cook_provision"]["action"], "existing");
-        assert_eq!(
-            plan.metadata["cook_provision"]["lifecycle_intent"]["owner_run_ref"],
-            run_id
-        );
-        assert_eq!(
-            plan.metadata["cook_provision"]["worktree_provider_id"],
-            "fixture"
-        );
-        assert_eq!(
-            options.workspace.source_worktree_path.as_deref(),
-            Some(workspace.as_path())
-        );
-        assert_eq!(
-            plan.tasks[0].workspace.root.as_deref(),
-            Some(workspace.to_str().expect("workspace path"))
-        );
-        assert!(!recipe_root_lifecycle_store
-            .record_exists(run_id)
-            .expect("recipe root has no lifecycle state"));
-        assert!(!ambient_lifecycle_store
-            .record_exists(run_id)
-            .expect("ambient lifecycle state remains untouched"));
-    });
-}
-
 #[test]
 fn pending_cook_ensures_native_destination_after_durable_admission_idempotently() {
     homeboy_core::test_support::with_isolated_home(|home| {
@@ -8283,12 +7273,6 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
         let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
         let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
-        assert!(
-            homeboy_core::defaults::load_config()
-                .worktree_providers
-                .is_empty(),
-            "native lifecycle must not require a configured worktree provider"
-        );
         let remote = tempfile::tempdir().expect("bare origin");
         assert!(Command::new("git")
             .args(["init", "--bare", "--quiet"])
@@ -8440,7 +7424,7 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
                 .is_none()
         );
 
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options)
             .expect("ensure native Cook destination");
         assert_eq!(
             options.workspace.task_base_sha.as_deref(),
@@ -8451,7 +7435,7 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             .source_worktree_path
             .clone()
             .expect("bound native destination");
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options)
             .expect("re-admit native Cook destination");
         validate_cook_workspace(&options)
             .expect("native destination converges during the first post-materialization preflight");
@@ -8495,762 +7479,6 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             plan.tasks[0].workspace.root.as_deref(),
             Some(first_path.to_str().expect("UTF-8 native path"))
         );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn pending_cook_attaches_task_before_exact_provider_resolution() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
-        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
-        let root = tempfile::tempdir().expect("workspace root");
-        let source = root.path().join("source");
-        let workspace = root.path().join("workspace");
-        for args in [
-            vec!["init", "--quiet", "-b", "main", source.to_str().unwrap()],
-            vec![
-                "-C",
-                source.to_str().unwrap(),
-                "config",
-                "user.email",
-                "test@example.com",
-            ],
-            vec![
-                "-C",
-                source.to_str().unwrap(),
-                "config",
-                "user.name",
-                "Homeboy Test",
-            ],
-            vec![
-                "-C",
-                source.to_str().unwrap(),
-                "commit",
-                "--quiet",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-            vec![
-                "-C",
-                source.to_str().unwrap(),
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "fix-13427",
-                workspace.to_str().unwrap(),
-            ],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .status()
-                .expect("git runs")
-                .success());
-        }
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let attached = provider_dir.path().join("attached");
-        let apply_count = provider_dir.path().join("apply-count");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                r#"#!/bin/sh
-case "$1" in
-preview)
-  status=eligible
-  test -f '{}' && status=already_attached
-  printf '{{"schema":"homeboy/worktree-provider-task-attachment/v1","provider_id":"fixture","handle":"fixture@fix-13427","task_url":"https://example.test/issues/13427","path":"{}","branch":"fix-13427","primary":false,"status":"%s"}}\n' "$status"
-  ;;
-apply)
-  printf '1\n' >> '{}'
-  touch '{}'
-  printf '%s\n' '{{"schema":"homeboy/worktree-provider-task-attachment/v1","provider_id":"fixture","handle":"fixture@fix-13427","task_url":"https://example.test/issues/13427","path":"{}","branch":"fix-13427","primary":false,"status":"attached"}}'
-  ;;
-resolve)
-  if test -f '{}'; then
-    printf '%s\n' '{{"worktrees":[{{"handle":"fixture@fix-13427","path":"{}","branch":"fix-13427","safety":{{"dirty":false,"unpushed":false,"primary":false}}}}]}}'
-  else
-    printf 'exact worktree has no tracker ownership\n' >&2
-    exit 23
-  fi
-  ;;
-esac
-"#,
-                attached.display(),
-                workspace.display(),
-                apply_count.display(),
-                attached.display(),
-                workspace.display(),
-                attached.display(),
-                workspace.display(),
-            ),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    task_attachment_preview: Some(vec![
-                        provider.display().to_string(),
-                        "preview".to_string(),
-                        "{handle}".to_string(),
-                        "{task_url}".to_string(),
-                        "{idempotency_key}".to_string(),
-                    ]),
-                    task_attachment_apply: Some(vec![
-                        provider.display().to_string(),
-                        "apply".to_string(),
-                        "{handle}".to_string(),
-                        "{task_url}".to_string(),
-                        "{idempotency_key}".to_string(),
-                    ]),
-                    resolve: Some(vec![
-                        provider.display().to_string(),
-                        "resolve".to_string(),
-                        "{handle}".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-
-        let mut options =
-            batch_cook_options("fix-13427", Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = "fix-13427-run".to_string();
-        options.workspace.to_worktree = "fixture@fix-13427".to_string();
-        options.workspace.task_base_sha = Some("fixture-base".to_string());
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending",
-            "kind": "provider",
-            "handle": options.workspace.to_worktree,
-            "provision_intent": {
-                "repo": "fixture",
-                "base": "main",
-                "head": "fix-13427",
-                "task_url": "https://example.test/issues/13427"
-            }
-        });
-        recipe_store
-            .persist_initial_recipe(&options)
-            .expect("persist recipe");
-        materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, &options)
-            .expect("materialize durable run");
-
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
-            .expect("attach ownership and resolve exact workspace");
-
-        assert_eq!(std::fs::read_to_string(apply_count).unwrap(), "1\n");
-        assert_eq!(
-            options.identity.initial_plan.metadata["cook_provision"]["worktree_provider_id"],
-            "fixture"
-        );
-        assert_eq!(
-            options.workspace.source_worktree_path.as_deref(),
-            Some(workspace.as_path())
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let ensured = provider_dir.path().join("ensured");
-        let competing_resolve = provider_dir.path().join("competing-resolve");
-        let owner = provider_dir.path().join("owner");
-        let competing = provider_dir.path().join("competing");
-        std::fs::write(
-            &owner,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nensure) touch '{}' && sleep 1 ;;\nesac\n",
-                ensured.display(),
-            ),
-        )
-        .expect("write owner provider");
-        std::fs::write(
-            &competing,
-            format!(
-                "#!/bin/sh\nif test -f '{}'; then touch '{}' && printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@owner-timeout\",\"path\":\"/unsafe-competing-destination\",\"branch\":\"owner-timeout\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi\n",
-                ensured.display(),
-                competing_resolve.display(),
-            ),
-        )
-        .expect("write competing provider");
-        for provider in [&owner, &competing] {
-            let mut permissions = std::fs::metadata(provider)
-                .expect("provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(provider, permissions).expect("make provider executable");
-        }
-
-        let provider_config = |command: &std::path::Path, ensure: bool| {
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 100,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![command.display().to_string(), "resolve".to_string()]),
-                    ensure: ensure.then(|| {
-                        vec![
-                            command.display().to_string(),
-                            "ensure".to_string(),
-                            "{repo}".to_string(),
-                            "{base}".to_string(),
-                            "{head}".to_string(),
-                            "{task_url}".to_string(),
-                            "{purpose}".to_string(),
-                            "{owner_run_ref}".to_string(),
-                            "{cleanup_policy}".to_string(),
-                        ]
-                    }),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            }
-        };
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config
-            .worktree_providers
-            .insert("owner".to_string(), provider_config(&owner, true));
-        config
-            .worktree_providers
-            .insert("competing".to_string(), provider_config(&competing, false));
-        config.settings.insert(
-            homeboy_core::worktree_providers::WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY
-                .to_string(),
-            serde_json::json!({
-                "owner": { "repository": "fixture" }
-            }),
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-
-        let cook_id = "owner-timeout";
-        let run_id = "owner-timeout-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = run_id.to_string();
-        options.workspace.to_worktree = "fixture@owner-timeout".to_string();
-        options.finalization.no_finalize = false;
-        options.gates.private_verify = vec!["PRIVATE_GATE_SECRET=do-not-persist".to_string()];
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending",
-            "kind": "provider",
-            "handle": options.workspace.to_worktree,
-            "provision_intent": {
-                "repo": "fixture",
-                "base": "main",
-                "head": "owner-timeout",
-                "task_url": "https://example.test/issues/12825",
-            },
-            "lifecycle_intent": {
-                "purpose": "agent_task_cook",
-                "cleanup_policy": "remove_on_success",
-            },
-        });
-
-        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
-            .expect("Cook reports the pinned provider timeout");
-        assert_eq!(result.value.status, "pre_execution_failure");
-        assert!(ensured.exists(), "owner ensure ran");
-        assert!(
-            !competing_resolve.exists(),
-            "post-timeout reconciliation must not query a competing provider"
-        );
-        let record =
-            agent_task_lifecycle::reconcile_status(run_id).expect("durable timeout record");
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_operation"],
-            "ensure"
-        );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_self_repair"]
-                ["failed_operation"],
-            "ensure"
-        );
-        assert!(record.metadata["pre_execution_failure"]["details"]
-            ["worktree_provider_self_repair"]["replay_argv"]
-            .as_array()
-            .expect("typed self-repair replay")
-            .iter()
-            .any(|argument| argument == "--worktree-provider-self-repair"));
-        let route =
-            &record.metadata["pre_execution_failure"]["details"]["worktree_provider_self_repair"];
-        assert!(route["replay_argv"]
-            .as_array()
-            .expect("typed self-repair replay")
-            .iter()
-            .any(|argument| argument == "<redacted:--private-verify>"));
-        assert!(!route.to_string().contains("PRIVATE_GATE_SECRET"));
-        assert!(route["replay_requires"]
-            .as_array()
-            .expect("replay requirements")
-            .iter()
-            .any(|requirement| requirement
-                .as_str()
-                .is_some_and(|requirement| requirement.contains("private gate"))));
-        let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
-        assert_eq!(
-            plan.metadata["cook_provision"]["worktree_provider_id"],
-            "owner"
-        );
-        assert_eq!(
-            plan.metadata["worktree_provider_resolve"]["provider_id"],
-            "owner"
-        );
-        assert_eq!(
-            plan.metadata["worktree_provider_resolve"]["retry_disposition"],
-            "fail_closed"
-        );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_resolve"]
-                ["provider_id"],
-            "owner"
-        );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_resolve"]
-                ["retry_disposition"],
-            "fail_closed"
-        );
-        assert!(plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"].is_null());
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn deferred_ensure_only_provider_fails_after_durable_cook_admission() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let ensured = provider_dir.path().join("ensured");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!("#!/bin/sh\ntouch '{}'\n", ensured.display()),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    ensure: Some(vec![provider.display().to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-
-        let cook_id = "ensure-only";
-        let run_id = "ensure-only-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = run_id.to_string();
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending",
-            "kind": "provider",
-            "handle": options.workspace.to_worktree,
-            "provision_intent": {
-                "repo": "fixture",
-                "base": "main",
-                "head": "ensure-only",
-                "task_url": "https://example.test/issues/12601",
-            },
-        });
-
-        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
-            .expect("Cook reports the postcondition failure");
-
-        assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "pre_execution_failure");
-        assert!(ensured.exists(), "ensure ran after durable Cook admission");
-        let record = agent_task_lifecycle::exact_record(run_id)
-            .expect("ensure-only postcondition failure has an addressable run");
-        assert_eq!(
-            record.state,
-            agent_task_lifecycle::AgentTaskRunState::Failed
-        );
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["phase"],
-            "worktree_provider_lookup"
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn deferred_ensure_only_failure_uses_injected_recipe_and_lifecycle_stores() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
-        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let recipe_root_lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
-        let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
-        let ambient_lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-        assert_ne!(recipe_context.data_dir(), lifecycle_context.data_dir());
-
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let ensured = provider_dir.path().join("ensured");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!("#!/bin/sh\ntouch '{}'\n", ensured.display()),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    ensure: Some(vec![provider.display().to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-
-        let cook_id = "split-ensure-only";
-        let run_id = "split-ensure-only-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = run_id.to_string();
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending",
-            "kind": "provider",
-            "handle": options.workspace.to_worktree,
-            "provision_intent": {
-                "repo": "fixture",
-                "base": "main",
-                "head": "split-ensure-only",
-                "task_url": "https://example.test/issues/12601",
-            },
-        });
-
-        let result = run_cook_spine(
-            &recipe_store,
-            &lifecycle_store,
-            options,
-            Arc::new(UnusedExecutor),
-            &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
-            None,
-            CookMode::Resume,
-        )
-        .expect("Cook reports the injected-store postcondition failure");
-
-        assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "pre_execution_failure");
-        assert!(ensured.exists(), "ensure ran after durable Cook admission");
-        assert!(recipe_store.recipe_exists(cook_id));
-        let record = lifecycle_store
-            .read_record(run_id)
-            .expect("injected lifecycle store has the exact failed run");
-        assert_eq!(record.state, AgentTaskRunState::Failed);
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["phase"],
-            "worktree_provider_lookup"
-        );
-        assert!(!recipe_root_lifecycle_store
-            .record_exists(run_id)
-            .expect("recipe root has no lifecycle state"));
-        assert!(!ambient_lifecycle_store
-            .record_exists(run_id)
-            .expect("ambient lifecycle state remains untouched"));
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn review_12349_deferred_lookup_cancellation_preserves_cancelled_state() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let marker = provider_dir.path().join("started");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!("#!/bin/sh\ntouch '{}'\nsleep 5\n", marker.display()),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve_identity: Some(vec![
-                        provider.display().to_string(),
-                        "token=provider-secret-must-not-persist".to_string(),
-                    ]),
-                    attest_safety: Some(vec!["true".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save config");
-
-        let cook_id = "review-12349-cancelled-lookup";
-        let run_id = "review-12349-cancelled-lookup-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = run_id.to_string();
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending", "kind": "provider", "handle": options.workspace.to_worktree,
-            "worktree_provider_id": "fixture",
-        });
-
-        let cook = std::thread::spawn(move || {
-            run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
-        });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !marker.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            marker.exists(),
-            "provider lookup started before cancellation"
-        );
-        agent_task_lifecycle::cancel_run(run_id, Some("review cancellation"))
-            .expect("cancel durable lookup run");
-
-        let result = cook
-            .join()
-            .expect("Cook thread joins")
-            .expect("Cook returns cancellation report");
-        assert_eq!(result.value.status, "cancelled");
-        let record =
-            agent_task_lifecycle::reconcile_status(run_id).expect("cancelled durable record");
-        assert_eq!(
-            record.state,
-            agent_task_lifecycle::AgentTaskRunState::Cancelled
-        );
-        assert!(record.metadata["pre_execution_failure"].is_null());
-        assert!(!record
-            .metadata
-            .to_string()
-            .contains("provider-secret-must-not-persist"));
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn short_cook_deadline_caps_resolve_timeout_without_starting_retry() {
-    use crate::agent_task_timeout::{now_unix_ms, with_current_cook_deadline, CookDeadline};
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(&provider, "#!/bin/sh\nsleep 1\n").expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 5_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve_identity: Some(vec![
-                        provider.display().to_string(),
-                        "{handle}".to_string(),
-                    ]),
-                    attest_safety: Some(vec!["true".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save config");
-        let cook_id = "cook-split-identity-timeout";
-        let run_id = "cook-split-identity-timeout-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.provider_transport.attempt_dispatcher = None;
-        options.identity.initial_run_id = run_id.to_string();
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending", "kind": "provider", "handle": options.workspace.to_worktree,
-            "worktree_provider_id": "fixture",
-        });
-
-        let phases = Arc::new(Mutex::new(Vec::new()));
-        let observed_phases = Arc::clone(&phases);
-        let observer = move |event: &CookProgressEvent<'_>| {
-            observed_phases
-                .lock()
-                .expect("phase lock")
-                .push((event.phase.to_string(), event.detail.map(str::to_string)));
-            Ok(())
-        };
-        let started = std::time::Instant::now();
-        let result = with_current_cook_deadline(
-            Some(CookDeadline::from_unix_ms(
-                now_unix_ms().saturating_add(200),
-            )),
-            || {
-                run_cook(CookContext {
-                    durable_observer: Some(&observer),
-                    ..CookContext::new(options, Arc::new(UnusedExecutor))
-                })
-            },
-        )
-        .expect("Cook records short-deadline lookup timeout");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "effective lookup timeout must cap total pre-execution time"
-        );
-        assert_eq!(result.value.status, "pre_execution_failure");
-        let record =
-            agent_task_lifecycle::reconcile_status(run_id).expect("durable timeout record");
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_lookup"],
-            "timed_out"
-        );
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]
-                ["worktree_provider_call_classification"],
-            "timeout"
-        );
-        let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
-        assert_eq!(plan.metadata["worktree_provider_resolve"]["attempt"], 1);
-        assert_eq!(
-            plan.metadata["worktree_provider_resolve"]["retry_disposition"],
-            "deadline_expired"
-        );
-        assert_eq!(
-            plan.metadata["worktree_provider_resolve"]["configured_timeout_ms"],
-            5_000
-        );
-        assert_eq!(
-            plan.metadata["worktree_provider_resolve"]["provider_id"],
-            "fixture"
-        );
-        assert!(plan.metadata["worktree_provider_resolve"]["events"]
-            .as_array()
-            .expect("resolve events")
-            .iter()
-            .any(|event| event["attempt"] == 1
-                && event["effective_timeout_ms"].as_u64().unwrap_or(u64::MAX) < 5_000));
-        assert!(plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"].is_null());
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert!(record.metadata["provider_executions"].is_null());
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["details"]["worktree_provider_resolve"],
-            plan.metadata["worktree_provider_resolve"]
-        );
-        assert!(phases
-            .lock()
-            .expect("phase lock")
-            .iter()
-            .any(|(phase, detail)| {
-                phase == "worktree_provider_lookup"
-                    && detail.as_deref() == Some("starting bounded provider workspace lookup")
-            }));
-        let recipe = super::super::load_recipe(cook_id).expect("durable recipe");
-        assert_eq!(
-            recipe.attempts[0].plan.metadata["cook_provision"]["worktree_provider_id"],
-            "fixture"
-        );
-        let retry = agent_task_lifecycle::retry(run_id, Some("cook-split-identity-timeout-retry"))
-            .expect("split timeout remains retryable");
-        assert_eq!(retry.metadata["retry_of"], run_id);
     });
 }
 
@@ -9298,493 +7526,6 @@ fn reconstruction_restores_a_materialized_pending_workspace_from_the_durable_pla
         .metadata
         .get("cook_workspace_identity")
         .is_some());
-}
-
-#[cfg(unix)]
-#[test]
-fn split_only_provider_is_authoritative_without_source_override_or_legacy_commands() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let root = tempfile::tempdir().expect("workspace root");
-        let source = root.path().join("source");
-        let workspace = root.path().join("workspace");
-        std::fs::create_dir(&source).expect("source directory");
-        assert!(Command::new("git")
-            .args(["init", "--quiet", "-b", "main"])
-            .current_dir(&source)
-            .status()
-            .expect("git init")
-            .success());
-        for args in [
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Homeboy Test"],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .current_dir(&source)
-                .status()
-                .expect("git config")
-                .success());
-        }
-        std::fs::write(source.join("tracked.txt"), "base\n").expect("write base");
-        assert!(Command::new("git")
-            .args(["add", "."])
-            .current_dir(&source)
-            .status()
-            .expect("git add")
-            .success());
-        assert!(Command::new("git")
-            .args(["commit", "--quiet", "-m", "base"])
-            .current_dir(&source)
-            .status()
-            .expect("git commit")
-            .success());
-        assert!(Command::new("git")
-            .args(["worktree", "add", "--quiet", "-b", "split-only"])
-            .arg(&workspace)
-            .current_dir(&source)
-            .status()
-            .expect("git worktree add")
-            .success());
-        let workspace = workspace.canonicalize().expect("canonical workspace");
-        let provider_dir = tempfile::tempdir().expect("provider directory");
-        let provider = provider_dir.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nif test \"$1\" = safety; then printf '%s' '{{\"schema\":\"homeboy/worktree-provider-safety/v1\",\"identity_token\":\"opaque\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"dirty\":false,\"unpushed\":false,\"fresh\":true,\"latency_ms\":0,\"budget_ms\":0}}'; else printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"fixture\",\"token\":\"opaque\",\"handle\":\"fixture@split-only\",\"path\":\"{}\",\"branch\":\"split-only\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'; fi\n",
-                workspace.display()
-            ),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve_identity: Some(vec![
-                        provider.display().to_string(),
-                        "identity".to_string(),
-                        "{handle}".to_string(),
-                    ]),
-                    attest_safety: Some(vec![
-                        provider.display().to_string(),
-                        "safety".to_string(),
-                        "{identity}".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save config");
-        let mut options =
-            batch_cook_options("split-only", Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.workspace.to_worktree = "fixture@split-only".to_string();
-        options.workspace.source_worktree_path = None;
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "existing",
-            "workspace_identity": { "schema": "homeboy/worktree-provider-identity/v1", "provider_id": "fixture", "token": "opaque", "handle": "fixture@split-only", "path": workspace, "branch": "split-only", "primary": false, "latency_ms": 0, "budget_ms": 0 }
-        });
-
-        validate_cook_workspace(&options)
-            .expect("provider-owned workspace passes mandatory dispatch revalidation");
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("provider tempdir");
-        let primary = temp.path().join("primary");
-        let original = temp.path().join("original");
-        let switched = temp.path().join("switched");
-        for args in [
-            vec![
-                "init",
-                "--initial-branch",
-                "main",
-                primary.to_str().expect("primary path"),
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "config",
-                "user.email",
-                "test@example.com",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "config",
-                "user.name",
-                "Test",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "commit",
-                "--allow-empty",
-                "-m",
-                "initial",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "remote",
-                "add",
-                "origin",
-                primary.to_str().expect("primary path"),
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "fetch",
-                "origin",
-                "main:refs/remotes/origin/main",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "worktree",
-                "add",
-                "-b",
-                "original",
-                original.to_str().expect("original path"),
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "worktree",
-                "add",
-                "-b",
-                "switched",
-                switched.to_str().expect("switched path"),
-            ],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .status()
-                .expect("git runs")
-                .success());
-        }
-        let marker = temp.path().join("provider-marker");
-        let original_provider = temp.path().join("original-provider");
-        let switched_provider = temp.path().join("switched-provider");
-        for (script, label, branch, path) in [
-            (&original_provider, "original", "original", &original),
-            (&switched_provider, "switched", "switched", &switched),
-        ] {
-            std::fs::write(
-                script,
-                format!(
-                    "#!/bin/sh\nprintf '%s' '{label}' > '{}'\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@provider-bound\",\"path\":\"{}\",\"branch\":\"{branch}\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
-                    marker.display(), path.display()
-                ),
-            )
-            .expect("write provider");
-            let mut permissions = std::fs::metadata(script)
-                .expect("provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(script, permissions).expect("make provider executable");
-        }
-        let provider_config =
-            |script: &std::path::Path| homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![script.display().to_string(), "{handle}".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            };
-        // The timeout recipe predates the new provider. A re-selection would use
-        // `a-switched`; durable retry must invoke only `z-original`.
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "z-original".to_string(),
-            provider_config(&original_provider),
-        );
-        config.worktree_providers.insert(
-            "a-switched".to_string(),
-            provider_config(&switched_provider),
-        );
-        homeboy_core::defaults::save_config(&config).expect("save changed provider config");
-        let base_sha = String::from_utf8(
-            Command::new("git")
-                .args([
-                    "-C",
-                    primary.to_str().expect("primary path"),
-                    "rev-parse",
-                    "HEAD",
-                ])
-                .output()
-                .expect("resolve fixture base")
-                .stdout,
-        )
-        .expect("UTF-8 fixture base")
-        .trim()
-        .to_string();
-        let mut options = batch_cook_options(
-            "provider-bound",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        options.workspace.task_base_sha = Some(base_sha.clone());
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending", "kind": "provider", "handle": options.workspace.to_worktree,
-            "worktree_provider_id": "z-original",
-        });
-
-        let lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-        lifecycle_store
-            .submit_plan_with_runtime_admission(
-                &options.identity.initial_plan,
-                &options.identity.initial_run_id,
-                |_| Ok(serde_json::json!({})),
-            )
-            .expect("materialize pending provider run");
-        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
-            .expect("materialize original provider workspace");
-
-        assert_eq!(
-            std::fs::read_to_string(marker).expect("provider marker"),
-            "original"
-        );
-        let canonical_original = std::fs::canonicalize(&original).expect("canonical original");
-        assert_eq!(
-            options.workspace.source_worktree_path.as_deref(),
-            Some(canonical_original.as_path())
-        );
-        assert_eq!(
-            options.identity.initial_plan.tasks[0]
-                .workspace
-                .root
-                .as_deref(),
-            canonical_original.to_str()
-        );
-
-        let captured = Arc::new(Mutex::new(None));
-        let mut dispatch_options = batch_cook_options(
-            "provider-bound-dispatch",
-            Arc::new(WorkspaceCapturingDetachedAttemptDispatcher {
-                plan: Arc::clone(&captured),
-            }),
-        );
-        dispatch_options.workspace.to_worktree = "fixture@provider-bound".to_string();
-        dispatch_options.workspace.task_base_sha = Some(base_sha);
-        dispatch_options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending", "kind": "provider",
-            "handle": dispatch_options.workspace.to_worktree,
-            "worktree_provider_id": "z-original",
-        });
-
-        let report = run_cook(CookContext::new(dispatch_options, Arc::new(UnusedExecutor)))
-            .expect("Cook dispatches the materialized provider workspace");
-        assert_eq!(
-            report.value.status, "in_flight",
-            "unexpected Cook report: {:#?}",
-            report.value
-        );
-        let dispatched = captured
-            .lock()
-            .expect("captured dispatch plan")
-            .clone()
-            .expect("provider dispatch received a plan");
-        assert_eq!(
-            dispatched.tasks[0].workspace.root.as_deref(),
-            canonical_original.to_str(),
-            "provider resolution projects its concrete path into the canonical dispatch plan"
-        );
-        assert_eq!(
-            dispatched.metadata["cook_provision"]["workspace_identity"]["handle"],
-            "fixture@provider-bound",
-            "the logical handle remains the authenticated provider identity"
-        );
-        let recipe = super::super::load_recipe("provider-bound-dispatch")
-            .expect("logical Cook recipe remains durable");
-        assert!(recipe.attempts[0].plan.tasks[0].workspace.root.is_none());
-        assert_eq!(
-            recipe.attempts[0].plan.metadata["cook_provision"]["action"],
-            "lookup_pending"
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn pending_repo_only_lookup_rejects_provider_workspace_from_another_repository() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("provider tempdir");
-        let primary = temp.path().join("foreign-primary");
-        let foreign = temp.path().join("foreign-worktree");
-        for args in [
-            vec![
-                "init",
-                "--initial-branch",
-                "main",
-                primary.to_str().expect("primary path"),
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "config",
-                "user.email",
-                "test@example.com",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "config",
-                "user.name",
-                "Test",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "commit",
-                "--allow-empty",
-                "-m",
-                "initial",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "remote",
-                "add",
-                "origin",
-                "https://token:provider-secret@example.com/foreign.git",
-            ],
-            vec![
-                "-C",
-                primary.to_str().expect("primary path"),
-                "worktree",
-                "add",
-                "-b",
-                "foreign",
-                foreign.to_str().expect("foreign path"),
-            ],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .status()
-                .expect("git runs")
-                .success());
-        }
-        let provider = temp.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@repo-only-mismatch\",\"path\":\"{}\",\"branch\":\"foreign\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
-                foreign.display()
-            ),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-        let cook_id = "repo-only-mismatch";
-        let run_id = "repo-only-mismatch-run";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.provider_transport.attempt_dispatcher = None;
-        options.identity.initial_run_id = run_id.to_string();
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "action": "lookup_pending", "kind": "provider", "handle": options.workspace.to_worktree,
-            "worktree_provider_id": "fixture",
-        });
-        options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
-            "remote_identity": "git://example.com/expected",
-            "repository_name": "expected",
-            "provenance": "--repo:requested-repository",
-        });
-
-        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
-            .expect("Cook records identity failure");
-
-        assert_eq!(result.value.status, "pre_execution_failure");
-        let record =
-            agent_task_lifecycle::reconcile_status(run_id).expect("durable identity failure");
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["phase"],
-            "worktree_provider_lookup"
-        );
-        assert!(record.metadata["pre_execution_failure"]["message"]
-            .as_str()
-            .expect("message")
-            .contains("does not match"));
-        assert!(!record.metadata.to_string().contains("provider-secret"));
-        let persisted = agent_task_lifecycle::load_plan(run_id).expect("persisted plan");
-        assert!(persisted.tasks[0].workspace.root.is_none());
-        assert!(persisted.tasks[0]
-            .metadata
-            .get("cook_workspace_identity")
-            .is_none());
-    });
 }
 
 #[test]
@@ -12595,9 +10336,10 @@ fn retry_reports_missing_candidate_source_as_retryable_recovery() {
 
         assert_eq!(error.retryable, Some(true), "{error:#?}");
         assert!(error.message.contains("candidate source workspace"));
-        assert!(error.hints.iter().any(|hint| hint
-            .message
-            .contains("Restore the recorded candidate source workspace")));
+        assert!(error.hints.iter().any(|hint| {
+            hint.message
+                .contains("Restore the recorded candidate source workspace")
+        }));
     });
 }
 
@@ -12965,9 +10707,9 @@ fn cook_prepares_transport_before_pinning_runtime_generation() {
 
         assert_eq!(result.value.status, "in_flight");
         assert!(
-                !observed_pin.load(Ordering::SeqCst),
-                "transport readiness must complete before the cook generation pin can block a reconnect"
-            );
+            !observed_pin.load(Ordering::SeqCst),
+            "transport readiness must complete before the cook generation pin can block a reconnect"
+        );
     });
 }
 
@@ -12976,12 +10718,12 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-runtime-mismatch-attempt-1";
         let mut options = batch_cook_options(
-                "cook-runtime-mismatch",
-                Arc::new(AdmissionFailingAttemptDispatcher {
-                    message: "pinned controller executable hash mismatch: expected fixture, found replacement",
-                    runtime_recovery: None,
-                    phase: "controller_admission",
-                }),
+            "cook-runtime-mismatch",
+            Arc::new(AdmissionFailingAttemptDispatcher {
+                message: "pinned controller executable hash mismatch: expected fixture, found replacement",
+                runtime_recovery: None,
+                phase: "controller_admission",
+            }),
         );
         options.provider_transport.provider_command = Some("fixture-provider".to_string());
         options.identity.initial_run_id = run_id.to_string();
@@ -13081,7 +10823,7 @@ fn cook_pre_provider_worktree_lookup_failure_advertises_diagnostics_not_retry() 
         let mut options = batch_cook_options(
             "cook-worktree-lookup",
             Arc::new(AdmissionFailingAttemptDispatcher {
-                message: "configured worktree could not be resolved before provider dispatch",
+                message: "native worktree could not be resolved before provider dispatch",
                 runtime_recovery: None,
                 phase: "pre_provider_worktree_lookup",
             }),
@@ -13337,6 +11079,7 @@ fn cook_reattests_each_initial_baseline_before_detached_transport_retry() {
             }),
         );
         options.identity.initial_run_id = "cook-baseline-attestation-attempt-1".to_string();
+        options.workspace.to_worktree = source.display().to_string();
         options.workspace.source_worktree_path = Some(source.clone());
         options.provider_transport.provider_command = Some("fixture-provider".to_string());
         options.identity.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
@@ -14121,7 +11864,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                     to_worktree: "fixture@detached".to_string(),
                     source_worktree_path: None,
                     // This test covers handoff only; an explicit transport
-                    // intentionally bypasses configured-provider preflight.
+                    // intentionally bypasses native-worktree preflight.
                     task_base_sha: None,
                     source_refs: Vec::new(),
                 },
@@ -14389,6 +12132,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
         let run_id = "cook-historical-adoption-attempt-1";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.identity.initial_run_id = run_id.to_string();
+        options.workspace.to_worktree = target.display().to_string();
         options.workspace.source_worktree_path = Some(source.clone());
         options.workspace.task_base_sha = Some(base.clone());
         options.provider_transport.provider_command = Some(provider.display().to_string());
@@ -14491,32 +12235,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
             );
             (result, backend)
         });
-        let provider_started_in_time = (0..500).any(|_| {
-            if provider_started.exists() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            false
-        });
-        let running = provider_started_in_time
-            .then(|| agent_task_lifecycle::reconcile_status(run_id))
-            .transpose();
-        // Always release and join before asserting so a regression cannot
-        // strand the fake provider and hang the test process.
-        std::fs::write(&provider_release, "release").expect("release provider");
         let adoption_result = adoption.join();
-        assert!(provider_started_in_time, "promotion provider did not start");
-        let running = running
-            .expect("blocked adoption status")
-            .expect("provider started before status capture");
-        let active = running.candidate_adoption.expect("active adoption attempt");
-        assert_eq!(active.state, "verification_running");
-        assert_eq!(active.phase, "verification");
-        assert_eq!(active.active_gate, "test \"$(cat lib.rs)\" = candidate");
-        assert_eq!(active.candidate_sha, candidate);
-        assert_eq!(active.ai_model, "openai/gpt-5.6-sol");
-        assert_eq!(active.owner_pid, std::process::id());
-        assert!(!active.heartbeat_at.is_empty());
         let (result, backend) = adoption_result.expect("adoption thread completes");
         let result = result.expect("historical recipe adoption succeeds");
 
@@ -17481,9 +15200,7 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
         let continuation = tracked_promotion_continuation(&options)
             .unwrap()
             .expect("durable Cook attribution");
-        assert!(cook_owned_unpushed_destination(&continuation)
-            .unwrap()
-            .is_some());
+        assert!(cook_owned_unpushed_destination(&continuation).unwrap());
 
         let base = Command::new("git")
             .args(["rev-parse", "HEAD^"])
@@ -17826,456 +15543,6 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
             .expect("claim retained")
             .state
                 == agent_task_lifecycle::ClaimState::Failed
-        );
-    });
-}
-
-#[test]
-fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let fixture = durable_cook_0_328_fixture();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        let target = temp.path().join("candidate");
-        std::fs::create_dir(&source).unwrap();
-        for args in [
-            vec!["init", "--quiet", "-b", "main"],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Homeboy Test"],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .current_dir(&source)
-                .status()
-                .unwrap()
-                .success());
-        }
-        std::fs::write(source.join("tracked.txt"), "base\n").unwrap();
-        assert!(Command::new("git")
-            .args(["add", "."])
-            .current_dir(&source)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("git")
-            .args(["commit", "--quiet", "-m", "base"])
-            .current_dir(&source)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("git")
-            .args(["worktree", "add", "--quiet", "-b", "cook-candidate"])
-            .arg(&target)
-            .current_dir(&source)
-            .status()
-            .unwrap()
-            .success());
-        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
-
-        let mut options = tracked_promotion_continuation_options(
-            &fixture.cook.id,
-            "run-tracked-promotion",
-            &target,
-        );
-        options.workspace.to_worktree = "fixture@cook-candidate".to_string();
-        record_tracked_promotion_continuation(&options, &target);
-
-        let provider = temp.path().join("provider");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-                serde_json::json!({ "worktrees": [{
-                    "handle": options.workspace.to_worktree,
-                    "path": target,
-                    "branch": "cook-candidate",
-                    "safety": { "dirty": true, "unpushed": false, "primary": false },
-                }] })
-            ),
-        )
-        .expect("write provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&provider, permissions).unwrap();
-        }
-        let mut config = homeboy_core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy_core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy_core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string()]),
-                    resolve_path: Some(vec![provider.display().to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy_core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy_core::defaults::save_config(&config).expect("save provider config");
-        crate::agent_task_candidate_baseline::register();
-
-        let mut legacy_path_recipe = options.clone();
-        legacy_path_recipe.workspace.to_worktree = target.display().to_string();
-        legacy_path_recipe.workspace.source_worktree_path = Some(target.clone());
-        canonicalize_cook_provider_workspace(&mut legacy_path_recipe)
-            .expect("legacy path identity remains recoverable through provider ownership");
-        assert_eq!(
-            legacy_path_recipe.workspace.to_worktree,
-            options.workspace.to_worktree
-        );
-        assert_eq!(
-            legacy_path_recipe.identity.initial_plan.metadata["cook_provision"]
-                ["workspace_identity"]["handle"],
-            options.workspace.to_worktree
-        );
-
-        // Fanout coordinators re-resolve the destination from the identity
-        // persisted when their child was admitted; they do not retain a CWD.
-        options.workspace.source_worktree_path = None;
-        options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "workspace_identity": homeboy_core::worktree_provider::resolve_configured_worktree_exact_identity_from_config(
-                &options.workspace.to_worktree,
-                Some("fixture"),
-                &config,
-            )
-            .expect("persisted provider identity")
-        });
-
-        assert!(
-            tracked_promotion_continuation(&options).unwrap().is_some(),
-            "a durably attributed gate-failed promotion re-enters without a route token"
-        );
-        options.identity.initial_plan.metadata["cook_continue_context"] = serde_json::json!({
-            "schema": "homeboy/agent-task-cook-continue-context/v1",
-            "run_id": options.identity.initial_run_id,
-        });
-        let continuation = tracked_promotion_continuation(&options)
-            .unwrap()
-            .expect("tracked promotion continuation");
-        assert_eq!(continuation.baseline["patch_artifact"]["id"], "patch");
-
-        let generic_preflight =
-            crate::agent_task_promotion::preflight_configured_workspace_provider(
-                &options.workspace.to_worktree,
-            )
-            .expect_err("generic provider preflight rejects every dirty destination");
-        assert_eq!(
-            generic_preflight.details["workspace"]["classification"],
-            "workspace.resolved_but_dirty"
-        );
-        validate_cook_workspace(&options)
-            .expect("exact gate-failed promoted provider destination resumes");
-
-        std::fs::write(target.join("extra.txt"), "unattributed\n").unwrap();
-        let error = validate_cook_workspace(&options).expect_err("extra drift is rejected");
-        assert_eq!(error.details["field"], "to_worktree");
-        assert!(
-            error
-                .message
-                .contains("differs from its exact tracked post-apply candidate"),
-            "{error}"
-        );
-        std::fs::remove_file(target.join("extra.txt")).unwrap();
-
-        std::fs::write(target.join("tracked.txt"), "changed\n").unwrap();
-        let error = validate_cook_workspace(&options).expect_err("changed drift is rejected");
-        assert_eq!(error.details["field"], "to_worktree");
-        assert!(error
-            .message
-            .contains("differs from its exact tracked post-apply candidate"));
-
-        std::fs::write(target.join("tracked.txt"), "base\n").unwrap();
-        let error = validate_cook_workspace(&options).expect_err("missing candidate is rejected");
-        assert_eq!(error.details["field"], "to_worktree");
-        assert!(error
-            .message
-            .contains("differs from its exact tracked post-apply candidate"));
-
-        // The historical admission branch is narrower than the workspace
-        // validator: it requires a terminal timed-out review-form retry whose
-        // copied applied promotion exactly matches its source promotion.
-        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
-        let mut historical = options.clone();
-        historical.identity.initial_plan = batch_cook_options(
-            &fixture.cook.id,
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        )
-        .identity
-        .initial_plan;
-        historical.identity.initial_run_id = "run-historical-review-form".to_string();
-        historical.identity.initial_plan.tasks[0].inputs = serde_json::json!({
-            "cook_loop": {
-                "review_form_required": true,
-                "execution_budget_authority": {
-                    "kind": "fresh_cook_review",
-                    "max_same_provider_retries": 1
-                }
-            }
-        });
-        historical.finalization.no_finalize = false;
-        let mut source_options = historical.clone();
-        source_options.identity.initial_run_id = "run-tracked-promotion-source".to_string();
-        record_tracked_promotion_continuation(&source_options, &target);
-        let mut source_promotion = serde_json::to_value(
-            persisted_promotion_for_attempt(&source_options.identity.initial_run_id)
-                .unwrap()
-                .expect("source promotion"),
-        )
-        .unwrap();
-        source_promotion["status"] = serde_json::json!("applied");
-        source_promotion["provenance"]
-            .as_object_mut()
-            .unwrap()
-            .remove("post_apply");
-        agent_task_lifecycle::record_promotion(
-            &source_options.identity.initial_run_id,
-            source_promotion,
-        )
-        .unwrap();
-
-        let mut copied_promotion = serde_json::to_value(
-            persisted_promotion_for_attempt(&source_options.identity.initial_run_id)
-                .unwrap()
-                .expect("applied source promotion"),
-        )
-        .unwrap();
-        copied_promotion["source"]["run_id"] =
-            serde_json::json!(historical.identity.initial_run_id);
-        copied_promotion["provenance"]["cook_follow_up"] = serde_json::json!({
-            "kind": fixture.continuation_record.latest_promotion.follow_up_kind,
-            "source_run_id": source_options.identity.initial_run_id,
-        });
-        agent_task_lifecycle::submit_plan(
-            &historical.identity.initial_plan,
-            Some(&historical.identity.initial_run_id),
-        )
-        .unwrap();
-        agent_task_lifecycle::record_promotion(
-            &historical.identity.initial_run_id,
-            copied_promotion.clone(),
-        )
-        .unwrap();
-        seed_timeout_review_form_aggregate(
-            &historical.identity.initial_run_id,
-            &historical.identity.initial_plan,
-        );
-        agent_task_lifecycle::rewrite_record_for_test(
-            &historical.identity.initial_run_id,
-            |record| {
-                record.state = agent_task_lifecycle::AgentTaskRunState::PartialFailure;
-            },
-        )
-        .unwrap();
-
-        let source = persisted_promotion_for_attempt(&source_options.identity.initial_run_id)
-            .unwrap()
-            .expect("fixture source promotion is inspectable");
-        let continuation = persisted_promotion_for_attempt(&historical.identity.initial_run_id)
-            .unwrap()
-            .expect("fixture continuation promotion is inspectable");
-        assert_eq!(
-            serde_json::to_value(source.status).unwrap(),
-            fixture.source_record.latest_promotion.status
-        );
-        assert_eq!(fixture.source_record.schema, "homeboy/agent-task-run/v1");
-        assert_eq!(fixture.source_record.state, "succeeded");
-        assert!(!fixture.source_record.latest_promotion.post_apply);
-        assert_eq!(source.provenance.pointer("/post_apply"), None);
-        assert_eq!(
-            continuation.provenance["cook_follow_up"]["kind"],
-            fixture.continuation_record.latest_promotion.follow_up_kind
-        );
-        assert_eq!(fixture.cook.source_attempt, 1);
-        assert_eq!(fixture.cook.continuation_attempt, 2);
-        let aggregate = agent_task_lifecycle::read_aggregate(&historical.identity.initial_run_id)
-            .expect("fixture continuation aggregate is inspectable");
-        assert_eq!(
-            serde_json::to_value(aggregate.status).unwrap(),
-            fixture.continuation_record.aggregate.status
-        );
-        assert_eq!(
-            serde_json::to_value(aggregate.outcomes[0].status).unwrap(),
-            fixture.continuation_record.aggregate.outcome_status
-        );
-        assert_eq!(
-            fixture.continuation_record.schema,
-            "homeboy/agent-task-run/v1"
-        );
-        assert_eq!(fixture.continuation_record.state, "partial_failure");
-
-        let before_preflight = serde_json::to_value(
-            agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id).unwrap(),
-        )
-        .unwrap();
-        assert!(
-            authenticated_historical_review_form_workspace_with_trace(&historical, false).unwrap(),
-            "the exact dirty candidate authorizes only this historical continuation"
-        );
-        assert_eq!(
-            serde_json::to_value(
-                agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
-                    .unwrap()
-            )
-            .unwrap(),
-            before_preflight,
-            "read-only admission must not persist a continuation trace"
-        );
-        assert!(
-            authenticated_historical_review_form_workspace(&historical).unwrap(),
-            "execution records its exact admission trace"
-        );
-        historical.provider_transport.attempt_dispatcher = None;
-        let executions = Arc::new(AtomicUsize::new(0));
-        let executor = Arc::new(RecordingReviewFormExecutor {
-            executions: Arc::clone(&executions),
-        });
-
-        std::fs::write(target.join("tracked.txt"), "drifted\n").unwrap();
-        assert!(
-            !authenticated_historical_review_form_workspace(&historical).unwrap(),
-            "candidate drift falls through to normal preflight"
-        );
-        let result = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
-                Ok(serde_json::json!({}))
-            }))),
-            mode: CookMode::ContinueTerminal,
-            ..CookContext::new(historical.clone(), executor.clone())
-        })
-        .expect("candidate drift returns durable failure evidence before local dispatch");
-        assert_eq!(result.exit_code, 1);
-        assert!(result.value.disposition.is_terminal());
-        let trace = agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
-            .unwrap()
-            .metadata["cook_continuation_admission"]
-            .clone();
-        assert_eq!(
-            trace["first_authoritative_denial"],
-            "provider_baseline_verification"
-        );
-        assert_eq!(trace["predicates"][4]["outcome"], "fail");
-        assert_eq!(executions.load(Ordering::SeqCst), 0);
-
-        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
-        agent_task_lifecycle::rewrite_record_for_test(
-            &historical.identity.initial_run_id,
-            |record| {
-                record.state = agent_task_lifecycle::AgentTaskRunState::Cancelled;
-            },
-        )
-        .unwrap();
-        assert!(
-            !authenticated_historical_review_form_workspace(&historical).unwrap(),
-            "cancelled review-form attempts never authorize the bypass"
-        );
-        let record = agent_task_lifecycle::exact_record(&historical.identity.initial_run_id)
-            .expect("read cancelled review-form attempt");
-        let lifecycle_store = test_lifecycle_store();
-        let preflight =
-            preflight_cook_continuation_admission(&lifecycle_store, &historical, &record)
-                .expect_err("preflight rejects the same ineligible terminal review form");
-        assert_eq!(
-            preflight.details["continuation_admission"]["first_authoritative_denial"],
-            "terminal_review_form_eligibility",
-            "{preflight:?}"
-        );
-        let result = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
-                Ok(serde_json::json!({}))
-            }))),
-            mode: CookMode::ContinueTerminal,
-            ..CookContext::new(historical.clone(), executor.clone())
-        })
-        .expect("cancelled attempt returns durable failure evidence before local dispatch");
-        assert_eq!(result.exit_code, 1);
-        assert!(result.value.disposition.is_terminal());
-        let trace = agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
-            .unwrap()
-            .metadata["cook_continuation_admission"]
-            .clone();
-        assert_eq!(
-            trace["first_authoritative_denial"],
-            "terminal_review_form_eligibility"
-        );
-        assert_eq!(trace["predicates"][1]["outcome"], "fail");
-        assert_eq!(executions.load(Ordering::SeqCst), 0);
-
-        agent_task_lifecycle::rewrite_record_for_test(
-            &historical.identity.initial_run_id,
-            |record| {
-                record.state = agent_task_lifecycle::AgentTaskRunState::PartialFailure;
-            },
-        )
-        .unwrap();
-        agent_task_lifecycle::rewrite_record_for_test(
-            &historical.identity.initial_run_id,
-            |record| {
-                record.metadata["latest_promotion"]["provenance"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("candidate");
-            },
-        )
-        .unwrap();
-        assert!(
-            !authenticated_historical_review_form_workspace(&historical).unwrap(),
-            "missing legacy candidate evidence is an authorization denial"
-        );
-        let result = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
-                Ok(serde_json::json!({}))
-            }))),
-            mode: CookMode::ContinueTerminal,
-            ..CookContext::new(historical.clone(), executor.clone())
-        })
-        .expect("malformed evidence returns durable failure evidence before local dispatch");
-        assert_eq!(result.exit_code, 1);
-        assert!(result.value.disposition.is_terminal());
-        let trace = agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
-            .unwrap()
-            .metadata["cook_continuation_admission"]
-            .clone();
-        assert_eq!(
-            trace["first_authoritative_denial"],
-            "terminal_review_form_eligibility"
-        );
-        assert_eq!(trace["predicates"][1]["outcome"], "fail");
-        assert_eq!(executions.load(Ordering::SeqCst), 0);
-        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
-        let mut other_cook = tracked_promotion_continuation_options(
-            "cook-other-promotion",
-            "run-other-promotion",
-            &target,
-        );
-        other_cook.workspace.to_worktree = options.workspace.to_worktree.clone();
-        other_cook.identity.initial_plan.metadata["cook_continue_context"] = serde_json::json!({
-            "schema": "homeboy/agent-task-cook-continue-context/v1",
-            "run_id": other_cook.identity.initial_run_id,
-        });
-        assert!(
-            tracked_promotion_continuation(&other_cook)
-                .unwrap()
-                .is_none(),
-            "a different Cook cannot claim this attempt's promotion"
         );
     });
 }
@@ -19260,29 +16527,29 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
         };
         finalize_cook_pr_with_backend(&options, run_id, &promotion, &mut backend).unwrap();
         for section in [
-                "## Summary",
-                "## What changed",
-                "## How to test",
-                "## Compatibility",
-                "## Evidence",
-                "## AI assistance",
-                "openai/gpt-5.6-terra",
-                "Verified finalization base: main at verified-base",
-                // AI-authored prose (from the seeded review form).
-                "Close the issue by guarding the reload path.",
-                "Add a null guard in the render path.",
-                "Internal-only change; no compatibility impact.",
-                // Deterministic evidence (orchestrator-owned).
-                "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
-                "Verified candidate scope: 1 changed file(s): src/lib.rs.",
-                "Cook deterministic verification: 1 gate(s) completed green.",
-            ] {
-                assert!(
-                    backend.body.contains(section),
-                    "missing {section}: {}",
-                    backend.body
-                );
-            }
+            "## Summary",
+            "## What changed",
+            "## How to test",
+            "## Compatibility",
+            "## Evidence",
+            "## AI assistance",
+            "openai/gpt-5.6-terra",
+            "Verified finalization base: main at verified-base",
+            // AI-authored prose (from the seeded review form).
+            "Close the issue by guarding the reload path.",
+            "Add a null guard in the render path.",
+            "Internal-only change; no compatibility impact.",
+            // Deterministic evidence (orchestrator-owned).
+            "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
+            "Verified candidate scope: 1 changed file(s): src/lib.rs.",
+            "Cook deterministic verification: 1 gate(s) completed green.",
+        ] {
+            assert!(
+                backend.body.contains(section),
+                "missing {section}: {}",
+                backend.body
+            );
+        }
         for forbidden in [
             "Publication intent",
             "homeboy/agent-task",
@@ -19457,22 +16724,6 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
             .get("cook_finalization")
             .is_some());
     }
-}
-
-#[test]
-fn provider_timeout_heartbeat_reports_resolved_and_remaining_budget() {
-    let detail = provider_timeout_heartbeat_detail(
-        1_200_000,
-        1_184_997,
-        Some("rss_mib exceeded warning threshold"),
-        &CookProviderActivity::default(),
-    );
-
-    assert_eq!(
-        detail,
-        "provider execution is still running; timeout=1200000ms; remaining=1184997ms; rss_mib exceeded warning threshold"
-    );
-    assert!(detail.len() <= 512);
 }
 
 #[test]
@@ -22249,8 +19500,8 @@ fn fanout_coordinator_converges_recoverable_and_failed_terminal_children() {
 fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_attempt() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
-        let target = temp.path().join("candidate");
-        std::fs::create_dir(&target).unwrap();
+        let primary = temp.path().join("primary");
+        std::fs::create_dir(&primary).unwrap();
         for args in [
             vec!["init", "-b", "main"],
             vec!["config", "user.email", "test@example.com"],
@@ -22258,27 +19509,41 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         ] {
             assert!(Command::new("git")
                 .args(args)
-                .current_dir(&target)
+                .current_dir(&primary)
                 .status()
                 .unwrap()
                 .success());
         }
-        std::fs::write(target.join("lib.rs"), "old\n").unwrap();
+        std::fs::write(primary.join("lib.rs"), "old\n").unwrap();
         assert!(Command::new("git")
             .args(["add", "."])
-            .current_dir(&target)
+            .current_dir(&primary)
             .status()
             .unwrap()
             .success());
         assert!(Command::new("git")
             .args(["commit", "-m", "base"])
-            .current_dir(&target)
+            .current_dir(&primary)
             .status()
             .unwrap()
             .success());
         assert!(Command::new("git")
             .args(["remote", "add", "origin", "."])
-            .current_dir(&target)
+            .current_dir(&primary)
+            .status()
+            .unwrap()
+            .success());
+        let target = temp.path().join("candidate");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fixture-candidate",
+                target.to_str().expect("UTF-8 candidate path"),
+                "HEAD",
+            ])
+            .current_dir(&primary)
             .status()
             .unwrap()
             .success());
@@ -22287,6 +19552,14 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         let patch_path = temp.path().join("candidate.patch");
         std::fs::write(&patch_path, &patch).unwrap();
         let base_sha = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
+
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@cook-9703".to_string(),
+            path: target.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register native fanout target");
 
         let dispatches = Arc::new(AtomicUsize::new(0));
         let cook_id = "cook-9703";

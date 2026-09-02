@@ -12,7 +12,7 @@ use crate::agent_task::{
     AGENT_TOOL_RESULT_SCHEMA,
 };
 use homeboy_core::stream_capture::StreamCaptureMetadata;
-use homeboy_core::{git, worktree, worktree_provider};
+use homeboy_core::{git, worktree};
 
 pub const AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA: &str = "homeboy/agent-tool-dispatch-evidence/v1";
 
@@ -154,7 +154,7 @@ mod dispatch {
         for key in ["command", "cmd", "script", "command_line", "commandLine"] {
             match input.get(key) {
                 Some(Value::String(command)) if !command.trim().is_empty() => {
-                    return Some(command.clone())
+                    return Some(command.clone());
                 }
                 Some(Value::Array(parts)) => {
                     let joined = parts
@@ -532,7 +532,7 @@ mod tools {
     ) -> Result<Value, AgentTaskDiagnostic> {
         let repo = required_string(input, &["repo", "component_id", "name"])?;
         let branch = required_string(input, &["branch"])?;
-        let created = worktree_provider::create_worktree(worktree::WorktreeCreateOptions {
+        let created = worktree::create(worktree::WorktreeCreateOptions {
             component_id: component_slug(repo).to_string(),
             branch: branch.to_string(),
             from: optional_string(input, &["from", "base_ref"]).map(str::to_string),
@@ -546,12 +546,7 @@ mod tools {
             message: error.to_string(),
             data: Value::Null,
         })?;
-        match created {
-            worktree_provider::WorktreeProviderCreateOutput::Native(output) => to_value(Ok(output)),
-            worktree_provider::WorktreeProviderCreateOutput::Configured(output) => to_value(Ok(
-                worktree_provider::ConfiguredWorktreeCreateEvidence::from(output),
-            )),
-        }
+        to_value(Ok(created))
     }
 
     pub(crate) fn github_issue_get(
@@ -732,14 +727,16 @@ mod workspace_paths {
     }
 
     pub(crate) fn latest_active_worktree_path(component_id: &str) -> Option<String> {
-        worktree_provider::list_worktree_provider_inventory()
+        worktree::list()
             .ok()?
+            .worktrees
             .into_iter()
             .filter(|workspace| {
-                workspace.repository.as_deref() == Some(component_id) && !workspace.safety.missing
+                workspace.component_id == component_id
+                    && workspace.state == worktree::TaskWorktreeState::Active
             })
             .max_by(|left, right| left.created_at.cmp(&right.created_at))
-            .map(|workspace| workspace.ownership.path)
+            .map(|workspace| workspace.worktree_path)
     }
 
     pub(crate) fn workspace_file_path(

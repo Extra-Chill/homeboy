@@ -2,12 +2,10 @@
 
 Manage component-backed task worktrees for generic Homeboy workflows.
 
-Creation, resolution, listing, status, and cleanup use one provider-neutral
-contract. An enabled configured provider that declares creation capability owns
-creation; otherwise Homeboy's built-in provider creates from the registered
-local component checkout. Configured provider declarations are authoritative:
-provider errors and unsafe state fail closed instead of falling back to local
-ownership.
+Creation, resolution, listing, status, and cleanup use Homeboy's native
+task-worktree registry. Homeboy creates each task worktree from its registered
+local component checkout and records its lifecycle, owner run, and cleanup
+policy in that registry.
 
 ## Commands
 
@@ -21,7 +19,7 @@ For multi-PR orchestration, start with `homeboy --output homeboy-results/worktre
 
 ## Safety
 
-Built-in removal refuses dirty worktrees, unpushed commits, primary checkouts, and paths outside the component checkout parent. `--force` only bypasses dirty/unpushed checks; primary checkout and containment gates always apply. Configured providers retain their own cleanup authority and return typed safety and cleanup evidence through the same command output.
+Removal refuses dirty worktrees, unpushed commits, primary checkouts, and paths outside the component checkout parent. `--force` only bypasses dirty/unpushed checks; primary checkout and containment gates always apply.
 
 `worktree cleanup` reports a task-worktree cleanup plan by default. Pass `--apply` to remove planned worktrees after the existing safety gates pass. `--dry-run` remains a deprecated plan-only alias for one release; it conflicts with `--apply` and reports `deprecated_flag: "--dry-run"` in JSON output.
 
