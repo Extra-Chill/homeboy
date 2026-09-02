@@ -6092,6 +6092,69 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
 }
 
 #[test]
+fn native_explicit_cwd_persists_its_managed_handle_and_rejects_mismatch() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let primary = tempfile::tempdir_in(home.path()).expect("primary repository");
+        let target = home.path().join("native-cook-cwd");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(primary.path(), &["init", "--initial-branch=main"]);
+        git(
+            primary.path(),
+            &["config", "user.email", "agent@example.test"],
+        );
+        git(primary.path(), &["config", "user.name", "Agent"]);
+        std::fs::write(primary.path().join("tracked.txt"), "base\n").expect("write base");
+        git(primary.path(), &["add", "tracked.txt"]);
+        git(primary.path(), &["commit", "-m", "base"]);
+        git(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fix/native-cook-cwd",
+                target.to_str().expect("target path"),
+            ],
+        );
+        homeboy_core::worktree::record_active_for_test("fixture@native-cook-cwd", &target);
+
+        let mut options = batch_cook_options(
+            "native-explicit-cwd",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.to_worktree = target.display().to_string();
+        options.workspace.source_worktree_path = Some(target.clone());
+        options.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
+            serde_json::json!({ "kind": "explicit_cwd" });
+
+        canonicalize_cook_provider_workspace(&mut options)
+            .expect("native explicit CWD is admitted through its managed handle");
+        assert_eq!(options.workspace.to_worktree, "fixture@native-cook-cwd");
+        let recipe = super::super::cook_recipe::persist_initial_recipe(&options)
+            .expect("persist canonical Cook recipe");
+        assert_eq!(
+            recipe.finalization["to_worktree"],
+            "fixture@native-cook-cwd"
+        );
+
+        let mut mismatch = options.clone();
+        mismatch.workspace.to_worktree = "fixture@other".to_string();
+        mismatch.workspace.source_worktree_path = Some(target);
+        let error = canonicalize_cook_provider_workspace(&mut mismatch)
+            .expect_err("different native handle must not be admitted");
+        assert_eq!(error.details["field"], "to_worktree");
+        assert!(error.message.contains("identify different worktrees"));
+    });
+}
+
+#[test]
 fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary repository");
