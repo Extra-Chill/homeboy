@@ -1,0 +1,9 @@
+{
+  "account_blocked": { "status": 1, "stdout": "", "stderr": "HTTP 403 personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription." },
+  "quota": { "status": 1, "stdout": "", "stderr": "HTTP 429 rate limit exhausted" },
+  "auth": { "status": 1, "stdout": "", "stderr": "HTTP 401 authentication rejected" },
+  "transient": { "status": 1, "stdout": "", "stderr": "HTTP 503 service unavailable" },
+  "unsupported": { "status": 1, "stdout": "", "stderr": "model gpt-5.6-terra is unsupported" },
+  "indeterminate": { "status": 1, "stdout": "", "stderr": "Unknown argument: --format" },
+  "success": { "status": 0, "stdout": "{\"type\":\"text\",\"part\":{\"text\":\"READY\"}}\n", "stderr": "" }
+}
