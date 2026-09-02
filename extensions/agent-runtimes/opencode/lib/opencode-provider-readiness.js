@@ -133,13 +133,15 @@ function runProbe(probe, executable, args, command, env, config, cwd) {
 function runModelProbe(probe, executable, args, selected, env, config, options) {
 	const fileSystem = options.fs || fs;
 	let cwd;
+	let result;
+	let cleanupFailed = false;
 	try {
 		cwd = fileSystem.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-readiness-'));
 	} catch {
 		return { isolationError: true, stdout: '', stderr: '' };
 	}
 	try {
-		return runProbe(probe, executable, args, [
+		result = runProbe(probe, executable, args, [
 			'run', '--model', `${selected.provider}/${selected.model}`, '--format', 'json',
 			'--agent', OPENCODE_READINESS_AGENT, '--title', OPENCODE_READINESS_AGENT,
 			OPENCODE_READINESS_PROMPT,
@@ -148,9 +150,10 @@ function runModelProbe(probe, executable, args, selected, env, config, options) 
 		try {
 			fileSystem.rmSync(cwd, { recursive: true, force: true });
 		} catch {
-			// The probe result remains valid when its disposable local state cannot be removed.
+			cleanupFailed = true;
 		}
 	}
+	return cleanupFailed ? { isolationError: true, stdout: '', stderr: '' } : result;
 }
 
 function probeFailure(result, identity, probeName) {
