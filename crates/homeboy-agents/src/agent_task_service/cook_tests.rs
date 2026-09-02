@@ -963,8 +963,9 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     };
 
+    const SECRET: &str = "rotation-projection-secret";
     let attempts = serde_json::json!([
-        {"attempt": 1, "rotation_index": 0, "backend": "xai", "model": "grok-4.6", "attempted_model": "grok-4.6", "status": "failed", "failure_classification": "provider_account_blocked"},
+        {"attempt": 1, "rotation_index": 0, "backend": "xai", "model": "grok-4.6", "attempted_model": "grok-4.6", "status": "failed", "failure_classification": "provider_account_blocked", "summary": "token=rotation-projection-secret"},
         {"attempt": 2, "rotation_index": 1, "backend": "zai-coding-plan", "model": "glm-5.3", "attempted_model": "glm-5.3", "status": "failed", "failure_classification": "rate_limited"},
         {"attempt": 3, "rotation_index": 2, "backend": "opencode-go", "model": "kimi-k3", "attempted_model": "kimi-k3", "status": "failed", "failure_classification": "stalled"},
         {"attempt": 4, "rotation_index": 3, "backend": "anthropic", "model": "claude-sonnet-5", "attempted_model": "claude-sonnet-5", "status": "failed", "failure_classification": "stalled"}
@@ -984,8 +985,8 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
             diagnostics: vec![
                 AgentTaskDiagnostic {
                     class: "agent_task.provider_rotation_exhausted".to_string(),
-                    message: "all configured provider routes were rejected".to_string(),
-                    data: serde_json::json!({ "attempts": attempts }),
+                    message: "all configured provider routes were rejected: token=rotation-projection-secret".to_string(),
+                    data: serde_json::json!({ "attempts": attempts, "token": SECRET }),
                 },
                 AgentTaskDiagnostic {
                     class: "agent_task.execution_budget_exhausted".to_string(),
@@ -1072,11 +1073,24 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
             "missing {route}: {stop_reason}"
         );
     }
-    let context = report.value.failure_context.expect("failure context");
+    let context = report
+        .value
+        .failure_context
+        .as_ref()
+        .expect("failure context");
     assert_eq!(context.reason_code, "provider_rotation_exhausted");
     assert_eq!(
-        context.diagnostic.expect("diagnostic")["class"],
+        context.diagnostic.as_ref().expect("diagnostic")["class"],
         "agent_task.provider_rotation_exhausted"
+    );
+    let rendered = serde_json::to_string(&report.value).expect("rotation report serializes");
+    assert!(
+        !rendered.contains(SECRET),
+        "rotation report leaked {SECRET}"
+    );
+    assert!(
+        rendered.contains("[REDACTED]"),
+        "rotation report was not redacted"
     );
 }
 

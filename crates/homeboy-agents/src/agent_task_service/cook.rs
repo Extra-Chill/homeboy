@@ -882,6 +882,17 @@ fn truncate_diagnostic_text(text: &str) -> String {
     }
 }
 
+/// A preceding `key: ` can make the prose redactor consume a following
+/// `token=value` as ordinary text. Redact each whitespace-delimited fragment a
+/// second time so provider-produced diagnostic prose cannot bypass it.
+fn redact_diagnostic_text(text: &str) -> String {
+    let redacted = homeboy_core::redaction::redact_string(text);
+    redacted
+        .split_inclusive(char::is_whitespace)
+        .map(homeboy_core::redaction::redact_string)
+        .collect()
+}
+
 /// The generic cook side-effect boundary the attempt loop drives its external
 /// effects through: promotion, moving-base recovery, and PR finalization.
 ///
@@ -4222,11 +4233,12 @@ fn make_provider_rotation_actionable(
     }) else {
         return;
     };
-    let mut diagnostic_value = serde_json::json!({
+    let diagnostic_message = redact_diagnostic_text(&diagnostic.message);
+    let mut diagnostic_value = homeboy_core::redaction::redact_json(&serde_json::json!({
         "class": diagnostic.class,
-        "message": diagnostic.message,
+        "message": diagnostic_message,
         "data": diagnostic.data,
-    });
+    }));
     bound_diagnostic_value(&mut diagnostic_value, 0);
     let routes = provider_rotation_attempts(outcome)
         .unwrap_or_default()
@@ -4246,16 +4258,21 @@ fn make_provider_rotation_actionable(
         })
         .collect::<Vec<_>>();
     let routes = if routes.is_empty() {
-        truncate_diagnostic_text(&diagnostic.message)
+        truncate_diagnostic_text(&diagnostic_message)
     } else {
-        truncate_diagnostic_text(&routes.join("; "))
+        truncate_diagnostic_text(&redact_diagnostic_text(&routes.join("; ")))
     };
     let budget = aggregate
         .outcomes
         .iter()
         .flat_map(|outcome| &outcome.diagnostics)
         .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
-        .map(|diagnostic| format!("; {}", truncate_diagnostic_text(&diagnostic.message)))
+        .map(|diagnostic| {
+            format!(
+                "; {}",
+                truncate_diagnostic_text(&redact_diagnostic_text(&diagnostic.message))
+            )
+        })
         .unwrap_or_default();
     report.value.terminal_phase = Some("provider".to_string());
     report.value.terminal_failure_classification = Some("provider_rotation_exhausted".to_string());
@@ -4268,7 +4285,7 @@ fn make_provider_rotation_actionable(
         operation: "route_selection".to_string(),
         phase: "provider".to_string(),
         exit_code: 1,
-        stderr_excerpt: truncate_diagnostic_text(&diagnostic.message),
+        stderr_excerpt: truncate_diagnostic_text(&diagnostic_message),
         evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
         next_action: AgentTaskCookRecoveryAction {
             action: "diagnose".to_string(),
