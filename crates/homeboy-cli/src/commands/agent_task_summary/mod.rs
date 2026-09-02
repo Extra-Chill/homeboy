@@ -260,6 +260,9 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
     if let Some(next_action) = summary.get("next_action").and_then(Value::as_str) {
         lines.push(format!("Next: {next_action}"));
     }
+    if let Some(refresh_action) = summary.get("refresh_action").and_then(Value::as_str) {
+        lines.push(format!("Refresh: {refresh_action}"));
+    }
     Some(lines.join("\n"))
 }
 
