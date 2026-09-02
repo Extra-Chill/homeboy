@@ -40,6 +40,7 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 		runId: env.HOMEBOY_FUZZ_RUN_ID,
 		seed: env.HOMEBOY_FUZZ_SEED,
 		maxDuration: env.HOMEBOY_FUZZ_MAX_DURATION,
+		executionRequest: readFuzzExecutionRequest(env.HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE),
 		resultsFile: env.HOMEBOY_FUZZ_RESULTS_FILE,
 		artifactRoot: env.HOMEBOY_FUZZ_ARTIFACTS_DIR || env.HOMEBOY_ARTIFACT_ROOT || env.HOMEBOY_ARTIFACT_DIR || env.HOMEBOY_ARTIFACTS_DIR || env.HOMEBOY_RUN_ARTIFACT_ROOT || env.HOMEBOY_RUN_ARTIFACT_DIR,
 		wpCodeboxFuzzWorkloadRoot: env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT,
@@ -74,7 +75,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const plan = normalizeRunnerPlan(workload.plan || workload.fuzz_plan || workload.fuzzPlan || workload);
 	const runtimeCapabilities = normalizeWordPressFuzzRuntimeCapabilities(resolveRuntimeCapabilitiesForWorkload(workload, plan));
 	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
-	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities, packageRoot });
+	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, executionRequest: env.executionRequest, instructions, runtimeCapabilities, packageRoot });
 	const runtimeRequirements = wpCodeboxRuntimeRequirementsFromWorkload(workload, { env });
 	const runtimeTaskRequest = wpCodeboxFuzzRuntimeTaskRequest({
 		taskId: runId,
@@ -298,11 +299,12 @@ function normalizeRunnerPlan(input) {
 	});
 }
 
-function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities, packageRoot }) {
+function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, executionRequest, instructions, runtimeCapabilities, packageRoot }) {
 	const homeboyFuzzWorkload = homeboyFuzzWorkloadForCodebox(workload, { workloadId });
 	return wpCodeboxFuzzSuiteInput({
 		id: runId,
 		goal: instructions,
+		executionRequest,
 		target: workload.target || { type: 'wordpress', workload_id: workloadId },
 		homeboyFuzzWorkload,
 		packageRoot,
@@ -1061,6 +1063,27 @@ function writeFuzzArtifactPayload({ artifactRoot, artifact }) {
 
 function readJsonFile(filePath) {
 	return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function readFuzzExecutionRequest(filePath) {
+	if (filePath === undefined) {
+		return undefined;
+	}
+	const normalizedPath = typeof filePath === 'string' ? filePath.trim() : '';
+	if (!normalizedPath) {
+		throw new Error('HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE must name a readable JSON file when supplied.');
+	}
+	let source;
+	try {
+		source = fs.readFileSync(normalizedPath, 'utf8');
+	} catch (error) {
+		throw new Error(`Unable to read HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE at ${normalizedPath}: ${error.message}`);
+	}
+	try {
+		return JSON.parse(source);
+	} catch (error) {
+		throw new Error(`Invalid JSON in HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE at ${normalizedPath}: ${error.message}`);
+	}
 }
 
 function requiredString(value, name) {

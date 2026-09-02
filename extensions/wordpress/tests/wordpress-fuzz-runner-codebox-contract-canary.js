@@ -15,11 +15,13 @@ const { spawnSync } = require('node:child_process');
 const {
 	HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
+	readWordPressFuzzRunnerEnv,
 } = require('../lib/wordpress-fuzz-runner');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-codebox-contract-'));
 const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'campaign.json');
+const executionRequestPath = path.join(tempDir, 'execution-request.json');
 const observedRequestPath = path.join(tempDir, 'observed-fuzz-suite-request.json');
 const observedArgvPath = path.join(tempDir, 'observed-fuzz-suite-argv.json');
 const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
@@ -75,7 +77,15 @@ const workload = {
 	},
 };
 
+const executionRequest = {
+	selection: { include: ['rest:*'], exclude: ['admin:*'] },
+	budgets: { max_cases: 9, max_duration_seconds: 5 },
+	action_model: { name: 'rest-request', mutation: 'isolated' },
+	exploration_policy: { strategy: 'coverage-guided', max_depth: 3 },
+};
+
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload, null, 2)}\n`);
+fs.writeFileSync(executionRequestPath, `${JSON.stringify(executionRequest, null, 2)}\n`);
 fs.mkdirSync(path.join(emptyCodeboxInstallRoot, 'source', 'packages', 'cli'), { recursive: true });
 fs.mkdirSync(pluginRoot, { recursive: true });
 fs.writeFileSync(path.join(pluginRoot, 'woocommerce.php'), '<?php\n/**\n * Plugin Name: WooCommerce\n */\n');
@@ -146,6 +156,10 @@ if (request.metadata?.homeboy_agent_task_request) {
   process.stderr.write('fuzz execution must not route through Homeboy agent-task metadata');
   process.exit(1);
 }
+if (JSON.stringify(request.execution_request) !== JSON.stringify(${JSON.stringify(executionRequest)})) {
+  process.stderr.write('fuzz suite request did not preserve the portable execution request');
+  process.exit(1);
+}
 
 process.stdout.write(JSON.stringify({
   schema: 'wp-codebox/fuzz-suite-result/v1',
@@ -181,6 +195,7 @@ const cli = spawnSync(runnerPath, [], {
 		HOMEBOY_FUZZ_RUN_ID: 'contract-run',
 		HOMEBOY_FUZZ_SEED: 'seed-contract',
 		HOMEBOY_FUZZ_MAX_DURATION: '5',
+		HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE: executionRequestPath,
 		HOMEBOY_FUZZ_RESULTS_FILE: resultsPath,
 		HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE: checkoutRoot,
 	},
@@ -237,6 +252,7 @@ assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected
 assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('replay-data'), true);
 assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('coverage-summary'), true);
 assert.equal(observedRequest.metadata.homeboy_agent_task_request, undefined);
+assert.deepEqual(observedRequest.execution_request, executionRequest);
 const observedPlugin = observedRequest.metadata.runtime_requirements.extra_plugins[0];
 assert.equal(observedPlugin.source, checkoutRoot);
 assert.equal(observedPlugin.sourceSubpath, 'plugins/woocommerce');
@@ -247,3 +263,15 @@ assert.notEqual(observedPlugin.pluginFile, 'woocommerce.php');
 const campaign = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
 assert.equal(campaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
 assert.equal(campaign.metadata.wordpress_fuzz_result.id, 'contract-result');
+
+assert.equal(readWordPressFuzzRunnerEnv({}).executionRequest, undefined);
+assert.throws(
+	() => readWordPressFuzzRunnerEnv({ HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE: path.join(tempDir, 'missing-request.json') }),
+	/Unable to read HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE/,
+);
+const malformedRequestPath = path.join(tempDir, 'malformed-request.json');
+fs.writeFileSync(malformedRequestPath, '{not-json');
+assert.throws(
+	() => readWordPressFuzzRunnerEnv({ HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE: malformedRequestPath }),
+	/Invalid JSON in HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE/,
+);
