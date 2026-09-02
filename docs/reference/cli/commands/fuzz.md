@@ -53,6 +53,17 @@ Run generic fuzz workloads for a component
 | `--expect-metric` | `<METRIC=VALUE>` | Require a numeric metric emitted by the fuzz campaign to equal this value. Repeatable. Format: `--expect-metric metric_name=2` |
 | `--action-model` | `<PATH>` | Generic action model contract JSON (`homeboy/fuzz-action-model/v1`) to include in the execution request |
 | `--exploration-policy` | `<PATH>` | Generic exploration policy contract JSON (`homeboy/fuzz-exploration-policy/v1`) to include in the execution request |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 | Subcommand | Summary |
 | --- | --- |
@@ -90,6 +101,17 @@ Diagnose active fuzz runtime provenance and installed extension revision
 | Option | Value | Description |
 | --- | --- | --- |
 | `--extension` | `<ID>` | Extension whose active install should be diagnosed |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy fuzz discover`
 
@@ -126,6 +148,17 @@ List declared fuzz workloads without executing them
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
 | `--setting-json` | `<SETTING_JSON>` | Typed-JSON setting override. Repeatable |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy fuzz plan`
 
@@ -181,6 +214,17 @@ Build a fuzz execution request without executing it
 | `--execute` | flag | Execute generated campaign entries through the existing `fuzz run` primitive |
 | `--dry-run` | flag | Emit structured dispatch records without executing campaign entries |
 | `--resume` | flag | Skip campaign entries whose run id already exists in the persisted run store |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy fuzz stable`
 
@@ -206,7 +250,6 @@ Emit stable workload Lab command JSON from a stable workload manifest
 | --- | --- | --- |
 | `--manifest` | `<PATH>` | Stable workload manifest JSON path |
 | `--stable-id` | `<ID[,ID]>` | Limit to one or more stable workload ids. Repeatable and comma-separated |
-| `--runner` | `<ID>` | Preferred Lab runner id to include in every command |
 | `--artifact-root` | `<DIR>` | Persisted artifact root to include in every command |
 | `--run-id-prefix` | `<ID>` | Stable run id prefix. Defaults to stable-YYYYMMDD |
 | `--tracker-ref` | `<KIND:ID>` | Extra tracker ref added to every run command. Repeatable. Format: KIND:ID |
@@ -215,6 +258,7 @@ Emit stable workload Lab command JSON from a stable workload manifest
 | `--since` | `<SINCE>` | Lookback for refs compare command |
 | `--limit` | `<LIMIT>` | Run-history limit for refs/compare commands |
 | `--hotspot-limit` | `<HOTSPOT_LIMIT>` | Hotspot compare row limit |
+| `--runner` | `<ID>` | Preferred Lab runner id to include in every command |
 
 ## `homeboy fuzz run-campaign`
 
@@ -270,6 +314,17 @@ Execute or dry-run a generated fuzz campaign plan
 | `--execute` | flag | Execute generated campaign entries through the existing `fuzz run` primitive |
 | `--dry-run` | flag | Emit structured dispatch records without executing campaign entries |
 | `--resume` | flag | Skip campaign entries whose run id already exists in the persisted run store |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy fuzz run`
 
@@ -312,6 +367,17 @@ Execute the selected fuzz workload, persist fuzz evidence, and surface its campa
 | `--expect-metric` | `<METRIC=VALUE>` | Require a numeric metric emitted by the fuzz campaign to equal this value. Repeatable. Format: `--expect-metric metric_name=2` |
 | `--action-model` | `<PATH>` | Generic action model contract JSON (`homeboy/fuzz-action-model/v1`) to include in the execution request |
 | `--exploration-policy` | `<PATH>` | Generic exploration policy contract JSON (`homeboy/fuzz-exploration-policy/v1`) to include in the execution request |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy fuzz validate`
 

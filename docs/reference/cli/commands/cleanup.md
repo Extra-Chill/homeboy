@@ -31,6 +31,7 @@ Remove declared reconstructable artifacts from managed worktrees
 | `--limit` | `<N>` | Override the configured maximum number of persisted artifacts inspected |
 | `--full` | flag | Include every controller-scratch candidate and retained-resource detail. Default output keeps representative detail within the shared response budget |
 | `--cursor` | `<CURSOR>` | Continue a bounded shared-store cleanup inventory from this cursor |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
 
 | Subcommand | Summary |
 | --- | --- |

@@ -758,7 +758,6 @@ Plan a runner-backed refresh loop before dispatching matrix-style work
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--runner` | `<RUNNER>` | Runner ID that will execute the workload |
 | `--workspace` | `<WORKSPACE>` | Controller-side workspace or worktree to sync to the runner |
 | `--runner-cwd` | `<RUNNER_CWD>` | Runner-side cwd for the eventual runner exec command |
 | `--run-id` | `<RUN_ID>` | Stable run id to use for the produced evidence |
@@ -767,6 +766,7 @@ Plan a runner-backed refresh loop before dispatching matrix-style work
 | `--source` | `<PATH>` | Source path that must exist before the refresh is dispatched. Repeat for multiple paths |
 | `--fixture` | `<PATH>` | Fixture path that must exist before the refresh is dispatched. Repeat for multiple paths |
 | `--sync-mode` | `<SYNC_MODE>` | Runner workspace sync mode to use in the planned sync command |
+| `--runner` | `<RUNNER>` | Runner ID that will execute the workload |
 
 ## `homeboy runner broker`
 

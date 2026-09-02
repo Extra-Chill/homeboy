@@ -77,7 +77,6 @@ Diagnose provider and runtime readiness on a runner, and optionally repair it
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--runner` | `<RUNNER>` | Runner to diagnose and optionally repair |
 | `--backend` | `<BACKEND>` | Restrict diagnostics to this executor backend |
 | `--selector` | `<PROVIDER_ID>` | Restrict diagnostics to this backend-specific provider selector |
 | `--path` | `<PATH>` | Add this directory to the runner diagnostic path search |
@@ -85,6 +84,7 @@ Diagnose provider and runtime readiness on a runner, and optionally repair it
 | `--require-tool` | `<TOOL>` | Require this executable to be available on the runner. Repeatable |
 | `--secret-env` | `<ENV>` | Declare a secret environment variable available for readiness checks. Repeatable |
 | `--repair` | flag | Repair remediable runner readiness failures |
+| `--runner` | `<RUNNER>` | Runner to diagnose and optionally repair |
 
 ## `homeboy agent-task cook`
 
@@ -109,12 +109,23 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--help-full` | flag | Show the complete Cook option reference |
 | `--prompt` | `<PROMPT>` | Inline prompt, `@<path>` to read a file, `-` to read stdin, or `@prompt:<id>` for a stored prompt |
 | `--cwd` | `<PATH>` | Existing local repo checkout or worktree path to cook in. For Cook, omitting --repo infers its configured component when the Git remote maps unambiguously to one registered component |
-| `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in. For Cook, omitting --repo infers its configured component when the workspace Git remote maps unambiguously to one registered component |
 | `--repo` | `<REPO>` | Repository or configured component slug, e.g. sample-plugin. Cook accepts configured component aliases, preserves the canonical owning repository for provisioning and task grouping, and resolves the execution component separately. It infers both from an explicit --workspace or --cwd Git checkout when its configured remote mapping is unambiguous; an explicit value must match the checkout |
 | `--task-url` | `<URL>` | Issue, PR, or tracker URL the task is cooking |
 | `--backend` | `<BACKEND>` | Executor backend to request. Defaults to the configured coding backend |
-| `--selector` | `<PROVIDER_ID>` | Optional provider id when more than one provider exists for the backend |
 | `--model` | `<MODEL>` | Optional model override passed through to the provider |
+| `--preview` | flag | Resolve the Cook plan and validate static inputs without creating a run or provisioning a worktree. Includes a replayable command |
+| `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
+| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. A missing destination is created after durable Cook admission through Homeboy's native worktree lifecycle. When omitted, an explicit --cwd is the canonical destination. Otherwise, --repo plus --task-url derives an issue-owned destination through Homeboy's native worktree lifecycle. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout. When paired with --cwd, this must name the same existing local or active registered linked task worktree; --cwd remains the Cook workspace authority |
+| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
+| `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
+| `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. This derives provider execution and same-provider remediation budgets. An explicit --model pins the provider route; use --allow-provider-rotation to opt it into configured fallbacks (default 3) |
+| `--no-finalize` | flag | Stop after the work is verified but before opening the pull request, leaving the committed change on the worktree branch for manual review or a later `agent-task review`/finalize |
+| `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
+| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against. When omitted, Cook resolves configured repository or remote default-branch evidence before retaining its deferred `main` compatibility default when the provider has not materialized a checkout |
+| `--head` | `<BRANCH>` | Head branch to push and open the PR from. Defaults to the branch the destination worktree is already on |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in. For Cook, omitting --repo infers its configured component when the workspace Git remote maps unambiguously to one registered component |
+| `--selector` | `<PROVIDER_ID>` | Optional provider id when more than one provider exists for the backend |
 | `--secret-env` | `<ENV>` | Secret environment variable name to hydrate for the provider. Repeatable |
 | `--concurrency` | `<N>` | Maximum number of task cells to run at once |
 | `--run-id` | `<ID>` | Optional durable run id. Generated when omitted |
@@ -123,20 +134,14 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--max-provider-executions` | `<N>` | Maximum total provider executions per task, including same-provider retries and provider rotations. For Cook, this must be at least --max-attempts; use --max-same-provider-retries for gate and review-form remediation. `--attempts 1` runs exactly once. An explicit total cap bounds rotations inherited from configuration: for example, `--max-attempts 1 --max-provider-executions 1` runs once even when a rotation is configured, and reports those rotations as unreachable. An explicit `--max-provider-rotations` must fit within this total. When omitted, defaults to the total attempts the configured provider rotation needs, or 1 when no rotation is configured |
 | `--max-same-provider-retries` | `<N>` | Same-provider retries allowed after the first provider execution. Cook needs one for each possible gate or required review-form remediation; provider rotations cannot replace those retries. Defaults to 0; a configured provider rotation never funds these |
 | `--max-provider-rotations` | `<N>` | Cross-provider rotations allowed after the first provider execution. Rotations are distinct from same-provider Cook remediation and do not satisfy its required review-form retry budget. When omitted, defaults to the number of entries in the configured provider rotation, or 0 when no rotation is configured. When supplied with an explicit total execution cap, this request must fit within that cap; only inherited rotations are truncated automatically |
-| `--queue-only` | flag | Persist the run for a daemon/runner but do not execute immediately |
 | `--timeout-ms` | `<MS>` | Provider wall-clock timeout in milliseconds for each provider execution (default 1200000 = 20 min). Cook reports the resolved value in its preamble; a plan's `options.timeout_ms` carries the same budget into `agent-task run-plan` |
 | `--deny-command` | `<PATTERN>` | Command pattern the provider agent must not run. Repeatable, and additive to the host-level `agent_task.command_policy` config |
 | `--allow-command` | `<PATTERN>` | Command pattern the provider agent may run. Supplying any `--allow-command` switches the policy to allow-list mode: every command that does not match one of these patterns is refused |
 | `--command-policy-reason` | `<TEXT>` | Why the command policy exists, returned verbatim to the agent with every refusal. Telling the agent what to do instead (e.g. "this host routes builds to CI; make your edits and push") converts a refused command into correct behaviour rather than a wasted budget |
 | `--candidate-completion` | `<POLICY>` | Completion rule for isolated candidates: wait for all results (default) or promote the first successful candidate |
-| `--preview` | flag | Resolve the Cook plan and validate static inputs without creating a run or provisioning a worktree. Includes a replayable command |
-| `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
 | `--provider-evidence` | `<JSON>` | JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular-file path): `--provider-evidence '{"id":"evidence","source":"/absolute/path"}'`. Each source is limited to 64 MiB. |
-| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. A missing destination is created after durable Cook admission through Homeboy's native worktree lifecycle. When omitted, an explicit --cwd is the canonical destination. Otherwise, --repo plus --task-url derives an issue-owned destination through Homeboy's native worktree lifecycle. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout. When paired with --cwd, this must name the same existing local or active registered linked task worktree; --cwd remains the Cook workspace authority |
 | `--provider-command` | `<COMMAND>` | Exact argv element for the promotion apply-provider. Repeat once per element |
 | `--provider-argv` | `<ARG>` | Exact argv element for the promotion apply-provider. Repeat once per element; values are never shell-split |
-| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
-| `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-verify-file` | `<PATH>` | Read one private verification shell program from a file. The controller snapshots its bytes before submission; durable provenance records its digest and redaction policy, not its file path. Relative paths use the controller's invocation directory |
 | `--gate-input-source` | `<JSON>` | Durable source metadata emitted by Homeboy-generated promotion commands. This preserves the immutable provenance of a previously snapshotted gate; private entries retain no source path |
@@ -158,14 +163,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--gate-shared-cargo-target` | flag | Override the component's declared shared Cargo target policy for deterministic gates. Omit to inherit the repository component policy |
 | `--no-gate-shared-cargo-target` | flag | Explicitly keep deterministic gate Cargo output local to its workspace |
-| `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. This derives provider execution and same-provider remediation budgets. An explicit --model pins the provider route; use --allow-provider-rotation to opt it into configured fallbacks (default 3) |
 | `--allow-provider-rotation` | flag | Permit configured cross-provider/model fallbacks after explicitly selecting a model. This is distinct from same-provider remediation, which retries the selected route for gate and required review-form fixes |
-| `--no-finalize` | flag | Stop after the work is verified but before opening the pull request, leaving the committed change on the worktree branch for manual review or a later `agent-task review`/finalize |
-| `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
 | `--no-progress` | flag | Suppress intermediate Cook progress lines after the durable run identity. The final result still contains status and evidence commands for orchestration |
-| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against. When omitted, Cook resolves configured repository or remote default-branch evidence before retaining its deferred `main` compatibility default when the provider has not materialized a checkout |
-| `--head` | `<BRANCH>` | Head branch to push and open the PR from. Defaults to the branch the destination worktree is already on |
 | `--title` | `<TEXT>` | Title for the finalized pull request. Defaults to a title derived from the goal / commit |
 | `--commit-message` | `<TEXT>` | Commit message for the cook's committed change. Defaults to a message derived from the goal |
 | `--protected-branch` | `<BRANCH>` | Branch names the cook refuses to push to or target directly, as a safety guard. Repeatable; defaults to the standard protected set |
@@ -174,6 +174,16 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--require-acceptance` | flag | Require a separate durable acceptance verdict before PR finalization |
 | `--acceptance-authority` | `<ACCEPTANCE_AUTHORITY>` | Authority allowed to issue the acceptance verdict |
 | `--acceptance-policy` | `<ACCEPTANCE_POLICY>` | Policy the acceptance authority applies |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task cook-continue`
 
@@ -300,6 +310,17 @@ Run an `AgentTaskPlan` through extension-declared executor providers
 | `--plan` | `<JSON|@FILE|->` | Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json` |
 | `--record-run-id` | `<ID>` | Durable run ID to record for this planned lifecycle |
 | `--timeout-ms` | `<MS>` | Maximum execution time in milliseconds |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task run`
 
@@ -316,6 +337,17 @@ Execute a previously submitted durable run
 | Option | Value | Description |
 | --- | --- | --- |
 | `--timeout-ms` | `<MS>` | Maximum execution time in milliseconds |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task run-next`
 
@@ -328,6 +360,17 @@ Claim and execute the oldest queued durable run, optionally within one fanout
 | Option | Value | Description |
 | --- | --- | --- |
 | `--fanout` | `<ID>` | Claim only queued child runs belonging to this durable fanout |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task submit`
 
@@ -373,6 +416,17 @@ Read durable run status
 | `--watch` | flag | Follow this durable status until it reaches a terminal state or the timeout expires |
 | `--interval` | `<DURATION>` | Delay between status reads while following. Accepts ms, s, m, h, or d |
 | `--timeout` | `<DURATION>` | Total time to follow before returning the latest partial status. Accepts ms, s, m, h, or d |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task watch`
 
@@ -417,6 +471,17 @@ Discovery returns a finite agent-facing page by default; use `--limit` for a dif
 | `--parent-id` | `<PARENT_ID>` | Restrict results to records owned by this parent run or group |
 | `--full` | flag | Return every matching record. This is intentionally explicit because discovery defaults to a finite agent-facing page |
 | `--latest` | flag | Return only the newest record matching the supplied list filters |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task active`
 
@@ -436,6 +501,17 @@ List queued and running durable runs, newest first.
 | `--reconcile` | flag | Preview reconciliation for every active record in the selected scope |
 | `--dry-run` | flag | Explicitly retain preview-only reconciliation mode |
 | `--apply` | flag | Apply reconciliation to every selected active record |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task reconcile`
 
@@ -478,6 +554,17 @@ Show the latest durable run
 | Option | Value | Description |
 | --- | --- | --- |
 | `--limit` | `<N>` | Number of newest durable runs to inspect before selecting the latest |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task logs`
 
@@ -494,6 +581,17 @@ Read the canonical durable event stream for a run
 | Option | Value | Description |
 | --- | --- | --- |
 | `--cursor` | `<CURSOR>` | Resume events after this opaque cursor |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task artifacts`
 
@@ -510,6 +608,17 @@ List artifacts and evidence refs recorded for a completed run
 | Option | Value | Description |
 | --- | --- | --- |
 | `--full` | flag | Return complete lifecycle details instead of the bounded summary |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task retained-artifacts`
 
@@ -573,6 +682,17 @@ Narrow the result with `--task` or `--kind`; `--full` returns the unprojected ev
 | `--task` | `<TASK_ID>` | Restrict results to this task ID |
 | `--failure-only` | flag | Return only evidence associated with failures |
 | `--full` | flag | Return every matching evidence record rather than the bounded preview |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task diagnose`
 
@@ -724,6 +844,17 @@ Submit a fresh durable run from an existing run's plan
 | `--model` | `<MODEL>` | Model for the next Cook attempt. A model override pins provider rotation unless --allow-provider-rotation or a positive --provider-rotations is also supplied |
 | `--allow-provider-rotation` | flag | Re-enable configured provider/model rotation for this overridden route |
 | `--provider-rotations` | `<N>` | Explicit cross-provider/model rotations available after this override |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task fanout`
 
@@ -808,6 +939,17 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--preview` | flag | Resolve and validate the batch without repository hydration, provider dispatch, or worktree creation. Runs the selected provider's bounded readiness admission, then prints the static plan, worktree projection, preflight, and a replayable command — the batch-wide counterpart of `agent-task cook --preview`. `--dry-run` is accepted as the historical spelling of this flag |
 | `--dry-run-planner-timeout-seconds` | `<SECONDS>` | Maximum wall-clock budget for each bounded static --preview planning phase (default 10 seconds per phase) |
 | `--run-plan` | flag | Execute the planned wave in this invocation. After admission and worktree preflight, every child cook runs through the cook-loop service and successful children open or update their own pull requests. Without this flag the command only plans the batch and creates or reuses the child worktrees — see the two-phase model above |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task fanout plan`
 
@@ -896,11 +1038,22 @@ Provider-neutral by design: drive execution with `agent-task run-next` or an exi
 | `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
 | `--model` | `<MODEL>` | Model name override forwarded to the selected provider |
 | `--batch-id` | `<ID>` | Durable batch ID to assign while submitting the loaded agent-task plan |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task fanout status`
 
 ```sh
-homeboy agent-task fanout status <BATCH_ID>
+homeboy agent-task fanout status [OPTIONS] <BATCH_ID>
 ```
 
 Read durable batch state and per-child run status
@@ -908,6 +1061,20 @@ Read durable batch state and per-child run status
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<BATCH_ID>` | yes | Durable fanout batch ID whose status, resume result, or artifacts to read |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task fanout resume`
 
@@ -924,7 +1091,7 @@ Resume a durable fanout batch after coordinator loss: idempotently harvest termi
 ## `homeboy agent-task fanout artifacts`
 
 ```sh
-homeboy agent-task fanout artifacts <BATCH_ID>
+homeboy agent-task fanout artifacts [OPTIONS] <BATCH_ID>
 ```
 
 List artifacts recorded by a durable batch's child runs
@@ -932,6 +1099,20 @@ List artifacts recorded by a durable batch's child runs
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<BATCH_ID>` | yes | Durable fanout batch ID whose status, resume result, or artifacts to read |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task fanout run-plan`
 
@@ -954,6 +1135,17 @@ Successful child cooks open or update their own pull requests.
 | `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. Overrides the persisted plan value for this execution |
 | `--max-concurrency` | `<N>` | Maximum number of child cooks to run at once. See `fanout cook-batch --max-concurrency` |
 | `--max-duration` | `<SECONDS>` | Wall-clock budget, in seconds, for the whole batch. See `fanout cook-batch --max-duration` |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task review`
 
@@ -973,6 +1165,17 @@ Build a durable aggregate review envelope from run state, logs, artifacts, and p
 | `--to-worktree` | `<HANDLE>` | Target managed worktree handle for the review candidate |
 | `--provider-command` | `<COMMAND>` | Deprecated shell command for the promotion apply provider |
 | `--provider-argv` | `<ARG>` | Exact argv element for the promotion apply provider; repeat per element |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task promote`
 
@@ -1021,6 +1224,17 @@ Promote a completed generic patch artifact into a managed worktree
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--gate-shared-cargo-target` | flag | Override the component's declared shared Cargo target policy for deterministic gates. Omit to inherit the repository component policy |
 | `--no-gate-shared-cargo-target` | flag | Explicitly keep deterministic gate Cargo output local to its workspace |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task adopt`
 
@@ -1219,6 +1433,17 @@ List extension-declared executor providers and optional secret/backend readiness
 | `--catalog` | flag | Return the full multi-backend catalog even when `--backend` is set. Without this, `--backend X` filters the presentation to X so the output stays within caller display limits (#9654) |
 | `--full` | flag | Return the complete provider declarations and discovery diagnostics |
 | `--set-default` | flag | Live-probe every declared backend and, if at least one is ready right now, persist it as `agent_task.default_backend` with the remaining ready backends recorded as an `agent_task.rotation` fallback chain |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task prompts`
 
@@ -1340,6 +1565,17 @@ Show redacted readiness for provider secret environment variables
 | `--backend` | `<BACKEND>` | Executor backend whose required secrets to report. Defaults to the same backend cook/dispatch would use when omitted |
 | `--selector` | `<PROVIDER_ID>` | Provider id to disambiguate when more than one provider exists for the backend |
 | `--secret-env` | `<ENV>` | Secret environment variable name to check without exposing its value. Repeatable. When omitted, the selected backend's required secrets are used |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task auth set-keychain`
 
@@ -1520,6 +1756,17 @@ With a configured default Lab runner, --resume uses automatic Lab offload unless
 | `--dispatch-selector` | `<PROVIDER_ID>` | Extension-provider selector: the Homeboy executor provider id (e.g. `sample.executor-provider`) that runs controller-spawned dispatch actions when the action omits one. This is not model/runtime provider configuration; pass runtime-specific values in --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids |
 | `--dispatch-model` | `<MODEL>` | Model override to use for controller-spawned dispatch actions when the action omits one |
 | `--dispatch-provider-config` | `<JSON>` | Agent/model provider config (JSON, @file, or -): the nested AI runtime/provider/model the selected executor uses for controller-spawned dispatch actions when the action omits one. Put runtime-specific provider selection here, not in --dispatch-selector |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task controller run-from-spec`
 
@@ -1548,6 +1795,17 @@ With a configured default Lab runner, this uses automatic Lab offload unless loc
 | `--dispatch-selector` | `<PROVIDER_ID>` | Extension-provider selector: the Homeboy executor provider id (e.g. `sample.executor-provider`) that runs controller-spawned dispatch actions when the action omits one. This is not model/runtime provider configuration; pass runtime-specific values in --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids |
 | `--dispatch-model` | `<MODEL>` | Model override to use for controller-spawned dispatch actions when the action omits one |
 | `--dispatch-provider-config` | `<JSON>` | Agent/model provider config (JSON, @file, or -): the nested AI runtime/provider/model the selected executor uses for controller-spawned dispatch actions when the action omits one. Put runtime-specific provider selection here, not in --dispatch-selector |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task controller materialize`
 
@@ -1567,6 +1825,17 @@ With a configured default Lab runner, this uses automatic Lab offload unless loc
 | --- | --- | --- |
 | `--inputs` | `<JSON>` | Explicit run inputs JSON, @file, or - for stdin. Supports `inputs` and `metadata` objects |
 | `--policy-result` | `<JSON>` | Declarative policy result JSON, @file, or - for stdin. Repeatable |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task controller validate-proof`
 
@@ -1737,6 +2006,17 @@ Execute pending controller actions until no executable action remains
 | `--dispatch-selector` | `<PROVIDER_ID>` | Extension-provider selector: the Homeboy executor provider id (e.g. `sample.executor-provider`) that runs controller-spawned dispatch actions when the action omits one. This is not model/runtime provider configuration; pass runtime-specific values in --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids |
 | `--dispatch-model` | `<MODEL>` | Model override to use for controller-spawned dispatch actions when the action omits one |
 | `--dispatch-provider-config` | `<JSON>` | Agent/model provider config (JSON, @file, or -): the nested AI runtime/provider/model the selected executor uses for controller-spawned dispatch actions when the action omits one. Put runtime-specific provider selection here, not in --dispatch-selector |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy agent-task controller mark-human-ready`
 
@@ -1766,8 +2046,8 @@ Run a one-command end-to-end controller proof from a named profile + runner
 | Option | Value | Description |
 | --- | --- | --- |
 | `--profile` | `<NAME>` | Named proof profile (intent + policy). Resolved from the registry passed via --profiles; the orchestration never branches on the profile name |
-| `--runner` | `<RUNNER>` | Runner to dispatch the proof through (for example a Lab runner id) |
 | `--profiles` | `<JSON>` | Proof profile registry JSON, @file, or - for stdin: a generic object mapping profile names to profile definitions. Keeps profile data out of core so adding a profile is pure data |
 | `--seed` | `<SEED>` | Optional explicit seed material for run-scoped identity. Defaults to a fresh timestamp so each invocation derives an isolated run/loop id |
 | `--max-actions` | `<N>` | Maximum controller actions to execute once preflight passes |
 | `--preflight-only` | flag | Run preflight reconciliation only; do not dispatch even when it passes |
+| `--runner` | `<RUNNER>` | Runner to dispatch the proof through (for example a Lab runner id) |

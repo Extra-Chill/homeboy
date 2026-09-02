@@ -60,6 +60,17 @@ Run performance benchmarks for a component
 | `--profile` | `<PROFILE>` | Run the named rig-defined bench profile |
 | `--ci-profile` | `<ID>` | Run using env and passthrough args from a single extension-declared CI bench profile |
 | `--ignore-default-baseline` | flag | Skip auto-upgrading single-rig runs into a comparison even when the rig spec declares `bench.default_baseline_rig`. Use with `--baseline` / `--ratchet` against a rig that normally auto-pairs, or to bench the candidate alone |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 | Subcommand | Summary |
 | --- | --- |
@@ -112,6 +123,17 @@ Run a local settings matrix and aggregate child bench runs
 | `--ci-profile` | `<ID>` | Run using env and passthrough args from a single extension-declared CI bench profile |
 | `--ignore-default-baseline` | flag | Skip auto-upgrading single-rig runs into a comparison even when the rig spec declares `bench.default_baseline_rig`. Use with `--baseline` / `--ratchet` against a rig that normally auto-pairs, or to bench the candidate alone |
 | `--setting-matrix` | `<NAME=VALUE[,VALUE...]>` | Settings matrix axis in NAME=value,value form. Repeat the flag or pass multiple axes after it, e.g. --setting-matrix clients=10,100 rounds=3 |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 ## `homeboy bench list`
 

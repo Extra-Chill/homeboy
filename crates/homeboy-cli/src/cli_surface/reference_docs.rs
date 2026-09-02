@@ -11,10 +11,9 @@
 //! `crates/homeboy-cli/build.rs` already embeds every `docs/**/*.md` file into
 //! the binary and emits a `rerun-if-changed` for each one. Generating this tree
 //! during the build would add a second pass over the whole command surface to
-//! every single compile of an already-slow workspace. Instead the tree is
-//! checked in and drift is not gated, so generation cost is paid only when
-//! someone deliberately regenerates via
-//! the focused `generate-cli-reference` binary:
+//! every single compile of an already-slow workspace. Instead the reference is
+//! checked in, a focused test projects the live tree in memory to gate drift,
+//! and writes happen only through the `generate-cli-reference` binary:
 //!
 //! ```sh
 //! cargo run -p homeboy-cli --bin generate-cli-reference
@@ -68,7 +67,7 @@ const NO_HELP_CELL: &str = "_no help text_";
 /// Projects the live runtime Clap tree into the serializable reference contract.
 /// This remains the sole source used when deliberately updating the contract.
 pub(crate) fn live_generated_reference_docs() -> BTreeMap<String, String> {
-    let root = Cli::command();
+    let root = Cli::command_with_scoped_lab_args();
 
     let mut files = BTreeMap::new();
     let mut summaries = Vec::new();

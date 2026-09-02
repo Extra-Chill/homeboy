@@ -8,14 +8,6 @@ name: Command Contract Boundary
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'crates/contracts/homeboy-command-contract/**'
-      - 'crates/homeboy-cli/src/cli_surface/reference_docs.rs'
-      - 'crates/homeboy-cli/src/cli_surface/reference_docs_tests.rs'
-      - 'docs/reference/cli/**'
-      - 'crates/homeboy-cli/Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/command-contract-boundary.yml'
   workflow_dispatch:
 
 jobs:
@@ -35,3 +27,5 @@ jobs:
             exit 1
           fi
           cargo test --locked -p homeboy-command-contract
+      - name: Verify live Clap reference parity
+        run: cargo test --locked -p homeboy-cli --lib cli_surface::reference_docs

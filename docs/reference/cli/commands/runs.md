@@ -65,7 +65,6 @@ List persisted observation runs
 | `--active` | flag | Project active and recent work from every activity source, including connected runner jobs. Supports task identity filters rather than the observation-store-only filters below |
 | `--task-url` | `<TASK_URL>` | Match one durable task URL in the unified active projection |
 | `--repo` | `<REPO>` | Match one repository slug in the unified active projection |
-| `--runner` | `<RUNNER>` | Query runs from a connected execution runner daemon |
 | `--kind` | `<KIND>` | Run kind: bench, rig, trace, etc |
 | `--component` | `<COMPONENT_ID>` | Component ID |
 | `--rig` | `<RIG>` | Rig ID |
@@ -81,6 +80,7 @@ List persisted observation runs
 | `--include-mirrors` | flag | Show every underlying observation row, including runner-execution mirrors that are collapsed into one canonical row by default |
 | `--limit` | `<LIMIT>` | Maximum runs to return |
 | `--include-active-runner-jobs` | flag | Include active runner jobs from connected runner daemons |
+| `--runner` | `<RUNNER>` | Query runs from a connected execution runner daemon |
 
 ## `homeboy runs distribution`
 
@@ -336,7 +336,6 @@ List artifacts recorded for one run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--runner` | `<RUNNER>` | Query artifacts from a connected execution runner daemon |
 | `--pull` | flag | Pull runner/remote artifact bytes to the operator-local artifact root so the completed run is self-contained. Best-effort and per-artifact: the listing still prints, and each artifact reports a pull status |
 | `--pull-dir` | `<PULL_DIR>` | Optional directory to write pulled artifact bytes into. Defaults to a run-scoped path under the operator-local artifact root |
 | `--token` | `<TOKEN>` | Exact persisted artifact id token |
@@ -351,6 +350,7 @@ List artifacts recorded for one run
 | `--limit` | `<LIMIT>` | Maximum records in this page (1-1000) |
 | `--offset` | `<OFFSET>` | Number of matching records to skip before this page |
 | `--full` | flag | Retain the exhaustive legacy listing and derived summaries |
+| `--runner` | `<RUNNER>` | Query artifacts from a connected execution runner daemon |
 
 ## `homeboy runs artifact`
 
@@ -386,9 +386,9 @@ Attach an existing runner-side output file to a persisted run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--runner` | `<RUNNER>` | Runner ID that can read the path |
 | `--path` | `<PATH>` | Absolute runner-side file path under an allowed workspace/output root |
 | `--name` | `<NAME>` | Artifact kind/name to record in the observation store |
+| `--runner` | `<RUNNER>` | Runner ID that can read the path |
 
 ## `homeboy runs artifact get`
 
@@ -405,9 +405,9 @@ Copy a recorded file artifact to a local path
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--runner` | `<RUNNER>` | Pull the artifact from a connected execution runner daemon |
 | `-o`, `--output` | `<OUTPUT>` | Destination file path. Defaults to the recorded artifact filename |
 | `-q`, `--field` | `<FIELD>` | JSONPath selector(s) projected over the artifact-get result so callers extract only specific fields (e.g. `sha256`, `output_path`) instead of the whole structure. Repeat or comma-separate. Field selection still writes the artifact bytes when `--output` is set. Example: `-q '$.sha256'`, `-q '$.output_path'` |
+| `--runner` | `<RUNNER>` | Pull the artifact from a connected execution runner daemon |
 
 ## `homeboy runs artifact get-handle`
 
@@ -492,8 +492,8 @@ Plan or delete locally cached runner artifact downloads
 | --- | --- | --- |
 | `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
 | `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
-| `--runner` | `<RUNNER>` | Limit cleanup to one runner id under the local runner artifact cache |
 | `--run-id` | `<RUN_ID>` | Limit cleanup to one run id. Requires --runner |
+| `--runner` | `<RUNNER>` | Limit cleanup to one runner id under the local runner artifact cache |
 
 ## `homeboy runs artifact cleanup-persisted`
 

@@ -13,11 +13,10 @@
 
 use super::reference_docs::{
     commands_without_description, documented_subcommands, generated_command_index,
-    write_cli_reference, WRITE_ENV,
+    live_generated_reference_docs, write_cli_reference, WRITE_ENV,
 };
 use super::Cli;
 use clap::CommandFactory;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// Repo-root-relative paths resolve from the workspace root, not this crate's
@@ -42,6 +41,39 @@ fn cli_reference_docs_regenerate_on_demand() {
     }
 
     write_cli_reference(&workspace_root()).expect("write CLI reference");
+}
+
+#[test]
+fn live_clap_reference_matches_checked_in_contract() {
+    let live = live_generated_reference_docs();
+    let checked_in = homeboy_command_contract::cli_reference::checked_in_cli_reference();
+
+    let missing = live
+        .keys()
+        .filter(|name| !checked_in.documents.contains_key(*name))
+        .collect::<Vec<_>>();
+    let stale = checked_in
+        .documents
+        .keys()
+        .filter(|name| !live.contains_key(*name))
+        .collect::<Vec<_>>();
+    let changed = live
+        .iter()
+        .filter_map(|(name, body)| {
+            checked_in
+                .documents
+                .get(name)
+                .filter(|checked_in_body| *checked_in_body != body)
+                .map(|_| name)
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty() && stale.is_empty() && changed.is_empty(),
+        "checked-in CLI reference differs from live Clap: missing={missing:?}, \
+         stale={stale:?}, changed={changed:?}. Regenerate with `cargo run -p \
+         homeboy-cli --bin generate-cli-reference`."
+    );
 }
 
 /// A command with no clap `about` is invisible in `--help`, in the generated
@@ -71,48 +103,16 @@ fn every_visible_command_ships_help_text() {
     );
 }
 
-/// `documented_command_index_entries` collects into a `BTreeSet` and the
-/// registry guard uses `index.contains(..)`, so a duplicated index line is
-/// invisible to both `self doctor` and
-/// `command_registry_docs_paths_exist_and_are_indexed`. It shipped: `api` was
-/// listed twice (#10324).
 #[test]
-fn commands_index_lists_each_command_once() {
-    let index = std::fs::read_to_string(workspace_root().join("docs/commands/commands-index.md"))
-        .expect("failed to read docs/commands/commands-index.md");
+fn checked_in_command_index_matches_live_clap() {
+    let checked_in =
+        std::fs::read_to_string(workspace_root().join("docs/commands/commands-index.md"))
+            .expect("failed to read docs/commands/commands-index.md");
 
-    // Mirror `documented_command_index_entries`: only the command section above
-    // `Related:` is the command list.
-    let command_section = index.split("Related:").next().unwrap_or(index.as_str());
-
-    let mut seen = BTreeSet::new();
-    let mut duplicates = Vec::new();
-    for line in command_section.lines() {
-        let Some(rest) = line.strip_prefix("- [") else {
-            continue;
-        };
-        let Some(slug) = rest.split(']').next() else {
-            continue;
-        };
-        if !seen.insert(slug.to_string()) {
-            duplicates.push(slug.to_string());
-        }
-    }
-
-    assert!(
-        duplicates.is_empty(),
-        "docs/commands/commands-index.md lists these commands more than once: {duplicates:?}"
+    assert_eq!(
+        checked_in,
+        generated_command_index(),
+        "checked-in command index differs from live Clap; regenerate with `cargo run -p \
+         homeboy-cli --bin generate-cli-reference`"
     );
-}
-
-#[test]
-fn generated_command_index_includes_runtime_extension_commands() {
-    let index = generated_command_index();
-
-    for command in crate::command_contract::runtime_extension_command_doc_slugs() {
-        assert!(
-            index.contains(&format!("- [{command}]({command}.md)")),
-            "generated command index omitted registered runtime extension command `{command}`"
-        );
-    }
 }

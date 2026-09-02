@@ -72,6 +72,17 @@ Capture black-box behavioral traces for a component
 | `--allow-local-toolchain` | flag | Allow intentionally local/development evidence. The output is marked non-canonical |
 | `--stale` | flag | Clean only stale trace overlay locks |
 | `--force` | flag | Remove stale trace overlay locks even when touched files are dirty |
+| `--placement` | `<PLACEMENT>` | Select where eligible work executes. `auto` (default) follows command policy; `lab` selects an eligible ready runner; `local` is an explicit authorized override. Use `--runner <id>` instead to pin one runner Values: `auto`, `local`, `lab`, `lab-or-local`. |
+| `--detach-after-handoff` | flag | Submit to Lab and return after durable controller handoff. Omit it to keep observing the remote lifecycle, which remains the default |
+| `--artifact-root` | `<DIR>` | Directory where persisted run artifacts are copied. Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root |
+| `--runner` | `<RUNNER_ID>` | Pin portable work to a connected Lab runner. This implies Lab placement; use `--placement <policy>` instead to select placement without pinning |
+| `--allow-dirty-lab-workspace` | flag | Permit Lab git workspace materialization to overwrite a dirty runner-side checkout |
+| `--skip-deps-hydration` | flag | Skip post-materialization dependency hydration for Lab offloads. When set, Homeboy does not run the detected provider install (e.g. `composer install`, `npm ci`) in the materialized runner workspace before the command starts |
+| `--preserve-workspace-on-failure` | flag | Preserve a failed Lab workspace for bounded TTL-based inspection |
+| `--runner-env` | `<KEY=VALUE>` | Add a job-scoped environment variable to a Lab offload without mutating runner config |
+| `--runner-secret-env` | `<NAME>` | Reference a runner-owned secret environment variable for a Lab offload. The runner resolves this identity; Homeboy never accepts its value here |
+| `--lab-env-json` | `<JSON>` | Add job-scoped Lab offload environment from a JSON object without mutating runner config |
+| `--runner-workspace-root` | `<DIR>` | Override the selected runner workspace root for this Lab offload only |
 
 | Subcommand | Summary |
 | --- | --- |
