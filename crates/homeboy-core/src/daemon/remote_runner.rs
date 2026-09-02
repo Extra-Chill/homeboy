@@ -10,9 +10,10 @@ use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::error::{Error, Result};
 use crate::paths;
 use homeboy_runner_contract::{
+    RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
     RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiSubmitOutcome,
-    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
-    RUNNER_API_V1,
+    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RUNNER_API_CLAIM_REQUEST_SCHEMA,
+    RUNNER_API_CLAIM_RESPONSE_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1,
 };
 use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
@@ -735,6 +736,55 @@ fn submission_lookup(
 }
 
 fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
+    let canonical = body
+        .as_ref()
+        .is_some_and(|value| value.get("schema").is_some() || value.get("api_version").is_some());
+    if canonical {
+        let request: RunnerApiClaimRequest = parse_body(body, "Runner API claim request")?;
+        if request.schema != RUNNER_API_CLAIM_REQUEST_SCHEMA || request.api_version != RUNNER_API_V1
+        {
+            return Err(Error::validation_invalid_argument(
+                "schema",
+                "unsupported Runner API claim request",
+                Some(request.schema),
+                None,
+            ));
+        }
+        auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
+        touch_reverse_session(&request.runner_id)?;
+        let concurrency_limit = request
+            .concurrency_limit
+            .or_else(|| super::runner_workspace_root::runner_concurrency_limit(&request.runner_id));
+        let outcome = match job_store.claim_remote_runner_job_with_protocols(
+            &request.runner_id,
+            request.project_id.as_deref(),
+            request.lease_ms.unwrap_or(30_000),
+            concurrency_limit,
+            crate::api_jobs::RemoteRunnerClaimProtocols {
+                execution: request.execution_protocol.as_ref(),
+                workspace_claim: request.workspace_claim_protocol.as_ref(),
+                workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+            },
+        ) {
+            Ok(Some(claim)) => RunnerApiClaimOutcome::Claimed {
+                claim: claim.runner_api_claimed_execution()?,
+            },
+            Ok(None) => RunnerApiClaimOutcome::Empty,
+            Err(error) => RunnerApiClaimOutcome::Rejected {
+                failure: RunnerApiOperationFailure {
+                    code: RunnerApiOperationFailureCode::SubmissionRejected,
+                    message: error.message,
+                },
+            },
+        };
+        return Ok(json!({
+            "response": RunnerApiClaimResponse {
+                schema: RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                outcome,
+            },
+        }));
+    }
     let request: ClaimRequest = parse_body(body, "remote runner claim request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
     touch_reverse_session(&request.runner_id)?;
@@ -1373,6 +1423,16 @@ mod auth_tests {
         })
     }
 
+    fn canonical_claim_body(execution_protocol: Value) -> Value {
+        json!({
+            "schema": "homeboy/runner-api-claim-request/v1",
+            "api_version": { "major": 1 },
+            "runner_id": "homeboy-lab",
+            "lease_ms": 30000,
+            "execution_protocol": execution_protocol,
+        })
+    }
+
     fn typed_result(run_id: &str) -> Value {
         json!({
             "exit_code": 0,
@@ -1695,6 +1755,174 @@ mod auth_tests {
         );
         assert_eq!(response.status_code, 401);
         assert_eq!(response.body["error"], "broker.auth_denied");
+    }
+
+    #[test]
+    fn canonical_claim_endpoint_returns_claimed_empty_and_rejected_outcomes() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+
+        let claimed = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(canonical_claim_body(json!(
+                crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()
+            ))),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(claimed.status_code, 200, "claimed body: {}", claimed.body);
+        assert_eq!(
+            claimed.body["body"]["response"]["schema"],
+            "homeboy/runner-api-claim-response/v1"
+        );
+        assert_eq!(
+            claimed.body["body"]["response"]["outcome"]["status"],
+            "claimed"
+        );
+        assert_eq!(
+            claimed.body["body"]["response"]["outcome"]["claim"]["job_id"],
+            job_id
+        );
+        assert!(claimed.body["body"]["response"]["outcome"]["claim"]
+            .get("legacy_request")
+            .is_none());
+
+        let empty = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(canonical_claim_body(json!(
+                crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()
+            ))),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(empty.status_code, 200, "empty body: {}", empty.body);
+        assert_eq!(
+            empty.body["body"]["response"]["outcome"],
+            json!({ "status": "empty" })
+        );
+
+        let rejected_store = JobStore::default();
+        let rejected_submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &rejected_store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let rejected_job_id = rejected_submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("rejected job id");
+        let rejected = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(canonical_claim_body(json!({
+                "capability": "runner-job-execution-context", "version": 99
+            }))),
+            &rejected_store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(
+            rejected.status_code, 200,
+            "rejected body: {}",
+            rejected.body
+        );
+        assert_eq!(
+            rejected.body["body"]["response"]["outcome"]["status"],
+            "rejected"
+        );
+        assert_eq!(
+            rejected_store
+                .get(Uuid::parse_str(rejected_job_id).expect("valid rejected job id"))
+                .expect("rejected job remains queued")
+                .status,
+            crate::api_jobs::JobStatus::Queued
+        );
+    }
+
+    #[test]
+    fn canonical_claim_does_not_fall_back_to_the_legacy_adapter() {
+        let _home = HomeGuard::new();
+        for body in [
+            json!({
+                "schema": "homeboy/runner-api-claim-request/v1",
+                "runner_id": "homeboy-lab",
+            }),
+            json!({
+                "schema": "homeboy/runner-api-claim-request/v1",
+                "api_version": { "major": 2 },
+                "runner_id": "homeboy-lab",
+            }),
+        ] {
+            let store = JobStore::default();
+            let submit = route(
+                "POST",
+                "/runner/jobs",
+                Some(submit_body()),
+                &store,
+                &BrokerAuthContext::trusted_local(),
+            );
+            let job_id = submit.body["body"]["job"]["id"].as_str().expect("job id");
+
+            let response = route(
+                "POST",
+                "/runner/jobs/claim",
+                Some(body),
+                &store,
+                &BrokerAuthContext::trusted_local(),
+            );
+            assert_eq!(
+                response.status_code, 400,
+                "response body: {}",
+                response.body
+            );
+            assert_eq!(
+                store
+                    .get(Uuid::parse_str(job_id).expect("valid job id"))
+                    .expect("job remains queued")
+                    .status,
+                crate::api_jobs::JobStatus::Queued
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_claim_adapter_preserves_request_and_response_shape() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"].clone();
+        let legacy_request = json!({ "runner_id": "homeboy-lab", "lease_ms": 30000 });
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(legacy_request),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(claim.status_code, 200, "legacy body: {}", claim.body);
+        assert_eq!(claim.body["body"]["command"], "api.runner.jobs.claim");
+        assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
+        assert!(claim.body["body"]["claim"].get("envelope").is_some());
+        assert!(claim.body["body"].get("response").is_none());
     }
 
     #[test]

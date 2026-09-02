@@ -6,6 +6,11 @@
 //! construct authority from them.
 
 use homeboy_engine_primitives::content_hash;
+use homeboy_runner_contract::{RunnerJobExecutionContextAssertion, RunnerJobExecutionVerification};
+pub use homeboy_runner_contract::{
+    RunnerJobExecutionProtocol, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY,
+    RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::api_jobs::Job;
@@ -15,45 +20,10 @@ use crate::runner_execution_envelope::RunnerExecutionEnvelope;
 pub const RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA: &str = "homeboy/runner-job-execution-context/v1";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_EVIDENCE_SCHEMA: &str =
     "homeboy/runner-job-execution-context-evidence/v1";
-pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY: &str = "runner-job-execution-context";
-pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION: u32 = 2;
 pub const RUNNER_JOB_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_ID";
 pub const RUNNER_CHILD_RESERVATION_ENV: &str = "HOMEBOY_RUNNER_CHILD_RESERVATION";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID";
 const MAX_EVIDENCE_BYTES: usize = 8 * 1024;
-
-/// A worker must explicitly advertise this before the broker will hand it a
-/// context-bearing job. This prevents an older worker from ignoring the added
-/// claim field and executing an unauthenticated handoff.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerJobExecutionProtocol {
-    pub capability: String,
-    pub version: u32,
-}
-
-impl RunnerJobExecutionProtocol {
-    pub fn current() -> Self {
-        Self {
-            capability: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY.to_string(),
-            version: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
-        }
-    }
-
-    pub fn verify(&self) -> Result<()> {
-        if self.capability == RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            && (1..=RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION).contains(&self.version)
-        {
-            return Ok(());
-        }
-        Err(rejected(
-            "worker does not advertise the required execution-context protocol",
-        ))
-    }
-
-    pub fn uses_envelope_only_claim(&self) -> bool {
-        self.version >= 2
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerJobExecutionContext {
@@ -69,7 +39,7 @@ pub struct RunnerJobExecutionContext {
     /// never crosses a durable evidence or provider-process boundary.
     claim_ref: String,
     dispatch_receipt: String,
-    verification: RunnerJobExecutionVerification,
+    verification: RunnerJobExecutionVerificationLocal,
     /// Authority is intentionally process-local. A wire value is only an
     /// assertion until it has been recomputed from the live durable claim.
     #[serde(skip)]
@@ -77,7 +47,7 @@ pub struct RunnerJobExecutionContext {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerJobExecutionVerification {
+pub struct RunnerJobExecutionVerificationLocal {
     state: String,
     verified_at_ms: u64,
 }
@@ -159,7 +129,7 @@ impl RunnerJobExecutionContext {
             runtime_id,
             claim_ref: claim_ref(&claim_id),
             dispatch_receipt,
-            verification: RunnerJobExecutionVerification {
+            verification: RunnerJobExecutionVerificationLocal {
                 state: "verified".to_string(),
                 verified_at_ms: job.updated_at_ms,
             },
@@ -181,7 +151,7 @@ impl RunnerJobExecutionContext {
             runtime_id,
             claim_ref: "local".to_string(),
             dispatch_receipt,
-            verification: RunnerJobExecutionVerification {
+            verification: RunnerJobExecutionVerificationLocal {
                 state: "local".to_string(),
                 verified_at_ms: 0,
             },
@@ -258,7 +228,7 @@ impl RunnerJobExecutionContext {
             runtime_id,
             claim_ref: claim_ref(&reservation_id),
             dispatch_receipt,
-            verification: RunnerJobExecutionVerification {
+            verification: RunnerJobExecutionVerificationLocal {
                 state: "verified".to_string(),
                 verified_at_ms: 0,
             },
@@ -286,6 +256,32 @@ impl RunnerJobExecutionContext {
         Ok(Self {
             authenticated: true,
             ..verified
+        })
+    }
+
+    /// Validate a received canonical claim assertion before the broker consumes
+    /// its durable receipt. Receipt consumption remains the live authority
+    /// check; this only binds the assertion to the claim projection.
+    pub fn verify_claimed_execution(
+        &self,
+        job_id: &str,
+        runner_id: &str,
+        claim_expires_at_ms: u64,
+    ) -> Result<Self> {
+        if claim_expires_at_ms <= crate::api_jobs::timestamp_ms()
+            || self.schema != RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA
+            || self.id != context_id(&self.dispatch_receipt)
+            || self.runner_job_id != job_id
+            || self.runner_id != runner_id
+            || self.verification.state != "verified"
+        {
+            return Err(rejected(
+                "execution context does not match the claimed runner job",
+            ));
+        }
+        Ok(Self {
+            authenticated: true,
+            ..self.clone()
         })
     }
 
@@ -318,6 +314,48 @@ impl RunnerJobExecutionContext {
 
     pub fn runtime_id(&self) -> &str {
         &self.runtime_id
+    }
+
+    /// Export the non-authoritative value that may cross the runner API.
+    pub fn assertion(&self) -> RunnerJobExecutionContextAssertion {
+        RunnerJobExecutionContextAssertion {
+            schema: self.schema.clone(),
+            id: self.id.clone(),
+            controller_run_id: self.controller_run_id.clone(),
+            controller_attempt_id: self.controller_attempt_id.clone(),
+            runner_id: self.runner_id.clone(),
+            runner_job_id: self.runner_job_id.clone(),
+            accepted_handoff_id: self.accepted_handoff_id.clone(),
+            runtime_id: self.runtime_id.clone(),
+            claim_ref: self.claim_ref.clone(),
+            dispatch_receipt: self.dispatch_receipt.clone(),
+            verification: RunnerJobExecutionVerification {
+                state: self.verification.state.clone(),
+                verified_at_ms: self.verification.verified_at_ms,
+            },
+        }
+    }
+
+    /// Rehydrate a transport assertion before verifying it against durable
+    /// claim state. This never grants authenticated authority by itself.
+    pub fn from_assertion(assertion: RunnerJobExecutionContextAssertion) -> Self {
+        Self {
+            schema: assertion.schema,
+            id: assertion.id,
+            controller_run_id: assertion.controller_run_id,
+            controller_attempt_id: assertion.controller_attempt_id,
+            runner_id: assertion.runner_id,
+            runner_job_id: assertion.runner_job_id,
+            accepted_handoff_id: assertion.accepted_handoff_id,
+            runtime_id: assertion.runtime_id,
+            claim_ref: assertion.claim_ref,
+            dispatch_receipt: assertion.dispatch_receipt,
+            verification: RunnerJobExecutionVerificationLocal {
+                state: assertion.verification.state,
+                verified_at_ms: assertion.verification.verified_at_ms,
+            },
+            authenticated: false,
+        }
     }
 
     pub fn is_local(&self) -> bool {
