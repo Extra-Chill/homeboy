@@ -15,7 +15,9 @@ use homeboy_core::lab_contract::{run_location_index_path, JobArtifactMetadata, L
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_runner_contract::{
-    RunnerApiSubmitRequest, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
+    RunnerApiSubmitRequest, WorkspaceIdentity, WorkspaceOwnerLease,
+    RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1, WORKSPACE_CLAIM_PROTOCOL_VERSION,
+    WORKSPACE_OWNER_LEASE_CAPABILITY,
 };
 
 use super::super::capabilities::{
@@ -560,11 +562,9 @@ fn require_daemon_workspace_owner_lease_v2(client: &Client, local_url: &str) -> 
         .is_some_and(|capabilities| {
             capabilities.iter().any(|capability| {
                 capability.get("capability").and_then(Value::as_str)
-                    == Some(homeboy_core::workspace_claim::WORKSPACE_OWNER_LEASE_CAPABILITY)
+                    == Some(WORKSPACE_OWNER_LEASE_CAPABILITY)
                     && capability.get("version").and_then(Value::as_u64)
-                        == Some(
-                            homeboy_core::workspace_claim::WORKSPACE_CLAIM_PROTOCOL_VERSION as u64,
-                        )
+                        == Some(WORKSPACE_CLAIM_PROTOCOL_VERSION as u64)
             })
         });
     supported.then_some(()).ok_or_else(|| {
@@ -584,7 +584,7 @@ pub(crate) enum DaemonAdmissionPolicy {
     DurableLeaseRequired,
 }
 
-type WorkspaceOwnerRegistration = (homeboy_core::workspace_claim::WorkspaceIdentity, String);
+type WorkspaceOwnerRegistration = (WorkspaceIdentity, String);
 
 const ADMISSION_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
 const ADMISSION_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -693,7 +693,7 @@ pub(crate) struct DaemonAdmissionReservation {
     local_url: String,
     job_id: String,
     token: Option<String>,
-    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+    workspace_owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
     renewer_stop: Option<Sender<()>>,
     renewer: Option<std::thread::JoinHandle<()>>,
     authority: DaemonAdmissionReservationAuthority,
@@ -1087,7 +1087,7 @@ fn spawn_admission_renewer(
     local_url: String,
     job_id: String,
     token: String,
-    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+    workspace_owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
     health: Arc<Mutex<AdmissionRenewalHealth>>,
 ) -> (Sender<()>, std::thread::JoinHandle<()>) {
     let (stop, shutdown) = mpsc::channel();

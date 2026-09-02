@@ -20,6 +20,7 @@ use crate::agent_task_scheduler::{
 };
 use crate::agent_task_secrets::validate_secret_env;
 use homeboy_core::{defaults, worktree, Error, Result};
+use homeboy_runner_contract::WorkspaceIdentity;
 
 use super::agent_task_dispatch_service::{
     initial_provider_route_from_policy, AgentTaskDispatchRequest, AgentTaskModelSelection,
@@ -668,7 +669,7 @@ pub(crate) struct DispatchWorkspaceTarget {
     component_id: Option<String>,
     branch: Option<String>,
     base_ref: Option<String>,
-    workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    workspace_identity: Option<WorkspaceIdentity>,
     pub(crate) metadata: Value,
 }
 

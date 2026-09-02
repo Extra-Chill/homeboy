@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-use crate::{RunnerApiOperationFailure, RunnerApiVersion, RunnerExecutionEnvelope};
+use crate::{
+    RunnerApiOperationFailure, RunnerApiVersion, RunnerExecutionEnvelope, WorkspaceClaimBinding,
+    WorkspaceOwnerLease,
+};
 
 pub const RUNNER_API_SUBMIT_REQUEST_SCHEMA: &str = "homeboy/runner-api-submit-request/v1";
 pub const RUNNER_API_SUBMIT_RESPONSE_SCHEMA: &str = "homeboy/runner-api-submit-response/v1";
@@ -15,9 +17,9 @@ pub struct RunnerApiSubmitRequest {
     pub submission_key: String,
     pub envelope: RunnerExecutionEnvelope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_claim_binding: Option<Value>,
+    pub workspace_claim_binding: Option<WorkspaceClaimBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_owner_lease: Option<Value>,
+    pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,7 +40,11 @@ pub enum RunnerApiSubmitOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RunnerApiOperationFailureCode, RUNNER_API_V1};
+    use crate::{
+        RunnerApiOperationFailureCode, WorkspaceClaim, WorkspaceClaimProtocol, WorkspaceIdentity,
+        WorkspaceOwnerLeaseProtocol, RUNNER_API_V1, WORKSPACE_CLAIM_SCHEMA,
+        WORKSPACE_OWNER_LEASE_SCHEMA,
+    };
 
     #[test]
     fn submit_request_has_a_strict_versioned_wire_shape() {
@@ -62,6 +68,50 @@ mod tests {
                 "unexpected": true,
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn submit_request_authority_sidecars_have_canonical_wire_shapes() {
+        let workspace = WorkspaceIdentity::new("managed-workspace", "repo@task").unwrap();
+        let request = RunnerApiSubmitRequest {
+            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            submission_key: "agent-task:v1:lab:run-1".to_string(),
+            envelope: RunnerExecutionEnvelope::planned("run-1", "test"),
+            workspace_claim_binding: Some(WorkspaceClaimBinding {
+                workspace: workspace.clone(),
+                lifecycle_revision: 7,
+                claim: Some(WorkspaceClaim {
+                    schema: WORKSPACE_CLAIM_SCHEMA.to_string(),
+                    protocol: WorkspaceClaimProtocol::current(),
+                    workspace: workspace.clone(),
+                    lifecycle_revision: 7,
+                    token: "claim-token".to_string(),
+                    expires_at_ms: 100,
+                }),
+            }),
+            workspace_owner_lease: Some(crate::WorkspaceOwnerLease {
+                schema: WORKSPACE_OWNER_LEASE_SCHEMA.to_string(),
+                protocol: WorkspaceOwnerLeaseProtocol::current(),
+                workspace,
+                owner_id: "runner:one".to_string(),
+                lifecycle_revision: 8,
+                token: "lease-token".to_string(),
+                expires_at_ms: 101,
+            }),
+        };
+
+        let encoded = serde_json::to_value(&request).unwrap();
+        let decoded: RunnerApiSubmitRequest = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(
+            encoded["workspace_claim_binding"]["claim"]["protocol"],
+            serde_json::json!({ "capability": "workspace-claim", "version": 2 })
+        );
+        assert_eq!(
+            encoded["workspace_owner_lease"]["protocol"],
+            serde_json::json!({ "capability": "workspace-owner-lease", "version": 2 })
         );
     }
 

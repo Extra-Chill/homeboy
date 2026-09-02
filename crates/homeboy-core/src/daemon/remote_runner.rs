@@ -645,34 +645,8 @@ fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) 
                     )
                 })?;
             auth.authorize(BrokerScope::Submit, Some(runner_id))?;
-            let workspace_claim_binding = submission
-                .workspace_claim_binding
-                .as_ref()
-                .map(|binding| serde_json::from_value(binding.clone()))
-                .transpose()
-                .map_err(|error| {
-                    Error::validation_invalid_argument(
-                        "workspace_claim_binding",
-                        format!("malformed reverse runner workspace claim binding: {error}"),
-                        None,
-                        None,
-                    )
-                })?;
-            let workspace_owner_lease = submission
-                .workspace_owner_lease
-                .as_ref()
-                .map(|lease| serde_json::from_value(lease.clone()))
-                .transpose()
-                .map_err(|error| {
-                    Error::validation_invalid_argument(
-                        "workspace_owner_lease",
-                        format!("malformed reverse runner workspace owner lease: {error}"),
-                        None,
-                        None,
-                    )
-                })?;
-            authorize_workspace_claim_binding(workspace_claim_binding.as_ref())?;
-            authorize_workspace_owner_lease(workspace_owner_lease.as_ref())?;
+            authorize_workspace_claim_binding(submission.workspace_claim_binding.as_ref())?;
+            authorize_workspace_owner_lease(submission.workspace_owner_lease.as_ref())?;
             let response = match job_store.submit_runner_api_request(submission) {
                 Ok(job) => RunnerApiSubmitResponse {
                     schema: RUNNER_API_SUBMIT_RESPONSE_SCHEMA.to_string(),

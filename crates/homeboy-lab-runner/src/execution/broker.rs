@@ -9,7 +9,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_runner_contract::{
-    RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse,
+    RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse, WorkspaceOwnerLease,
     RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
 };
 use reqwest::blocking::Client;
@@ -140,7 +140,7 @@ pub(super) fn exec_via_reverse_broker(
                 "register reverse broker workspace owner",
                 token.as_deref(),
             )?;
-            let lease: homeboy_core::workspace_claim::WorkspaceOwnerLease = serde_json::from_value(
+            let lease: WorkspaceOwnerLease = serde_json::from_value(
                 data.get("workspace_owner_lease")
                     .cloned()
                     .unwrap_or_default(),
@@ -163,16 +163,7 @@ pub(super) fn exec_via_reverse_broker(
         submission_key: submission_key.clone(),
         envelope,
         workspace_claim_binding: None,
-        workspace_owner_lease: workspace_owner_lease
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("serialize workspace owner lease".to_string()),
-                )
-            })?,
+        workspace_owner_lease: workspace_owner_lease.clone(),
     };
     if detach_after_handoff {
         if let Some(run_id) = run_id.as_deref() {

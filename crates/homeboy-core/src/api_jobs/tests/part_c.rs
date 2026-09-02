@@ -572,7 +572,7 @@ fn remote_runner_protocol_v1_claim_retains_legacy_request_projection() {
 }
 
 #[test]
-fn runner_api_claim_sidecars_match_across_v2_and_v1_projections() {
+fn runner_api_legacy_json_claim_sidecars_match_across_v2_and_v1_projections() {
     let store = JobStore::default();
     let workspace =
         crate::workspace_claim::WorkspaceIdentity::new("test", "claim-sidecars").expect("identity");
@@ -599,17 +599,19 @@ fn runner_api_claim_sidecars_match_across_v2_and_v1_projections() {
     };
     let submit = |submission_key: &str| {
         let request = remote_runner_request("homeboy-lab", None);
+        let legacy_json = serde_json::to_value(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: submission_key.to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: Some(binding.clone()),
+            workspace_owner_lease: Some(owner_lease.clone()),
+        })
+        .expect("legacy Runner API JSON");
+        let submission =
+            serde_json::from_value(legacy_json).expect("legacy Runner API JSON remains readable");
         store
-            .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
-                schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-                api_version: homeboy_runner_contract::RUNNER_API_V1,
-                submission_key: submission_key.to_string(),
-                envelope: request.execution_envelope(),
-                workspace_claim_binding: Some(serde_json::to_value(&binding).expect("binding")),
-                workspace_owner_lease: Some(
-                    serde_json::to_value(&owner_lease).expect("owner lease"),
-                ),
-            })
+            .submit_runner_api_request(submission)
             .expect("Runner API request queues")
     };
 

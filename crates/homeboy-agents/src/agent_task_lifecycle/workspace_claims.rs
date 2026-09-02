@@ -3,14 +3,14 @@
 use super::runner_continuation::with_runner_continuation;
 use super::*;
 use homeboy_core::engine::local_files::{remove_file_durably, write_json_file_owner_only};
-use homeboy_core::workspace_claim::{
-    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceClaimStore, WorkspaceIdentity,
-    WorkspaceOwnerLease, MAX_WORKSPACE_CLAIM_TTL_MS,
-};
+use homeboy_core::workspace_claim::{WorkspaceClaimStore, MAX_WORKSPACE_CLAIM_TTL_MS};
 use homeboy_core::worktree::{
     authority_set_fingerprint, TaskWorktreeRecord, TerminalWorkspaceAuthorityObservation,
     TerminalWorkspaceAuthorityProof, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
     TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+};
+use homeboy_runner_contract::{
+    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceIdentity, WorkspaceOwnerLease,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -1378,7 +1378,7 @@ pub(crate) fn identity_for_plan(plan: &AgentTaskPlan) -> Result<Option<Workspace
 mod tests {
     use super::*;
     use homeboy_core::test_support::with_isolated_home;
-    use homeboy_core::workspace_claim::{WorkspaceClaimProtocol, WORKSPACE_CLAIM_SCHEMA};
+    use homeboy_runner_contract::{WorkspaceClaimProtocol, WORKSPACE_CLAIM_SCHEMA};
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 

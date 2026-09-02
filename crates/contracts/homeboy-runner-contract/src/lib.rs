@@ -16,6 +16,7 @@ pub mod secret_env_plan;
 mod session;
 mod submission;
 mod workspace;
+mod workspace_authority;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
@@ -54,6 +55,12 @@ pub use submission::{
 };
 pub use workspace::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
+};
+pub use workspace_authority::{
+    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceClaimProtocol, WorkspaceIdentity,
+    WorkspaceOwnerLease, WorkspaceOwnerLeaseProtocol, WORKSPACE_CLAIM_CAPABILITY,
+    WORKSPACE_CLAIM_PROTOCOL_VERSION, WORKSPACE_CLAIM_SCHEMA, WORKSPACE_IDENTITY_SCHEMA,
+    WORKSPACE_OWNER_LEASE_CAPABILITY, WORKSPACE_OWNER_LEASE_SCHEMA,
 };
 
 use serde::{Deserialize, Serialize};
