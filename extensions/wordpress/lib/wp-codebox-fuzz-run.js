@@ -322,6 +322,7 @@ function wpCodeboxFuzzSuiteInput(options = {}) {
 		schema: wpCodeboxFuzzSuiteSchema(options),
 		id: options.id || options.runId || options.run_id,
 		goal: options.goal || options.instructions,
+		execution_request: options.executionRequest ?? options.execution_request,
 		version: options.version,
 		target: options.target,
 		cases,
