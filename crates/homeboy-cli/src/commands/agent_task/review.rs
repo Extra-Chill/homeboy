@@ -2153,7 +2153,9 @@ fn providers_with_catalog(
 
     Ok((
         serde_json::json!({
-            "schema": "homeboy/agent-task-providers/v1",
+            // v2 makes a successful live validation's `next_action` and
+            // `next_command` nullable; v1 consumers may have required them.
+            "schema": "homeboy/agent-task-providers/v2",
             "catalog": {
                 "refreshed": args.refresh,
                 "version": catalog_version,
