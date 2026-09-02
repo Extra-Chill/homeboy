@@ -4612,7 +4612,9 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
                 false,
             )?
             .record;
-            return Ok(record.metadata["cook_id"].is_string());
+            return Ok(record.metadata["cook_id"].is_string()
+                || (record.state.is_terminal()
+                    && agent_task_lifecycle::is_unmaterialized_cook_admission(&record)));
         }
     }
     Ok(true)

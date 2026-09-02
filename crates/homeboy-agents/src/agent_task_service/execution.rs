@@ -1147,17 +1147,20 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, |plan| {
-        if plan.metadata.get("generic_lab_command_replay").is_some() {
-            return Err(Error::validation_invalid_argument(
-                "generic_lab_command_replay",
-                "generic Lab replay requires controller workspace preflight",
-                Some(plan.plan_id.clone()),
-                None,
-            ));
-        }
-        Ok(())
-    })
+    let mut retry =
+        retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, |plan| {
+            if plan.metadata.get("generic_lab_command_replay").is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "generic_lab_command_replay",
+                    "generic Lab replay requires controller workspace preflight",
+                    Some(plan.plan_id.clone()),
+                    None,
+                ));
+            }
+            Ok(())
+        })?;
+    reconcile_unmaterialized_cook_retry(&mut retry, run)?;
+    Ok(retry)
 }
 
 /// Reserve a new Cook attempt with an explicit operator-approved provider
@@ -1211,7 +1214,7 @@ pub fn retry_with_provider_route_override(
     if route_override.is_empty() {
         return retry(run_id, new_run_id, run, force);
     }
-    retry_with_preflight_and_timeout(
+    let mut retry = retry_with_preflight_and_timeout(
         run_id,
         new_run_id,
         run,
@@ -1229,7 +1232,21 @@ pub fn retry_with_provider_route_override(
             }
             Ok(())
         },
-    )
+    )?;
+    reconcile_unmaterialized_cook_retry(&mut retry, run)?;
+    Ok(retry)
+}
+
+fn reconcile_unmaterialized_cook_retry(
+    retry: &mut AgentTaskRetryServiceResult,
+    run: bool,
+) -> Result<()> {
+    if run && agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
+        agent_task_lifecycle::rearm_unmaterialized_cook_admission(&retry.record.run_id)?;
+        crate::agent_task_service::reconcile_unmaterialized_cook_admission(&retry.record.run_id)?;
+        retry.record = agent_task_lifecycle::exact_record(&retry.record.run_id)?;
+    }
+    Ok(())
 }
 
 pub(super) fn deferred_cleanup_receipt_is_terminal(
@@ -1304,6 +1321,28 @@ where
     let source_plan =
         agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
     preflight(&source_plan)?;
+    if source.state.is_terminal() && agent_task_lifecycle::is_unmaterialized_cook_admission(&source)
+    {
+        if let Some(route_override) = route_override.filter(|override_| !override_.is_empty()) {
+            validate_unmaterialized_replay_route_override(&source, route_override)?;
+        }
+        let retry_run_id = new_run_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("retry-{}", uuid::Uuid::new_v4()));
+        let (record, created) = agent_task_lifecycle::retry_unmaterialized_cook_admission_in_store(
+            &lifecycle_store,
+            &source.run_id,
+            &retry_run_id,
+            force,
+        )?;
+        return Ok(AgentTaskRetryServiceResult {
+            record,
+            // An admission is reconciled by the controller, never executed as
+            // the empty task plan a generic retry would otherwise submit.
+            run: false,
+            created,
+        });
+    }
     let recovered_replacement = config::with_config_lock(|| {
         let Some(mut cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
             return Ok(None);
@@ -1524,6 +1563,65 @@ where
         run,
         created: false,
     })
+}
+
+fn validate_unmaterialized_replay_route_override(
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+    route_override: &CookProviderRouteOverride,
+) -> Result<()> {
+    let binding = &source.metadata["unmaterialized_cook_admission"]["binding"];
+    let runtime = &binding["provider_runtime_refs"];
+    for (name, requested, persisted) in [
+        (
+            "backend",
+            route_override.backend.as_ref(),
+            runtime["backend"].as_str(),
+        ),
+        (
+            "selector",
+            route_override.selector.as_ref(),
+            runtime["selector"].as_str(),
+        ),
+        (
+            "model",
+            route_override.model.as_ref(),
+            runtime["model"].as_str(),
+        ),
+    ] {
+        if requested.is_some_and(|value| Some(value.as_str()) != persisted) {
+            return Err(unmaterialized_replay_route_override_error(
+                &source.run_id,
+                name,
+            ));
+        }
+    }
+    let persisted_rotations = binding["retry"]["provider_rotations"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok());
+    if route_override
+        .provider_rotations
+        .is_some_and(|value| Some(value) != persisted_rotations)
+        || route_override
+            .allow_provider_rotation
+            .is_some_and(|value| Some(value) != persisted_rotations.map(|value| value > 0))
+    {
+        return Err(unmaterialized_replay_route_override_error(
+            &source.run_id,
+            "provider rotation policy",
+        ));
+    }
+    Ok(())
+}
+
+fn unmaterialized_replay_route_override_error(run_id: &str, field: &str) -> Error {
+    Error::validation_invalid_argument(
+        "provider-route",
+        format!(
+            "terminal unmaterialized Cook retry cannot change persisted {field}; submit a fresh Cook for a new provider route or policy"
+        ),
+        Some(run_id.to_string()),
+        None,
+    )
 }
 
 fn apply_cook_timeout_override(
