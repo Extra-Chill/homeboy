@@ -670,7 +670,7 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
         })?;
         let envelope =
             read_portable_review_child_envelope(&output_path, request.gate, &output.stderr)?;
-        envelope.project(output.status.success(), request.source_commit)
+        envelope.project(output.status.success(), request.source_commit, request.gate)
     }
 }
 
@@ -739,6 +739,7 @@ struct PortableReviewChildData {
 
 #[derive(Deserialize)]
 struct PortableChildReadinessEvidence {
+    gate: String,
     requested_source_commit: String,
     source_commit: String,
     runner_id: Option<String>,
@@ -749,6 +750,7 @@ impl PortableReviewChildEnvelope {
         self,
         process_passed: bool,
         requested_source_commit: &str,
+        expected_gate: &str,
     ) -> homeboy::core::Result<PortableStageChildResult> {
         let mut evidence_refs = self
             .evidence
@@ -777,7 +779,12 @@ impl PortableReviewChildEnvelope {
         })?;
         let readiness = child.release_readiness;
         if process_passed && self.success {
-            validate_portable_child_success(&readiness, requested_source_commit, &evidence_refs)?;
+            validate_portable_child_success(
+                &readiness,
+                requested_source_commit,
+                expected_gate,
+                &evidence_refs,
+            )?;
         }
         Ok(PortableStageChildResult {
             passed: process_passed && self.success,
@@ -791,8 +798,17 @@ impl PortableReviewChildEnvelope {
 fn validate_portable_child_success(
     child: &PortableChildReadinessEvidence,
     requested_source_commit: &str,
+    expected_gate: &str,
     evidence_refs: &[String],
 ) -> homeboy::core::Result<()> {
+    if child.gate != expected_gate {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            "portable child readiness gate does not match the requested release gate",
+            Some(child.gate.clone()),
+            None,
+        ));
+    }
     if child.source_commit != requested_source_commit {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "release.preflight",
@@ -2200,6 +2216,7 @@ jobs:
             "evidence": [{ "uri": "runner-artifact://lab-runner-7/review.json" }],
             "data": {
                 "release_readiness": {
+                    "gate": "lint",
                     "requested_source_commit": "frozen-source",
                     "source_commit": "frozen-source",
                     "runner_id": "lab-runner-7",
@@ -2212,7 +2229,9 @@ jobs:
         }))
         .expect("stable child result");
 
-        let projected = child.project(true, "frozen-source").expect("valid child");
+        let projected = child
+            .project(true, "frozen-source", "lint")
+            .expect("valid child");
 
         assert!(projected.passed);
         assert_eq!(projected.runner_id.as_deref(), Some("lab-runner-7"));
@@ -2235,6 +2254,7 @@ jobs:
 
     fn valid_child_evidence() -> PortableChildReadinessEvidence {
         PortableChildReadinessEvidence {
+            gate: "lint".to_string(),
             requested_source_commit: "frozen-source".to_string(),
             source_commit: "frozen-source".to_string(),
             runner_id: Some("lab-runner".to_string()),
@@ -2252,42 +2272,72 @@ jobs:
     fn portable_child_success_rejects_missing_source_commit() {
         let mut child = valid_child_evidence();
         child.source_commit.clear();
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
     }
 
     #[test]
     fn portable_child_success_rejects_mismatched_source_commit() {
         let mut child = valid_child_evidence();
         child.source_commit = "other-source".to_string();
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
     }
 
     #[test]
     fn portable_child_success_rejects_missing_runner_or_durable_evidence() {
         let mut child = valid_child_evidence();
         child.runner_id = None;
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
         let child = valid_child_evidence();
-        assert!(validate_portable_child_success(&child, "frozen-source", &[]).is_err());
+        assert!(validate_portable_child_success(&child, "frozen-source", "lint", &[]).is_err());
     }
 
     #[test]
     fn portable_child_success_rejects_empty_provenance() {
         let mut child = valid_child_evidence();
         child.provenance = Default::default();
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn portable_child_success_rejects_mismatched_gate_evidence() {
+        let mut child = valid_child_evidence();
+        child.gate = "audit".to_string();
+
+        let error = validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .expect_err("evidence for a different gate must not authorize lint");
+
+        assert!(error
+            .message
+            .contains("does not match the requested release gate"));
     }
 
     #[test]
@@ -2585,6 +2635,7 @@ jobs:
                 "evidence": [{ "uri": "run://portable-test" }],
                 "data": {
                     "release_readiness": {
+                        "gate": "test",
                         "requested_source_commit": "source",
                         "source_commit": "source",
                         "runner_id": "homeboy-lab",
@@ -2602,7 +2653,9 @@ jobs:
             b"ordinary child progress remains outside the structured result",
         )
         .expect("structured output is authoritative");
-        let projected = envelope.project(true, "source").expect("valid evidence");
+        let projected = envelope
+            .project(true, "source", "test")
+            .expect("valid evidence");
 
         assert!(projected.passed);
         assert_eq!(projected.runner_id.as_deref(), Some("homeboy-lab"));
