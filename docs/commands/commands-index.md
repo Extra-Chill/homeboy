@@ -41,6 +41,7 @@ cargo run -p homeboy-cli --bin generate-cli-reference -->
 - [ssh](ssh.md)
 - [stack](stack.md)
 - [status](status.md)
+- [topology](topology.md)
 - [trace](trace.md)
 - [triage](triage.md)
 - [tunnel](tunnel.md)
