@@ -67,9 +67,8 @@ pub struct ReviewArgs {
     // flattens, so `review --changed-since` and `review lint --changed-since`
     // can no longer drift apart.
     //
-    // Only the lint stage scopes `--changed-only` natively; audit and test
-    // run on the full component with a hint noting the limitation. Use
-    // `--changed-since` for full umbrella scoping.
+    // Lint and audit reuse the precomputed working-tree file set for
+    // `--changed-only`; test still runs against the full component.
     #[command(flatten)]
     pub changed: ChangedScopeArgs,
 
@@ -122,6 +121,7 @@ pub enum ReviewCommand {
 /// executes in the selected checkout.
 #[derive(Serialize)]
 struct ReviewChildReadinessEvidence {
+    gate: String,
     requested_source_commit: String,
     source_commit: String,
     runner_id: Option<String>,
@@ -301,7 +301,7 @@ fn dispatch_review_plan_step(
         "review.audit" => {
             let descriptor = ReviewStageDescriptor {
                 name: "audit",
-                include_changed_only_scope: false,
+                include_changed_only_scope: true,
                 build_args: build_audit_args,
                 run: audit::run,
                 finding_count: audit_finding_count,
@@ -339,14 +339,17 @@ fn dispatch_review_plan_step(
 
 pub fn run(args: ReviewArgs) -> CmdResult<Value> {
     match args.command {
-        Some(ReviewCommand::Audit(args)) => {
-            let requested_source = args.audit.release_readiness_source.clone();
-            let component = args.audit.comp.load()?;
+        Some(ReviewCommand::Audit(review_audit)) => {
+            let requested_source = review_audit.audit.release_readiness_source.clone();
+            let component = review_audit.audit.comp.load()?;
             prepare_local_review_dependencies(&component)?;
+            let audit_args =
+                review_audit_args(review_audit.audit, &args.changed, &component.local_path)?;
             to_value_with_readiness_provenance(
-                audit::run(args.audit),
+                audit::run(audit_args),
                 &component,
                 requested_source.as_deref(),
+                "audit",
             )
         }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
@@ -358,6 +361,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
                 lint::run(review_lint_args(args)),
                 &component,
                 requested_source.as_deref(),
+                "lint",
             )
         }
         Some(ReviewCommand::Test(args)) => {
@@ -368,6 +372,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
                 test::run(args),
                 &component,
                 requested_source.as_deref(),
+                "test",
             )
         }
         Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
@@ -376,12 +381,31 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
     }
 }
 
+/// Translate review's working-tree scope to audit's existing HEAD-based scoped
+/// workflow. The injected list avoids a second git walk and keeps untracked
+/// files in scope.
+fn review_audit_args(
+    mut audit_args: audit::AuditArgs,
+    changed: &ChangedScopeArgs,
+    source_path: &str,
+) -> homeboy::core::Result<audit::AuditArgs> {
+    if changed.changed_only && audit_args.changed.changed_since.is_none() {
+        audit_args.changed.changed_since = Some("HEAD".to_string());
+        audit_args.changed.precomputed_changed_files = Some(git::get_dirty_files(source_path)?);
+        // `AuditArgs::profile` defaults to full for direct audit. A working-tree
+        // review instead uses the bounded profile promised by review's scope.
+        audit_args.profile = "pr".to_string();
+    }
+    Ok(audit_args)
+}
+
 /// Portable release preflight consumes this child-produced provenance from the
 /// command result. Capture it after execution on the runner that tested it.
 fn to_value_with_readiness_provenance<T: Serialize>(
     result: CmdResult<T>,
     component: &homeboy::core::component::Component,
     requested_source: Option<&str>,
+    gate: &str,
 ) -> CmdResult<Value> {
     let (output, exit_code) = result?;
     let mut value = serde_json::to_value(output).map_err(|error| {
@@ -403,6 +427,7 @@ fn to_value_with_readiness_provenance<T: Serialize>(
         object.insert(
             "release_readiness".to_string(),
             serde_json::to_value(ReviewChildReadinessEvidence {
+                gate: gate.to_string(),
                 requested_source_commit: requested_source.to_string(),
                 source_commit,
                 runner_id,
@@ -508,6 +533,10 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         observation::finish_success(review_observation, &output, 0);
         return Ok((output, 0));
     }
+
+    // The test phase restores its checkout, so establish the whole plan is
+    // eligible before dependency hydration or any detector can begin.
+    homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&source_path))?;
 
     let review_observation = Some(observation::start(observation::ReviewObservationStart {
         component_id: &component.id,
@@ -651,7 +680,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
 
     if args.changed.changed_only {
         top_hints.push(
-            "--changed-only scopes lint only; audit and test ran on the full component".to_string(),
+            "--changed-only scopes lint and audit; audit uses the bounded pr detector profile while test runs on the full component".to_string(),
         );
     }
 
@@ -1051,7 +1080,14 @@ fn build_audit_args(
         profile: selected_audit_profile(args, review_context),
         baseline_args: args.baseline_args.clone(),
         changed: ChangedSinceArgs {
-            changed_since: args.changed.changed_since().map(str::to_string),
+            // Audit has no separate --changed-only flag. Reusing HEAD with the
+            // already-resolved dirty file list preserves working-tree semantics
+            // while activating its scoped execution path and bounded output.
+            changed_since: args
+                .changed
+                .changed_since()
+                .map(str::to_string)
+                .or(args.changed.changed_only.then_some("HEAD".to_string())),
             precomputed_changed_files: review_context
                 .precomputed_changed_files()
                 .map(<[String]>::to_vec),
@@ -1264,6 +1300,24 @@ mod tests {
     }
 
     #[test]
+    fn release_readiness_evidence_preserves_each_portable_gate_discriminator() {
+        for gate in ["audit", "lint", "test"] {
+            let evidence = serde_json::to_value(ReviewChildReadinessEvidence {
+                gate: gate.to_string(),
+                requested_source_commit: "frozen-source".to_string(),
+                source_commit: "frozen-source".to_string(),
+                runner_id: Some("homeboy-lab".to_string()),
+                provenance: Default::default(),
+            })
+            .expect("serialize readiness evidence");
+
+            assert_eq!(evidence["gate"], gate);
+            assert_eq!(evidence["requested_source_commit"], "frozen-source");
+            assert_eq!(evidence["source_commit"], "frozen-source");
+        }
+    }
+
+    #[test]
     fn parses_one_shot_extension_override() {
         let cli = TestCli::try_parse_from([
             "test",
@@ -1287,6 +1341,15 @@ mod tests {
         let cli = TestCli::try_parse_from(["test", "--changed-only"]).expect("should parse");
         assert!(cli.review.changed.changed_only);
         assert!(cli.review.changed.changed_since().is_none());
+    }
+
+    #[test]
+    fn parses_changed_only_before_direct_audit() {
+        let cli = TestCli::try_parse_from(["test", "--changed-only", "audit"])
+            .expect("direct audit should retain the parent changed-only scope");
+
+        assert!(cli.review.changed.changed_only);
+        assert!(matches!(cli.review.command, Some(ReviewCommand::Audit(_))));
     }
 
     #[test]
@@ -1504,9 +1567,30 @@ mod tests {
             baseline_args: BaselineArgs::default(),
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-only");
-        // audit/test do not support --changed-only, so the suffix is empty
-        // when the caller requests it not be included.
+        // Test still runs full-component, but audit now translates this into its
+        // scoped HEAD workflow.
         assert_eq!(scope_flag_suffix(&args, false), "");
+    }
+
+    #[test]
+    fn changed_only_review_builds_bounded_head_scoped_audit() {
+        let mut args = review_args_fixture();
+        args.changed.changed_only = true;
+        let review_context = ReviewExecutionContext {
+            scope: "changed-only".to_string(),
+            changed_file_count: Some(1),
+            precomputed_changed_files: Some(vec!["src/changed.rs".to_string()]),
+        };
+
+        let audit_args = build_audit_args(&args, &review_context);
+
+        assert_eq!(audit_args.profile, "pr");
+        assert_eq!(audit_args.changed.changed_since.as_deref(), Some("HEAD"));
+        assert_eq!(
+            audit_args.changed.precomputed_changed_files.as_deref(),
+            Some(&["src/changed.rs".to_string()][..]),
+            "working-tree files must be injected instead of recomputing a HEAD diff"
+        );
     }
 
     #[test]

@@ -8,14 +8,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use fs4::fs_std::FileExt;
 use homeboy::core::cleanup::{
-    self, ArtifactCleanupOptions, ArtifactCleanupSort, CleanupPolicy, CleanupPolicyOverrides,
-    ResourceCleanupOptions,
+    self, ArtifactCleanupOptions, ArtifactCleanupScope, ArtifactCleanupSort, CleanupPolicy,
+    CleanupPolicyOverrides,
 };
 use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverrides};
 use homeboy::core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
-use homeboy::core::daemon::LocalControllerJobClient;
+use homeboy::core::daemon::{
+    ControllerJobSubmission, ControllerJobSubmissionDisposition, LocalControllerJobClient,
+};
 use homeboy::core::defaults;
 use homeboy::core::engine;
 use homeboy::core::engine::shell::quote_arg;
@@ -24,14 +26,7 @@ use homeboy::core::observation::runs_service::{
     RunnerDownloadCleanupOptions,
 };
 use homeboy::core::output::OutputBudget;
-use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
-use homeboy::core::worktree::WorktreeCleanupOutput;
-use homeboy::core::worktree_provider::{
-    cleanup_worktrees_from_config, WorktreeCleanupRequest, WorktreeCleanupScope,
-};
-use homeboy::core::worktree_providers::{
-    max_configured_provider_cleanup_timeout, WorktreeProviderCleanupMode,
-};
+use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
 use homeboy::runner::runners::{
     self as runner, RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
@@ -39,8 +34,7 @@ use homeboy::runner::runners::{
 pub use homeboy_command_contract::cleanup::{
     runtime_tmp_commands, CleanupArgs, CleanupArtifactsArgs, CleanupArtifactsSortArg,
     CleanupCategoryArg, CleanupCommand, CleanupInventoryCategoryMetadata,
-    CleanupRetainedStorageArgs, CleanupWorktreesArgs, LEAKED_TEST_HOMES_METADATA,
-    RUNNER_DOWNLOADS_METADATA,
+    CleanupRetainedStorageArgs, LEAKED_TEST_HOMES_METADATA, RUNNER_DOWNLOADS_METADATA,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,6 +51,9 @@ const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
 const CLEANUP_CATEGORY_HEARTBEAT: Duration = Duration::from_secs(5);
 /// Time reserved for the repo-artifact category to report after its last root.
 const REPO_ARTIFACT_REPORTING_HEADROOM: Duration = Duration::from_secs(2);
+/// Time reserved for the runtime-temp category to release its cleanup lock and
+/// serialize its report after the sweep stops.
+const RUNTIME_TMP_REPORTING_HEADROOM: Duration = Duration::from_secs(2);
 const CLEANUP_CATEGORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 #[cfg(any(test, feature = "test-support"))]
 const CLEANUP_CATEGORY_FIXTURE_ENV: &str = "HOMEBOY_TEST_CLEANUP_CATEGORY_FIXTURE";
@@ -131,8 +128,7 @@ struct AutomaticRetentionControllerOutput {
 /// bytes by hand, and they arrive at hundreds of megabytes each (#11073). It is
 /// bounded by an age floor, a byte ceiling, and the scan limit, and it can only
 /// ever reach a directory whose owning process is gone.
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 11] = [
-    CleanupCategoryArg::WorktreeProviders,
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
     CleanupCategoryArg::OrphanedArtifactBytes,
@@ -184,63 +180,35 @@ const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
 
 pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> CmdResult<Value> {
     match args.command {
-        Some(CleanupCommand::Artifacts(args)) => cleanup::cleanup_resources_from_config(
-            ResourceCleanupOptions {
-                intent: cleanup_intent(args.apply),
-                artifacts: Some(ArtifactCleanupOptions {
-                    path: args.path,
-                    apply: args.apply,
-                    self_artifacts: args.self_artifacts,
-                    temp_roots: args.temp_root,
-                    sort: match args.sort {
-                        CleanupArtifactsSortArg::Discovery => ArtifactCleanupSort::Discovery,
-                        CleanupArtifactsSortArg::Size => ArtifactCleanupSort::Size,
-                    },
-                    limit: args.limit,
-                    merged_only: args.merged_only,
-                    min_age_days: args.min_age_days,
-                    include_active_worktrees: args.include_active_worktrees,
-                    max_scan_duration: None,
-                }),
-                worktree_providers: None,
-            },
-            defaults::load_config(),
-        )
-        .and_then(|output| {
-            serde_json::to_value(output).map_err(|err| {
-                homeboy::core::Error::internal_json(
-                    err.to_string(),
-                    Some("serialize cleanup artifacts output".to_string()),
-                )
-            })
-        })
-        .map(|output| (output, 0)),
-        Some(CleanupCommand::Worktrees(args)) => {
-            let output = cleanup::cleanup_resources_from_config(
-                ResourceCleanupOptions {
-                    intent: cleanup_intent(args.apply),
-                    artifacts: None,
-                    worktree_providers: Some(WorktreeCleanupRequest {
-                        providers: args.provider,
-                        all_configured_providers: args.all_providers,
-                        apply: args.apply,
-                        timeout: None,
-                        provider_run_id: args.provider_run_id,
-                        provider_plan_id: args.provider_plan_id,
-                        ..WorktreeCleanupRequest::default()
-                    }),
+        Some(CleanupCommand::Artifacts(args)) => {
+            cleanup::cleanup_artifacts(ArtifactCleanupOptions {
+                path: args.path,
+                scope: args
+                    .all_worktrees
+                    .then_some(ArtifactCleanupScope::RepositoryWorktrees)
+                    .unwrap_or_default(),
+                apply: args.apply,
+                self_artifacts: args.self_artifacts,
+                temp_roots: args.temp_root,
+                sort: match args.sort {
+                    CleanupArtifactsSortArg::Discovery => ArtifactCleanupSort::Discovery,
+                    CleanupArtifactsSortArg::Size => ArtifactCleanupSort::Size,
                 },
-                defaults::load_config(),
-            )?;
-            let exit_code = (output.failure_count > 0) as i32;
-            serde_json::to_value(output)
-                .map_err(|err| {
+                limit: args.limit,
+                merged_only: args.merged_only,
+                min_age_days: args.min_age_days,
+                include_active_worktrees: args.include_active_worktrees,
+                max_scan_duration: None,
+            })
+            .and_then(|output| {
+                serde_json::to_value(output).map_err(|err| {
                     homeboy::core::Error::internal_json(
                         err.to_string(),
-                        Some("serialize cleanup worktrees output".to_string()),
+                        Some("serialize cleanup artifacts output".to_string()),
                     )
                 })
-                .map(|output| (output, exit_code))
+            })
+            .map(|output| (output, 0))
         }
         Some(CleanupCommand::RetainedStorage(args)) => bounded_retained_storage_report(args),
         Some(CleanupCommand::AutomaticRetention) => automatic_retention(),
@@ -382,7 +350,13 @@ impl CleanupJobDriver {
                 run_ref: format!("homeboy://job/{job_id}"),
                 report: Box::new(move |progress| progress_handle.progress(progress)),
             },
-            || cleanup_inventory(args),
+            || {
+                // A durable job retains partial, resumable evidence as a
+                // successful pass. Only an interactive cleanup must turn that
+                // state into a failing command envelope.
+                let deadline = SystemTime::now().checked_add(cleanup_inventory_timeout(args.apply));
+                cleanup_inventory_with_deadline(args, deadline)
+            },
         )?;
         let output = serde_json::json!({
             "phase": if result.exit_code == 0 { "completed" } else { "partial_failure" },
@@ -508,14 +482,21 @@ fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
             Some("serialize cleanup job request".to_string()),
         )
     })?;
-    let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, request.to_string().as_bytes());
-    let job = LocalControllerJobClient::connect()?.submit(serde_json::json!({
-        "type": CLEANUP_JOB_TYPE,
-        "version": CLEANUP_JOB_VERSION,
-        "idempotency_key": format!("cleanup-inventory-{digest}"),
-        "request": request,
-    }))?;
-    Ok(compact_cleanup_job(&job, "submitted"))
+    // A completed cleanup describes the inventory that existed when it ran, not
+    // a standing claim over future inventory with the same command arguments.
+    let invocation_id = uuid::Uuid::new_v4();
+    let active_request_id =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, request.to_string().as_bytes());
+    let submission = LocalControllerJobClient::connect_current_build()?.submit_with_disposition(
+        serde_json::json!({
+            "type": CLEANUP_JOB_TYPE,
+            "version": CLEANUP_JOB_VERSION,
+            "idempotency_key": format!("cleanup-inventory-{invocation_id}"),
+            "active_idempotency_key": format!("cleanup-inventory-active-{active_request_id}"),
+            "request": request,
+        }),
+    )?;
+    Ok(compact_cleanup_submission(&submission))
 }
 
 fn cleanup_job_status(job_id: &str, full: bool) -> homeboy::core::Result<Value> {
@@ -549,6 +530,18 @@ fn compact_cleanup_job(job: &homeboy::core::api_jobs::Job, command: &'static str
         "status_command": format!("homeboy cleanup status {}", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
         "evidence_command": format!("homeboy cleanup status {} --full", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
     })
+}
+
+fn compact_cleanup_submission(submission: &ControllerJobSubmission) -> Value {
+    let mut output = compact_cleanup_job(&submission.job, "submitted");
+    output["submission"] = serde_json::json!({
+        "disposition": match submission.disposition {
+            ControllerJobSubmissionDisposition::Created => "created",
+            ControllerJobSubmissionDisposition::Reused => "reused",
+            ControllerJobSubmissionDisposition::Unknown => "unknown",
+        },
+    });
+    output
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -888,6 +881,7 @@ fn retained_storage_report(
             run_max_bytes: policy.runtime_run_max_bytes,
             run_max_count: policy.runtime_run_max_count,
             cursor: None,
+            deadline: None,
         })?;
     let runtime_tmp_continuation = runtime_tmp.next_cursor.as_ref().map(|cursor| {
         format!(
@@ -1637,14 +1631,6 @@ const TASK_WORKTREES_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy worktree cleanup --cleanup-branches --apply",
     };
 
-const WORKTREE_PROVIDERS_METADATA: CleanupInventoryCategoryMetadata =
-    CleanupInventoryCategoryMetadata {
-        category: "worktree_providers",
-        include_arg: "worktree-providers",
-        dry_run_command: "homeboy cleanup worktrees --all-providers",
-        apply_command: "homeboy cleanup worktrees --all-providers --apply",
-    };
-
 const EXTERNAL_STORAGE_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "external_storage",
@@ -1918,16 +1904,23 @@ fn automatic_retention() -> CmdResult<Value> {
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventoryResult> {
     let deadline = SystemTime::now().checked_add(cleanup_inventory_timeout(args.apply));
-    cleanup_inventory_with_deadline(args, deadline)
+    let mut result = cleanup_inventory_with_deadline(args, deadline)?;
+    // An interactive aggregate has no scheduler to perform its next bounded
+    // pass. Do not acknowledge an incomplete mutation inventory as success:
+    // callers must receive the continuation action and a non-zero exit.
+    finalize_synchronous_cleanup_result(&mut result);
+    Ok(result)
 }
 
-/// Aggregate sweep budget, widened by whatever a category legitimately needs
-/// beyond the shared base.
-///
-/// Without the widening, raising a provider timeout would simply relocate the
-/// failure: the provider category would consume the whole aggregate and starve
-/// every category scheduled after it.
-fn cleanup_inventory_timeout(apply: bool) -> Duration {
+fn finalize_synchronous_cleanup_result(result: &mut CleanupInventoryResult) {
+    if result.exit_code == 0 && result.output["continuation_required"] == true {
+        result.output["status"] = Value::String("partial_failure".to_string());
+        result.exit_code = 1;
+    }
+}
+
+/// Aggregate sweep budget.
+fn cleanup_inventory_timeout(_apply: bool) -> Duration {
     if let Some(inherited) = std::env::var(CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -1940,9 +1933,7 @@ fn cleanup_inventory_timeout(apply: bool) -> Duration {
             .retention
             .cleanup_aggregate_max_seconds,
     );
-    let base = cleanup_category_base_budget();
-    let widest = cleanup_category_required_budget(WORKTREE_PROVIDERS_METADATA.category, apply);
-    configured.saturating_add(widest.saturating_sub(base))
+    configured
 }
 
 fn cleanup_inventory_with_deadline(
@@ -2000,99 +1991,13 @@ fn cleanup_inventory_with_deadline(
             deadline,
             CleanupCategoryCommandOverrides::default(),
             || {
-                let output = cleanup_worktrees_from_config(
-                    &WorktreeCleanupRequest {
-                        scope: WorktreeCleanupScope::Native,
-                        providers: Vec::new(),
-                        all_configured_providers: false,
-                        apply,
-                        force: false,
-                        cleanup_branches: apply,
-                        allow_unmerged_branches: false,
-                        timeout: None,
-                        provider_run_id: None,
-                        provider_plan_id: None,
-                    },
-                    &homeboy::core::defaults::load_config(),
-                )?
-                .native
-                .expect("native cleanup scope includes the built-in provider");
+                let output = worktree::cleanup(WorktreeCleanupOptions {
+                    force: false,
+                    dry_run: !apply,
+                    cleanup_branches: apply,
+                    allow_unmerged_branches: false,
+                })?;
                 task_worktrees_category(output, apply).map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::WorktreeProviders) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            WORKTREE_PROVIDERS_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let output = cleanup::cleanup_resources_from_config(
-                    ResourceCleanupOptions {
-                        intent: cleanup_intent(apply),
-                        artifacts: None,
-                        worktree_providers: Some(WorktreeCleanupRequest {
-                            providers: Vec::new(),
-                            all_configured_providers: true,
-                            apply,
-                            timeout: deadline.map(|deadline| {
-                                deadline
-                                    .duration_since(SystemTime::now())
-                                    .unwrap_or(Duration::ZERO)
-                            }),
-                            ..WorktreeCleanupRequest::default()
-                        }),
-                    },
-                    config.clone(),
-                )?;
-                // Every other category derives its metrics from `output`. This
-                // one used to hardcode zeros and read only `failure_count`,
-                // which is how a sweep that pruned 49 lock files rendered as
-                // `applied_count: 0, reclaimed_bytes: 0, status: succeeded`
-                // (#9825) — a destructive mutation presented as a clean no-op.
-                //
-                // `candidate_count` mirrors applied here because a provider
-                // reports what it acted on, not a pre-scan population; claiming
-                // a candidate count it never published would be the same
-                // fabrication in the opposite direction.
-                let effects = output.worktree_provider_effects.as_ref();
-                let blockers = effects.and_then(|effects| effects.reconciliation_blockers);
-                let provider_failure_count = output.failure_count;
-                let metrics = CleanupCategoryMetrics {
-                    candidate_count: output.applied_count,
-                    applied_count: output.applied_count,
-                    skipped_count: output.failure_count,
-                    estimated_bytes: 0,
-                    reclaimed_bytes: output.reclaimed_bytes,
-                };
-                category_from_output(WORKTREE_PROVIDERS_METADATA, apply, metrics, output).map(
-                    |mut category| {
-                        // The final unique inventory, not the sum of repeated
-                        // phase snapshots. The projection already collapsed
-                        // per-provider phases; history stays on the provider
-                        // rows that observed it.
-                        if let Some(blockers) = blockers {
-                            category.reconciliation_blocker_count =
-                                usize::try_from(blockers).unwrap_or(usize::MAX);
-                        }
-                        if provider_failure_count > 0 {
-                            category.failure = Some(CleanupInventoryCategoryFailure {
-                                code: "cleanup.provider_failure".to_string(),
-                                message: format!(
-                                    "{provider_failure_count} worktree cleanup provider(s) failed"
-                                ),
-                                retryable: Some(true),
-                            });
-                            category.outcome = "failed".to_string();
-                            category.inventory_completeness = "partial".to_string();
-                        }
-                        vec![category]
-                    },
-                )
             },
         );
     }
@@ -2320,6 +2225,10 @@ fn cleanup_inventory_with_deadline(
                         run_max_bytes: policy.runtime_run_max_bytes,
                         run_max_count: policy.runtime_run_max_count,
                         cursor: args.cursor.as_deref(),
+                        // Stop at an entry boundary while there is still time to
+                        // report, rather than being killed at the category wall
+                        // with the cleanup lock still on disk (#14221).
+                        deadline: runtime_tmp_scan_deadline(deadline),
                     },
                 )?;
                 engine::temp::present_runtime_temp_cleanup(
@@ -2685,7 +2594,6 @@ fn cleanup_category_arg_name(category: &CleanupCategoryArg) -> &'static str {
     match category {
         CleanupCategoryArg::RepoArtifacts => "repo-artifacts",
         CleanupCategoryArg::TaskWorktrees => "task-worktrees",
-        CleanupCategoryArg::WorktreeProviders => "worktree-providers",
         CleanupCategoryArg::TerminalRuns => "terminal-runs",
         CleanupCategoryArg::PersistedRunArtifacts => "persisted-run-artifacts",
         CleanupCategoryArg::OrphanedArtifactBytes => "orphaned-artifact-bytes",
@@ -2748,9 +2656,8 @@ fn isolate_cleanup_category_bounded(
 ) {
     // Checked before dispatch rather than inside each execution path. The
     // in-process path had no budget check at all, so an exhausted deadline
-    // reached the worktree provider as a real invocation with a zero timeout —
-    // a guaranteed failure, reported as a provider fault instead of the
-    // continuation it actually was (#12727).
+    // reached a category as a real invocation with no usable time remaining,
+    // turning an exhausted aggregate budget into a misleading category failure.
     if let Some(remaining) = exhausted_category_budget(deadline) {
         categories.push(cleanup_category_timeout_failure(
             metadata,
@@ -2758,6 +2665,7 @@ fn isolate_cleanup_category_bounded(
             remaining,
             0,
             Some("aggregate cleanup budget was exhausted before this category started".to_string()),
+            cleanup_category_replay_command(metadata, args),
         ));
         return;
     }
@@ -2829,10 +2737,7 @@ fn run_cleanup_category_process(
     args: &CleanupArgs,
     deadline: Option<SystemTime>,
 ) -> std::result::Result<Vec<CleanupInventoryCategory>, Box<CleanupInventoryCategory>> {
-    let wall_clock_budget = cleanup_category_timeout(
-        cleanup_category_required_budget(metadata.category, args.apply),
-        deadline,
-    );
+    let wall_clock_budget = cleanup_category_timeout(cleanup_category_base_budget(), deadline);
     if wall_clock_budget <= CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2) {
         return Err(Box::new(cleanup_category_timeout_failure(
             metadata,
@@ -2843,6 +2748,7 @@ fn run_cleanup_category_process(
                 "aggregate cleanup has too little time remaining to start and reap this category"
                     .to_string(),
             ),
+            cleanup_category_replay_command(metadata, args),
         )));
     }
     let timeout = wall_clock_budget.saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
@@ -2947,6 +2853,7 @@ fn run_cleanup_category_process(
             timeout,
             elapsed_ms,
             last_progress,
+            cleanup_category_replay_command(metadata, args),
         )));
     }
 
@@ -3063,40 +2970,6 @@ fn cleanup_category_base_budget() -> Duration {
     })
 }
 
-/// Budget a specific category needs to finish the work it delegates.
-///
-/// `worktree_providers` shells out twice before reaching the provider, and each
-/// hop reserves [`CLEANUP_CHILD_TERMINATION_ALLOWANCE`]. Sizing the category at
-/// the configured provider timeout plus both allowances is what makes a
-/// configured provider budget reachable; the previous fixed constant capped
-/// every provider below even its own default.
-fn cleanup_category_required_budget(category: &str, apply: bool) -> Duration {
-    let base = cleanup_category_base_budget();
-    if category != WORKTREE_PROVIDERS_METADATA.category {
-        return base;
-    }
-    let mode = if apply {
-        WorktreeProviderCleanupMode::Apply
-    } else {
-        WorktreeProviderCleanupMode::Preview
-    };
-    provider_category_budget(
-        base,
-        max_configured_provider_cleanup_timeout(&defaults::load_config().worktree_providers, &mode),
-    )
-}
-
-/// Category budget that survives both subprocess hops with the configured
-/// provider timeout intact.
-///
-/// Kept free of global config so the arithmetic that guarantees
-/// `budget - 2 * allowance >= configured` is directly testable.
-fn provider_category_budget(base: Duration, provider: Option<Duration>) -> Duration {
-    provider.map_or(base, |provider| {
-        base.max(provider.saturating_add(CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2)))
-    })
-}
-
 fn cleanup_category_timeout(required: Duration, deadline: Option<SystemTime>) -> Duration {
     deadline.map_or(required, |deadline| {
         required.min(
@@ -3178,11 +3051,11 @@ fn cleanup_category_timeout_failure(
     timeout: Duration,
     elapsed_ms: u128,
     last_progress: Option<String>,
+    continuation_command: String,
 ) -> CleanupInventoryCategory {
-    let continuation = metadata.canonical_cleanup_command(apply);
     CleanupInventoryCategory {
         category: metadata.category.to_string(),
-        canonical_cleanup_command: continuation.clone(),
+        canonical_cleanup_command: continuation_command.clone(),
         specialist_command: metadata.specialist_command(apply).to_string(),
         included: true,
         skipped: true,
@@ -3203,7 +3076,7 @@ fn cleanup_category_timeout_failure(
         elapsed_ms,
         timeout_ms: timeout.as_millis(),
         last_progress,
-        continuation_command: continuation,
+        continuation_command: continuation_command.clone(),
         cleanup_run_ref: active_cleanup_run_ref(),
         candidate_count: 0,
         applied_count: 0,
@@ -3216,8 +3089,52 @@ fn cleanup_category_timeout_failure(
             "outcome": "timed_out",
             "elapsed_ms": elapsed_ms,
             "timeout_ms": timeout.as_millis(),
+            "continuation_command": continuation_command,
         }),
     }
+}
+
+/// Replay one incomplete aggregate category with the exact policy supplied to
+/// the owning command. A specialist command cannot carry aggregate-only policy
+/// such as `--include-untagged`, retention overrides, or pagination state.
+fn cleanup_category_replay_command(
+    metadata: CleanupInventoryCategoryMetadata,
+    args: &CleanupArgs,
+) -> String {
+    let mut command = "homeboy cleanup".to_string();
+    command.push_str(&format!(" --include {}", metadata.include_arg));
+    if !args.exclude.is_empty() {
+        command.push_str(&format!(
+            " --exclude {}",
+            args.exclude
+                .iter()
+                .map(cleanup_category_arg_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if args.include_untagged {
+        command.push_str(" --include-untagged");
+    }
+    if args.apply {
+        command.push_str(" --apply");
+    }
+    if let Some(days) = args.older_than_days {
+        command.push_str(&format!(" --older-than-days {days}"));
+    }
+    if let Some(days) = args.runtime_tmp_managed_older_than_days {
+        command.push_str(&format!(" --runtime-tmp-managed-older-than-days {days}"));
+    }
+    if let Some(limit) = args.limit {
+        command.push_str(&format!(" --limit {limit}"));
+    }
+    if let Some(cursor) = &args.cursor {
+        command.push_str(&format!(" --cursor {}", quote_arg(cursor)));
+    }
+    if args.full {
+        command.push_str(" --full");
+    }
+    command
 }
 
 fn cleanup_category_process_failure(
@@ -3598,6 +3515,7 @@ fn repo_artifact_roots(
                 "configured_component",
                 ArtifactCleanupOptions {
                     path: Some(root),
+                    scope: ArtifactCleanupScope::RepositoryWorktrees,
                     apply,
                     self_artifacts: false,
                     temp_roots: Vec::new(),
@@ -3616,6 +3534,7 @@ fn repo_artifact_roots(
             "homeboy_source_checkout",
             ArtifactCleanupOptions {
                 path: None,
+                scope: ArtifactCleanupScope::RepositoryWorktrees,
                 apply,
                 self_artifacts: true,
                 temp_roots: Vec::new(),
@@ -3637,6 +3556,20 @@ fn repo_artifact_roots(
 /// every root gets a bounded slice and stops at a worktree boundary with its
 /// progress intact. Previously each root scanned unbounded until the category
 /// wall killed the process, discarding everything it had reclaimed (#12727).
+/// Convert the aggregate's category wall into a sweep budget that expires
+/// early enough for runtime-temp to release its lock and report.
+///
+/// Reaching the category wall itself is fatal to the lock: the supervisor
+/// SIGKILLs the category child, no destructor runs, and the `.cleanup.lock`
+/// directory survives with a now-dead owner PID recorded in it (#14221).
+fn runtime_tmp_scan_deadline(deadline: Option<SystemTime>) -> Option<Instant> {
+    let remaining = deadline?
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO)
+        .saturating_sub(RUNTIME_TMP_REPORTING_HEADROOM);
+    Instant::now().checked_add(remaining)
+}
+
 fn apply_repo_artifact_scan_budget(
     roots: &mut [(&'static str, ArtifactCleanupOptions)],
     deadline: Option<SystemTime>,
@@ -3981,6 +3914,16 @@ fn cleanup_actionable(
 ) -> CommandActionableMetadata {
     let mut actionable = CommandActionableMetadata::default();
     for category in categories {
+        if is_bounded_continuation(category) {
+            actionable.next_actions.push(
+                CommandNextAction::new(
+                    format!("resume {} cleanup", category.category.replace('_', " ")),
+                    category.continuation_command.clone(),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+            continue;
+        }
         if category.failure.is_some() {
             actionable.next_actions.push(
                 CommandNextAction::new(
@@ -4022,14 +3965,6 @@ fn apply_command(command: &str) -> String {
         command.to_string()
     } else {
         format!("{command} --apply")
-    }
-}
-
-fn cleanup_intent(apply: bool) -> ResourceCleanupIntent {
-    if apply {
-        ResourceCleanupIntent::Apply
-    } else {
-        ResourceCleanupIntent::DryRun
     }
 }
 
@@ -4167,119 +4102,7 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
 }
 
 pub(crate) fn render_cleanup_summary(payload: &Value) -> Option<String> {
-    render_artifact_cleanup_summary(payload).or_else(|| render_worktree_cleanup_summary(payload))
-}
-
-pub(crate) fn render_worktree_cleanup_summary(payload: &Value) -> Option<String> {
-    let payload = if payload.get("command").and_then(Value::as_str)? == "cleanup.resources" {
-        payload.get("worktree_providers")?
-    } else {
-        payload
-    };
-
-    if payload.get("command").and_then(Value::as_str)? != "cleanup.worktrees" {
-        return None;
-    }
-
-    let mode = payload
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("preview");
-    let provider_count = payload
-        .get("provider_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let success_count = payload
-        .get("success_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let failure_count = payload
-        .get("failure_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-
-    let mut lines = vec![
-        "Worktree provider cleanup summary".to_string(),
-        format!(
-            "Mode: {}",
-            if mode == "apply" { "apply" } else { "preview" }
-        ),
-        format!("Providers: {provider_count}"),
-        format!("Succeeded: {success_count}"),
-        format!("Failed: {failure_count}"),
-    ];
-
-    if let Some(providers) = payload.get("providers").and_then(Value::as_array) {
-        for provider in providers {
-            let provider_id = provider
-                .get("provider_id")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let success = provider
-                .get("success")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            lines.push(format!(
-                "Provider {provider_id}: {}",
-                if success { "ok" } else { "failed" }
-            ));
-            if let Some(command) = provider_command(provider) {
-                lines.push(format!("  Command: {command}"));
-            }
-            if let Some(phase) = provider.get("phase").and_then(Value::as_str) {
-                lines.push(format!("  Phase: {phase}"));
-            }
-            if let Some(outcome) = provider.get("outcome").and_then(Value::as_str) {
-                lines.push(format!("  Outcome: {outcome}"));
-            }
-            if let Some(completeness) = provider
-                .get("inventory_completeness")
-                .and_then(Value::as_str)
-            {
-                lines.push(format!("  Inventory: {completeness}"));
-            }
-            if let Some(elapsed_ms) = provider.get("elapsed_ms").and_then(Value::as_u64) {
-                lines.push(format!("  Elapsed: {elapsed_ms} ms"));
-            }
-            if let Some(heartbeat_count) = provider.get("heartbeat_count").and_then(Value::as_u64) {
-                lines.push(format!("  Heartbeats: {heartbeat_count}"));
-            }
-            if let Some(progress) = provider.get("last_progress").and_then(Value::as_str) {
-                lines.push(format!("  Last observed progress: {progress}"));
-            }
-            if let Some(run_refs) = provider.get("run_refs").and_then(Value::as_array) {
-                for run_ref in run_refs {
-                    if let Some(run_id) = run_ref.get("run_id").and_then(Value::as_str) {
-                        lines.push(format!("  Run: {run_id}"));
-                    }
-                    if let Some(status_command) =
-                        run_ref.get("status_command").and_then(Value::as_str)
-                    {
-                        lines.push(format!("  Status command: {status_command}"));
-                    }
-                }
-            }
-            if let Some(follow_up) = provider.get("follow_up_command").and_then(Value::as_str) {
-                lines.push(format!("  Safe follow-up command: {follow_up}"));
-            }
-            if let Some(error) = provider.get("error").and_then(Value::as_str) {
-                lines.push(format!("  Error: {error}"));
-            }
-        }
-    }
-
-    lines.push(String::new());
-    Some(lines.join("\n"))
-}
-
-fn provider_command(provider: &Value) -> Option<String> {
-    let argv = provider.get("command_run")?.as_array()?;
-    let parts: Vec<String> = argv
-        .iter()
-        .filter_map(Value::as_str)
-        .map(quote_arg)
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(" "))
+    render_artifact_cleanup_summary(payload)
 }
 
 fn artifact_candidate_lines(payload: &Value, limit: usize) -> Vec<String> {
@@ -4479,45 +4302,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    /// A configured provider budget must survive both subprocess hops.
-    ///
-    /// Regression for #13700: the category budget was a fixed 30s constant, so
-    /// the provider received `30s - 5s - 5s = 20s` no matter what was
-    /// configured. Even the 30s provider default was unreachable, and the
-    /// documented 300s maximum was ~93% dead range.
-    #[test]
-    fn provider_category_budget_delivers_the_configured_timeout_through_both_hops() {
-        let base = Duration::from_secs(30);
-        let hops = CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2);
-
-        for configured_secs in [30, 45, 120, 180, 300] {
-            let configured = Duration::from_secs(configured_secs);
-            let budget = provider_category_budget(base, Some(configured));
-            // This subtraction mirrors run_cleanup_category_process: one
-            // allowance for the child, one for the grandchild env budget.
-            let delivered = budget.saturating_sub(hops);
-            assert!(
-                delivered >= configured,
-                "configured {configured:?} must reach the provider, got {delivered:?}"
-            );
-        }
-
-        // The old ceiling is genuinely gone, not merely widened.
-        assert!(
-            provider_category_budget(base, Some(Duration::from_secs(120))).saturating_sub(hops)
-                > Duration::from_secs(20),
-            "120s provider must exceed the previous 20s ceiling"
-        );
-
-        // A provider cheaper than the base never shrinks the category budget,
-        // and no configured provider leaves the base untouched.
-        assert_eq!(
-            provider_category_budget(base, Some(Duration::from_secs(1))),
-            base
-        );
-        assert_eq!(provider_category_budget(base, None), base);
-    }
 
     fn controller_cleanup_request() -> Value {
         serde_json::to_value(CleanupArgs {
@@ -5452,9 +5236,58 @@ mod tests {
         });
     }
 
+    /// Interactive cleanup has no scheduler to consume a bounded continuation.
+    /// Its envelope must therefore fail consistently while exposing one replay
+    /// action owned by the aggregate, rather than a stripped specialist hint.
+    #[test]
+    fn timed_out_scoped_cleanup_is_non_successful_and_replays_the_aggregate_policy() {
+        homeboy::test_support::with_isolated_home(|_root| {
+            let expired = SystemTime::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("expired deadline");
+            let result = cleanup_inventory_with_deadline(
+                CleanupArgs {
+                    apply: true,
+                    include: vec![CleanupCategoryArg::RepoArtifacts],
+                    exclude: vec![CleanupCategoryArg::ControllerRuntimes],
+                    include_untagged: true,
+                    older_than_days: Some(7),
+                    runtime_tmp_managed_older_than_days: None,
+                    limit: Some(3),
+                    full: true,
+                    cursor: Some("next page".to_string()),
+                    command: None,
+                },
+                Some(expired),
+            )
+            .expect("aggregate result");
+            let mut result = result;
+            finalize_synchronous_cleanup_result(&mut result);
+            let envelope =
+                crate::commands::utils::response::cli_response_for_json_result_for_command(
+                    &Ok(result.output),
+                    result.exit_code,
+                    "cleanup",
+                    None,
+                );
+
+            assert_eq!(envelope.exit_code, 1);
+            assert!(!envelope.success);
+            assert_eq!(envelope.status, "partial_failure");
+            assert_eq!(
+                envelope.data.as_ref().expect("data")["status"],
+                "partial_failure"
+            );
+            assert_eq!(envelope.next_actions.len(), 1);
+            assert_eq!(
+                envelope.next_actions[0].command,
+                "homeboy cleanup --include repo-artifacts --exclude controller-runtimes --include-untagged --apply --older-than-days 7 --limit 3 --cursor 'next page' --full"
+            );
+        });
+    }
+
     /// The budget check runs before dispatch, so no category is ever started
-    /// with a zero timeout. Previously an exhausted deadline still reached the
-    /// worktree provider as a real invocation with `timeout_ms: 0` (#12727).
+    /// with a zero timeout.
     #[test]
     fn exhausted_budget_is_detected_before_a_category_is_dispatched() {
         let expired = SystemTime::now()
@@ -5542,7 +5375,6 @@ mod tests {
         for category in [
             CleanupCategoryArg::RepoArtifacts,
             CleanupCategoryArg::TaskWorktrees,
-            CleanupCategoryArg::WorktreeProviders,
             CleanupCategoryArg::TerminalRuns,
             CleanupCategoryArg::PersistedRunArtifacts,
             CleanupCategoryArg::OrphanedArtifactBytes,
@@ -6208,57 +6040,5 @@ mod tests {
         assert!(summary.contains("Full candidate list is available in JSON output"));
         assert!(summary.contains("--sort size --limit 10"));
         assert!(!summary.contains("/tmp/repo/target-10"));
-    }
-
-    #[test]
-    fn cleanup_worktrees_summary_surfaces_provider_progress_and_refs() {
-        let payload = json!({
-            "command": "cleanup.resources",
-            "mode": "apply",
-            "worktree_providers": {
-                "command": "cleanup.worktrees",
-                "mode": "apply",
-                "provider_count": 1,
-                "success_count": 1,
-                "failure_count": 0,
-                "providers": [
-                    {
-                        "provider_id": "fixture",
-                        "success": true,
-                        "outcome": "completed",
-                        "inventory_completeness": "complete",
-                        "elapsed_ms": 250,
-                        "heartbeat_count": 2,
-                        "mode": "apply",
-                        "command_run": ["provider-bin", "cleanup", "--apply"],
-                        "phase": "running",
-                        "last_progress": "removed 10/20",
-                        "run_refs": [
-                            {
-                                "run_id": "cleanup-run-1",
-                                "status_command": "provider status cleanup-run-1"
-                            }
-                        ],
-                        "follow_up_command": "provider status cleanup-run-1"
-                    }
-                ]
-            }
-        });
-
-        let summary = render_worktree_cleanup_summary(&payload).expect("summary");
-
-        assert!(summary.contains("Worktree provider cleanup summary\n"));
-        assert!(summary.contains("Mode: apply\n"));
-        assert!(summary.contains("Provider fixture: ok\n"));
-        assert!(summary.contains("  Command: provider-bin cleanup --apply\n"));
-        assert!(summary.contains("  Phase: running\n"));
-        assert!(summary.contains("  Outcome: completed\n"));
-        assert!(summary.contains("  Inventory: complete\n"));
-        assert!(summary.contains("  Elapsed: 250 ms\n"));
-        assert!(summary.contains("  Heartbeats: 2\n"));
-        assert!(summary.contains("  Last observed progress: removed 10/20\n"));
-        assert!(summary.contains("  Run: cleanup-run-1\n"));
-        assert!(summary.contains("  Status command: provider status cleanup-run-1\n"));
-        assert!(summary.contains("  Safe follow-up command: provider status cleanup-run-1\n"));
     }
 }

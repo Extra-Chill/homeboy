@@ -94,7 +94,8 @@ pub use runner_continuation::{
 };
 pub use runner_continuation::{
     register_runner_continuation_provider, runner_authority, runner_live_job_authority,
-    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
+    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationSubmission,
+    RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
 pub use runner_exec::*;
 pub use workspace_authority::*;

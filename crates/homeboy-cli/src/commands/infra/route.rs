@@ -208,8 +208,9 @@ pub(crate) fn route_after_parse_with_provenance(
                 .map(|runner| runner.runner_id.clone())
         })
         .flatten();
-    if detached_cook_can_queue(cli) && !is_unmaterialized_replay_worker() {
-        // Persist before any bounded refresh. The scoped replay selector owns
+    if cook_requires_unmaterialized_admission(cli, &preflight) && !is_unmaterialized_replay_worker()
+    {
+        // Persist before provider execution. The scoped replay selector owns
         // ready and reverse-capacity admission after this durable boundary.
         return admit_unmaterialized_cook(
             cli,
@@ -957,15 +958,33 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
     }
 }
 
-fn detached_cook_can_queue(cli: &Cli) -> bool {
-    cli.detach_after_handoff
-        && !matches!(cli.placement, homeboy::cli_surface::Placement::Local)
-        && matches!(
-            cli.command,
-            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-            })
-        )
+/// Preserve durable Cook admission when no provider route is currently
+/// executable. Automatic local execution under pressure needs the separately
+/// audited local-capacity fallback; a stale or failed runner refresh is not it.
+fn cook_requires_unmaterialized_admission(
+    cli: &Cli,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+) -> bool {
+    let is_cook = matches!(
+        cli.command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+        })
+    );
+    is_cook
+        && ((cli.detach_after_handoff
+            && !cli.placement.allows_local_fallback()
+            && !matches!(cli.placement, homeboy::cli_surface::Placement::Local))
+            || (matches!(cli.placement, homeboy::cli_surface::Placement::Auto)
+                && preflight.selected_runner_id.is_none()
+                && matches!(
+                    preflight.resource_admission,
+                    homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+                )
+                && !matches!(
+                    preflight.fallback,
+                    homeboy::core::parsed_command_preflight::FallbackDirective::LocalCapacity
+                )))
 }
 
 fn admission_digest(value: impl AsRef<[u8]>) -> String {
@@ -1133,7 +1152,8 @@ fn admit_unmaterialized_cook(
     let admission = record.metadata["unmaterialized_cook_admission"].clone();
     let output = serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-admission-result/v1",
-        "status": admission["state"],
+        "status": "pending_resource_admission",
+        "admission_state": admission["state"],
         "cook_id": cook_id,
         "run_id": cook_id,
         "materialized": false,
@@ -4569,7 +4589,7 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
         AgentTaskCommand::Evidence(args) => Some(&args.run_id),
         AgentTaskCommand::Diagnose(args) => Some(&args.run_id),
         AgentTaskCommand::Review(args) => Some(&args.run_id),
-        AgentTaskCommand::Retry(args) if !args.run => Some(&args.run_id),
+        AgentTaskCommand::Retry(args) => Some(&args.run_id),
         AgentTaskCommand::Reconcile(args) => Some(&args.run_id),
         _ => None,
     };
@@ -4578,13 +4598,26 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
     };
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    Some(agent_task_lifecycle::run_record_exists_resolved_in_store(
-        &lifecycle_store,
-        run_id,
-    )?)
-    .map(Ok)
-    .transpose()
-    .map(|present| present.unwrap_or(false))
+    let present =
+        agent_task_lifecycle::run_record_exists_resolved_in_store(&lifecycle_store, run_id)?;
+    if !present {
+        return Ok(false);
+    }
+    if let AgentTaskCommand::Retry(args) = &agent_task.command {
+        if args.run {
+            let record = agent_task_lifecycle::reconcile_status_in_store(
+                &lifecycle_store,
+                run_id,
+                agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                false,
+            )?
+            .record;
+            return Ok(record.metadata["cook_id"].is_string()
+                || (record.state.is_terminal()
+                    && agent_task_lifecycle::is_unmaterialized_cook_admission(&record)));
+        }
+    }
+    Ok(true)
 }
 
 fn lab_offload_command_for_materialized_args(

@@ -53,7 +53,7 @@ pub(crate) fn run_command_output(
             let bounded_operation = agent_task_bounded_operation(&args);
             if matches!(
                 &args.command,
-                crate::commands::agent_task::AgentTaskCommand::Cook(_)
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) if !cook_args.preview
             ) {
                 if let Some(path) = output_file {
                     let full = agent_task_requests_full_output(&args);
@@ -231,7 +231,6 @@ pub(crate) fn run_command_output(
             let summarize = matches!(
                 args.command,
                 Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
-                    | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
                     | Some(crate::commands::cleanup::CleanupCommand::AutomaticRetention)
             ) && !homeboy::core::lab_routing::is_lab_offload_subprocess();
             command_run_with_summary(

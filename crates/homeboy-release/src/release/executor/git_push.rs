@@ -62,6 +62,28 @@ pub(crate) fn run_git_push(
                 let recovered_data = serde_json::to_value(&push).map_err(|e| {
                     Error::internal_json(e.to_string(), Some("git push output".to_string()))
                 })?;
+                // Recovery is deliberately bounded to one fetch/rebase/re-push.
+                // A second concurrent advance must remain a failed release step,
+                // rather than turning a rejected re-push into false success.
+                if !push.success {
+                    let mut data = serde_json::json!({
+                        "success": false,
+                        "recovered": "advanced-remote-rebased",
+                        "branch": branch,
+                        "target": format!("origin/{branch}"),
+                        "push": recovered_data,
+                    });
+                    if !advance.is_noop() {
+                        data["concurrent_advance"] = advance.to_json();
+                    }
+                    return Ok(step_failed(
+                        "git.push",
+                        "git.push",
+                        Some(data),
+                        Some(push_error_message(&push)),
+                        non_fast_forward_recovery_hints(component_id, branch),
+                    ));
+                }
                 // Make the race loud: the reviewed dry-run plan no longer matches
                 // the published release contents (issue #6141). Skip the warning
                 // for no-op recoveries (already reconciled / spurious rejection).
@@ -576,6 +598,94 @@ mod tests {
             "exactly one release commit must exist on the branch, got: {}",
             subjects
         );
+    }
+
+    #[test]
+    fn run_git_push_fails_when_recovery_repush_is_rejected_after_second_advance() {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        let other = tempfile::tempdir().expect("other clone tempdir");
+        let local = tempfile::tempdir().expect("local tempdir");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(remote.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            remote.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        git(
+            other.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        git(other.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            other.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(other.path().join("base.txt"), "base").unwrap();
+        git(other.path(), &["add", "."]);
+        git(other.path(), &["commit", "-m", "base"]);
+        git(other.path(), &["push", "origin", "main"]);
+        git(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        git(local.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            local.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+
+        std::fs::write(other.path().join("first.txt"), "first").unwrap();
+        git(other.path(), &["add", "."]);
+        git(other.path(), &["commit", "-m", "first advance"]);
+        git(other.path(), &["push", "origin", "main"]);
+        std::fs::write(local.path().join("release.txt"), "release").unwrap();
+        git(local.path(), &["add", "."]);
+        git(local.path(), &["commit", "-m", "release: v1.0.0"]);
+        git(
+            local.path(),
+            &["tag", "-a", "v1.0.0", "-m", "Release v1.0.0"],
+        );
+
+        // A receive hook advances main during the recovery re-push, after its
+        // fetch/rebase boundary. Git rejects that stale re-push deterministically.
+        let hook = remote.path().join("hooks/pre-receive");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = refs/heads/main ]; then\n    tree=$(git rev-parse \"$old^{tree}\")\n    raced=$(printf 'second advance\\n' | git commit-tree \"$tree\" -p \"$old\")\n    git update-ref \"$ref\" \"$raced\" \"$old\"\n  fi\ndone\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"), None)
+            .expect("push step returns a result");
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(
+            result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("success"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("recovered"))
+                .and_then(serde_json::Value::as_str),
+            Some("advanced-remote-rebased")
+        );
+        assert!(!result.error.unwrap_or_default().is_empty());
     }
 
     fn rev(dir: &std::path::Path, refname: &str) -> String {

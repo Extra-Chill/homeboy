@@ -66,6 +66,7 @@ mod process;
 mod recovery;
 pub(crate) mod redaction;
 mod secrets;
+mod submission;
 mod worker;
 
 #[cfg(test)]
@@ -94,6 +95,7 @@ use paths::*;
 use process::*;
 use redaction::*;
 use secrets::*;
+use submission::*;
 
 // Crate-internal surface consumed by sibling `runner` modules (evidence, worker,
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
@@ -116,6 +118,9 @@ pub(crate) use process::{
 pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
 pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
+
+mod request;
+pub use request::{exec_request, RunnerExecRequest};
 
 // Public surface re-exported by the parent `runner` module. These mirror the
 // pre-split `pub` items so external callers keep referencing them unchanged.

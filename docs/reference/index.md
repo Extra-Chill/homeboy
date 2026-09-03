@@ -6,9 +6,10 @@ Reference pages are intentionally dense. If you are deciding what to run next, s
 
 ## CLI
 
-- [Generated CLI reference](cli/commands/index.md) - every command, argument, flag, and subcommand, generated from clap
 - [Root command and global flags](cli/homeboy-root-command.md)
-- [Command index](../commands/commands-index.md) - hand-written narrative per command family
+- [Command concepts and workflows](../commands/index.md)
+- Runtime command index: `homeboy self docs commands/commands-index`
+- Exact command help: `homeboy <command> --help`
 - [Contract manifest command](../commands/contract.md)
 
 ## Configuration
@@ -25,7 +26,7 @@ Reference pages are intentionally dense. If you are deciding what to run next, s
 
 ## Extension Commands
 
-Extensions add top-level commands at runtime, so they are not part of the
-clap-generated reference above.
+Extensions add top-level commands at runtime. They appear automatically in
+`homeboy --help` and the runtime command index when installed.
 
 - [Cargo command](../commands/cargo.md)

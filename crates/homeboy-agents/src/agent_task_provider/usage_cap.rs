@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use crate::agent_task::AgentTaskOutcome;
+use crate::agent_task::AgentTaskRequest;
+use homeboy_engine_primitives::content_hash;
 
 /// Diagnostic class attached to an outcome when Homeboy detects a provider
 /// usage cap in its output. Distinct from the generic rate-limit text match
@@ -43,6 +45,64 @@ pub fn provider_usage_cap_key(backend: &str, selector: Option<&str>) -> String {
         Some(selector) => format!("{backend}::{selector}"),
         None => backend.to_string(),
     }
+}
+
+/// Model-scoped route key used by scheduler dispatch. Distinct models on one
+/// runtime backend can represent independent provider accounts or cap windows.
+pub fn provider_usage_cap_key_for_model(
+    backend: &str,
+    selector: Option<&str>,
+    model: Option<&str>,
+) -> String {
+    let route = provider_usage_cap_key(backend, selector);
+    match model.map(str::trim).filter(|model| !model.is_empty()) {
+        Some(model) => format!("{route}::{model}"),
+        None => route,
+    }
+}
+
+/// Stable capacity key for an effective route. Account/provider configuration
+/// and runtime selection are part of the identity so independent accounts on
+/// one backend/model never inherit each other's cap evidence.
+pub fn provider_usage_cap_key_for_request(request: &AgentTaskRequest) -> String {
+    let encoded = serde_json::to_vec(&serde_json::json!({
+        "backend": request.executor.backend,
+        "selector": request.executor.selector,
+        "runtime_selection": request.executor.runtime_selection(),
+        "required_capabilities": request.executor.required_capabilities,
+        "effective_config": provider_capacity_config(request),
+        "resolved_runtime_identity": request.metadata.get("resolved_runtime_identity"),
+    }))
+    .expect("provider route capacity identity serializes");
+    content_hash::sha256_hex(&encoded)
+}
+
+pub(crate) fn provider_capacity_config(request: &AgentTaskRequest) -> serde_json::Value {
+    let mut config =
+        super::effective_provider_config(&request.executor.config, request.executor.model())
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+    config.remove("workspace_root");
+    if let Some(workspace) = config
+        .get_mut("workspace")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        workspace.remove("root");
+        if workspace.is_empty() {
+            config.remove("workspace");
+        }
+    }
+    if let Some(runtime_env) = config
+        .get_mut("runtime_env")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        runtime_env.remove("TMPDIR");
+        if runtime_env.is_empty() {
+            config.remove("runtime_env");
+        }
+    }
+    serde_json::Value::Object(config)
 }
 
 /// Providers Homeboy has learned are presently over their usage cap, plus the
@@ -66,6 +126,11 @@ impl ProviderUsageCapRegistry {
         match self.capped.get(&key) {
             Some(existing) if *existing >= reset_at => {}
             _ => {
+                // Stale rows may be discarded, but active capacity evidence is
+                // authoritative and must never be silently dropped merely
+                // because many accounts are active at once.
+                let now = Utc::now();
+                self.capped.retain(|_, reset| *reset > now);
                 self.capped.insert(key, reset_at);
             }
         }
@@ -228,6 +293,10 @@ mod tests {
             provider_usage_cap_key("opencode-go", Some("secondary")),
             "opencode-go::secondary"
         );
+        assert_ne!(
+            provider_usage_cap_key_for_model("opencode", None, Some("zai/glm")),
+            provider_usage_cap_key_for_model("opencode", None, Some("openai/gpt"))
+        );
     }
 
     #[test]
@@ -239,5 +308,44 @@ mod tests {
         registry.record(&key, now() + chrono::Duration::minutes(5));
 
         assert_eq!(registry.active(&key, now()), Some(later));
+    }
+
+    #[test]
+    fn registry_preserves_more_than_sixty_four_active_capacity_bindings() {
+        let mut registry = ProviderUsageCapRegistry::default();
+        let reset_at = Utc::now() + chrono::Duration::hours(1);
+        for index in 0..64 {
+            registry.record(format!("active-{index}"), reset_at);
+        }
+
+        registry.record("overflow", reset_at);
+
+        assert_eq!(registry.capped.len(), 65);
+        for index in 0..64 {
+            assert_eq!(
+                registry.active(&format!("active-{index}"), Utc::now()),
+                Some(reset_at)
+            );
+        }
+        assert_eq!(registry.active("overflow", Utc::now()), Some(reset_at));
+    }
+
+    #[test]
+    fn bounded_registry_prunes_expired_bindings_before_admitting_new_evidence() {
+        let mut registry = ProviderUsageCapRegistry::default();
+        registry.capped.insert(
+            "expired".to_string(),
+            Utc::now() - chrono::Duration::seconds(1),
+        );
+        for index in 0..63 {
+            registry.capped.insert(
+                format!("active-{index}"),
+                Utc::now() + chrono::Duration::hours(1),
+            );
+        }
+        registry.record("replacement", Utc::now() + chrono::Duration::hours(1));
+
+        assert!(!registry.capped.contains_key("expired"));
+        assert!(registry.capped.contains_key("replacement"));
     }
 }

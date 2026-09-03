@@ -2,10 +2,10 @@ use super::super::dispatch::{
     compact_exec_command_run, raw_exec_command_run, render_compact_exec_output,
 };
 use super::super::exec::{
-    exec_with_hydration, exec_workspace_context, prepare_runner_exec_command,
-    prepare_runner_exec_env, prepare_runner_exec_secret_env_plan, read_bounded,
-    read_runner_exec_script, read_runner_exec_script_from_reader, should_print_handoff,
-    validate_runner_exec_invocation_shape, validate_runner_exec_public_env,
+    exec_workspace_context, execute, prepare_runner_exec_command, prepare_runner_exec_env,
+    prepare_runner_exec_secret_env_plan, read_bounded, read_runner_exec_script,
+    read_runner_exec_script_from_reader, should_print_handoff,
+    validate_runner_exec_invocation_shape, validate_runner_exec_public_env, RunnerExecInput,
     RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 
@@ -33,36 +33,17 @@ fn runner_exec_generates_a_persisted_run_for_declared_outputs() {
         )
         .expect("create local runner");
 
-        let (output, exit_code) = exec_with_hydration(
+        let mut input = RunnerExecInput::new(
             "lab-local",
-            Some(workspace.path().display().to_string()),
-            None,
-            None,
-            false,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            None,
-            Vec::new(),
-            vec!["output".to_string()],
-            Vec::new(),
-            false,
-            false,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
                 "mkdir output && printf generated > output/result.txt".to_string(),
             ],
-            Vec::new(),
-        )
-        .expect("runner exec with generated run id");
+        );
+        input.cwd = Some(workspace.path().display().to_string());
+        input.artifact_dir_outputs = vec!["output".to_string()];
+        let (output, exit_code) = execute(input).expect("runner exec with generated run id");
 
         assert_eq!(exit_code, 0);
         let run_id = output.mirror_run_id.expect("persisted runner exec run id");
@@ -117,6 +98,7 @@ fn synced_node_workload_receives_runner_extension_environment() {
         homeboy_core::extension::lifecycle::install(
             &extension.path().display().to_string(),
             Some("fixture"),
+            homeboy_core::extension::registry::ExtensionLifecycleValidation::declaration_only(),
         )
         .expect("install fixture extension");
         runner::create(
@@ -128,39 +110,31 @@ fn synced_node_workload_receives_runner_extension_environment() {
         )
         .expect("create runner");
 
-        let (output, code) = exec_with_hydration(
+        let mut input = RunnerExecInput::new(
             "lab-node",
-            None,
-            Some(project.path().display().to_string()),
-            None,
-            false,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            false,
-            false,
             vec![
                 "node".to_string(),
                 "-e".to_string(),
                 "if (process.env.FIXTURE_RUNTIME !== 'runner-local') process.exit(1)".to_string(),
             ],
-            vec!["fixture".to_string()],
-        )
-        .expect("synced Node execution");
+        );
+        input.sync_workspace = Some(project.path().display().to_string());
+        input.run_id = Some("synced-node-run".to_string());
+        input.extension_env_providers = vec!["fixture".to_string()];
+        let (output, code) = execute(input).expect("synced Node execution");
 
         assert_eq!(code, 0, "{}", output.stderr);
         assert_eq!(output.stdout, "");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("synced-node-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(
+            run.cwd.as_deref(),
+            run.metadata_json["remote_workspace"].as_str(),
+            "the durable run must identify the materialized snapshot, not the configured root"
+        );
     });
 }
 
@@ -266,36 +240,17 @@ fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
 
         // The install command deliberately fails. The exec invocation itself
         // must probe and reuse this prepared view before starting the workload.
-        let (output, exit_code) = exec_with_hydration(
+        let mut input = RunnerExecInput::new(
             "workspace-ref-local",
-            None,
-            None,
-            Some(synced.workspace_ref.clone()),
-            true,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            false,
-            false,
             vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 "test -f node_modules/build.txt && printf '%s' \"$PWD\"".to_string(),
             ],
-            Vec::new(),
-        )
-        .expect("hydrate and execute resolved snapshot");
+        );
+        input.workspace_ref = Some(synced.workspace_ref.clone());
+        input.hydrate_deps = true;
+        let (output, exit_code) = execute(input).expect("hydrate and execute resolved snapshot");
 
         assert_eq!(exit_code, 0, "{}", output.stderr);
         assert_eq!(output.remote_cwd, synced.remote_path);
@@ -516,13 +471,187 @@ fn sync_workspace_exec_rejects_explicit_cwd() {
         Some("/local/project".to_string()),
         None,
         false,
-        false,
     )
     .expect_err("cwd and sync-workspace must conflict");
 
     assert!(err
         .to_string()
         .contains("--cwd and --sync-workspace are mutually exclusive"));
+}
+
+#[test]
+fn invalid_workspace_ref_does_not_create_explicit_runner_exec_run() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        runner::create(
+            &format!(
+                r#"{{"id":"invalid-workspace-ref-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+
+        let run_id = "invalid-workspace-ref-run";
+        let mut options = runner::RunnerExecOptions::default();
+        options.command = vec!["pwd".to_string()];
+        options.run_id = Some(run_id.to_string());
+        let mut request = runner::RunnerExecRequest::new("invalid-workspace-ref-local", options);
+        request.workspace_ref = Some("workspace:00000000-0000-0000-0000-000000000001".to_string());
+
+        runner::exec_request(request).expect_err("invalid workspace ref must fail");
+
+        let store = ObservationStore::open_initialized().expect("store");
+        assert!(store.get_run(run_id).expect("read run").is_none());
+    });
+}
+
+#[test]
+fn sync_workspace_failure_is_durably_attributed_before_runner_handoff() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        runner::create(
+            &format!(
+                r#"{{"id":"workspace-sync-failure","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let missing_workspace = runner_root.path().join("missing-workspace");
+
+        let mut input = RunnerExecInput::new("workspace-sync-failure", vec!["pwd".to_string()]);
+        input.sync_workspace = Some(missing_workspace.display().to_string());
+        input.run_id = Some("workspace-sync-failure-run".to_string());
+        let error = execute(input).expect_err("missing workspace must fail before runner handoff");
+
+        assert!(error.message.contains("workspace sync path"));
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("workspace-sync-failure-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(run.metadata_json["runner_exec_phase"], "workspace_sync");
+        assert_eq!(
+            run.metadata_json["runner_pre_handoff_failure"]["phase"],
+            "workspace_sync"
+        );
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
+fn workspace_sync_timeout_terminalizes_stalled_workspace_before_handoff() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("source.txt"), "source").expect("workspace source");
+        runner::create(
+            &format!(
+                r#"{{"id":"bounded-workspace-sync","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let mut input = super::super::exec::RunnerExecInput::new(
+            "bounded-workspace-sync",
+            vec!["pwd".to_string()],
+        );
+        input.sync_workspace = Some(workspace.path().display().to_string());
+        input.run_id = Some("bounded-workspace-sync-run".to_string());
+        input.workspace_sync_timeout = std::time::Duration::ZERO;
+        let error =
+            execute(input).expect_err("expired pre-command deadline must stop workspace sync");
+
+        assert_eq!(error.code.as_str(), "runner.lab_transport_failure");
+        assert_eq!(error.details["workspace_sync"]["timed_out"], true);
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("bounded-workspace-sync-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(run.metadata_json["runner_exec_phase"], "workspace_sync");
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
+fn hydration_failure_is_durably_attributed_before_runner_handoff() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("homeboy-deps.json"),
+            r#"{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[]}"#,
+        )
+        .expect("dependency manifest");
+        runner::create(
+            &format!(
+                r#"{{"id":"hydration-failure","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let mut input = RunnerExecInput::new("hydration-failure", vec!["pwd".to_string()]);
+        input.sync_workspace = Some(workspace.path().display().to_string());
+        input.hydrate_deps = true;
+        input.run_id = Some("hydration-failure-run".to_string());
+        let error = execute(input)
+            .expect_err("failed dependency hydration must fail before runner handoff");
+
+        assert!(!error.message.is_empty());
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("hydration-failure-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(
+            run.metadata_json["runner_pre_handoff_failure"]["phase"],
+            "dependency_hydration"
+        );
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
+fn hydration_prerequisite_failure_terminalizes_the_durable_run() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        runner::create(
+            &format!(
+                r#"{{"id":"hydration-prerequisite-failure","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let mut input =
+            RunnerExecInput::new("hydration-prerequisite-failure", vec!["pwd".to_string()]);
+        input.hydrate_deps = true;
+        input.run_id = Some("hydration-prerequisite-failure-run".to_string());
+        let error = execute(input).expect_err("hydration requires a synchronized workspace");
+
+        assert!(error.message.contains("--hydrate-deps requires"));
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("hydration-prerequisite-failure-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(
+            run.metadata_json["runner_exec_phase"],
+            "dependency_hydration"
+        );
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
 }
 
 #[test]
@@ -768,37 +897,19 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             )
             .expect("run");
 
-        let (output, exit_code) = exec_with_hydration(
+        let mut input = RunnerExecInput::new(
             "lab-local",
-            Some(workspace.path().display().to_string()),
-            None,
-            None,
-            false,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            Some(run.id.clone()),
-            vec!["out.txt".to_string(), "reports".to_string()],
-            Vec::new(),
-            Vec::new(),
-            false,
-            false,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
                 "printf hello > out.txt && mkdir reports && printf '{}' > reports/result.json"
                     .to_string(),
             ],
-            Vec::new(),
-        )
-        .expect("runner exec");
+        );
+        input.cwd = Some(workspace.path().display().to_string());
+        input.run_id = Some(run.id.clone());
+        input.artifact_outputs = vec!["out.txt".to_string(), "reports".to_string()];
+        let (output, exit_code) = execute(input).expect("runner exec");
 
         assert_eq!(exit_code, 0);
         let binaries = output
@@ -850,36 +961,18 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             )
             .expect("run");
 
-        let (output, exit_code) = exec_with_hydration(
+        let mut input = RunnerExecInput::new(
             "lab-local",
-            Some(workspace.path().display().to_string()),
-            None,
-            None,
-            false,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            Some(run.id.clone()),
-            Vec::new(),
-            Vec::new(),
-            vec!["summary.json".to_string()],
-            false,
-            false,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
                 r#"printf '{"matrix":{"passed":1}}' > summary.json"#.to_string(),
             ],
-            Vec::new(),
-        )
-        .expect("runner exec");
+        );
+        input.cwd = Some(workspace.path().display().to_string());
+        input.run_id = Some(run.id.clone());
+        input.summary_outputs = vec!["summary.json".to_string()];
+        let (output, exit_code) = execute(input).expect("runner exec");
 
         assert_eq!(exit_code, 0);
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
@@ -935,12 +1028,15 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
             )
             .expect("run");
 
-        let (output, exit_code) = exec_with_hydration("lab-local", Some(workspace.path().display().to_string()), None, None, false, None, false, false, Vec::new(), None, Vec::new(), Vec::new(), None, None, false, Some(run.id.clone()), Vec::new(), Vec::new(), vec!["summary.json".to_string()], false, false, vec![
+        let mut input = RunnerExecInput::new("lab-local", vec![
                 "sh".to_string(),
                 "-c".to_string(),
                 r#"yes noisy | head -n 2000; printf '{"status":"pass","count":2000}' > summary.json"#.to_string(),
-            ], Vec::new())
-        .expect("runner exec");
+            ]);
+        input.cwd = Some(workspace.path().display().to_string());
+        input.run_id = Some(run.id.clone());
+        input.summary_outputs = vec!["summary.json".to_string()];
+        let (output, exit_code) = execute(input).expect("runner exec");
 
         assert_eq!(exit_code, 0);
         assert!(output.stdout.len() > 10_000);
@@ -1359,36 +1455,17 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
 fn read_only_artifact_exec_rejects_capture_patch() {
     // A read-only retrieval must never rewrite a draining generation, so it
     // cannot capture a mutation patch (Extra-Chill/homeboy#9420).
-    let err = exec_with_hydration(
+    let mut input = RunnerExecInput::new(
         "lab-local",
-        None,
-        None,
-        None,
-        false,
-        None,
-        false,
-        true, // capture_patch
-        Vec::new(),
-        None,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        false,
-        None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        true, // read_only_artifact
-        false,
         vec![
             "sh".to_string(),
             "-c".to_string(),
             "cat result.json".to_string(),
         ],
-        Vec::new(),
-    )
-    .expect_err("read-only retrieval cannot capture a patch");
+    );
+    input.capture_patch = true;
+    input.read_only_artifact = true;
+    let err = execute(input).expect_err("read-only retrieval cannot capture a patch");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert_eq!(err.details["field"], "read_only_artifact");
@@ -1396,36 +1473,18 @@ fn read_only_artifact_exec_rejects_capture_patch() {
 
 #[test]
 fn read_only_artifact_exec_rejects_declared_outputs() {
-    let err = exec_with_hydration(
+    let mut input = RunnerExecInput::new(
         "lab-local",
-        None,
-        None,
-        None,
-        false,
-        None,
-        false,
-        false,
-        Vec::new(),
-        None,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        false,
-        Some("run-1".to_string()),
-        vec!["out.txt".to_string()], // artifact output declaration
-        Vec::new(),
-        Vec::new(),
-        true, // read_only_artifact
-        false,
         vec![
             "sh".to_string(),
             "-c".to_string(),
             "cat result.json".to_string(),
         ],
-        Vec::new(),
-    )
-    .expect_err("read-only retrieval cannot declare new artifact outputs");
+    );
+    input.run_id = Some("run-1".to_string());
+    input.artifact_outputs = vec!["out.txt".to_string()];
+    input.read_only_artifact = true;
+    let err = execute(input).expect_err("read-only retrieval cannot declare new artifact outputs");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert_eq!(err.details["field"], "read_only_artifact");

@@ -9,7 +9,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::rig_test_support::{
-    bare_source_path, minimal_rig, minimal_stack, run_git, write_rig, write_stack, GitFixture,
+    bare_source_path, clone_bare, commit_all, init_main, minimal_rig, minimal_stack, push_main,
+    run_git, write_rig, write_stack,
 };
 
 /// The isolated home each test below installs, named as a config root.
@@ -24,32 +25,14 @@ fn test_config_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// Source-update-only fixture helpers. These live here rather than in the
-/// shared `support.rs` because only the source-update tests attach to an
-/// existing repo and push back to a bare source; keeping them in the shared
-/// module made them appear dead to `install_test.rs`, which includes the same
-/// `#[path]` module but never pushes.
-impl<'a> GitFixture<'a> {
-    /// Attach to an already-initialized repository in `dir` (e.g. one created
-    /// via a raw `git init` elsewhere) to reuse the commit/push helpers.
-    fn attach(dir: &'a Path) -> Self {
-        Self { dir }
-    }
-
-    /// Push the current `HEAD` to the `main` branch of `source`.
-    fn push_main(&self, source: &str) {
-        run_git(self.dir, &["push", source, "HEAD:main"]);
-    }
-}
-
 fn commit_package(package: &Path, message: &str) {
-    GitFixture::attach(package).commit(message);
+    commit_all(package, message);
 }
 
 fn create_bare_source(package: &Path) -> tempfile::TempDir {
-    let git = GitFixture::init(package);
-    git.commit("initial rigs");
-    git.clone_bare()
+    init_main(package);
+    commit_all(package, "initial rigs");
+    clone_bare(package)
 }
 
 #[test]
@@ -85,7 +68,8 @@ fn linked_package_provenance_tracks_execution_time_content_and_dirty_state() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
     let rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-    GitFixture::init(package.path()).commit("initial rig");
+    init_main(package.path());
+    commit_all(package.path(), "initial rig");
 
     let installed = install(
         &test_config_root(),
@@ -480,7 +464,7 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     )
     .expect("update rig");
     commit_package(package.path(), "update alpha");
-    GitFixture::attach(package.path()).push_main(&source);
+    push_main(package.path(), &source);
 
     let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
 
@@ -529,7 +513,7 @@ fn update_git_source_refreshes_owned_stack_specs() {
     )
     .expect("update stack");
     commit_package(package.path(), "update alpha stack");
-    GitFixture::attach(package.path()).push_main(&source);
+    push_main(package.path(), &source);
 
     let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
 
@@ -574,7 +558,7 @@ fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() 
     )
     .expect("update remote package");
     commit_package(package.path(), "remote update");
-    GitFixture::attach(package.path()).push_main(&source);
+    push_main(package.path(), &source);
 
     let error = update_source_for_rig(&test_config_root(), "alpha")
         .expect_err("invalid provenance must fail closed");
@@ -615,7 +599,7 @@ fn update_all_reports_broken_sources_and_continues() {
     )
     .expect("update good rig");
     commit_package(good_package.path(), "update good rig");
-    GitFixture::attach(good_package.path()).push_main(&good_source);
+    push_main(good_package.path(), &good_source);
 
     let result =
         update_all_sources(&test_config_root()).expect("update all continues after broken source");
@@ -652,7 +636,7 @@ fn refresh_source_selector_updates_recorded_package() {
     )
     .expect("update rig");
     commit_package(package.path(), "refresh alpha");
-    GitFixture::attach(package.path()).push_main(&source);
+    push_main(package.path(), &source);
 
     let package_id = list_sources(&test_config_root()).expect("sources").sources[0]
         .package_id
@@ -691,7 +675,7 @@ fn refresh_without_selector_updates_all_sources() {
     )
     .expect("update rig");
     commit_package(package.path(), "refresh alpha");
-    GitFixture::attach(package.path()).push_main(&source);
+    push_main(package.path(), &source);
 
     let result = update_source(&test_config_root(), None).expect("refresh all sources");
 
@@ -720,7 +704,7 @@ fn update_git_source_skips_user_replaced_stack_specs() {
     )
     .expect("update source stack");
     commit_package(package.path(), "update alpha stack");
-    GitFixture::attach(package.path()).push_main(&source);
+    push_main(package.path(), &source);
 
     let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
 

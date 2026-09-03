@@ -9,10 +9,14 @@
 //! real and the result events, exit codes, captured stdout/stderr, and patch
 //! artifacts are exercised end to end.
 
-use homeboy_core::api_jobs::{Job, JobEventKind, JobStatus, JobStore};
-use homeboy_core::daemon::route_with_body;
+use homeboy_core::api_jobs::{Job, JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::daemon::{route_with_body, DirectDaemonExecSubmitRequest};
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use homeboy_core::observation::ObservationStore;
 use homeboy_core::test_support::HomeGuard;
+use homeboy_runner_contract::{
+    RunnerApiSubmitRequest, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
+};
 
 /// Register the runner-side exec driver the daemon `/exec` route drives.
 /// Production wires this at CLI startup; the registration is an idempotent
@@ -55,6 +59,131 @@ fn wait_for_job(store: &JobStore, job_id: &str) -> Job {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     store.get(id).expect("job")
+}
+
+fn direct_submission(command: Vec<&str>, submission_key: &str) -> serde_json::Value {
+    let request = RemoteRunnerJobRequest {
+        runner_id: "lab-local".to_string(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: command.into_iter().map(str::to_string).collect(),
+        cwd: Some(std::env::current_dir().expect("cwd").display().to_string()),
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch: false,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        require_paths: Vec::new(),
+        extension_env_providers: Vec::new(),
+        lab_runner_workload: None,
+        lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+        metadata: None,
+    };
+    serde_json::to_value(DirectDaemonExecSubmitRequest {
+        submission: RunnerApiSubmitRequest {
+            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            submission_key: submission_key.to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+        },
+        runner: None,
+        raw_exec: false,
+        workspace_owner_request: None,
+    })
+    .expect("serialize direct submission")
+}
+
+#[test]
+fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields() {
+    register_driver();
+    let _home = create_lab_local_runner();
+    let store = JobStore::default();
+    let payload = direct_submission(
+        vec!["sh", "-c", "sleep 1; printf typed"],
+        "typed-daemon-run",
+    );
+
+    for field in [
+        "runner_id",
+        "command",
+        "cwd",
+        "env",
+        "source_snapshot",
+        "lifecycle",
+        "runner_workload",
+        "path_materialization_plan",
+    ] {
+        assert!(payload.get(field).is_none(), "adapter leaked {field}");
+    }
+    let response = route_with_body("POST", "/exec", Some(payload.clone()), &store);
+    assert_eq!(response.status_code, 200);
+    let job_id = response.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+    let retry = route_with_body("POST", "/exec", Some(payload), &store);
+    assert_eq!(retry.status_code, 200);
+    assert_eq!(retry.body["body"]["job"]["id"], job_id);
+    assert_eq!(retry.body["body"]["idempotent_resubmission"], true);
+    assert_eq!(wait_for_job(&store, &job_id).status, JobStatus::Succeeded);
+}
+
+#[test]
+fn typed_daemon_exec_rejects_submitted_authority_before_owner_registration() {
+    let _home = create_lab_local_runner();
+    let store = JobStore::default();
+    let mut payload = direct_submission(vec!["sh", "-c", "printf no"], "typed-authority");
+    payload["submission"]["workspace_claim_binding"] = serde_json::json!({"workspace": "x"});
+    payload["workspace_owner_request"] = serde_json::json!({
+        "workspace": {
+            "schema": homeboy_core::workspace_claim::WORKSPACE_IDENTITY_SCHEMA,
+            "kind": "test",
+            "locator": "typed-authority",
+        },
+        "owner_id": "owner",
+        "ttl_ms": 1000,
+    });
+
+    let response = route_with_body("POST", "/exec", Some(payload), &store);
+    assert_eq!(response.status_code, 400);
+    assert!(response
+        .body
+        .to_string()
+        .contains("not submitted workspace authority"));
+}
+
+#[test]
+fn typed_daemon_exec_rejects_inline_secret_before_execution() {
+    register_driver();
+    let _home = create_lab_local_runner();
+    let store = JobStore::default();
+    let marker = std::path::PathBuf::from(std::env::var("HOME").expect("isolated HOME"))
+        .join("inline-secret-executed");
+    let mut payload = direct_submission(
+        vec!["sh", "-c", &format!("printf ran > {}", marker.display())],
+        "typed-inline-secret",
+    );
+    payload["submission"]["envelope"]["dispatch"]["env"]["TOKEN"] =
+        serde_json::json!("inline-secret");
+    payload["submission"]["envelope"]["secret_env"] = serde_json::to_value(
+        homeboy_core::secret_env_plan::SecretEnvPlan::from_secret_env_names(["TOKEN".to_string()]),
+    )
+    .expect("serialize secret plan");
+
+    let response = route_with_body("POST", "/exec", Some(payload), &store);
+    assert_eq!(response.status_code, 400);
+    assert!(response
+        .body
+        .to_string()
+        .contains("cannot accept inline secret env values"));
+    assert!(response.body["body"]["job"].is_null());
+    assert!(!marker.exists());
 }
 
 #[test]
@@ -191,6 +320,7 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     homeboy_core::extension::lifecycle::install(
         &extension.path().display().to_string(),
         Some("fixture"),
+        ExtensionLifecycleValidation::declaration_only(),
     )
     .expect("install fixture extension");
     let store = JobStore::default();

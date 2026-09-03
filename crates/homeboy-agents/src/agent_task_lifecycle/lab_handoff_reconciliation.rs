@@ -185,15 +185,88 @@ fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) ->
     else {
         return false;
     };
-    let Ok(request) = serde_json::from_value::<RemoteRunnerJobRequest>(
-        intent.get("replay_request").cloned().unwrap_or(Value::Null),
-    ) else {
+    let Ok(replay) = pending_runner_replay(intent) else {
         return false;
     };
-    request.runner_id == runner_id
-        && request.submission_key() == Some(submission_key)
+    replay.runner_id() == runner_id
+        && replay.submission_key() == Some(submission_key)
         && handoff.runner_id == runner_id
         && handoff.submission_key.as_deref() == Some(submission_key)
+}
+
+enum PendingRunnerReplay {
+    Envelope(RunnerApiSubmitRequest),
+    Legacy(RemoteRunnerJobRequest),
+}
+
+impl PendingRunnerReplay {
+    fn runner_id(&self) -> &str {
+        match self {
+            Self::Envelope(request) => request
+                .envelope
+                .dispatch
+                .as_ref()
+                .map(|dispatch| dispatch.runner_id.as_str())
+                .unwrap_or_default(),
+            Self::Legacy(request) => &request.runner_id,
+        }
+    }
+
+    fn submission_key(&self) -> Option<&str> {
+        match self {
+            Self::Envelope(request) => Some(request.submission_key.trim())
+                .filter(|submission_key| !submission_key.is_empty()),
+            Self::Legacy(request) => request.submission_key(),
+        }
+    }
+
+    fn cwd(&self) -> Option<&str> {
+        match self {
+            Self::Envelope(request) => request
+                .envelope
+                .dispatch
+                .as_ref()
+                .and_then(|dispatch| dispatch.cwd.as_deref()),
+            Self::Legacy(request) => request.cwd.as_deref(),
+        }
+    }
+
+    fn command(&self) -> &[String] {
+        match self {
+            Self::Envelope(request) => request
+                .envelope
+                .dispatch
+                .as_ref()
+                .map(|dispatch| dispatch.command.as_slice())
+                .unwrap_or_default(),
+            Self::Legacy(request) => &request.command,
+        }
+    }
+}
+
+fn pending_runner_replay(intent: &serde_json::Map<String, Value>) -> Result<PendingRunnerReplay> {
+    if let Some(envelope) = intent.get("replay_envelope_request") {
+        return serde_json::from_value(envelope.clone())
+            .map(PendingRunnerReplay::Envelope)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse envelope runner replay request".to_string()),
+                )
+            });
+    }
+    serde_json::from_value(intent.get("replay_request").cloned().ok_or_else(|| {
+        Error::internal_unexpected(
+            "pending runner submission intent has no complete replay request",
+        )
+    })?)
+    .map(PendingRunnerReplay::Legacy)
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse runner replay request".to_string()),
+        )
+    })
 }
 
 /// The replay decision and its consequence must name one installation. This
@@ -236,47 +309,32 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     let submission_key = string("submission_key").ok_or_else(|| {
         Error::internal_unexpected("pending runner submission intent has no submission key")
     })?;
-    let mut request: RemoteRunnerJobRequest =
-        serde_json::from_value(intent.get("replay_request").cloned().ok_or_else(|| {
-            Error::internal_unexpected(
-                "pending runner submission intent has no complete replay request",
-            )
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse runner replay request".to_string()),
-            )
-        })?;
-    if request.runner_id != runner_id {
+    let replay = pending_runner_replay(intent)?;
+    if replay.runner_id() != runner_id || replay.submission_key() != Some(&submission_key) {
         return Err(Error::internal_unexpected(
-            "runner replay request does not match pending runner",
+            "runner replay request does not match pending submission authority",
         ));
     }
-    let cwd = request.cwd.clone().unwrap_or_default();
-    let command = request.command.clone();
-    let mut metadata = request.metadata.take().unwrap_or_else(|| json!({}));
-    if !metadata.is_object() {
-        metadata = json!({});
-    }
-    metadata["submission_key"] = json!(submission_key);
-    metadata["durable_run_id"] = json!(run_id);
-    metadata["reconciled_from"] = json!("durable_detached_handoff_intent");
-    request.metadata = Some(metadata);
-    let envelope_request = intent
-        .get("replay_envelope_request")
-        .cloned()
-        .map(serde_json::from_value::<RunnerApiSubmitRequest>)
-        .transpose()
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse envelope runner replay request".to_string()),
-            )
-        })?;
-    match runner_continuation::with_runner_continuation(|provider| match envelope_request {
-        Some(request) => provider.submit_reverse_broker_envelope_job(&runner_id, request),
-        None => provider.submit_reverse_broker_job(&runner_id, request),
+    let cwd = replay.cwd().unwrap_or_default().to_string();
+    let command = replay.command().to_vec();
+    let submission = match replay {
+        PendingRunnerReplay::Envelope(request) => {
+            runner_continuation::RunnerContinuationSubmission::RunnerApi(request)
+        }
+        PendingRunnerReplay::Legacy(mut request) => {
+            let mut metadata = request.metadata.take().unwrap_or_else(|| json!({}));
+            if !metadata.is_object() {
+                metadata = json!({});
+            }
+            metadata["submission_key"] = json!(submission_key);
+            metadata["durable_run_id"] = json!(run_id);
+            metadata["reconciled_from"] = json!("durable_detached_handoff_intent");
+            request.metadata = Some(metadata);
+            runner_continuation::RunnerContinuationSubmission::LegacyReplay(request)
+        }
+    };
+    match runner_continuation::with_runner_continuation(|provider| {
+        provider.submit_runner_api_request(&runner_id, submission)
     }) {
         Ok(job) => {
             record_detached_lab_run_in_store(
@@ -411,21 +469,10 @@ pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
     let submission_key = string("submission_key").ok_or_else(|| {
         Error::internal_unexpected("pending runner submission intent has no submission key")
     })?;
-    let request: RemoteRunnerJobRequest =
-        serde_json::from_value(intent.get("replay_request").cloned().ok_or_else(|| {
-            Error::internal_unexpected(
-                "pending runner submission intent has no complete replay request",
-            )
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse runner replay request".to_string()),
-            )
-        })?;
-    if request.runner_id != runner_id {
+    let replay = pending_runner_replay(intent)?;
+    if replay.runner_id() != runner_id || replay.submission_key() != Some(&submission_key) {
         return Err(Error::internal_unexpected(
-            "runner replay request does not match pending runner",
+            "runner replay request does not match pending submission authority",
         ));
     }
     let lookup = runner_continuation::with_runner_continuation(|provider| {
@@ -439,8 +486,8 @@ pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
                     run_id: &run_id,
                     runner_id: &runner_id,
                     runner_job_id: &job.id.to_string(),
-                    remote_workspace: request.cwd.as_deref().unwrap_or_default(),
-                    remote_command: &request.command,
+                    remote_workspace: replay.cwd().unwrap_or_default(),
+                    remote_command: replay.command(),
                 },
             )?;
             Ok(true)

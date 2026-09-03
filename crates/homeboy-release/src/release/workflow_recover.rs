@@ -169,6 +169,21 @@ pub(super) fn run_recover(
     };
     let remote_tag_commit = git::remote_tag_commit(&component.local_path, &tag_name)?;
 
+    if input.retag {
+        if let Some(result) = recreate_divergent_unpublished_release(
+            input,
+            &component,
+            &release_scope,
+            current_version,
+            &head_commit,
+            |candidate_tag| {
+                crate::release::executor::github_release_exists_for_tag(&component, candidate_tag)
+            },
+        )? {
+            return Ok((result, None, RECOVERY_INCOMPLETE_EXIT_CODE));
+        }
+    }
+
     let tag_is_stale = local_tag_commit
         .as_deref()
         .is_some_and(|commit| commit != head_commit)
@@ -273,24 +288,10 @@ pub(super) fn run_recover(
             ));
         }
 
-        if crate::release::executor::github_release_exists_for_tag(&component, &tag_name)
-            == Some(true)
-        {
-            return Err(Error::validation_invalid_argument(
-                "retag",
-                format!(
-                    "Refusing to retag '{}': a GitHub Release already exists for this tag",
-                    tag_name
-                ),
-                None,
-                Some(vec![
-                    format!(
-                        "Moving a published release is destructive. Delete it deliberately if intended: gh release delete {}",
-                        tag_name
-                    ),
-                ]),
-            ));
-        }
+        require_unpublished_github_release(
+            &tag_name,
+            crate::release::executor::github_release_exists_for_tag(&component, &tag_name),
+        )?;
 
         if input.dry_run {
             let actions = vec![format!("would retag {} to HEAD", tag_name)];
@@ -326,6 +327,11 @@ pub(super) fn run_recover(
                 .unwrap_or("<unknown>"),
             short_sha(&head_commit)
         );
+
+        require_unpublished_github_release(
+            &tag_name,
+            crate::release::executor::github_release_exists_for_tag(&component, &tag_name),
+        )?;
 
         if tag_exists_local {
             git::delete_local_tag(&component.local_path, &tag_name)?;
@@ -565,6 +571,339 @@ pub(super) fn run_recover(
         None,
         RECOVERY_INCOMPLETE_EXIT_CODE,
     ))
+}
+
+/// Recreate an unpublished release commit when an interrupted release left its
+/// tag on divergent history while the current branch still carries the prior
+/// source version. This is intentionally part of the guarded `--recover
+/// --retag --apply` path: it never guesses at a tag, published release, or
+/// branch rewrite.
+fn recreate_divergent_unpublished_release<F>(
+    input: &ReleaseCommandInput,
+    component: &homeboy_core::component::Component,
+    release_scope: &ReleaseScope,
+    current_version: &str,
+    head_commit: &str,
+    github_release_exists: F,
+) -> Result<Option<ReleaseCommandResult>>
+where
+    F: Fn(&str) -> Option<bool>,
+{
+    // Recovery must inspect the highest release identity even when it is not
+    // reachable from HEAD; that divergence is the state this path repairs.
+    let Some(tag_name) = release_scope.latest_tag_any()? else {
+        return Ok(None);
+    };
+    let Some(version) = tag_name.rsplit_once('v').map(|(_, version)| version) else {
+        return Ok(None);
+    };
+    let (Ok(tag_version), Ok(source_version)) = (
+        semver::Version::parse(version),
+        semver::Version::parse(current_version),
+    ) else {
+        return Ok(None);
+    };
+    if tag_version < source_version {
+        return Ok(None);
+    }
+
+    let path = &component.local_path;
+    let local_tag = if git::tag_exists_locally(path, &tag_name)? {
+        Some(git::get_tag_commit(path, &tag_name)?)
+    } else {
+        None
+    };
+    let (Some(local_tag), Some(remote_tag)) = (local_tag, git::remote_tag_commit(path, &tag_name)?)
+    else {
+        return Ok(None);
+    };
+    if local_tag != remote_tag || git::is_ancestor(path, &local_tag, head_commit)? {
+        return Ok(None);
+    }
+    if input.bump_override.as_deref() != Some(version) {
+        return Err(Error::validation_invalid_argument(
+            "bump",
+            format!(
+                "Divergent tag recovery requires --bump {} to name the exact release being replaced",
+                version
+            ),
+            None,
+            Some(vec![format!(
+                "After inspecting {}, retry with: --recover --retag --bump {} --apply",
+                tag_name, version
+            )]),
+        ));
+    }
+    require_interrupted_release_lineage(path, &tag_name, version, &local_tag, head_commit)?;
+
+    require_unpublished_github_release(&tag_name, github_release_exists(&tag_name))?;
+
+    let actions = vec![format!(
+        "recreated release commit for {} on the current branch and replaced divergent tag {}",
+        version, tag_name
+    )];
+    if input.dry_run {
+        return Ok(Some(recovery_dry_run_result(
+            input, version, &tag_name, true, true, true, actions,
+        )));
+    }
+    if let Some(identity) = &input.git_identity {
+        git::configure_identity(path, &git::parse_git_identity(Some(identity)))?;
+    }
+
+    if tag_version > source_version {
+        let bump = crate::release::version::bump_component_version_with_changelog(
+            component, version, None, None,
+        )?;
+        if let Some(mismatches) =
+            crate::release::executor::version_targets::collect_version_target_mismatches(
+                component,
+                &bump.new_version,
+            )
+        {
+            return Err(version_target_recovery_error(
+                &tag_name,
+                version,
+                "version targets",
+                mismatches,
+            ));
+        }
+        let commit = git::commit(
+            Some(&input.component_id),
+            Some(&format!("release: v{}", version)),
+            git::CommitOptions {
+                staged_only: false,
+                files: None,
+                exclude: None,
+                amend: false,
+            },
+        )?;
+        if !commit.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to recreate release commit: {}",
+                commit.stderr
+            )));
+        }
+    }
+    if let Some(mismatches) =
+        crate::release::executor::version_targets::collect_head_version_mismatches(
+            component, version,
+        )
+    {
+        return Err(version_target_recovery_error(
+            &tag_name,
+            version,
+            "committed version targets",
+            mismatches,
+        ));
+    }
+    let branch = git::current_branch(std::path::Path::new(path)).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "branch",
+            "Recovery requires a checked-out branch",
+            None,
+            None,
+        )
+    })?;
+    let branch_push = git::push_at(
+        Some(&input.component_id),
+        git::PushOptions {
+            refspec: Some(format!("HEAD:refs/heads/{branch}")),
+            ..Default::default()
+        },
+        Some(path),
+    )?;
+    if !branch_push.success {
+        reconcile_release_branch(component, &input.component_id)?;
+    }
+
+    git::fetch_origin(path)?;
+    let remote_branch = git::remote_branch_commit(path, &branch)?.ok_or_else(|| {
+        Error::git_command_failed(format!(
+            "Remote branch {} disappeared during recovery",
+            branch
+        ))
+    })?;
+    let recovered_head = git::get_head_commit(path)?;
+    if !git::is_ancestor(path, &recovered_head, &remote_branch)? {
+        return Err(Error::git_command_failed(format!(
+            "Recreated release commit is not reachable from origin/{}",
+            branch
+        )));
+    }
+
+    // Recheck immediately before replacing the public ref. The earlier check
+    // protects all preceding work; this closes the destructive TOCTOU window.
+    require_unpublished_github_release(&tag_name, github_release_exists(&tag_name))?;
+
+    git::delete_local_tag(path, &tag_name)?;
+    let tag = git::tag(
+        Some(&input.component_id),
+        Some(&tag_name),
+        Some(&format!("Release {}", tag_name)),
+    )?;
+    if !tag.success {
+        return Err(Error::git_command_failed(format!(
+            "Failed to recreate tag {}: {}",
+            tag_name, tag.stderr
+        )));
+    }
+    let delete = git::delete_remote_tag(path, &tag_name)?;
+    if !delete.success {
+        return Err(Error::git_command_failed(format!(
+            "Failed to delete remote tag {}: {}",
+            tag_name, delete.stderr
+        )));
+    }
+    let tag_push = git::push_at(
+        Some(&input.component_id),
+        git::PushOptions {
+            refspec: Some(format!("refs/tags/{tag_name}:refs/tags/{tag_name}")),
+            ..Default::default()
+        },
+        Some(path),
+    )?;
+    if !tag_push.success {
+        return Err(Error::git_command_failed(format!(
+            "Failed to push recreated tag {}: {}",
+            tag_name, tag_push.stderr
+        )));
+    }
+    git::fetch_origin(path)?;
+    let remote_branch = git::remote_branch_commit(path, &branch)?.ok_or_else(|| {
+        Error::git_command_failed(format!(
+            "Remote branch {} disappeared during recovery",
+            branch
+        ))
+    })?;
+    let remote_tag = git::remote_tag_commit(path, &tag_name)?.ok_or_else(|| {
+        Error::git_command_failed(format!(
+            "Remote tag {} disappeared during recovery",
+            tag_name
+        ))
+    })?;
+    if !git::is_ancestor(path, &remote_tag, &remote_branch)? {
+        return Err(Error::git_command_failed(format!(
+            "Remote tag {} is not reachable from origin/{}",
+            tag_name, branch
+        )));
+    }
+
+    let continuation_command = publication_continuation_command(input);
+    Ok(Some(ReleaseCommandResult {
+        component_id: input.component_id.clone(),
+        status: "git_recovered".to_string(),
+        phase: release_execution_plan(input).phase,
+        bump_type: "recover".to_string(),
+        dry_run: false,
+        releasable_commits: 0,
+        new_version: None,
+        tag: Some(tag_name.clone()),
+        skipped_reason: None,
+        plan: Some(recovery_release_plan(
+            &input.component_id,
+            version,
+            &tag_name,
+            true,
+            true,
+            true,
+            &actions,
+        )),
+        run: None,
+        deployment: None,
+        continuation_command: Some(continuation_command.clone()),
+        release_summary: [
+            actions,
+            vec![format!(
+                "Git state recovered; release publication is incomplete. Run: {}",
+                continuation_command
+            )],
+        ]
+        .concat(),
+        readiness: None,
+    }))
+}
+
+fn require_interrupted_release_lineage(
+    path: &str,
+    tag_name: &str,
+    version: &str,
+    tag_commit: &str,
+    head_commit: &str,
+) -> Result<()> {
+    let subject = git::execute_git_for_release(path, &["log", "-1", "--format=%s", tag_commit])?;
+    let subject = String::from_utf8_lossy(&subject.stdout).trim().to_string();
+    let expected_subject = format!("release: v{version}");
+    let parent = git::execute_git_for_release(path, &["rev-parse", &format!("{tag_commit}^")])?;
+    let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
+    let shares_branch_lineage = subject == expected_subject
+        && !parent.is_empty()
+        && git::is_ancestor(path, &parent, head_commit)?;
+    if shares_branch_lineage {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "retag",
+        format!(
+            "Refusing to replace divergent tag '{}': its commit is not an interrupted release from the current branch history",
+            tag_name
+        ),
+        None,
+        Some(vec![format!(
+            "Inspect the unrelated tag before resolving it manually: git show {}",
+            tag_name
+        )]),
+    ))
+}
+
+fn require_unpublished_github_release(tag_name: &str, exists: Option<bool>) -> Result<()> {
+    match exists {
+        Some(false) => Ok(()),
+        Some(true) => Err(Error::validation_invalid_argument(
+            "retag",
+            format!("Refusing to retag '{}': a GitHub Release already exists", tag_name),
+            None,
+            None,
+        )),
+        None => Err(Error::validation_invalid_argument(
+            "retag",
+            format!(
+                "Refusing to retag '{}': could not verify whether a GitHub Release exists",
+                tag_name
+            ),
+            None,
+            Some(vec!["Authenticate gh for this repository and retry; moving a published release is destructive.".to_string()]),
+        )),
+    }
+}
+
+fn version_target_recovery_error(
+    tag_name: &str,
+    version: &str,
+    target_label: &str,
+    mismatches: Vec<crate::release::executor::version_targets::VersionTargetMismatch>,
+) -> Error {
+    Error::validation_invalid_argument(
+        "retag",
+        format!(
+            "Refusing to recreate '{}': {} do not show {}",
+            tag_name, target_label, version
+        ),
+        None,
+        Some(
+            mismatches
+                .into_iter()
+                .map(|m| {
+                    format!(
+                        "{} = {}",
+                        m.file,
+                        m.found.unwrap_or_else(|| "<unreadable>".to_string())
+                    )
+                })
+                .collect(),
+        ),
+    )
 }
 
 fn recovery_dry_run_result(
@@ -928,5 +1267,288 @@ mod tests {
     #[test]
     fn recovery_incomplete_exit_code_is_not_success() {
         assert_ne!(RECOVERY_INCOMPLETE_EXIT_CODE, 0);
+    }
+
+    #[test]
+    fn divergent_retag_refuses_unknown_github_release_lookup() {
+        let error = require_unpublished_github_release("v1.2.3", None)
+            .expect_err("unknown publication state must refuse tag replacement");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("could not verify"));
+    }
+
+    #[test]
+    fn divergent_retag_refuses_unrelated_tag_lineage() {
+        let repo = tempfile::tempdir().expect("repo");
+        git_in(repo.path(), &["init", "-b", "main"]);
+        git_in(repo.path(), &["config", "user.name", "Homeboy Test"]);
+        git_in(
+            repo.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(repo.path().join("file.txt"), "base\n").expect("write base");
+        git_in(repo.path(), &["add", "."]);
+        git_in(repo.path(), &["commit", "-m", "base"]);
+        git_in(repo.path(), &["switch", "-c", "unrelated"]);
+        std::fs::write(repo.path().join("file.txt"), "unrelated\n").expect("write unrelated");
+        git_in(
+            repo.path(),
+            &["commit", "-am", "feature: unrelated release candidate"],
+        );
+        let tag_commit = git_in(repo.path(), &["rev-parse", "HEAD"]);
+        git_in(repo.path(), &["tag", "v1.2.3"]);
+        git_in(repo.path(), &["switch", "main"]);
+        std::fs::write(repo.path().join("main.txt"), "main\n").expect("write main");
+        git_in(repo.path(), &["add", "."]);
+        git_in(repo.path(), &["commit", "-m", "main advance"]);
+        let head_commit = git_in(repo.path(), &["rev-parse", "HEAD"]);
+
+        let error = require_interrupted_release_lineage(
+            &repo.path().to_string_lossy(),
+            "v1.2.3",
+            "1.2.3",
+            &tag_commit,
+            &head_commit,
+        )
+        .expect_err("unrelated tag must not be adopted");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("not an interrupted release"));
+    }
+
+    #[test]
+    fn divergent_unpublished_tag_is_recreated_on_the_remote_branch() {
+        use homeboy_core::component::{Component, VersionTarget};
+
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let remote = tempfile::tempdir().expect("remote");
+            let repo = tempfile::tempdir().expect("repo");
+            git_in(remote.path(), &["init", "--bare", "-b", "main"]);
+            git_in(repo.path(), &["init", "-b", "main"]);
+            git_in(repo.path(), &["config", "user.name", "Homeboy Test"]);
+            git_in(
+                repo.path(),
+                &["config", "user.email", "homeboy@example.test"],
+            );
+            git_in(
+                repo.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    remote.path().to_str().expect("remote path"),
+                ],
+            );
+            std::fs::write(repo.path().join("VERSION"), "0.1.0\n").expect("write version");
+            std::fs::write(
+                repo.path().join("CHANGELOG.md"),
+                "# Changelog\n\n## Unreleased\n\n- fix: recovered release\n",
+            )
+            .expect("write changelog");
+            git_in(repo.path(), &["add", "."]);
+            git_in(repo.path(), &["commit", "-m", "base"]);
+            git_in(repo.path(), &["push", "-u", "origin", "main"]);
+            let main_before = git_in(repo.path(), &["rev-parse", "HEAD"]);
+
+            git_in(repo.path(), &["switch", "-c", "orphaned-release"]);
+            std::fs::write(repo.path().join("VERSION"), "0.1.1\n").expect("write orphan version");
+            git_in(repo.path(), &["commit", "-am", "release: v0.1.1"]);
+            git_in(
+                repo.path(),
+                &["tag", "-a", "v0.1.1", "-m", "Release v0.1.1"],
+            );
+            git_in(repo.path(), &["push", "origin", "refs/tags/v0.1.1"]);
+            git_in(repo.path(), &["switch", "main"]);
+
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: repo.path().to_string_lossy().to_string(),
+                changelog_target: Some("CHANGELOG.md".to_string()),
+                version_targets: Some(vec![VersionTarget {
+                    file: "VERSION".to_string(),
+                    pattern: Some(r"^([0-9]+\.[0-9]+\.[0-9]+)$".to_string()),
+                    artifact_path: None,
+                }]),
+                ..Component::default()
+            };
+            homeboy_core::component::write_standalone_component_config(&component)
+                .expect("register fixture component");
+            let scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+            assert_eq!(scope.tag_prefix(), None);
+            assert_eq!(
+                scope.latest_tag_any().expect("latest tag"),
+                Some("v0.1.1".to_string())
+            );
+            let input = ReleaseCommandInput {
+                component_id: "fixture".to_string(),
+                path_override: Some(component.local_path.clone()),
+                recover: true,
+                retag: true,
+                bump_override: Some("0.1.1".to_string()),
+                ..Default::default()
+            };
+
+            let result = recreate_divergent_unpublished_release(
+                &input,
+                &component,
+                &scope,
+                "0.1.0",
+                &main_before,
+                |tag| {
+                    assert_eq!(tag, "v0.1.1");
+                    Some(false)
+                },
+            )
+            .expect("recovery succeeds")
+            .expect("divergent release detected");
+
+            assert_eq!(result.status, "git_recovered");
+            assert_eq!(result.tag.as_deref(), Some("v0.1.1"));
+            assert_eq!(
+                std::fs::read_to_string(repo.path().join("VERSION")).expect("read version"),
+                "0.1.1\n"
+            );
+            git_in(repo.path(), &["fetch", "origin"]);
+            let remote_main = git_in(repo.path(), &["rev-parse", "origin/main"]);
+            let remote_tag = git_in(repo.path(), &["rev-parse", "v0.1.1^{commit}"]);
+            assert_eq!(remote_tag, remote_main);
+            assert_eq!(
+                git_in(repo.path(), &["log", "-1", "--format=%s", "origin/main"]),
+                "release: v0.1.1"
+            );
+        });
+    }
+
+    #[test]
+    fn divergent_retag_reconciles_interrupted_equal_version_retry() {
+        use homeboy_core::component::{Component, VersionTarget};
+
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let remote = tempfile::tempdir().expect("remote");
+            let repo = tempfile::tempdir().expect("repo");
+            let other = tempfile::tempdir().expect("other clone");
+            git_in(remote.path(), &["init", "--bare", "-b", "main"]);
+            git_in(repo.path(), &["init", "-b", "main"]);
+            git_in(repo.path(), &["config", "user.name", "Homeboy Test"]);
+            git_in(
+                repo.path(),
+                &["config", "user.email", "homeboy@example.test"],
+            );
+            git_in(
+                repo.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    remote.path().to_str().expect("remote path"),
+                ],
+            );
+            std::fs::write(repo.path().join("VERSION"), "0.1.0\n").expect("write version");
+            std::fs::write(repo.path().join("CHANGELOG.md"), "# Changelog\n")
+                .expect("write changelog");
+            git_in(repo.path(), &["add", "."]);
+            git_in(repo.path(), &["commit", "-m", "base"]);
+            git_in(repo.path(), &["push", "-u", "origin", "main"]);
+            git_in(
+                other.path(),
+                &["clone", remote.path().to_str().expect("remote path"), "."],
+            );
+            git_in(other.path(), &["config", "user.name", "Homeboy Test"]);
+            git_in(
+                other.path(),
+                &["config", "user.email", "homeboy@example.test"],
+            );
+
+            git_in(repo.path(), &["switch", "-c", "orphaned-release"]);
+            std::fs::write(repo.path().join("VERSION"), "0.1.1\n").expect("write orphan version");
+            git_in(repo.path(), &["commit", "-am", "release: v0.1.1"]);
+            git_in(
+                repo.path(),
+                &["tag", "-a", "v0.1.1", "-m", "Release v0.1.1"],
+            );
+            git_in(repo.path(), &["push", "origin", "refs/tags/v0.1.1"]);
+
+            git_in(repo.path(), &["switch", "main"]);
+            std::fs::write(other.path().join("first.txt"), "first\n")
+                .expect("write first concurrent change");
+            git_in(other.path(), &["add", "."]);
+            git_in(other.path(), &["commit", "-m", "first concurrent advance"]);
+            git_in(other.path(), &["push", "origin", "main"]);
+            git_in(repo.path(), &["pull", "--rebase", "origin", "main"]);
+
+            std::fs::write(repo.path().join("VERSION"), "0.1.1\n").expect("write retry version");
+            git_in(repo.path(), &["commit", "-am", "release: v0.1.1"]);
+            let retry_head = git_in(repo.path(), &["rev-parse", "HEAD"]);
+
+            std::fs::write(other.path().join("second.txt"), "second\n")
+                .expect("write second concurrent change");
+            git_in(other.path(), &["add", "."]);
+            git_in(other.path(), &["commit", "-m", "second concurrent advance"]);
+            git_in(other.path(), &["push", "origin", "main"]);
+
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: repo.path().to_string_lossy().to_string(),
+                changelog_target: Some("CHANGELOG.md".to_string()),
+                version_targets: Some(vec![VersionTarget {
+                    file: "VERSION".to_string(),
+                    pattern: Some(r"^([0-9]+\.[0-9]+\.[0-9]+)$".to_string()),
+                    artifact_path: None,
+                }]),
+                ..Component::default()
+            };
+            homeboy_core::component::write_standalone_component_config(&component)
+                .expect("register fixture component");
+            let scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+            let input = ReleaseCommandInput {
+                component_id: "fixture".to_string(),
+                path_override: Some(component.local_path.clone()),
+                recover: true,
+                retag: true,
+                bump_override: Some("0.1.1".to_string()),
+                ..Default::default()
+            };
+
+            assert_eq!(scope.tag_prefix(), None);
+            assert_eq!(
+                scope.latest_tag_any().expect("latest tag"),
+                Some("v0.1.1".to_string())
+            );
+            let local_tag =
+                git::get_tag_commit(&component.local_path, "v0.1.1").expect("local tag commit");
+            let remote_tag = git::remote_tag_commit(&component.local_path, "v0.1.1")
+                .expect("remote tag lookup")
+                .expect("remote tag commit");
+            assert_eq!(local_tag, remote_tag);
+            assert!(
+                !git::is_ancestor(&component.local_path, &local_tag, &retry_head)
+                    .expect("tag ancestry")
+            );
+            let result = recreate_divergent_unpublished_release(
+                &input,
+                &component,
+                &scope,
+                "0.1.1",
+                &retry_head,
+                |_| Some(false),
+            )
+            .expect("retry recovery succeeds")
+            .expect("equal-version divergent release detected");
+
+            assert_eq!(result.status, "git_recovered");
+            git_in(repo.path(), &["fetch", "origin"]);
+            let remote_main = git_in(repo.path(), &["rev-parse", "origin/main"]);
+            let remote_tag = git_in(repo.path(), &["rev-parse", "v0.1.1^{commit}"]);
+            assert_eq!(remote_tag, remote_main);
+            assert_eq!(
+                git_in(repo.path(), &["show", "origin/main:second.txt"]),
+                "second"
+            );
+            assert_eq!(
+                git_in(repo.path(), &["show", "origin/main:VERSION"]),
+                "0.1.1"
+            );
+        });
     }
 }

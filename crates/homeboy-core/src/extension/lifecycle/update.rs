@@ -173,7 +173,7 @@ pub fn update_linked_group(extension_ids: &[String], force: bool) -> Result<Vec<
             if initially_clean {
                 restore_linked_checkout(&git_root, old_branch.as_deref(), old_revision.as_deref());
                 for (_, extension_dir, source_dir, _) in &entries {
-                    let _ = install_linked_shared_assets(source_dir, extension_dir, None);
+                    let _ = install_linked_shared_assets(source_dir, extension_dir, None, None);
                 }
             }
             return Err(preserve_dirty_error(error, initially_clean, &git_root));
@@ -482,7 +482,7 @@ fn update_linked_extension(
                 old_branch.as_deref(),
                 old_source_revision.as_deref(),
             );
-            let _ = install_linked_shared_assets(&source_dir, extension_dir, None);
+            let _ = install_linked_shared_assets(&source_dir, extension_dir, None, None);
         }
         return Err(preserve_dirty_error(error, initially_clean, &git_root));
     }
@@ -514,7 +514,7 @@ fn refresh_linked_extension_install(
     source_dir: &Path,
     extension_dir: &Path,
 ) -> Result<()> {
-    install_linked_shared_assets(source_dir, extension_dir, None)?;
+    install_linked_shared_assets(source_dir, extension_dir, None, None)?;
     let manifest = load_extension(extension_id)?;
     homeboy_extension_contract::validate_core_compatibility(
         "extension",

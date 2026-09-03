@@ -3,20 +3,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use glob_match::glob_match;
 use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell;
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 
 use super::super::{Runner, RunnerKind};
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
 use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
     git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
-    run_shell_capture, run_shell_command, shell_command_for_runner, ssh_args,
-    ssh_client_for_runner, tar_exclude_args,
+    run_shell_capture, run_shell_command, run_shell_command_before, shell_command_for_runner,
+    ssh_args, ssh_client_for_runner, tar_exclude_args,
 };
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
@@ -884,8 +885,26 @@ pub(crate) fn materialize_snapshot_with_scratch(
     excludes: &[String],
     scratch: Option<&Path>,
 ) -> Result<()> {
+    materialize_snapshot_with_scratch_before(
+        runner,
+        local_path,
+        remote_path,
+        excludes,
+        scratch,
+        None,
+    )
+}
+
+pub(crate) fn materialize_snapshot_with_scratch_before(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+    scratch: Option<&Path>,
+    deadline: Option<Instant>,
+) -> Result<()> {
     match runner.kind {
-        RunnerKind::Local => materialize_snapshot_piped(
+        RunnerKind::Local => materialize_snapshot_piped_before(
             local_path,
             &format!(
                 "sh -c {}",
@@ -894,11 +913,12 @@ pub(crate) fn materialize_snapshot_with_scratch(
             excludes,
             "materialize local workspace snapshot",
             scratch,
+            deadline,
         ),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                materialize_snapshot_piped(
+                materialize_snapshot_piped_before(
                     local_path,
                     &format!(
                         "sh -c {}",
@@ -907,6 +927,7 @@ pub(crate) fn materialize_snapshot_with_scratch(
                     excludes,
                     "materialize local workspace snapshot",
                     scratch,
+                    deadline,
                 )
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
@@ -917,12 +938,13 @@ pub(crate) fn materialize_snapshot_with_scratch(
                     remote = shell::quote_arg(&remote),
                     remote_command = shell::quote_arg(&remote_command),
                 );
-                materialize_snapshot_piped(
+                materialize_snapshot_piped_before(
                     local_path,
                     &target,
                     excludes,
                     "materialize SSH workspace snapshot",
                     scratch,
+                    deadline,
                 )
             }
         }
@@ -1056,17 +1078,25 @@ fn validate_workspace_content_manifest(manifest: &WorkspaceContentManifest) -> R
 /// Materialize an immutable snapshot by linking unchanged content from a
 /// compatible runner-local seed, deleting paths absent from the controller
 /// manifest, and transporting only the manifest's explicit changed paths.
-pub(crate) fn materialize_snapshot_incremental(
+pub(crate) fn materialize_snapshot_incremental_before(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
     seed_path: &str,
     excludes: &[String],
     delta: &SnapshotManifestDelta,
+    deadline: Option<Instant>,
 ) -> Result<SnapshotTransferStats> {
     let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
     if !incremental_prepare_command_fits(remote_path, &temporary, seed_path, delta) {
-        materialize_snapshot(runner, local_path, remote_path, excludes)?;
+        materialize_snapshot_with_scratch_before(
+            runner,
+            local_path,
+            remote_path,
+            excludes,
+            None,
+            deadline,
+        )?;
         return Ok(SnapshotTransferStats {
             reused: ByteFileCounts::default(),
             transferred: delta.transfer.final_size,
@@ -1075,7 +1105,14 @@ pub(crate) fn materialize_snapshot_incremental(
     }
     let prepare = incremental_prepare_command(remote_path, &temporary, seed_path, delta);
     if prepare.len() > INCREMENTAL_PREPARE_COMMAND_MAX_BYTES {
-        materialize_snapshot(runner, local_path, remote_path, excludes)?;
+        materialize_snapshot_with_scratch_before(
+            runner,
+            local_path,
+            remote_path,
+            excludes,
+            None,
+            deadline,
+        )?;
         return Ok(SnapshotTransferStats {
             reused: ByteFileCounts::default(),
             transferred: delta.transfer.final_size,
@@ -1084,38 +1121,51 @@ pub(crate) fn materialize_snapshot_incremental(
     }
     let finalize = incremental_finalize_command(remote_path, &temporary);
     let result = match runner.kind {
-        RunnerKind::Local => {
-            run_shell_command(&prepare, "prepare incremental local workspace snapshot")
+        RunnerKind::Local => run_shell_command_before(
+            &prepare,
+            "prepare incremental local workspace snapshot",
+            deadline,
+        )
+        .and_then(|_| {
+            materialize_changed_paths_before(
+                local_path,
+                &local_extract_command(&temporary),
+                &delta.changed_paths,
+                "materialize incremental local workspace delta",
+                deadline,
+            )
+        })
+        .and_then(|_| {
+            run_shell_command_before(
+                &finalize,
+                "finalize incremental local workspace snapshot",
+                deadline,
+            )
+        }),
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                run_shell_command_before(
+                    &prepare,
+                    "prepare incremental local workspace snapshot",
+                    deadline,
+                )
                 .and_then(|_| {
-                    materialize_changed_paths(
+                    materialize_changed_paths_before(
                         local_path,
                         &local_extract_command(&temporary),
                         &delta.changed_paths,
                         "materialize incremental local workspace delta",
+                        deadline,
                     )
                 })
                 .and_then(|_| {
-                    run_shell_command(&finalize, "finalize incremental local workspace snapshot")
+                    run_shell_command_before(
+                        &finalize,
+                        "finalize incremental local workspace snapshot",
+                        deadline,
+                    )
                 })
-        }
-        RunnerKind::Ssh => {
-            let (_server, client) = ssh_client_for_runner(runner)?;
-            if client.is_local {
-                run_shell_command(&prepare, "prepare incremental local workspace snapshot")
-                    .and_then(|_| {
-                        materialize_changed_paths(
-                            local_path,
-                            &local_extract_command(&temporary),
-                            &delta.changed_paths,
-                            "materialize incremental local workspace delta",
-                        )
-                    })
-                    .and_then(|_| {
-                        run_shell_command(
-                            &finalize,
-                            "finalize incremental local workspace snapshot",
-                        )
-                    })
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let remote_shell = |script: &str| {
@@ -1126,29 +1176,32 @@ pub(crate) fn materialize_snapshot_incremental(
                         shell::quote_arg(script),
                     )
                 };
-                run_shell_command(
+                run_shell_command_before(
                     &remote_shell(&prepare),
                     "prepare incremental SSH workspace snapshot",
+                    deadline,
                 )
                 .and_then(|_| {
-                    materialize_changed_paths(
+                    materialize_changed_paths_before(
                         local_path,
                         &remote_extract_command(&client, &remote, &temporary),
                         &delta.changed_paths,
                         "materialize incremental SSH workspace delta",
+                        deadline,
                     )
                 })
                 .and_then(|_| {
-                    run_shell_command(
+                    run_shell_command_before(
                         &remote_shell(&finalize),
                         "finalize incremental SSH workspace snapshot",
+                        deadline,
                     )
                 })
             }
         }
     };
     if result.is_err() {
-        cleanup_incremental_temporary(runner, &temporary);
+        cleanup_incremental_temporary(runner, &temporary, deadline.is_some());
     }
     result.map(|_| delta.transfer.clone())
 }
@@ -1346,7 +1399,7 @@ pub(crate) fn materialize_prepared_workspace_update(
         }
     };
     if result.is_err() {
-        cleanup_incremental_temporary(runner, &temporary);
+        cleanup_incremental_temporary(runner, &temporary, false);
     }
     let release_result = run_shell_command(
         &shell_command_for_runner(runner, &release_lock)?,
@@ -1414,16 +1467,25 @@ fn incremental_prepare_command_preflight_bytes(
     bytes
 }
 
-fn cleanup_incremental_temporary(runner: &Runner, temporary: &str) {
+fn cleanup_incremental_temporary(runner: &Runner, temporary: &str, bounded: bool) {
     let command = format!("rm -rf -- {}", shell::quote_arg(temporary));
+    let deadline = bounded.then(|| Instant::now() + Duration::from_secs(5));
     match runner.kind {
         RunnerKind::Local => {
-            let _ = run_shell_command(&command, "clean incremental workspace temporary");
+            let _ = run_shell_command_before(
+                &command,
+                "clean incremental workspace temporary",
+                deadline,
+            );
         }
         RunnerKind::Ssh => {
             if let Ok((_server, client)) = ssh_client_for_runner(runner) {
                 if client.is_local {
-                    let _ = run_shell_command(&command, "clean incremental workspace temporary");
+                    let _ = run_shell_command_before(
+                        &command,
+                        "clean incremental workspace temporary",
+                        deadline,
+                    );
                 } else {
                     let remote = format!("{}@{}", client.user, client.host);
                     let command = format!(
@@ -1432,8 +1494,11 @@ fn cleanup_incremental_temporary(runner: &Runner, temporary: &str) {
                         shell::quote_arg(&remote),
                         shell::quote_arg(&command),
                     );
-                    let _ =
-                        run_shell_command(&command, "clean incremental SSH workspace temporary");
+                    let _ = run_shell_command_before(
+                        &command,
+                        "clean incremental SSH workspace temporary",
+                        deadline,
+                    );
                 }
             }
         }
@@ -1521,6 +1586,16 @@ fn materialize_changed_paths(
     changed_paths: &[String],
     action: &str,
 ) -> Result<()> {
+    materialize_changed_paths_before(local_path, target_command, changed_paths, action, None)
+}
+
+fn materialize_changed_paths_before(
+    local_path: &Path,
+    target_command: &str,
+    changed_paths: &[String],
+    action: &str,
+    deadline: Option<Instant>,
+) -> Result<()> {
     if changed_paths.is_empty() {
         return Ok(());
     }
@@ -1537,7 +1612,7 @@ fn materialize_changed_paths(
         shell::quote_arg(&list.path().display().to_string()),
         target_command,
     );
-    run_shell_command(&command, action)
+    run_shell_command_before(&command, action, deadline)
 }
 
 fn local_extract_command(destination: &str) -> String {
@@ -1945,6 +2020,17 @@ pub(super) fn materialize_snapshot_piped(
     action: &str,
     scratch: Option<&Path>,
 ) -> Result<()> {
+    materialize_snapshot_piped_before(local_path, target_command, excludes, action, scratch, None)
+}
+
+pub(super) fn materialize_snapshot_piped_before(
+    local_path: &Path,
+    target_command: &str,
+    excludes: &[String],
+    action: &str,
+    scratch: Option<&Path>,
+    deadline: Option<Instant>,
+) -> Result<()> {
     // Complete the controller-side archive staging before starting the target
     // command. In particular, an SSH target must never observe a partial or
     // second read of a controller workspace whose overlay artifacts changed.
@@ -1960,12 +2046,12 @@ pub(super) fn materialize_snapshot_piped(
         )
     })?;
     let mut manifest = snapshot_input_manifest(local_path, excludes)?;
-    let stage = materialize_snapshot_stage(local_path, excludes, &manifest, scratch).map_err(
-        |mut error| {
-            error.message = format!("{action}: {}", error.message);
-            error
-        },
-    )?;
+    let stage =
+        materialize_snapshot_stage_before(local_path, excludes, &manifest, scratch, deadline)
+            .map_err(|mut error| {
+                error.message = format!("{action}: {}", error.message);
+                error
+            })?;
     // A group that produced no staging output was entirely excluded by the
     // selected snapshot policy. It is optional transport input, so omit it
     // rather than giving tar a path that the same staging operation did not
@@ -1988,7 +2074,7 @@ pub(super) fn materialize_snapshot_piped(
         target_command,
         scratch,
     );
-    run_shell_command(&command, action)
+    run_shell_command_before(&command, action, deadline)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2179,11 +2265,22 @@ pub(super) fn snapshot_input_manifest(
 /// Materialize every required manifest entry into one private staging tree.
 /// The returned directory is kept alive through transfer, making the staging
 /// output the sole tar input after validation succeeds.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn materialize_snapshot_stage(
     local_path: &Path,
     excludes: &[String],
     manifest: &SnapshotInputManifest,
     scratch: Option<&Path>,
+) -> Result<tempfile::TempDir> {
+    materialize_snapshot_stage_before(local_path, excludes, manifest, scratch, None)
+}
+
+fn materialize_snapshot_stage_before(
+    local_path: &Path,
+    excludes: &[String],
+    manifest: &SnapshotInputManifest,
+    scratch: Option<&Path>,
+    deadline: Option<Instant>,
 ) -> Result<tempfile::TempDir> {
     let stage = scratch
         .map_or_else(tempfile::tempdir, |path| {
@@ -2227,19 +2324,24 @@ pub(super) fn materialize_snapshot_stage(
             tar_exclude_args(&archive_excludes)
         )),
     );
-    run_shell_command(&command, "construct workspace snapshot staging").map_err(|error| {
-        let missing = manifest.entries.iter().find(|entry| !entry.source.exists());
-        snapshot_construction_failure(
-            missing
-                .map(|entry| entry.declaration_id.as_str())
-                .unwrap_or("staging"),
-            missing
-                .map(|entry| entry.source.as_path())
-                .unwrap_or(local_path),
-            Some(&stage_source),
-            &error.message,
-        )
-    })?;
+    run_shell_command_before(&command, "construct workspace snapshot staging", deadline).map_err(
+        |error| {
+            if error.code == ErrorCode::RunnerLabTransportFailure {
+                return error;
+            }
+            let missing = manifest.entries.iter().find(|entry| !entry.source.exists());
+            snapshot_construction_failure(
+                missing
+                    .map(|entry| entry.declaration_id.as_str())
+                    .unwrap_or("staging"),
+                missing
+                    .map(|entry| entry.source.as_path())
+                    .unwrap_or(local_path),
+                Some(&stage_source),
+                &error.message,
+            )
+        },
+    )?;
     for entry in &manifest.entries {
         let output = stage.path().join(&entry.staging_output);
         if output.exists() {

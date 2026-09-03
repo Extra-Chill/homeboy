@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 
 use fs4::fs_std::FileExt;
+use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -126,6 +127,11 @@ pub(crate) struct ControllerJobState {
     /// Driver-owned safe projection exposed in the queued event and API logs.
     pub(crate) public_request: Value,
     pub(crate) request_digest: String,
+    /// Optional semantic identity that coalesces matching work only while its
+    /// durable job remains nonterminal. The caller's idempotency key still
+    /// permanently identifies this particular submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) active_idempotency_key: Option<String>,
     /// The controller-minted durable run this job executes for, declared by
     /// the driver from its typed request and persisted at admission — before
     /// any driver work can escape the daemon lifecycle. Recovery reconciles
@@ -329,7 +335,6 @@ impl JobStore {
         inner: &mut JobStoreInner,
     ) -> Result<()> {
         let durable = read_durable_store(path)?;
-        remote_runner::validate_stored_remote_runner_jobs(&durable.jobs)?;
         let next_sequence = durable
             .jobs
             .iter()
@@ -728,7 +733,6 @@ impl JobStore {
         prepare_tombstone_store(&path)?;
         let mut durable: DurableJobStore = serde_json::from_slice(raw)
             .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
-        remote_runner::validate_stored_remote_runner_jobs(&durable.jobs)?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
         let terminal_job_retention_bytes = terminal_job_retention_bytes.max(1);
@@ -1926,6 +1930,26 @@ impl JobStore {
                 None,
             ));
         }
+        if let Some(active_idempotency_key) = controller_job.active_idempotency_key.as_deref() {
+            let active = inner.jobs.values().find(|stored| {
+                !stored.job.status.is_terminal()
+                    && stored
+                        .controller_job
+                        .as_ref()
+                        .and_then(|state| state.active_idempotency_key.as_deref())
+                        == Some(active_idempotency_key)
+            });
+            if let Some(active) = active {
+                let active_state = active
+                    .controller_job
+                    .as_ref()
+                    .expect("active controller submission has controller state");
+                if controller_submission_fingerprint(active_state) != fingerprint {
+                    return Err(controller_idempotency_conflict(active_idempotency_key));
+                }
+                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(active.job.clone())));
+            }
+        }
         let job = Job {
             id: Uuid::new_v4(),
             operation,
@@ -2135,7 +2159,7 @@ impl JobStore {
         request: LocalRunnerJobRequest,
         capacity: usize,
         run: F,
-    ) -> Result<JobRunner>
+    ) -> Result<(JobRunner, bool)>
     where
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
@@ -2150,7 +2174,7 @@ impl JobStore {
         // `JobRunner` contract is preserved.
         if !created {
             let handle = thread::spawn(|| {});
-            return Ok(JobRunner { job_id, handle });
+            return Ok((JobRunner { job_id, handle }, false));
         }
         let handle_store = self.clone();
         let worker_store = self.clone();
@@ -2210,7 +2234,7 @@ impl JobStore {
                 }
             }
         });
-        Ok(JobRunner { job_id, handle })
+        Ok((JobRunner { job_id, handle }, true))
     }
 
     fn run_background_with_start_policy<T, F>(
@@ -3014,9 +3038,7 @@ fn stored_job_durable_run_id(stored: &StoredJob) -> Option<String> {
     stored
         .remote_runner
         .as_ref()
-        .and_then(|remote| remote.request().ok())
-        .and_then(|request| request.lifecycle)
-        .as_ref()
+        .and_then(|remote| remote.envelope.lifecycle.as_ref())
         .or_else(|| {
             stored
                 .local_runner
@@ -3047,10 +3069,12 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
     let run_id = stored
         .remote_runner
         .as_ref()
-        .and_then(|remote| remote.request().ok())
-        .and_then(|request| request.lab_runner_workload)
-        .as_ref()
-        .and_then(|workload| workload.agent_task.as_ref())
+        .and_then(|remote| {
+            lab_runner_workload_from_execution_envelope(&remote.envelope)
+                .ok()
+                .flatten()
+        })
+        .and_then(|workload| workload.agent_task)
         .map(|agent_task| agent_task.run_id.trim().to_string())
         .or_else(|| {
             stored
