@@ -394,7 +394,7 @@ fn snapshot_reasons_for(
     snapshots
         .iter()
         .find(|snapshot| snapshot.pins.iter().any(|candidate| candidate == pin))
-        .map(|snapshot| snapshot.retention_reasons.clone())
+        .map(|snapshot| snapshot.retention_reasons())
         .expect("snapshot")
 }
 
@@ -498,7 +498,7 @@ fn controller_pin_retention_reclaims_old_terminal_retained_artifacts_under_press
         assert!(applied.snapshots.iter().any(|snapshot| {
             snapshot.pins.contains(&terminal_pin)
                 && snapshot
-                    .retention_reasons
+                    .retention_reasons()
                     .iter()
                     .any(|reason| reason == "reclaimable")
         }));

@@ -789,12 +789,12 @@ fn retained_storage_report(
     retained_storage_progress("controller_runtimes");
     let runtime = controller_runtime::retention_report()?;
     for snapshot in runtime.snapshots {
-        if snapshot.eligible {
+        if snapshot.eligible() {
             continue;
         }
         records.push(RetainedStorageRecord {
             category: "controller_runtimes".to_string(),
-            reason: snapshot.retention_reasons.join(", "),
+            reason: snapshot.retention_reasons().join(", "),
             owner: snapshot.identity,
             run_id: None,
             liveness: "lifecycle_pinned".to_string(),
@@ -2360,21 +2360,17 @@ fn cleanup_inventory_with_deadline(
                             ignore_retention: false,
                         },
                     ))?;
-                let estimated_bytes = output
-                    .snapshots
-                    .iter()
-                    .filter(|snapshot| snapshot.eligible)
-                    .map(|snapshot| snapshot.size_bytes)
-                    .sum();
+                // Counts come from core rather than being re-derived here, so
+                // the advertised reclaim is exactly what an apply achieves. A
+                // locally recomputed count is how this category advertised
+                // 143 MB it could never free (#14222).
+                let candidate_count = output.candidate_count();
+                let estimated_bytes = output.candidate_bytes();
                 category_from_output(
                     CONTROLLER_RUNTIMES_METADATA,
                     apply,
                     CleanupCategoryMetrics {
-                        candidate_count: output
-                            .snapshots
-                            .iter()
-                            .filter(|snapshot| snapshot.eligible)
-                            .count(),
+                        candidate_count,
                         applied_count: output.removed_identities.len(),
                         skipped_count: output.retained.len(),
                         estimated_bytes,
@@ -3614,8 +3610,30 @@ struct CleanupCategoryMetrics {
 
 struct CleanupCategoryCommands {
     category: &'static str,
+    apply: bool,
     canonical_cleanup_command: String,
     specialist_command: String,
+}
+
+/// Outcome marker for an *apply* that named candidates and reclaimed none of
+/// them.
+///
+/// Distinct from `completed` because "nothing to do" and "something to do that
+/// this pass did not do" are different operator answers. Collapsing them is
+/// what let an apply report `succeeded` alongside a 143 MB candidate it never
+/// removed (#14222). It is not a failure — the run is healthy and the category
+/// is resumable through its specialist command — so it never fails the sweep
+/// and never changes the exit code.
+///
+/// A dry run naturally applies nothing, so this marker is apply-only.
+const CLEANUP_CATEGORY_OUTCOME_NO_EFFECT: &str = "no_effect";
+
+fn category_outcome(apply: bool, metrics: &CleanupCategoryMetrics) -> String {
+    if apply && metrics.candidate_count > 0 && metrics.applied_count == 0 {
+        CLEANUP_CATEGORY_OUTCOME_NO_EFFECT.to_string()
+    } else {
+        "completed".to_string()
+    }
 }
 
 fn category_from_output<T: Serialize>(
@@ -3627,6 +3645,7 @@ fn category_from_output<T: Serialize>(
     category_from_command(
         CleanupCategoryCommands {
             category: metadata.category,
+            apply,
             canonical_cleanup_command: metadata.canonical_cleanup_command(apply),
             specialist_command: metadata.specialist_command(apply).to_string(),
         },
@@ -3649,7 +3668,7 @@ fn category_from_command<T: Serialize>(
         skipped: false,
         skip_reason: None,
         failure: None,
-        outcome: "completed".to_string(),
+        outcome: category_outcome(commands.apply, &metrics),
         inventory_completeness: "complete".to_string(),
         elapsed_ms: 0,
         timeout_ms: 0,
@@ -3818,6 +3837,7 @@ fn remote_workspace_category(
     category_from_command(
         CleanupCategoryCommands {
             category: "remote_lab_workspaces",
+            apply,
             canonical_cleanup_command: REMOTE_LAB_WORKSPACES_METADATA
                 .canonical_cleanup_command(apply),
             specialist_command: command,
@@ -3893,6 +3913,7 @@ fn runner_binary_cache_output_category(
     category_from_command(
         CleanupCategoryCommands {
             category: RUNNER_BINARY_CACHES_METADATA.category,
+            apply,
             canonical_cleanup_command: RUNNER_BINARY_CACHES_METADATA
                 .canonical_cleanup_command(apply),
             specialist_command,
@@ -4184,6 +4205,7 @@ mod count_unit_tests {
         category_from_command(
             CleanupCategoryCommands {
                 category: name,
+                apply: true,
                 canonical_cleanup_command: format!("homeboy cleanup --include {name} --apply"),
                 specialist_command: format!("homeboy {name} --apply"),
             },
@@ -4197,6 +4219,61 @@ mod count_unit_tests {
             serde_json::json!({}),
         )
         .expect("category fixture")
+    }
+
+    /// An apply that named candidates and removed none of them is reported
+    /// distinctly, so `succeeded` never covers for a sweep that did nothing.
+    ///
+    /// An operator at 95% disk ran `--apply` expecting the advertised 143 MB,
+    /// got zero bytes, and had no signal that anything was unusual (#14222).
+    #[test]
+    fn an_apply_that_reclaims_none_of_its_candidates_is_not_reported_as_completed() {
+        assert_eq!(category("controller-runtimes", 1, 0).outcome, "no_effect");
+        assert_eq!(category("controller-runtimes", 1, 1).outcome, "completed");
+        // Nothing to do is a genuine clean pass, not a no-effect apply.
+        assert_eq!(category("controller-runtimes", 0, 0).outcome, "completed");
+    }
+
+    /// A dry run applies nothing by definition, so naming candidates in one is
+    /// exactly the expected outcome rather than a no-effect signal.
+    #[test]
+    fn a_dry_run_that_names_candidates_is_still_completed() {
+        let dry_run = category_from_command(
+            CleanupCategoryCommands {
+                category: "controller-runtimes",
+                apply: false,
+                canonical_cleanup_command: "homeboy cleanup --include controller-runtimes"
+                    .to_string(),
+                specialist_command: "homeboy runtime controller-prune".to_string(),
+            },
+            CleanupCategoryMetrics {
+                candidate_count: 3,
+                applied_count: 0,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+            },
+            serde_json::json!({}),
+        )
+        .expect("dry-run category fixture");
+
+        assert_eq!(dry_run.outcome, "completed");
+    }
+
+    /// `no_effect` is a reporting distinction, never a fault: it must not fail
+    /// the category, the sweep, or the scheduler that runs it.
+    #[test]
+    fn a_no_effect_apply_is_not_treated_as_a_failure() {
+        let categories = vec![category("controller-runtimes", 1, 0)];
+
+        assert_eq!(categories[0].outcome, "no_effect");
+        assert!(categories[0].failure.is_none());
+        assert!(!is_bounded_continuation(&categories[0]));
+        assert_eq!(
+            applied_category_count(&categories),
+            0,
+            "a category that applied nothing is not counted as having applied"
+        );
     }
 
     /// A directory-level atomic sweep removes every resource it selected. That
