@@ -8121,6 +8121,8 @@ fn retryable_pre_provider_retry_accepts_runner_rebound_workspace_identity() {
 
 #[test]
 fn retryable_pre_provider_retry_without_a_recipe_uses_legacy_lifecycle_retry() {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
             "cook-legacy-retry",
@@ -8145,12 +8147,125 @@ fn retryable_pre_provider_retry_without_a_recipe_uses_legacy_lifecycle_retry() {
         )
         .expect("record retryable legacy failure");
 
+        let status = crate::orchestration::run_from_current_environment(run_id)
+            .expect("project legacy generic retry");
+        let retry_action = status
+            .action_eligibility
+            .as_ref()
+            .expect("action eligibility")
+            .actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Retry)
+            .expect("retry action");
+        assert_eq!(
+            retry_action.availability,
+            ControlPlaneActionAvailability::Available,
+            "legacy Cook metadata must retain generic retry projection"
+        );
+        assert_eq!(
+            retry_action.reason,
+            "generic lifecycle retry is admitted; runtime admission will be revalidated before execution"
+        );
+
         let retry = crate::agent_task_service::retry(run_id, Some("legacy-retry"), false, false)
             .expect("legacy retry remains supported");
 
         assert_eq!(retry.record.run_id, "legacy-retry");
         assert_eq!(retry.record.metadata["retry_of"], run_id);
         assert!(retry.record.metadata["cook_id"].is_null());
+    });
+}
+
+#[test]
+fn cook_lab_workspace_stage_retry_eligibility_matches_durable_admission() {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_lab_pre_provider_cook(
+            "cook-workspace-stage-retry-eligibility",
+            "fixture retryable Lab workspace staging failure",
+        );
+        let run_id = &options.identity.initial_run_id;
+        let lifecycle_store = test_lifecycle_store();
+        let mut plan =
+            agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, run_id)
+                .expect("load Cook plan");
+        plan.metadata["execution_placement_decision"] = serde_json::json!({ "fixture": true });
+        agent_task_lifecycle::persist_controller_plan_in_store(&lifecycle_store, run_id, &plan)
+            .expect("seed legacy placement decision on plan only");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("record metadata")
+                .remove("execution_placement_decision");
+        })
+        .expect("remove legacy placement decision from record");
+        let before_projection = agent_task_lifecycle::exact_record(run_id)
+            .expect("read Cook-owned failed attempt before status projection");
+        let status = crate::orchestration::run_from_current_environment(run_id)
+            .expect("project Cook-owned failed attempt");
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id)
+                .expect("read Cook-owned failed attempt after status projection"),
+            before_projection,
+            "status projection must not normalize or otherwise mutate retry metadata"
+        );
+        let retry = status
+            .action_eligibility
+            .as_ref()
+            .expect("action eligibility")
+            .actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Retry)
+            .expect("retry action");
+
+        assert_eq!(
+            retry.availability,
+            ControlPlaneActionAvailability::Available
+        );
+        let replay = crate::agent_task_service::retry(run_id, None, false, false)
+            .expect("advertised Cook retry is admitted");
+        assert_eq!(replay.record.metadata["cook_id"], options.identity.cook_id);
+        assert_eq!(replay.record.metadata["retry_of"], *run_id);
+        assert_eq!(replay.record.metadata["provider_executions_consumed"], 0);
+    });
+}
+
+#[test]
+fn unbound_cook_workspace_stage_failure_does_not_advertise_retry() {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = retryable_lab_pre_provider_cook(
+            "cook-unbound-workspace-stage-source",
+            "fixture retryable Lab workspace staging failure",
+        );
+        let owner = retryable_pre_provider_cook("cook-unbound-workspace-stage-owner", 2);
+        let run_id = &source.identity.initial_run_id;
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_id"] = serde_json::json!(owner.identity.cook_id);
+        })
+        .expect("make the terminal record Cook-owned but unbound");
+
+        let status = crate::orchestration::run_from_current_environment(run_id)
+            .expect("project unbound Cook-owned failed attempt");
+        let retry = status
+            .action_eligibility
+            .as_ref()
+            .expect("action eligibility")
+            .actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Retry)
+            .expect("retry action");
+
+        assert_eq!(
+            retry.availability,
+            ControlPlaneActionAvailability::Unavailable
+        );
+        assert!(retry.reason.contains("homeboy agent-task status"));
+        assert!(retry.reason.contains(run_id));
+        assert!(crate::agent_task_service::retry(run_id, None, false, false).is_err());
     });
 }
 
