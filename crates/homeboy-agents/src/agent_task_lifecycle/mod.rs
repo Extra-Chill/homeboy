@@ -34,6 +34,7 @@ mod action_eligibility;
 pub mod activity_provider;
 pub mod agent_task_handoff_event;
 pub mod agent_task_lifecycle_event;
+mod aggregate_transition;
 mod artifact_materialization;
 mod cancellation;
 mod control_plane_identities;
@@ -67,6 +68,7 @@ pub use acceptance_verifier::{
     AgentTaskAcceptanceVerifier, AgentTaskAcceptanceVerifierProvenance,
 };
 pub use action_eligibility::*;
+pub(crate) use aggregate_transition::*;
 pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use control_plane_identities::{

@@ -296,6 +296,37 @@ impl RunnerContinuationProvider for ServiceRunnerFixture {
 }
 
 #[test]
+fn aggregate_transition_commits_record_aggregate_and_terminal_artifact_projection() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let mut record = stub_lab_offload_submission(&lifecycle_store, &plan, "aggregate-transition")
+        .expect("submit aggregate transition run");
+    let aggregate = succeeded_aggregate(&plan);
+
+    let completed = record_aggregate_in_store(&lifecycle_store, &mut record, &plan, &aggregate)
+        .expect("apply aggregate transition");
+    let persisted = lifecycle_store
+        .read_record("aggregate-transition")
+        .expect("persisted transitioned record");
+    let persisted_aggregate = lifecycle_store
+        .read_aggregate("aggregate-transition")
+        .expect("persisted transitioned aggregate");
+
+    assert_eq!(completed.state, AgentTaskRunState::Succeeded);
+    assert_eq!(persisted.state, AgentTaskRunState::Succeeded);
+    assert_eq!(
+        persisted.lifecycle.execution.state,
+        homeboy_core::run_lifecycle_record::RunExecutionState::Succeeded
+    );
+    assert_eq!(persisted_aggregate, aggregate);
+    assert_eq!(
+        persisted.metadata["artifact_projection"]["status"],
+        "complete"
+    );
+}
+
+#[test]
 fn cancellation_routes_managed_service_cleanup_to_its_lab_owner() {
     with_isolated_home(|_| {
         ensure_runner_continuation_provider_reset_hook();
