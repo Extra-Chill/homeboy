@@ -37,7 +37,7 @@
           "runtime_id"
         ],
         "schema_refs": [
-          "homeboy/agent-runtime-materialization-plan/v1"
+          "homeboy/agent-runtime-materialization-plan/v2"
         ]
       },
       {
@@ -112,6 +112,10 @@
       "timeout",
       "stalled",
       "rate_limited",
+      "provider_account_blocked",
+      "provider_quota_exhausted",
+      "provider_billing_blocked",
+      "provider_credentials_exhausted",
       "policy_denied",
       "capability_missing",
       "invalid_input",
@@ -168,6 +172,37 @@
       "skipped",
       "cancelled"
     ]
+  },
+  "managed_services": {
+    "default_cleanup_deadline_ms": 2000,
+    "direct_plan_field": "services",
+    "durable_plan_path": "inputs.managed_services",
+    "fields": [
+      "version",
+      "id",
+      "command",
+      "cwd",
+      "env",
+      "env_allowlist",
+      "secret_env",
+      "secret_env_plan",
+      "host",
+      "port",
+      "port_env",
+      "socket_handoff",
+      "readiness",
+      "cleanup_deadline_ms",
+      "public_url",
+      "browser_origin_probe",
+      "lifecycle",
+      "target"
+    ],
+    "lifecycle_values": [
+      "plan",
+      "target"
+    ],
+    "max_cleanup_deadline_ms": 60000,
+    "version": 1
   },
   "orchestration": {
     "agent_task_outcome_to_fanout_record_status": {
@@ -231,6 +266,10 @@
       "timeout",
       "stalled",
       "rate_limited",
+      "provider_account_blocked",
+      "provider_quota_exhausted",
+      "provider_billing_blocked",
+      "provider_credentials_exhausted",
       "policy_denied",
       "capability_missing",
       "invalid_input",
@@ -335,7 +374,7 @@
   "schemas": {
     "agent_runtime_contract_handshake": "homeboy/agent-runtime-contract-handshake/v1",
     "agent_runtime_manifest": "homeboy/agent-runtime-manifest/v1",
-    "agent_runtime_materialization_plan": "homeboy/agent-runtime-materialization-plan/v1",
+    "agent_runtime_materialization_plan": "homeboy/agent-runtime-materialization-plan/v2",
     "aggregate": "homeboy/agent-task-aggregate/v1",
     "artifact": "homeboy/agent-task-artifact/v1",
     "artifact_declaration": "homeboy/agent-task-artifact-declaration/v1",
@@ -344,6 +383,8 @@
     "batch_cook_fanout_run": "homeboy/agent-task-batch-cook-fanout-run/v1",
     "batch_cook_fanout_submit": "homeboy/agent-task-batch-cook-fanout-submit/v1",
     "command_invocation": "homeboy/command-invocation/v1",
+    "command_policy": "homeboy/agent-command-policy/v1",
+    "control_plane_action_eligibility": "homeboy/control-plane-action-eligibility/v1",
     "cook_feedback_report": "homeboy/agent-task-cook-feedback-report/v1",
     "diagnostic_ranking": "homeboy/agent-task-diagnostic-ranking/v1",
     "evidence_ref": "homeboy/agent-task-evidence-ref/v1",
@@ -353,7 +394,7 @@
     "fanout_reconcile_result": "homeboy/generic-fanout-reconcile-result/v1",
     "fanout_reconcile_run": "homeboy/fanout-reconcile-run/v1",
     "finding_packet_fanout_config": "homeboy/generic-finding-packet-fanout-config/v1",
-    "gate_report": "homeboy/agent-task-gate-report/v1",
+    "gate_report": "homeboy/agent-task-gate-report/v3",
     "loop_action": "homeboy/agent-task-loop-action/v1",
     "loop_controller": "homeboy/agent-task-loop-controller/v1",
     "loop_controller_status": "homeboy/agent-task-loop-controller-status/v1",
@@ -362,6 +403,7 @@
     "matrix_plan": "homeboy/agent-task-matrix-plan/v1",
     "outcome": "homeboy/agent-task-outcome/v1",
     "plan": "homeboy/agent-task-plan/v1",
+    "plan_validation": "homeboy/agent-task-plan-validation/v1",
     "promotion_report": "homeboy/agent-task-promotion-report/v1",
     "provider": "homeboy/agent-task-executor-provider/v1",
     "provider_capability_contract": "homeboy/agent-task-provider-capability-contract/v1",

@@ -636,9 +636,7 @@ verify_shared_agent_runtime_assets() {
 
     for dependency in \
         "wp-codebox/lib/wp-codebox-runtime-selection.js" \
-        "wp-codebox/scripts/lib/test-result-adapters.sh" \
-        "wp-codebox/scripts/agent/homeboy-wp-codebox-task-runner.cjs" \
-        "opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs"; do
+        "wp-codebox/scripts/lib/test-result-adapters.sh"; do
         if ! node "${resolver}" "${dependency}" >/dev/null; then
             missing=1
         fi
@@ -649,7 +647,7 @@ verify_shared_agent_runtime_assets() {
         return 1
     fi
 
-    echo "Shared agent runtime assets verified."
+    echo "Shared WordPress runtime assets verified."
 }
 
 install_wp_codebox

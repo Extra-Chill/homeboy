@@ -29,6 +29,7 @@ const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
 const checkoutRoot = path.join(tempDir, 'checkout');
 const pluginRoot = path.join(checkoutRoot, 'plugins', 'woocommerce');
 const fakeCodeboxCoreModule = path.join(tempDir, 'wp-codebox-core-contracts.cjs');
+const fixtureCodeboxCoreModule = path.join(__dirname, '..', '..', 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const fakeCodeboxBin = path.join(tempDir, 'wp-codebox');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
 const { wpCodeboxRuntimeCommand } = require(runnerPath);
@@ -90,29 +91,23 @@ fs.writeFileSync(executionRequestPath, `${JSON.stringify(executionRequest, null,
 fs.mkdirSync(path.join(emptyCodeboxInstallRoot, 'source', 'packages', 'cli'), { recursive: true });
 fs.mkdirSync(pluginRoot, { recursive: true });
 fs.writeFileSync(path.join(pluginRoot, 'woocommerce.php'), '<?php\n/**\n * Plugin Name: WooCommerce\n */\n');
-fs.writeFileSync(fakeCodeboxCoreModule, `module.exports.runtimeContractManifest = () => ({
-  schema: 'wp-codebox/runtime-contract-manifest/v1',
-  version: 1,
-  abilities: { wordpressRuntime: { runFuzzSuite: 'wp-codebox/run-fuzz-suite', runWorkload: 'wp-codebox/run-wordpress-workload' } },
-  commands: { wordpressRuntime: { runFuzzSuite: 'run-fuzz-suite', runWorkload: 'run-wordpress-workload' } },
-  capabilities: { wordpressRuntime: { commands: ['run-fuzz-suite', 'run-wordpress-workload'], capabilities: ['rest', 'disposable-runtime', 'runtime-isolation', 'artifact-export'], runner_modes: { 'runtime-backed': true } } },
-  readiness: { wordpressRuntime: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', mode: 'runtime-backed', command_available: true } },
-  schemas: { wordpressRuntime: { fuzzSuite: 'wp-codebox/fuzz-suite/v1', fuzzSuiteResult: 'wp-codebox/fuzz-suite-result/v1', workloadRun: 'wp-codebox/wordpress-workload-run/v1' } }
-});\n`);
+fs.writeFileSync(fakeCodeboxCoreModule, `module.exports = require(${JSON.stringify(fixtureCodeboxCoreModule)});\n`);
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
+const { runtimeContractManifest } = require(${JSON.stringify(fakeCodeboxCoreModule)});
 
-const command = process.argv[2];
+const commandOffset = process.argv[2] === 'codebox' ? 1 : 0;
+const command = process.argv[2 + commandOffset];
 const inputFileIndex = process.argv.indexOf('--input-file');
 if (process.argv.includes('--version')) {
   process.stdout.write('0.21.0');
   process.exit(0);
 }
-if (command === 'runtime' && process.argv[3] === 'descriptor' && process.argv.includes('--json')) {
+if (command === 'runtime' && process.argv[3 + commandOffset] === 'descriptor' && process.argv.includes('--json')) {
   process.stdout.write(JSON.stringify({
-    schema: 'wp-codebox/runtime-descriptor/v1',
-    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
-    contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+     schema: 'wp-codebox/runtime-descriptor/v1',
+     readiness: { status: 'available', browserRuntime: { status: 'ready' } },
+     contractManifest: runtimeContractManifest(),
   }));
   process.exit(0);
 }
@@ -128,8 +123,8 @@ if (command === 'run-wordpress-workload' && process.argv.includes('--help')) {
 	process.stderr.write('production dispatch must not probe run-wordpress-workload help');
 	process.exit(2);
 }
-if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--format=json')) {
-	process.stderr.write('expected public run-fuzz-suite --input-file <file> --format=json invocation');
+if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || (!process.argv.includes('--format=json') && !process.argv.includes('--json'))) {
+	process.stderr.write('expected public run-fuzz-suite --input-file <file> JSON invocation');
 	process.exit(1);
 }
 
@@ -187,7 +182,6 @@ const cli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
-		HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH: 'legacy-codebox-bin',
 		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
 		HOMEBOY_WP_CODEBOX_CORE_MODULE: fakeCodeboxCoreModule,
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
@@ -244,7 +238,7 @@ assert.deepEqual(
 const observedRequest = JSON.parse(fs.readFileSync(observedRequestPath, 'utf8'));
 const observedArgv = JSON.parse(fs.readFileSync(observedArgvPath, 'utf8'));
 assert.equal(observedArgv[0], fakeCodeboxBin, 'the explicit external pin is executed, not replaced by a managed candidate');
-assert.deepEqual(observedArgv.slice(1, 3), ['run-fuzz-suite', '--input-file']);
+assert.deepEqual(observedArgv.slice(1, 4), ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file']);
 assert.deepEqual(observedArgv.slice(-2), ['--artifacts', artifactRoot]);
 assert.equal(observedRequest.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.schema, 'homeboy/wp-codebox-fuzz-execution/v1');

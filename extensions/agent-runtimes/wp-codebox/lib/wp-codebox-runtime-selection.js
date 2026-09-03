@@ -16,7 +16,15 @@ if (!runtimeSelectionPath) {
 }
 
 const runtimeSelection = require(runtimeSelectionPath);
-const { minimum_version: REQUIRED_WP_CODEBOX_VERSION } = require('../wp-codebox.json');
+const extensionManifestCandidates = [
+	path.resolve(__dirname, '../../../extensions/wordpress/wordpress.json'),
+	path.resolve(__dirname, '../../../wordpress/wordpress.json'),
+];
+const extensionManifestPath = extensionManifestCandidates.find((candidate) => fs.existsSync(candidate));
+if (!extensionManifestPath) {
+	throw new Error(`WP Codebox runtime selection requires the WordPress extension manifest. Probed:\n${extensionManifestCandidates.map((candidate) => `  - ${candidate}`).join('\n')}`);
+}
+const { minimum_version: REQUIRED_WP_CODEBOX_VERSION } = require(extensionManifestPath).wp_codebox;
 
 const withRequiredVersion = (options = {}) => ({
 	...options,

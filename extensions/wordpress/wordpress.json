@@ -74,21 +74,6 @@
       ]
     },
     {
-      "id": "wordpress.runtime-task-plan",
-      "phase": "planning",
-      "invocation": {
-        "script": "scripts/agent/homeboy-wordpress-runtime-task-plan.cjs",
-        "output_schema": "homeboy/agent-task-plan/v1"
-      },
-      "produces": [
-        {
-          "kind": "execution_plan",
-          "name": "agent-task-plan",
-          "schema": "homeboy/agent-task-plan/v1"
-        }
-      ]
-    },
-    {
       "id": "wordpress.generic-fanout-reconcile-plan",
       "phase": "planning",
       "invocation": {
@@ -160,21 +145,6 @@
       ]
     }
   ],
-  "agent_task": {
-    "runtime_requirements": {
-      "required_capabilities": [
-        "browser_runtime",
-        "wordpress_sandbox",
-        "workspace_mounts",
-        "workspace_tools",
-        "artifact_materialization",
-        "patch_artifacts",
-        "verification_artifacts",
-        "structured_outcome"
-      ],
-      "integration_contract": "homeboy-wordpress-agent-task/v1"
-    }
-  },
   "dependency_materialization_recipes": {
     "schema": "homeboy-extension-wordpress/dependency-materialization-recipes/v1",
     "recipes": [

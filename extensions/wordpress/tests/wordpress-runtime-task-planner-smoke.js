@@ -182,6 +182,9 @@ try {
 		recursive: true,
 		filter: (source) => !source.split(path.sep).includes('node_modules'),
 	});
+	fs.cpSync(path.join(__dirname, '..', '..', 'agent-task-contracts'), path.join(installCopy, 'agent-task-contracts'), {
+		recursive: true,
+	});
 	const installedRequire = spawnSync(process.execPath, [
 		'-e',
 		"require(process.argv[1]); process.stdout.write('installed planner require passed\\n');",

@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 /**
  * Regression guard for Extra-Chill/homeboy#7736.
  *
- * The three CLI agent-task executor runtimes (opencode/codex/claude-code, plus
- * wp-codebox and pi) each `require('../../../agent-task-contracts')`, which from
+ * The CLI agent-task executor runtimes (opencode, codex, claude-code, and pi)
+ * each `require('../../../agent-task-contracts')`, which from
  * an installed runtime at `~/.config/homeboy/agent-runtimes/<runtime>/lib/`
  * resolves to `~/.config/homeboy/agent-task-contracts/`. That directory only
  * exists on an install if `agent-task-contracts` is declared as a shared asset

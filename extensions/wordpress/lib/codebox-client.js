@@ -40,18 +40,19 @@ class CodeboxClient {
 
 	runPublicCliCommand(args, options = {}) {
 		const merged = { ...this.options, ...options };
+		if (typeof merged.runPublicCli === 'function') {
+			const command = this.publicCliBin(merged);
+			return normalizeCliResult(merged.runPublicCli({ command, args, stdin: merged.stdin }, merged));
+		}
+		if (typeof merged.runCli === 'function') {
+			const command = this.publicCliBin(merged);
+			return normalizeCliResult(merged.runCli({ command, args, stdin: merged.stdin }, merged));
+		}
+
 		const runtime = canonicalWpCodeboxRuntime({
 			...merged,
 			wp_codebox_bin: merged.wp_codebox_bin || merged.wpCodeboxBin,
 		});
-		const command = runtime.selected.path;
-		if (typeof merged.runPublicCli === 'function') {
-			return normalizeCliResult(merged.runPublicCli({ command, args, stdin: merged.stdin }, merged));
-		}
-		if (typeof merged.runCli === 'function') {
-			return normalizeCliResult(merged.runCli({ command, args, stdin: merged.stdin }, merged));
-		}
-
 		const invocation = runtime.invocation;
 		const result = spawnSync(invocation.command, [...invocation.args, ...args], {
 			input: merged.stdin,

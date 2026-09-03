@@ -160,8 +160,7 @@ Promise.all([
 		assert.equal(summary.runtime_task_result.provider.id, 'wp-codebox');
 		assert.equal(summary.runtime_task_result.status, 'skipped');
 		assert(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_missing_runtime_contract_manifest'));
-		assert(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_missing_public_cli_command'));
-		assert.equal(summary.metadata.preflight.required.commands[0], 'run-fuzz-suite');
+		assert.deepEqual(summary.metadata.preflight.required.commands, []);
 	}),
 
 	runWpCodeboxFuzzSuite({

@@ -51,7 +51,7 @@ const coreContract = JSON.parse(fs.readFileSync(
 	'utf8'
 ));
 
-for (const runtimeId of ['claude-code', 'codex', 'local-shell', 'opencode', 'pi', 'wp-codebox']) {
+for (const runtimeId of ['claude-code', 'codex', 'local-shell', 'opencode', 'pi']) {
 	const runtimePath = path.join(rootDir, 'agent-runtimes', runtimeId);
 	const manifest = JSON.parse(fs.readFileSync(path.join(runtimePath, `${runtimeId}.json`), 'utf8'));
 	const [program, scriptTemplate] = manifest.agent_task_executors[0].invocation.argv;

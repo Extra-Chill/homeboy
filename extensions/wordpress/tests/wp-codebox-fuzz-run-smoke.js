@@ -47,6 +47,7 @@ const input = wpCodeboxFuzzSuiteInput({
   cases: [{ method: 'GET', path: '/wp/v2/posts' }],
   limits: { max_cases: 1 },
   metadata: { scenario: 'smoke' },
+  runtimeContractManifest: { schemas: { wordpressRuntime: { fuzzSuite: WP_CODEBOX_FUZZ_SUITE_SCHEMA } } },
 });
 assert.equal(input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(input.target.slug, 'sample-plugin');
@@ -77,7 +78,7 @@ assert.equal(wpCodeboxFuzzSuiteSchema({ runtimeContractManifest: manifest }), WP
 assert.equal(wpCodeboxWordPressWorkloadRunAbility({ runtimeContractManifest: manifest }), DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY);
 assert.equal(wpCodeboxWordPressWorkloadRunSchema({ runtimeContractManifest: manifest }), DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA);
 assert.equal(wpCodeboxRuntimeContractManifest({ runtimeContractManifest: manifest }), manifest);
-assert.equal(wpCodeboxRuntimeContractManifest().commands.wordpressRuntime.runFuzzSuite, 'run-fuzz-suite');
+assert.deepEqual(wpCodeboxRuntimeContractManifest(), {});
 
 const artifactPostprocessWorkloadInput = wpCodeboxWordPressWorkloadRunInput({
   id: 'artifact-postprocess-workload-run',

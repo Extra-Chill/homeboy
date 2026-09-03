@@ -67,7 +67,7 @@ if (typeof selection.preflightWpCodeboxCommand !== 'function') process.exit(1);
 process.stdout.write(selection.REQUIRED_WP_CODEBOX_VERSION);
 NODE
 )"
-expected_version="$(fixture_node -p "require(process.argv[1]).minimum_version" "${HOMEBOY_ROOT}/agent-runtimes/wp-codebox/wp-codebox.json" 2>&1)"
+expected_version="$(fixture_node -p "require(process.argv[1]).wp_codebox.minimum_version" "${EXTENSION_DIR}/wordpress.json" 2>&1)"
 [ "${selection_output}" = "${expected_version}" ] || fail "Installed WP Codebox runtime-selection shim failed to load: ${selection_output}"
 
 # The opencode wrapper's only job is to resolve and require the shared runtime,

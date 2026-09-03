@@ -34,7 +34,6 @@
       "node tests/local-shell-agent-task-executor-boundary.test.mjs",
       "bash tests/project-scripts-pnpm-workspace-smoke.sh",
       "node tests/runtime-provider-resolver-smoke.mjs",
-      "node tests/runtime-workflow-input-renderer-smoke.mjs",
       "bash tests/rust-release-prepare-smoke.sh",
       "node tests/secret-env-plan-smoke.mjs",
       "node tests/extension-shape-lint-toolchain-probes.test.mjs",
@@ -45,8 +44,6 @@
       "bash tests/wordpress-runtime-helper-resolver-smoke.sh",
       "bash wordpress/scripts/test/test-shard-replay-smoke.sh",
       "bash wordpress/tests/node-test-result-parser-smoke.sh",
-      "node tests/wp-codebox-adapter-contract-smoke.mjs",
-      "node tests/wp-codebox-callback-data-smoke.mjs",
       "node tests/wp-codebox-install-overrides-persist-smoke.mjs"
     ]
   }
