@@ -536,6 +536,10 @@ pub(crate) fn controller_upgrade_admission_for_records(
         // Durable terminal state is authoritative even when stale ownership
         // metadata remains from the process that produced it.
         .filter(|record| !record.state.is_terminal())
+        // A Cook that has not materialized any task and is blocked only by a
+        // stale runner needs this controller replacement to converge runtime.
+        // It owns no executable work, so it cannot safely block that upgrade.
+        .filter(|record| !is_unmaterialized_runtime_convergence_blocker(record))
         .filter_map(|record| {
             let liveness = liveness_for_record(record, now);
             let runner_unverified = record.runner_job_id().is_some()
@@ -658,6 +662,12 @@ pub(crate) fn controller_upgrade_admission_for_records(
         record_health: serde_json::to_value(record_health).unwrap_or(serde_json::Value::Null),
         blockers,
     }
+}
+
+fn is_unmaterialized_runtime_convergence_blocker(record: &AgentTaskRunRecord) -> bool {
+    record.tasks.is_empty()
+        && agent_task_lifecycle::is_unmaterialized_cook_admission(record)
+        && record.metadata["unmaterialized_cook_admission"]["state"] == "blocked_runner_stale"
 }
 
 struct AgentTaskControllerUpgradeAdmissionProvider;
