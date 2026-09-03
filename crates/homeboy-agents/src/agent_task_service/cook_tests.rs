@@ -21,9 +21,10 @@ use super::super::cook_promotion::{
     persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
     preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
     record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    replacement_gate_execution_started, selected_candidate_task_id_in_store,
-    verify_replacement_gates, CookReportInput, MovingBaseCookRecovery,
+    recover_cook_pr_with_backend_and_review_form, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, replacement_gate_execution_started,
+    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -18556,6 +18557,95 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         );
         assert!(!report.to_string().contains("stale-original-contract"));
         assert!(!report.to_string().contains("private stale gate"));
+    });
+}
+
+#[test]
+fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-9866";
+        let run_id = "cook-9866-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("link recipe attempt");
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        assert!(
+            agent_task_lifecycle::read_aggregate(run_id)
+                .unwrap()
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.outputs.get("review_form").is_none()),
+            "fixture must model the missing historical form"
+        );
+        let applied = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+            .expect("record applied promotion");
+
+        let mut preflight_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            ..Default::default()
+        };
+        let preflight = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(test_review_form()),
+            Vec::new(),
+            true,
+            &mut preflight_backend,
+        )
+        .expect("supplied form recovers immutable candidate without dispatch");
+        assert_eq!(preflight["status"], "validated");
+        assert_eq!(
+            preflight["review_dossier"]["summary"],
+            "Close the issue by guarding the reload path."
+        );
+        assert!(!preflight_backend.committed);
+        assert!(!preflight_backend.pushed);
+        assert!(!preflight_backend.created);
+
+        let mut publish_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied),
+            ..Default::default()
+        };
+        let published = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(test_review_form()),
+            Vec::new(),
+            false,
+            &mut publish_backend,
+        )
+        .expect("supplied form finalizes without manual reconstruction");
+        assert_eq!(published["status"], "review_ready");
+        assert!(publish_backend.created);
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("recovery receipt");
+        assert_eq!(
+            record.metadata["recovery_review_form"]["provenance"]["source"],
+            "operator_supplied_recovery"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["provenance"]["authoring"]["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["provenance"]["deterministic_gates"],
+            serde_json::to_value(&record.metadata["latest_promotion"]["deterministic_gates"])
+                .unwrap()
+        );
     });
 }
 
