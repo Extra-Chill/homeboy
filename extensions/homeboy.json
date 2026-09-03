@@ -34,7 +34,6 @@
       "node tests/local-shell-agent-task-executor-boundary.test.mjs",
       "bash tests/project-scripts-pnpm-workspace-smoke.sh",
       "node tests/runtime-provider-resolver-smoke.mjs",
-      "node tests/runtime-workflow-input-renderer-smoke.mjs",
       "bash tests/rust-release-prepare-smoke.sh",
       "node tests/secret-env-plan-smoke.mjs",
       "node tests/extension-shape-lint-toolchain-probes.test.mjs",

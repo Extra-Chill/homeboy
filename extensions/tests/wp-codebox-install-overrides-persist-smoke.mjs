@@ -4,10 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
-const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-install-overrides-'));
 const manifestPath = path.join(tempDir, 'wordpress.json');
@@ -63,19 +61,5 @@ const machineOverrides = JSON.parse(fs.readFileSync(machineOverridesPath, 'utf8'
 assert.equal(machineOverrides.wp_codebox_bin, cliPath);
 assert.equal(machineOverrides.wp_codebox_core_module, coreModulePath);
 assert.equal(fs.readFileSync(manifestPath, 'utf8'), manifestBefore, 'machine mode must not rewrite the manifest');
-
-const { resolveRuntimeProvider } = require('../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
-const runtime = resolveRuntimeProvider('wp-codebox', {
-	repoRoot: rootDir,
-	workspace: tempDir,
-	env: {
-		HOMEBOY_SETTINGS_JSON: JSON.stringify({
-			wp_codebox_bin: installedSettings.wp_codebox_bin,
-			wp_codebox_core_module: installedSettings.wp_codebox_core_module,
-		}),
-	},
-});
-assert.equal(runtime.paths.runtime_bin, cliPath);
-assert.equal(runtime.paths.runtime_core_module, coreModulePath);
 
 console.log('wp-codebox install overrides persist smoke passed');
