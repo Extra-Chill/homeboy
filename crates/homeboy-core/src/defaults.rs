@@ -219,6 +219,23 @@ pub struct RetentionConfig {
     pub controller_runtime_days: u64,
     #[serde(default = "default_controller_runtime_max_bytes")]
     pub controller_runtime_max_bytes: u64,
+    /// Published release versions retained per repository in the durable
+    /// release artifact store.
+    ///
+    /// Mirrors `runtime_run_max_count`: high-churn, reconstructable storage
+    /// bounded by how many entries are worth keeping rather than by how old
+    /// they are. The newest release is always retained regardless of this
+    /// value.
+    #[serde(default = "default_release_artifact_max_count")]
+    pub release_artifact_max_count: usize,
+    /// Ceiling on retained release artifact bytes, per repository.
+    ///
+    /// A count alone is a poor bound here: per-release payloads span two orders
+    /// of magnitude across repositories, so the count that preserves a small
+    /// repository's whole history lets a large one hold gigabytes (#14223).
+    /// Both bounds apply and the stricter one wins.
+    #[serde(default = "default_release_artifact_max_bytes")]
+    pub release_artifact_max_bytes: u64,
     #[serde(default = "default_retention_limit")]
     pub limit: i64,
     #[serde(default = "default_shared_store_retention_days")]
@@ -275,6 +292,8 @@ impl Default for RetentionConfig {
             runtime_run_max_count: default_runtime_run_max_count(),
             controller_runtime_days: default_controller_runtime_retention_days(),
             controller_runtime_max_bytes: default_controller_runtime_max_bytes(),
+            release_artifact_max_count: default_release_artifact_max_count(),
+            release_artifact_max_bytes: default_release_artifact_max_bytes(),
             limit: default_retention_limit(),
             shared_store_days: default_shared_store_retention_days(),
             shared_store_max_bytes: default_shared_store_max_bytes(),
@@ -315,6 +334,28 @@ fn default_controller_runtime_retention_days() -> u64 {
 }
 
 fn default_controller_runtime_max_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+
+/// Five published versions per repository.
+///
+/// Deliberately far below `runtime_run_max_count`'s 100: a runtime run is
+/// failure evidence that exists only locally, while a release artifact is a
+/// cache of bytes already published to an immutable GitHub Release tag. Losing
+/// an old one costs a download, so the retained depth only has to cover
+/// rollback and repair of recent releases, not an archive. The host in #14223
+/// held 14 builds of one repository spanning nine days while upstream was
+/// already several minor versions ahead of all of them.
+fn default_release_artifact_max_count() -> usize {
+    5
+}
+
+/// Two GiB per repository, matching `controller_runtime_max_bytes`.
+///
+/// At the ~435 MB per-build size that filled a host in #14223 this retains four
+/// builds; at the few-megabyte size most repositories publish it never binds and
+/// the count bound governs. That asymmetry is the point of having both.
+fn default_release_artifact_max_bytes() -> u64 {
     2 * 1024 * 1024 * 1024
 }
 

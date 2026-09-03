@@ -34,7 +34,8 @@ use homeboy::runner::runners::{
 pub use homeboy_command_contract::cleanup::{
     runtime_tmp_commands, CleanupArgs, CleanupArtifactsArgs, CleanupArtifactsSortArg,
     CleanupCategoryArg, CleanupCommand, CleanupInventoryCategoryMetadata,
-    CleanupRetainedStorageArgs, LEAKED_TEST_HOMES_METADATA, RUNNER_DOWNLOADS_METADATA,
+    CleanupRetainedStorageArgs, LEAKED_TEST_HOMES_METADATA, RELEASE_ARTIFACTS_METADATA,
+    RUNNER_DOWNLOADS_METADATA,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -128,12 +129,21 @@ struct AutomaticRetentionControllerOutput {
 /// bytes by hand, and they arrive at hundreds of megabytes each (#11073). It is
 /// bounded by an age floor, a byte ceiling, and the scan limit, and it can only
 /// ever reach a directory whose owning process is gone.
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
+///
+/// `release-artifacts` is unattended for the same reason: nothing reclaimed the
+/// durable release store by hand either, and it reached 6.1 GB with 6.0 GB of
+/// that a single repository's fourteen ~435 MB builds (#14223). It is bounded
+/// by a per-repository count, a per-repository byte ceiling, an age floor, and
+/// the scan limit; the newest release of every repository is structurally
+/// unreachable; and everything it can remove is a local copy of bytes already
+/// published to an immutable GitHub Release tag.
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 11] = [
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
     CleanupCategoryArg::OrphanedArtifactBytes,
     CleanupCategoryArg::RuntimeTmp,
     CleanupCategoryArg::LeakedTestHomes,
+    CleanupCategoryArg::ReleaseArtifacts,
     CleanupCategoryArg::ControllerScratch,
     CleanupCategoryArg::ControllerRuntimes,
     CleanupCategoryArg::RemoteLabWorkspaces,
@@ -2300,6 +2310,50 @@ fn cleanup_inventory_with_deadline(
         );
     }
 
+    // Not reachable by `orphaned-artifact-bytes`, which shares the artifact
+    // root: these directories are referenced by durable release records, so
+    // that category correctly inventories zero candidates against them. They
+    // are live, not orphaned, and bounding them needs a policy of its own
+    // (#14223).
+    if selected.includes(CleanupCategoryArg::ReleaseArtifacts) {
+        isolate_cleanup_category_bounded(
+            &mut categories,
+            RELEASE_ARTIFACTS_METADATA,
+            apply,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
+            || {
+                let output =
+                    cleanup::cleanup_release_artifacts(cleanup::ReleaseArtifactCleanupOptions {
+                        apply,
+                        max_count_per_repo: policy.release_artifact_max_count,
+                        max_bytes_per_repo: policy.release_artifact_max_bytes,
+                        min_age: policy.release_artifact_min_age(),
+                        limit: policy.scan_limit(),
+                        root: None,
+                    })?;
+                // `candidate_count` and `estimated_bytes` come straight from
+                // the category, which derives both from the same retention
+                // decision that gates removal. Recomputing them here would be a
+                // second place for the plan and the apply to disagree (#14222).
+                category_from_output(
+                    RELEASE_ARTIFACTS_METADATA,
+                    apply,
+                    CleanupCategoryMetrics {
+                        candidate_count: output.candidate_count,
+                        applied_count: output.removed_count,
+                        skipped_count: output.skipped_count,
+                        estimated_bytes: output.estimated_bytes,
+                        reclaimed_bytes: output.reclaimed_bytes,
+                    },
+                    output,
+                )
+                .map(|category| vec![category])
+            },
+        );
+    }
+
     if selected.includes(CleanupCategoryArg::ControllerScratch) {
         isolate_cleanup_category_bounded(
             &mut categories,
@@ -2601,6 +2655,7 @@ fn cleanup_category_arg_name(category: &CleanupCategoryArg) -> &'static str {
         CleanupCategoryArg::SharedCargoTargets => "shared-cargo-targets",
         CleanupCategoryArg::ControllerRuntimes => "controller-runtimes",
         CleanupCategoryArg::LeakedTestHomes => "leaked-test-homes",
+        CleanupCategoryArg::ReleaseArtifacts => "release-artifacts",
         CleanupCategoryArg::ExternalStorage => "external-storage",
     }
 }
@@ -4995,6 +5050,47 @@ mod tests {
         assert!(policy.scan_limit() > 0);
     }
 
+    /// #14223: the durable release store had no bound of any kind and reached
+    /// 6.1 GB, 6.0 GB of it one repository's fourteen ~435 MB builds. Nothing
+    /// reclaimed it by hand, so leaving the category opt-in would let it refill
+    /// on the next release cadence exactly as before.
+    #[test]
+    fn unattended_retention_reaches_the_release_store_nothing_else_bounds() {
+        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::ReleaseArtifacts));
+        assert!(!OPT_IN_ONLY_CATEGORIES.contains(&CleanupCategoryArg::ReleaseArtifacts));
+        assert_eq!(
+            cleanup_category_arg_name(&CleanupCategoryArg::ReleaseArtifacts),
+            "release-artifacts"
+        );
+        assert!(
+            CleanupCategorySelection::new(Vec::new(), Vec::new())
+                .includes(CleanupCategoryArg::ReleaseArtifacts),
+            "a bare sweep must reach the category"
+        );
+        assert!(
+            !CleanupCategorySelection::new(Vec::new(), vec![CleanupCategoryArg::ReleaseArtifacts])
+                .includes(CleanupCategoryArg::ReleaseArtifacts),
+            "an operator must still be able to exclude it"
+        );
+    }
+
+    /// Bounded before it is automatic. Both budgets must be finite: a count
+    /// alone cannot bound a store whose per-release payload spans two orders of
+    /// magnitude across repositories.
+    #[test]
+    fn the_release_artifact_category_is_bounded_before_it_is_automatic() {
+        let policy = cleanup::cleanup_policy_from_retention(
+            &defaults::RetentionConfig::default(),
+            CleanupPolicyOverrides::default(),
+        )
+        .expect("resolve policy");
+
+        assert!(policy.release_artifact_max_count < usize::MAX);
+        assert!(policy.release_artifact_max_bytes < u64::MAX);
+        assert!(policy.release_artifact_min_age() > Duration::ZERO);
+        assert!(policy.scan_limit() > 0);
+    }
+
     /// Inputs a running job may still need, and uncommitted operator work, are
     /// never reclaimed without an operator asking.
     #[test]
@@ -5759,6 +5855,13 @@ mod tests {
                 "leaked-test-homes",
                 "homeboy cleanup --include leaked-test-homes",
                 "homeboy cleanup --include leaked-test-homes --apply",
+            ),
+            (
+                RELEASE_ARTIFACTS_METADATA,
+                "release_artifacts",
+                "release-artifacts",
+                "homeboy cleanup --include release-artifacts",
+                "homeboy cleanup --include release-artifacts --apply",
             ),
         ];
 
