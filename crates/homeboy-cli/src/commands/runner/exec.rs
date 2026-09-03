@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use homeboy::core::engine::shell;
 use homeboy::core::secret_env_plan::SecretEnvPlan;
-use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::Error;
 use homeboy::runner::runners::{self as runner, RunnerExecOutput};
@@ -15,38 +13,74 @@ use homeboy_runner_contract::RunnerKind;
 
 use super::super::CmdResult;
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn exec_with_hydration(
-    runner_id: &str,
-    cwd: Option<String>,
-    sync_workspace: Option<String>,
-    workspace_ref: Option<String>,
-    hydrate_deps: bool,
-    project_id: Option<String>,
-    allow_diagnostic_ssh: bool,
-    capture_patch: bool,
-    require_paths: Vec<String>,
-    script_file: Option<String>,
-    env: Vec<String>,
-    secret_env: Vec<String>,
-    secret_env_plan: Option<String>,
-    secret_env_plan_file: Option<String>,
-    dry_run: bool,
-    run_id: Option<String>,
-    artifact_outputs: Vec<String>,
-    artifact_dir_outputs: Vec<String>,
-    summary_outputs: Vec<String>,
-    read_only_artifact: bool,
-    raw: bool,
-    command: Vec<String>,
-    extension_env_providers: Vec<String>,
-) -> CmdResult<RunnerExecOutput> {
-    exec_with_hydration_with_workspace_sync_timeout(
+#[derive(Debug, Clone)]
+pub(super) struct RunnerExecInput {
+    pub runner_id: String,
+    pub command: Vec<String>,
+    pub cwd: Option<String>,
+    pub sync_workspace: Option<String>,
+    pub workspace_ref: Option<String>,
+    pub hydrate_deps: bool,
+    pub workspace_sync_timeout: Duration,
+    pub project_id: Option<String>,
+    pub allow_diagnostic_ssh: bool,
+    pub capture_patch: bool,
+    pub require_paths: Vec<String>,
+    pub script_file: Option<String>,
+    pub env: Vec<String>,
+    pub secret_env: Vec<String>,
+    pub secret_env_plan: Option<String>,
+    pub secret_env_plan_file: Option<String>,
+    pub dry_run: bool,
+    pub run_id: Option<String>,
+    pub artifact_outputs: Vec<String>,
+    pub artifact_dir_outputs: Vec<String>,
+    pub summary_outputs: Vec<String>,
+    pub read_only_artifact: bool,
+    pub raw: bool,
+    pub extension_env_providers: Vec<String>,
+}
+
+impl RunnerExecInput {
+    pub(super) fn new(runner_id: impl Into<String>, command: Vec<String>) -> Self {
+        Self {
+            runner_id: runner_id.into(),
+            command,
+            cwd: None,
+            sync_workspace: None,
+            workspace_ref: None,
+            hydrate_deps: false,
+            workspace_sync_timeout: Duration::from_secs(240),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            capture_patch: false,
+            require_paths: Vec::new(),
+            script_file: None,
+            env: Vec::new(),
+            secret_env: Vec::new(),
+            secret_env_plan: None,
+            secret_env_plan_file: None,
+            dry_run: false,
+            run_id: None,
+            artifact_outputs: Vec::new(),
+            artifact_dir_outputs: Vec::new(),
+            summary_outputs: Vec::new(),
+            read_only_artifact: false,
+            raw: false,
+            extension_env_providers: Vec::new(),
+        }
+    }
+}
+
+pub(super) fn execute(input: RunnerExecInput) -> CmdResult<RunnerExecOutput> {
+    let RunnerExecInput {
         runner_id,
+        command,
         cwd,
         sync_workspace,
         workspace_ref,
         hydrate_deps,
+        workspace_sync_timeout,
         project_id,
         allow_diagnostic_ssh,
         capture_patch,
@@ -63,45 +97,14 @@ pub(super) fn exec_with_hydration(
         summary_outputs,
         read_only_artifact,
         raw,
-        command,
         extension_env_providers,
-        Duration::from_secs(240),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn exec_with_hydration_with_workspace_sync_timeout(
-    runner_id: &str,
-    cwd: Option<String>,
-    sync_workspace: Option<String>,
-    workspace_ref: Option<String>,
-    hydrate_deps: bool,
-    project_id: Option<String>,
-    allow_diagnostic_ssh: bool,
-    capture_patch: bool,
-    require_paths: Vec<String>,
-    script_file: Option<String>,
-    env: Vec<String>,
-    secret_env: Vec<String>,
-    secret_env_plan: Option<String>,
-    secret_env_plan_file: Option<String>,
-    dry_run: bool,
-    run_id: Option<String>,
-    artifact_outputs: Vec<String>,
-    artifact_dir_outputs: Vec<String>,
-    summary_outputs: Vec<String>,
-    read_only_artifact: bool,
-    raw: bool,
-    command: Vec<String>,
-    extension_env_providers: Vec<String>,
-    workspace_sync_timeout: Duration,
-) -> CmdResult<RunnerExecOutput> {
+    } = input;
     validate_runner_exec_invocation_shape(script_file.as_deref(), &command)?;
     let script = script_file
         .as_deref()
         .map(read_runner_exec_script)
         .transpose()?;
-    let prepared_command = prepare_runner_exec_command(script.as_ref(), command)?;
+    let command = prepare_runner_exec_command(script.as_ref(), command)?;
     let raw_env = prepare_runner_exec_env(env, script.as_deref())?;
     let secret_env_plan =
         prepare_runner_exec_secret_env_plan(secret_env, secret_env_plan, secret_env_plan_file)?;
@@ -113,372 +116,70 @@ pub(super) fn exec_with_hydration_with_workspace_sync_timeout(
         .into_iter()
         .collect::<HashMap<_, _>>();
     env.extend(raw_env);
-    let required_commands = prepared_command.first().cloned().into_iter().collect();
     let extension_env_providers = normalize_extension_env_providers(extension_env_providers);
-    let has_declared_outputs = !artifact_outputs.is_empty()
-        || !artifact_dir_outputs.is_empty()
-        || !summary_outputs.is_empty();
-
-    // A read-only retrieval hydrates evidence the runner already retains; it
-    // must not declare new artifact outputs or capture a mutation patch, so the
-    // read never rewrites a draining generation (Extra-Chill/homeboy#9420).
-    if read_only_artifact && (has_declared_outputs || capture_patch) {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "read_only_artifact",
-            "runner exec --read-only-artifact is a non-destructive retrieval; it cannot be combined with --capture-patch or --artifact/--artifact-dir/--summary output declarations",
-            None,
-            Some(vec![
-                "Drop --read-only-artifact to run a mutating command, or drop the output/capture flags to retrieve retained evidence non-destructively.".to_string(),
-            ]),
-        ));
+    if read_only_artifact
+        && (!artifact_outputs.is_empty()
+            || !artifact_dir_outputs.is_empty()
+            || !summary_outputs.is_empty()
+            || capture_patch)
+    {
+        return Err(Error::validation_invalid_argument("read_only_artifact", "runner exec --read-only-artifact is a non-destructive retrieval; it cannot be combined with --capture-patch or --artifact/--artifact-dir/--summary output declarations", None, None));
     }
-
     if dry_run {
         let (cwd, _, _) =
-            exec_workspace_context(runner_id, cwd, sync_workspace, workspace_ref, false, true)?;
+            exec_workspace_context(&runner_id, cwd, sync_workspace, workspace_ref, false)?;
         return runner_exec_dry_run(
-            runner_id,
+            &runner_id,
             cwd,
             allow_diagnostic_ssh,
             require_paths,
-            prepared_command,
+            command,
             script.unwrap_or_default(),
         );
     }
-
-    let validated_run_id =
-        validate_runner_exec_run_id(persisted_runner_exec_run_id(run_id, has_declared_outputs))?;
-    let has_workspace_sync = sync_workspace.is_some();
-    // Workspace synchronization is controller-side work. Create its durable
-    // owner before it begins so a stalled transfer is visible and terminalized
-    // without claiming that a runner job was ever accepted.
-    let lifecycle_store = validated_run_id
-        .as_deref()
-        .map(|_| {
-            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment(
-            )
-        })
-        .transpose()?;
-    if let (true, Some(run_id), Some(lifecycle_store)) = (
-        has_workspace_sync,
-        validated_run_id.as_deref(),
-        lifecycle_store.as_ref(),
-    ) {
-        let runner_config = runner::load(runner_id)?;
-        let remote_cwd = cwd
-            .as_deref()
-            .or(runner_config.workspace_root.as_deref())
-            .unwrap_or(".");
-        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run_in_store(
-            lifecycle_store,
-            run_id,
-            runner_id,
-            remote_cwd,
-            &prepared_command,
-        )?;
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
-            run_id,
-            "workspace_sync",
-        )?;
-    }
-    let deadline = has_workspace_sync.then(|| Instant::now() + workspace_sync_timeout);
-    let (cwd, source_snapshot, hydration_source) = exec_workspace_context_with_deadline(
-        runner_id,
+    let required_commands = command.first().cloned().into_iter().collect();
+    let options = runner::RunnerExecOptions {
+        execution_context:
+            homeboy::core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd,
-        sync_workspace,
-        workspace_ref,
-        hydrate_deps,
-        false,
-        deadline,
-    )
-    .map_err(|error| {
-        if has_workspace_sync {
-            if let Some(run_id) = validated_run_id.as_deref() {
-                let _ =
-                    homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
-                        run_id,
-                        "workspace_sync",
-                        "workspace_sync",
-                        false,
-                        &error,
-                    );
-            }
-        }
-        error
-    })?;
-    if hydrate_deps {
-        if let (Some(run_id), Some(lifecycle_store)) =
-            (validated_run_id.as_deref(), lifecycle_store.as_ref())
-        {
-            if !has_workspace_sync {
-                let runner_config = runner::load(runner_id)?;
-                let remote_cwd = cwd
-                    .as_deref()
-                    .or(runner_config.workspace_root.as_deref())
-                    .unwrap_or(".");
-                homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run_in_store(
-                    lifecycle_store,
-                    run_id,
-                    runner_id,
-                    remote_cwd,
-                    &prepared_command,
-                )?;
-            }
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
-                run_id,
-                "dependency_hydration",
-            )?;
-        }
-        (|| {
-            let local_path = hydration_source.ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "hydrate_deps",
-                    "--hydrate-deps requires --sync-workspace or --workspace-ref",
-                    None,
-                    None,
-                )
-            })?;
-            let remote_path = cwd.as_deref().ok_or_else(|| {
-                Error::internal_unexpected("synced runner workspace is missing its remote path")
-            })?;
-            homeboy_lab_runner::hydrate_runner_workspace_dependencies(
-                runner_id,
-                &local_path,
-                remote_path,
-            )
-        })()
-        .map_err(|error| {
-            if let Some(run_id) = validated_run_id.as_deref() {
-                let _ =
-                    homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
-                        run_id,
-                        "dependency_hydration",
-                        "dependency_hydration",
-                        false,
-                        &error,
-                    );
-            }
-            error
-        })?;
-    }
-    // One `runner exec` invocation is one unit of work over one installation.
-    // The store was resolved before workspace synchronization, which can stall
-    // before a runner job exists; every later write addresses that same run.
-    if let (Some(run_id), Some(lifecycle_store)) =
-        (validated_run_id.as_deref(), lifecycle_store.as_ref())
-    {
-        let runner_config = runner::load(runner_id)?;
-        let remote_cwd = cwd
-            .as_deref()
-            .or(runner_config.workspace_root.as_deref())
-            .unwrap_or(".");
-        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run_in_store(
-            lifecycle_store,
-            run_id,
-            runner_id,
-            remote_cwd,
-            &prepared_command,
-        )?;
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_declarations_in_store(
-            lifecycle_store,
-            run_id,
-            &artifact_outputs,
-            &artifact_dir_outputs,
-            &summary_outputs,
-        )?;
-        let execution_record =
-            homeboy::core::runner_execution_envelope::RunnerExecutionRecord::planned(
-                run_id, runner_id, "dispatch",
-            )
-            .with_orchestration_provenance(Some(
-                runner::runner_exec_orchestration_provenance(runner_id)?,
-            ));
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record_in_store(
-            lifecycle_store,
-            run_id,
-            &execution_record,
-        )?;
-    }
-
-    let (mut output, exit_code) = runner::exec(
-        runner_id,
-        runner::RunnerExecOptions {
-            execution_context:
-                homeboy::core::runner_job_execution_context::RunnerJobExecutionContext::local(
-                    "homeboy",
-                ),
-            cwd,
-            project_id,
-            allow_diagnostic_ssh,
-            diagnostic_ssh_timeout: None,
-            command: prepared_command,
-            env,
-            secret_env_names,
-            secret_env_plan: Some(secret_env_plan),
-            env_materialization: None,
-            capture_patch,
-            raw_exec: true,
-            source_snapshot,
-            path_materialization_plan: None,
-            capability_preflight: Some(runner::RunnerCapabilityPreflight {
-                command: "runner.exec".to_string(),
-                required_commands,
-                ..Default::default()
-            }),
-            required_extensions: extension_env_providers.clone(),
-            extension_env_providers,
-            accepted_extension_settings: Vec::new(),
-            require_paths,
-            lab_runner_workload: None,
-            run_id: validated_run_id.clone(),
-            run_id_owns_generic_exec: true,
-            detach_after_handoff: false,
-            // A read-only retrieval never rotates the tunnel and mirrors no new
-            // evidence; it hydrates evidence the runner already retains
-            // (Extra-Chill/homeboy#9420).
-            mirror_evidence: !read_only_artifact,
-            print_handoff: should_print_handoff(raw, read_only_artifact),
-            read_only_artifact_access: read_only_artifact,
-        },
-    )?;
-    if output.mirror_run_id.is_none() {
-        output.mirror_run_id.clone_from(&validated_run_id);
-    }
-    if let (Some(run_id), Some(lifecycle_store)) =
-        (validated_run_id.as_deref(), lifecycle_store.as_ref())
-    {
-        if let Some(execution_record) = output.execution_record.as_ref() {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record_in_store(
-                lifecycle_store,
-                run_id,
-                execution_record,
-            )?;
-        }
-        if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint_in_store(
-                lifecycle_store,
-                run_id,
-                &homeboy::core::api_jobs::RunnerJobLogSnapshot {
-                    job: job.clone(),
-                    events: events.clone(),
-                },
-            )?;
-        }
-        let mut artifacts = Vec::new();
-        for declaration in &artifact_outputs {
-            let promoted = runner::promote_runner_exec_artifacts_in_store(
-                lifecycle_store,
-                run_id,
-                &output,
-                std::slice::from_ref(declaration),
-            )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
-                lifecycle_store,
-                run_id,
-                "artifact",
-                declaration,
-                &promoted,
-            )?;
-            artifacts.extend(promoted);
-        }
-        let promoted_artifacts = artifacts
-            .iter()
-            .filter_map(|record| runner::promoted_output(&output, record))
-            .collect::<Vec<_>>();
-        let mut artifact_dir_records = Vec::new();
-        for declaration in &artifact_dir_outputs {
-            let promoted = runner::promote_runner_exec_artifact_dirs_in_store(
-                lifecycle_store,
-                run_id,
-                &output,
-                std::slice::from_ref(declaration),
-            )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
-                lifecycle_store,
-                run_id,
-                "artifact_dir",
-                declaration,
-                &promoted,
-            )?;
-            artifact_dir_records.extend(promoted);
-        }
-        let promoted_artifact_dir_records = artifact_dir_records
-            .iter()
-            .filter_map(|record| runner::promoted_output(&output, record))
-            .collect::<Vec<_>>();
-        let mut summaries = Vec::new();
-        for declaration in &summary_outputs {
-            let promoted = runner::promote_runner_exec_summaries_in_store(
-                lifecycle_store,
-                run_id,
-                &output,
-                std::slice::from_ref(declaration),
-            )?;
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion_in_store(
-                lifecycle_store,
-                run_id,
-                "summary",
-                declaration,
-                &promoted,
-            )?;
-            summaries.extend(promoted);
-        }
-        let structured_summaries = summaries
-            .iter()
-            .filter_map(|summary| runner::runner_exec_structured_summary(&output, summary))
-            .collect::<Vec<_>>();
-        let promoted_summaries = summaries
-            .iter()
-            .filter_map(|record| runner::promoted_output(&output, record))
-            .collect::<Vec<_>>();
-        output.promoted_outputs.extend(promoted_artifacts);
-        output
-            .promoted_outputs
-            .extend(promoted_artifact_dir_records);
-        output.structured_summaries.extend(structured_summaries);
-        output.promoted_outputs.extend(promoted_summaries);
-        let retained = artifacts
-            .iter()
-            .chain(artifact_dir_records.iter())
-            .chain(summaries.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs_in_store(
-            lifecycle_store,
-            run_id,
-            &retained,
-        )?;
-        if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
-            homeboy_agents::agent_task_lifecycle::project_terminal_runner_result_in_store(
-                lifecycle_store,
-                run_id,
-                &homeboy::core::api_jobs::RunnerJobLogSnapshot {
-                    job: job.clone(),
-                    events: events.clone(),
-                },
-            )?;
-        } else if matches!(
-            output.mode,
-            runner::RunnerExecMode::DiagnosticSsh | runner::RunnerExecMode::Local
-        ) {
-            homeboy_agents::agent_task_lifecycle::finish_runner_exec_direct_in_store(
-                lifecycle_store,
-                run_id,
-                match output.mode {
-                    runner::RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
-                    _ => "local",
-                },
-                exit_code,
-            )?;
-        }
-        if matches!(
-            output.mode,
-            runner::RunnerExecMode::Daemon | runner::RunnerExecMode::ReverseBroker
-        ) {
-            homeboy_lab_runner::reconcile_runner_generation_after_evidence(&output.runner_id)?;
-        }
-    }
-    Ok((output, exit_code))
+        project_id,
+        allow_diagnostic_ssh,
+        diagnostic_ssh_timeout: None,
+        command,
+        env,
+        secret_env_names,
+        secret_env_plan: Some(secret_env_plan),
+        env_materialization: None,
+        capture_patch,
+        raw_exec: true,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        capability_preflight: Some(runner::RunnerCapabilityPreflight {
+            command: "runner.exec".to_string(),
+            required_commands,
+            ..Default::default()
+        }),
+        required_extensions: extension_env_providers.clone(),
+        extension_env_providers,
+        accepted_extension_settings: Vec::new(),
+        require_paths,
+        lab_runner_workload: None,
+        run_id,
+        run_id_owns_generic_exec: true,
+        detach_after_handoff: false,
+        mirror_evidence: !read_only_artifact,
+        print_handoff: should_print_handoff(raw, read_only_artifact),
+        read_only_artifact_access: read_only_artifact,
+    };
+    let mut request = runner::RunnerExecRequest::new(runner_id, options);
+    request.sync_workspace = sync_workspace;
+    request.workspace_ref = workspace_ref;
+    request.hydrate_deps = hydrate_deps;
+    request.workspace_sync_timeout = workspace_sync_timeout;
+    request.artifact_outputs = artifact_outputs;
+    request.artifact_dir_outputs = artifact_dir_outputs;
+    request.summary_outputs = summary_outputs;
+    runner::exec_request(request)
 }
 
 fn normalize_extension_env_providers(extension_ids: Vec<String>) -> Vec<String> {
@@ -502,28 +203,11 @@ pub(super) fn exec_workspace_context(
     sync_workspace: Option<String>,
     workspace_ref: Option<String>,
     verify_hydration_source: bool,
-    dry_run: bool,
-) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>, Option<String>)> {
-    exec_workspace_context_with_deadline(
-        runner_id,
-        cwd,
-        sync_workspace,
-        workspace_ref,
-        verify_hydration_source,
-        dry_run,
-        None,
-    )
-}
-
-fn exec_workspace_context_with_deadline(
-    runner_id: &str,
-    cwd: Option<String>,
-    sync_workspace: Option<String>,
-    workspace_ref: Option<String>,
-    verify_hydration_source: bool,
-    dry_run: bool,
-    deadline: Option<Instant>,
-) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>, Option<String>)> {
+) -> homeboy::core::Result<(
+    Option<String>,
+    Option<homeboy::core::source_snapshot::SourceSnapshot>,
+    Option<String>,
+)> {
     if let Some(workspace_ref) = workspace_ref {
         if cwd.is_some() || sync_workspace.is_some() {
             return Err(Error::validation_invalid_argument(
@@ -560,61 +244,8 @@ fn exec_workspace_context_with_deadline(
         ));
     }
 
-    if dry_run {
-        return Ok((None, None, Some(local_path)));
-    }
-
-    let options = runner::RunnerWorkspaceSyncOptions {
-        path: local_path,
-        mode: runner::RunnerWorkspaceSyncMode::Snapshot,
-        controller_routed_git: false,
-        changed_since_base: None,
-        git_fetch_refs: Vec::new(),
-        snapshot_includes: Vec::new(),
-        allow_dirty_lab_workspace: false,
-        run_isolation_token: None,
-    };
-    let (synced, _) = (if let Some(deadline) = deadline {
-        runner::sync_workspace_before(runner_id, options, deadline)
-    } else {
-        runner::sync_workspace(runner_id, options)
-    })?;
-    let mut source_snapshot = homeboy::core::source_snapshot::collect_local(
-        runner_id,
-        Path::new(&synced.local_path),
-        Some(&synced.remote_path),
-        synced.sync_mode.as_str(),
-    );
-    source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
-
-    Ok((
-        Some(synced.remote_path),
-        Some(source_snapshot),
-        Some(synced.local_path),
-    ))
-}
-
-fn validate_runner_exec_run_id(run_id: Option<String>) -> homeboy::core::Result<Option<String>> {
-    let Some(run_id) = run_id else {
-        return Ok(None);
-    };
-    let trimmed = run_id.trim();
-    if trimmed.is_empty() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "run_id",
-            "runner exec --run-id must not be empty",
-            Some(run_id),
-            None,
-        ));
-    }
-    Ok(Some(trimmed.to_string()))
-}
-
-fn persisted_runner_exec_run_id(
-    run_id: Option<String>,
-    has_declared_outputs: bool,
-) -> Option<String> {
-    run_id.or_else(|| has_declared_outputs.then(|| format!("runner-exec-{}", uuid::Uuid::new_v4())))
+    // Non-dry-run synchronization belongs to the canonical RunnerExecRequest.
+    Ok((None, None, Some(local_path)))
 }
 
 /// Maximum number of bytes retained when reading a runner exec script into
