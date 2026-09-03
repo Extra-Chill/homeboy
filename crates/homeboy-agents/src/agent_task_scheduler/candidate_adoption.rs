@@ -169,8 +169,23 @@ pub(super) fn finalize_candidate_artifacts(outcome: &mut AgentTaskOutcome, runni
     let Some(run_id) = running.run_id.as_deref() else {
         return;
     };
+    let timeout_or_recoverable = matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Timeout | AgentTaskOutcomeStatus::CandidateRecoverable
+    ) || outcome.artifacts.iter().any(|artifact| {
+        artifact.metadata.get("incomplete") == Some(&serde_json::Value::Bool(true))
+    });
+    let provenance_root = running.source_workspace_root.as_deref().or_else(|| {
+        timeout_or_recoverable
+            .then_some(running.request.workspace.root.as_deref())
+            .flatten()
+    });
     let repository_identity =
-        canonical_repository_identity_for_root(running.source_workspace_root.as_deref());
+        canonical_repository_identity_for_root(provenance_root).or_else(|| {
+            timeout_or_recoverable
+                .then(|| local_repository_identity_for_root(provenance_root))
+                .flatten()
+        });
     let workspace_identity = running
         .source_provenance
         .as_ref()
@@ -269,7 +284,8 @@ fn sha256(content: &str) -> String {
 }
 
 fn canonical_repository_identity_for_root(root: Option<&str>) -> Option<String> {
-    let remote = homeboy_core::git::remote_origin_url(Path::new(root?))?;
+    let root = Path::new(root?);
+    let remote = homeboy_core::git::remote_origin_url(root)?;
     let repository = homeboy_core::git::release_download::parse_github_url(&remote)?;
     Some(format!(
         "github://{}/{}/{}",
@@ -277,4 +293,19 @@ fn canonical_repository_identity_for_root(root: Option<&str>) -> Option<String> 
         repository.owner.to_ascii_lowercase(),
         repository.repo.to_ascii_lowercase(),
     ))
+}
+
+fn local_repository_identity_for_root(root: Option<&str>) -> Option<String> {
+    let root = Path::new(root?);
+    // A local-only repository has no canonical remote, but its common Git
+    // directory still distinguishes it from another checkout at the same base.
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let git_dir = String::from_utf8(git_dir.stdout).ok()?;
+    let git_dir = std::fs::canonicalize(git_dir.trim()).ok()?;
+    Some(format!("local://{}", sha256(&git_dir.to_string_lossy())))
 }
