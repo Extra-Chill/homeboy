@@ -2569,17 +2569,44 @@ struct CookRetryAttempt {
 /// Recipe-backed Cook runs cannot fall back to generic lifecycle retry because
 /// that would lose the Cook's authenticated lineage.
 pub fn retry_admission(run_id: &str) -> Result<()> {
-    retry_admission_with_preflight(run_id, |plan| {
-        if plan.metadata.get("generic_lab_command_replay").is_some() {
-            return Err(Error::validation_invalid_argument(
-                "generic_lab_command_replay",
-                "generic Lab replay requires controller workspace preflight",
-                Some(plan.plan_id.clone()),
-                None,
-            ));
-        }
-        Ok(())
-    })
+    retry_admission_with_preflight(run_id, retry_plan_supported_by_generic_action)
+}
+
+/// Read-only Cook retry admission for control-plane projections. Unlike the
+/// executable admission path, this deliberately does not normalize placement
+/// metadata while rendering status.
+pub(crate) enum RetryProjectionAdmission {
+    DurableCook,
+    GenericLifecycle,
+}
+
+/// Read-only retry admission for control-plane projections of records that
+/// carry Cook metadata. Legacy metadata without a durable recipe follows the
+/// same generic lifecycle preflight as executable retry.
+pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let source = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, run_id)?;
+    if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
+        retry_plan_supported_by_generic_action(&retry.plan)?;
+        return Ok(RetryProjectionAdmission::DurableCook);
+    }
+    let plan =
+        agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
+    retry_plan_supported_by_generic_action(&plan)?;
+    Ok(RetryProjectionAdmission::GenericLifecycle)
+}
+
+fn retry_plan_supported_by_generic_action(plan: &AgentTaskPlan) -> Result<()> {
+    if plan.metadata.get("generic_lab_command_replay").is_some() {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "generic Lab replay requires controller workspace preflight",
+            Some(plan.plan_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Verify retry admission using the caller's execution-specific preflight.
