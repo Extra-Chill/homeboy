@@ -1877,131 +1877,68 @@ fn cook_selection_command_shell_round_trips_the_full_promotion_contract() {
     assert_eq!(toolchain_spec.probe_arguments, ["probe", "--format=json"]);
 }
 
-#[derive(Clone)]
-struct CanonicalSelectionSideEffects {
+fn canonical_selection_side_effects(
     promotions: Arc<AtomicUsize>,
     selected_artifact: Arc<Mutex<Option<String>>>,
+) -> CookSideEffects<'static> {
+    CookSideEffects::for_test(
+        move |_, options, run_id| {
+            promotions.fetch_add(1, Ordering::SeqCst);
+            let artifact = canonical_cook_patch_artifact_id_in_store(
+                &test_lifecycle_store(),
+                options,
+                run_id,
+            )?;
+            *selected_artifact.lock().unwrap() = artifact;
+            Ok(promotion(run_id))
+        },
+        |_, _, _| unreachable!("canonical selection stops before moving-base recovery"),
+        |_, _, _, _| unreachable!("no-finalize Cook must not finalize"),
+    )
 }
 
-impl CookSideEffectService for CanonicalSelectionSideEffects {
-    fn promote(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport> {
-        self.promotions.fetch_add(1, Ordering::SeqCst);
-        let artifact =
-            canonical_cook_patch_artifact_id_in_store(&test_lifecycle_store(), options, run_id)?;
-        *self.selected_artifact.lock().unwrap() = artifact;
-        Ok(promotion(run_id))
-    }
-
-    fn recover_moving_base(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        _recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport> {
-        unreachable!("canonical selection stops before moving-base recovery")
-    }
-
-    fn finalize(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        _run_id: &str,
-        _promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value> {
-        unreachable!("no-finalize Cook must not finalize")
-    }
+fn selection_required_side_effects() -> CookSideEffects<'static> {
+    CookSideEffects::for_test(
+        |lifecycle_store, _, run_id| {
+            let aggregate = lifecycle_store.read_aggregate(run_id)?;
+            let choices = aggregate
+                .outcomes
+                .iter()
+                .flat_map(|outcome| outcome.artifacts.iter())
+                .map(|artifact| serde_json::json!({ "artifact_id": artifact.id }))
+                .collect::<Vec<_>>();
+            assert_eq!(choices.len(), 2, "rooted aggregate has distinct candidates");
+            Err(homeboy_core::Error::new(
+                homeboy_core::ErrorCode::ValidationInvalidArgument,
+                "Cook found distinct canonical patch candidates; select one before promotion",
+                serde_json::json!({
+                    "field": "artifact_id",
+                    "state": "selection_required",
+                    "selection_required": true,
+                    "choices": choices,
+                }),
+            ))
+        },
+        |_, _, _| unreachable!("selection-required Cook must not recover a moving base"),
+        |_, _, _, _| unreachable!("selection-required Cook must not finalize"),
+    )
 }
 
-struct SelectionRequiredSideEffects;
-
-impl CookSideEffectService for SelectionRequiredSideEffects {
-    fn promote(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport> {
-        let aggregate = lifecycle_store.read_aggregate(run_id)?;
-        let choices = aggregate
-            .outcomes
-            .iter()
-            .flat_map(|outcome| outcome.artifacts.iter())
-            .map(|artifact| serde_json::json!({ "artifact_id": artifact.id }))
-            .collect::<Vec<_>>();
-        assert_eq!(choices.len(), 2, "rooted aggregate has distinct candidates");
-        Err(homeboy_core::Error::new(
-            homeboy_core::ErrorCode::ValidationInvalidArgument,
-            "Cook found distinct canonical patch candidates; select one before promotion",
-            serde_json::json!({
-                "field": "artifact_id",
-                "state": "selection_required",
-                "selection_required": true,
-                "choices": choices,
-            }),
-        ))
-    }
-
-    fn recover_moving_base(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        _recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport> {
-        unreachable!("selection-required Cook must not recover a moving base")
-    }
-
-    fn finalize(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        _run_id: &str,
-        _promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value> {
-        unreachable!("selection-required Cook must not finalize")
-    }
-}
-
-#[derive(Clone)]
-struct NoChangeSideEffects {
+fn no_change_side_effects(
     promotions: Arc<AtomicUsize>,
     finalizations: Arc<AtomicUsize>,
-}
-
-impl CookSideEffectService for NoChangeSideEffects {
-    fn promote(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        _run_id: &str,
-    ) -> Result<AgentTaskPromotionReport> {
-        self.promotions.fetch_add(1, Ordering::SeqCst);
-        unreachable!("intentional no-change without a candidate must not promote")
-    }
-
-    fn recover_moving_base(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        _recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport> {
-        unreachable!("intentional no-change cannot enter moving-base recovery")
-    }
-
-    fn finalize(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        _options: &CookRequest,
-        _run_id: &str,
-        _promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value> {
-        self.finalizations.fetch_add(1, Ordering::SeqCst);
-        unreachable!("intentional no-change without a candidate must not finalize")
-    }
+) -> CookSideEffects<'static> {
+    CookSideEffects::for_test(
+        move |_, _, _| {
+            promotions.fetch_add(1, Ordering::SeqCst);
+            unreachable!("intentional no-change without a candidate must not promote")
+        },
+        |_, _, _| unreachable!("intentional no-change cannot enter moving-base recovery"),
+        move |_, _, _, _| {
+            finalizations.fetch_add(1, Ordering::SeqCst);
+            unreachable!("intentional no-change without a candidate must not finalize")
+        },
+    )
 }
 
 fn run_intentional_no_change_cook(
@@ -2088,10 +2025,10 @@ fn run_intentional_no_change_cook(
     let finalizations = Arc::new(AtomicUsize::new(0));
     let resume_options = options.clone();
     let result = run_cook(CookContext {
-        side_effects: Some(Box::new(NoChangeSideEffects {
-            promotions: Arc::clone(&promotions),
-            finalizations: Arc::clone(&finalizations),
-        })),
+        side_effects: Some(no_change_side_effects(
+            Arc::clone(&promotions),
+            Arc::clone(&finalizations),
+        )),
         ..CookContext::new(options, Arc::new(UnusedExecutor))
     })
     .expect("finalize intentional no-change Cook");
@@ -2289,10 +2226,10 @@ fn cook_promotes_the_rotated_success_after_a_retained_timeout_with_aliases_colla
         let promotions = Arc::new(AtomicUsize::new(0));
         let selected_artifact = Arc::new(Mutex::new(None));
         let result = run_cook(CookContext {
-            side_effects: Some(Box::new(CanonicalSelectionSideEffects {
-                promotions: Arc::clone(&promotions),
-                selected_artifact: Arc::clone(&selected_artifact),
-            })),
+            side_effects: Some(canonical_selection_side_effects(
+                Arc::clone(&promotions),
+                Arc::clone(&selected_artifact),
+            )),
             ..CookContext::new(resumed_options, Arc::new(UnusedExecutor))
         })
         .unwrap();
@@ -2342,10 +2279,10 @@ fn cook_persists_selection_required_before_promotion_or_gates() {
         );
         let promotions = Arc::new(AtomicUsize::new(0));
         let result = run_cook(CookContext {
-            side_effects: Some(Box::new(CanonicalSelectionSideEffects {
-                promotions: Arc::clone(&promotions),
-                selected_artifact: Arc::new(Mutex::new(None)),
-            })),
+            side_effects: Some(canonical_selection_side_effects(
+                Arc::clone(&promotions),
+                Arc::new(Mutex::new(None)),
+            )),
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
@@ -2441,7 +2378,7 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
         &supplied_store,
         options,
         Arc::new(UnusedExecutor),
-        &mut SelectionRequiredSideEffects,
+        &mut selection_required_side_effects(),
         None,
         CookMode::Resume,
     )
@@ -2866,7 +2803,7 @@ fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_life
         &lifecycle_store,
         options,
         Arc::new(UnusedExecutor),
-        &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+        &mut CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
         None,
         CookMode::Resume,
     )
@@ -3477,14 +3414,14 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         .unwrap();
 
         let first = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
+            side_effects: Some(CookSideEffects::new(|_, _, _, _| {
                 Err(Error::validation_invalid_argument(
                     "base",
                     "HEAD is behind or diverged from resolved base `main`",
                     None,
                     None,
                 ))
-            }))),
+            })),
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
@@ -3497,16 +3434,9 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         let rebase_count_for_recover = Arc::clone(&rebase_count);
         let finalization_count_for_finalize = Arc::clone(&finalization_count);
         let second = run_cook(CookContext {
-            side_effects: Some(Box::new(TestCookSideEffects::new(
-                move |_: &_, _: &_, promotion: &AgentTaskPromotionReport| {
-                    finalization_count_for_finalize.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(
-                        promotion.verified_base.as_ref().unwrap().sha,
-                        "pinned-refreshed-base"
-                    );
-                    Ok(serde_json::json!({"status":"review_ready", "run_id": run_id}))
-                },
-                move |options: &CookRequest, recovery: &MovingBaseCookRecovery| {
+            side_effects: Some(CookSideEffects::for_test(
+                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
+                move |_, options: &CookRequest, recovery: &MovingBaseCookRecovery| {
                     rebase_count_for_recover.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(
                         options.gates.private_gate_reveal,
@@ -3519,7 +3449,15 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
                         serde_json::json!({"kind":"git","fingerprint":{"tree":"rebased"}});
                     Ok(refreshed)
                 },
-            ))),
+                move |_, _: &_, _: &_, promotion: &AgentTaskPromotionReport| {
+                    finalization_count_for_finalize.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        promotion.verified_base.as_ref().unwrap().sha,
+                        "pinned-refreshed-base"
+                    );
+                    Ok(serde_json::json!({"status":"review_ready", "run_id": run_id}))
+                },
+            )),
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
@@ -3552,14 +3490,15 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         )
         .unwrap();
         let third = run_cook(CookContext {
-            side_effects: Some(Box::new(TestCookSideEffects::new(
-                |_: &_, _: &_, _: &_| panic!("failed rebased gates must not finalize"),
-                |_: &CookRequest, recovery: &MovingBaseCookRecovery| {
+            side_effects: Some(CookSideEffects::for_test(
+                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
+                |_, _: &CookRequest, recovery: &MovingBaseCookRecovery| {
                     let mut failed = recovery.promotion.clone();
                     failed.status = AgentTaskPromotionStatus::GateFailed;
                     Ok(failed)
                 },
-            ))),
+                |_, _: &_, _: &_, _: &_| panic!("failed rebased gates must not finalize"),
+            )),
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .unwrap();
@@ -3760,14 +3699,14 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         })
         .unwrap();
         let first = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
+            side_effects: Some(CookSideEffects::new(|_, _, _, _| {
                 Err(Error::validation_invalid_argument(
                     "base",
                     "HEAD is behind or diverged from resolved base `main`",
                     None,
                     None,
                 ))
-            }))),
+            })),
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
@@ -3780,14 +3719,12 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
         let expected_base = advanced_base.clone();
         let second = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(
-                move |_, _, _, recovered| {
-                    finalization_calls_for_finalizer.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(recovered.status, AgentTaskPromotionStatus::Applied);
-                    assert_eq!(recovered.verified_base.as_ref().unwrap().sha, expected_base);
-                    Ok(serde_json::json!({"status": "review_ready"}))
-                },
-            ))),
+            side_effects: Some(CookSideEffects::new(move |_, _, _, recovered| {
+                finalization_calls_for_finalizer.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(recovered.status, AgentTaskPromotionStatus::Applied);
+                assert_eq!(recovered.verified_base.as_ref().unwrap().sha, expected_base);
+                Ok(serde_json::json!({"status": "review_ready"}))
+            })),
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
@@ -6040,9 +5977,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
             run_cook(CookContext {
                 store: Some(&store),
                 lifecycle_store: Some(&lifecycle_store),
-                side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
-                    Ok(serde_json::json!({}))
-                }))),
+                side_effects: Some(CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})))),
                 ..CookContext::new(winner, Arc::new(UnusedExecutor))
             })
         });
@@ -6050,9 +5985,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
             run_cook(CookContext {
                 store: Some(&store),
                 lifecycle_store: Some(&lifecycle_store),
-                side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
-                    Ok(serde_json::json!({}))
-                }))),
+                side_effects: Some(CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})))),
                 ..CookContext::new(loser, Arc::new(UnusedExecutor))
             })
         });
@@ -7088,13 +7021,11 @@ fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_d
         let finalizations = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&finalizations);
         let result = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(
-                move |_, _, finalized_run, _| {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(finalized_run, run_id);
-                    Ok(serde_json::json!({"status": "review_ready"}))
-                },
-            ))),
+            side_effects: Some(CookSideEffects::new(move |_, _, finalized_run, _| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(finalized_run, run_id);
+                Ok(serde_json::json!({"status": "review_ready"}))
+            })),
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .expect("continue through finalization");
@@ -9450,7 +9381,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             &ambient_lifecycle_store,
             options.clone(),
             Arc::new(UnusedExecutor),
-            &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+            &mut CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             CookMode::Resume,
         )
@@ -9467,7 +9398,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             &ambient_lifecycle_store,
             options,
             Arc::new(UnusedExecutor),
-            &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
+            &mut CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
             CookMode::Resume,
         )
@@ -9605,8 +9536,7 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
         let (winner, loser) = std::thread::scope(|scope| {
             let winner = scope.spawn(|| {
                 barrier.wait();
-                let mut side_effects =
-                    DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+                let mut side_effects = CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
                 run_cook_spine(
                     &store,
                     &lifecycle_store,
@@ -9619,8 +9549,7 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             });
             let loser = scope.spawn(|| {
                 barrier.wait();
-                let mut side_effects =
-                    DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
+                let mut side_effects = CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
                 run_cook_spine(
                     &store,
                     &lifecycle_store,
@@ -13191,16 +13120,14 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
             |_| Ok(Some(dispatcher.clone())),
             |options| {
                 run_cook(CookContext {
-                    side_effects: Some(Box::new(DefaultCookSideEffects::new(
-                        |_, options, run_id, promotion| {
-                            finalize_cook_pr_with_backend(
-                                options,
-                                run_id,
-                                promotion,
-                                &mut resumed_backend,
-                            )
-                        },
-                    ))),
+                    side_effects: Some(CookSideEffects::new(|_, options, run_id, promotion| {
+                        finalize_cook_pr_with_backend(
+                            options,
+                            run_id,
+                            promotion,
+                            &mut resumed_backend,
+                        )
+                    })),
                     ..CookContext::new(options, Arc::new(UnusedExecutor))
                 })
                 .map(|result| result.exit_code)
@@ -15839,7 +15766,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
             Ok(())
         };
         let result = run_cook(CookContext {
-            side_effects: Some(Box::new(DefaultCookSideEffects::new(
+            side_effects: Some(CookSideEffects::new(
                 move |_, _, received_run, promotion| {
                     finalization_count.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(received_run, expected_run_id);
@@ -15860,7 +15787,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
                     );
                     Ok(serde_json::json!({"status": "review_ready"}))
                 },
-            ))),
+            )),
             durable_observer: Some(&observer),
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
@@ -16090,7 +16017,7 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
             .record_promotion(run_id, serde_json::to_value(rooted_promotion).unwrap())
             .unwrap();
 
-        let mut side_effects = DefaultCookSideEffects::new(|_, _, _, _| {
+        let mut side_effects = CookSideEffects::new(|_, _, _, _| {
             unreachable!("promotion isolation does not finalize")
         });
         let first = side_effects.promote(store, &options, run_id).unwrap();
@@ -16336,7 +16263,7 @@ fn review_form_follow_up_finalization_replays_its_durable_claim_after_restart() 
 fn duplicate_controller_passes_revalidate_one_promoted_candidate() {
     // #8357 acceptance (AC5 + AC7): duplicate/concurrent controller passes over
     // the same candidate must produce exactly one promotion checkpoint and
-    // revalidate one published candidate. Drive the PRODUCTION `DefaultCookSideEffects`
+    // revalidate one published candidate. Drive the production `CookSideEffects`
     // boundary (which routes promote/finalize through the durable operation
     // claims) with an injected finalize effect, so no real Git/GitHub mutation
     // occurs. Promotion is seeded as already-applied so `promote` takes its load
@@ -16378,7 +16305,7 @@ fn duplicate_controller_passes_revalidate_one_promoted_candidate() {
         let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
         for _ in 0..3 {
             let calls = Arc::clone(&finalize_calls);
-            let mut side_effects = DefaultCookSideEffects::new(
+            let mut side_effects = CookSideEffects::new(
                 move |_: &AgentTaskLifecycleStore,
                       _: &CookRequest,
                       rid: &str,
