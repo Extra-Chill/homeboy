@@ -5134,9 +5134,9 @@ mod tests {
                 .pins
                 .contains(&current_pin)
                 && !snapshot.eligible()
-                && snapshot.reasons().contains(
-                    &ControllerRuntimeRetentionReason::ProtectedByActiveGeneration
-                )));
+                && snapshot
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::ProtectedByActiveGeneration)));
             assert!(inventory
                 .snapshots
                 .iter()
