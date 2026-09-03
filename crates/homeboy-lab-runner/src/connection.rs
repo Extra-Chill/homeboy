@@ -2040,9 +2040,9 @@ pub(crate) fn status_with_admission_projection_until(
         match session.as_ref() {
             Some(session) => match runner_jobs_until(runner_id, session, deadline) {
                 Ok((active_jobs, mut stale_jobs)) => {
-                    // `/jobs` has a typed remote-runner subset while daemon
-                    // freshness counts every live child. Never manufacture an
-                    // orphan when that subset is incomplete.
+                    // `/jobs` is the daemon's typed ownership snapshot. A
+                    // separate freshness read can straddle a job transition,
+                    // so never turn its stale count into a phantom owner.
                     if should_infer_child_run_orphans(active_jobs.len(), direct_daemon_active_jobs)
                     {
                         stale_jobs.extend(orphaned_child_run_jobs_until(
@@ -2052,12 +2052,6 @@ pub(crate) fn status_with_admission_projection_until(
                             deadline,
                         ));
                     }
-                    let active_jobs = project_unknown_daemon_owners(
-                        runner_id,
-                        session,
-                        active_jobs,
-                        direct_daemon_active_jobs,
-                    );
                     (
                         active_jobs,
                         stale_jobs,
@@ -2090,12 +2084,16 @@ pub(crate) fn status_with_admission_projection_until(
             None,
         )
     };
-    if let (Some(freshness), Some(active_jobs)) =
+    if let (Some(freshness), Some(_direct_daemon_active_jobs)) =
         (daemon_freshness.as_mut(), direct_daemon_active_jobs)
     {
-        freshness.active_jobs = active_jobs;
+        // The typed `/jobs` response is the inspectable ownership snapshot.
+        // Reconcile a mismatched freshness read to it without cancelling any
+        // known job or synthesizing an uninspectable owner.
+        freshness.active_jobs = active_jobs.len();
     }
-    let selected_active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
+    let selected_active_job_count =
+        reconciled_active_job_count(active_jobs.len(), direct_daemon_active_jobs);
     // This is strictly the selected daemon's live count. The admission summary
     // separately reports durable ownership and unidentified retained counters.
     let active_job_count = selected_active_job_count;
@@ -2107,15 +2105,6 @@ pub(crate) fn status_with_admission_projection_until(
         .and_then(|generation| generation.observed_active_job_count);
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
-        (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
-            Some(RunnerActiveJobError {
-                code: "active_job_view_inconsistent".to_string(),
-                message: format!(
-                    "direct daemon freshness reports {authoritative_count} active job(s), but /jobs exposed {} typed runner job(s); freshness is authoritative and terminal-only reconciliation found no durable terminal handoffs",
-                    active_jobs.len()
-                ),
-            })
-        }
         (None, _) if authoritative_generation_count.is_some_and(|count| count != active_job_count) => {
             Some(RunnerActiveJobError {
                 code: "active_job_count_inconsistent".to_string(),
@@ -2626,65 +2615,17 @@ fn should_infer_child_run_orphans(
     direct_daemon_active_jobs.is_none_or(|count| typed_active_jobs >= count)
 }
 
-/// Preserve the daemon's authoritative count when its typed `/jobs` projection
-/// is incomplete. These records deliberately have no cancellable job identity:
-/// reconciliation may settle stale store state, but live daemon work stays
-/// protected until the daemon itself supplies a typed owner.
-fn project_unknown_daemon_owners(
-    runner_id: &str,
-    session: &RunnerSession,
-    mut active_jobs: Vec<ActiveRunnerJobSummary>,
-    direct_daemon_active_jobs: Option<usize>,
-) -> Vec<ActiveRunnerJobSummary> {
-    let Some(authoritative_count) = direct_daemon_active_jobs else {
-        return active_jobs;
-    };
-    let missing_count = authoritative_count.saturating_sub(active_jobs.len());
-    let lease_id = session
-        .remote_daemon_lease_id
-        .as_deref()
-        .unwrap_or("unrecorded-lease");
-    let daemon_pid = session
-        .remote_daemon_pid
-        .map(|pid| pid.to_string())
-        .unwrap_or_else(|| "unrecorded-pid".to_string());
-    let typed_job_count = active_jobs.len();
-    active_jobs.extend((0..missing_count).map(|index| ActiveRunnerJobSummary {
-        runner_id: runner_id.to_string(),
-        job_id: format!("unknown-daemon-owner-{lease_id}-{}", index + 1),
-        operation: "daemon.unknown_owner".to_string(),
-        source: RunnerJobSource::Daemon.label().to_string(),
-        kind: "unknown".to_string(),
-        status: JobStatus::Running,
-        command: format!(
-            "unprojected daemon child: lease_id={lease_id}; daemon_pid={daemon_pid}; daemon_active_count={authoritative_count}; typed_jobs_count={typed_job_count}; store=/jobs"
-        ),
-        cwd: None,
-        started_at_ms: 0,
-        updated_at_ms: 0,
-        elapsed_ms: 0,
-        heartbeat_age_ms: 0,
-        claim: JobClaimMetadata {
-            claim_id: None,
-            claimed_by_runner_id: Some(runner_id.to_string()),
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-        },
-        claim_expires_in_ms: None,
-        lifecycle: None,
-        durable_run_id: None,
-        stale_reason: Some("daemon_freshness_count_exceeds_typed_jobs".to_string()),
-        lifecycle_state: Some("unknown_owner".to_string()),
-        retryable: Some(false),
-        active_child_count: None,
-        active_cell_count: None,
-    }));
-    active_jobs
-}
-
-pub(crate) fn is_unknown_daemon_owner(job: &ActiveRunnerJobSummary) -> bool {
-    job.lifecycle_state.as_deref() == Some("unknown_owner")
-        && job.job_id.starts_with("unknown-daemon-owner-")
+/// Reconcile a freshness count with the daemon's typed `/jobs` snapshot.
+///
+/// The probes are separate requests, so a completed job can make the count
+/// stale between them. Only the typed snapshot supplies inspectable owners.
+fn reconciled_active_job_count(
+    typed_job_count: usize,
+    daemon_active_count: Option<usize>,
+) -> usize {
+    daemon_active_count
+        .filter(|count| *count == typed_job_count)
+        .unwrap_or(typed_job_count)
 }
 
 /// Query the daemon job store before an operation replaces its process.
@@ -2721,19 +2662,6 @@ pub(super) fn active_jobs_before_daemon_replacement(
             ),
             Some(runner_id.to_string()),
             Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
-        ));
-    }
-    if report.active_jobs.iter().any(is_unknown_daemon_owner) {
-        return Err(Error::validation_invalid_argument(
-            "reconnect",
-            format!(
-                "runner `{runner_id}` has active daemon work without a typed /jobs owner; refusing to replace the daemon until its lease and store projection are reconciled"
-            ),
-            Some(runner_id.to_string()),
-            Some(vec![format!(
-                "homeboy runner reconcile {}",
-                shell::quote_arg(runner_id)
-            )]),
         ));
     }
     Ok(report.active_jobs)
@@ -4040,29 +3968,7 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
                 Some(session) => match runner_jobs(&runner.id, session) {
-                    Ok((active, _stale)) => {
-                        let direct_daemon_active_jobs =
-                            session.local_url.as_deref().and_then(|url| {
-                                daemon_http_freshness(
-                                    &runner.id,
-                                    url,
-                                    &session.homeboy_version,
-                                    session.homeboy_build_identity.as_deref().unwrap_or(""),
-                                )
-                                .ok()
-                                .map(|freshness| freshness.active_jobs)
-                            });
-                        (
-                            project_unknown_daemon_owners(
-                                &runner.id,
-                                session,
-                                active,
-                                direct_daemon_active_jobs,
-                            ),
-                            RunnerActiveJobState::Available,
-                            None,
-                        )
-                    }
+                    Ok((active, _stale)) => (active, RunnerActiveJobState::Available, None),
                     Err(error) => (
                         Vec::new(),
                         RunnerActiveJobState::Unavailable,
