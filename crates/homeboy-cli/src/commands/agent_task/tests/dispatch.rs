@@ -917,6 +917,33 @@ fn cook_replay_preserves_exact_component_when_repository_has_multiple_components
 }
 
 #[test]
+fn cook_replay_preserves_prepared_base_sha() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let mut args = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "implement the fix".to_string(),
+        "--repo".to_string(),
+        "example".to_string(),
+        "--task-url".to_string(),
+        "https://github.com/example/example/issues/1".to_string(),
+        "--base".to_string(),
+        "main".to_string(),
+        "--no-finalize".to_string(),
+    ]);
+    args.prepared_base_sha = Some(sha.to_string());
+
+    let replay = super::super::run::cook_replay_argv(&args);
+    assert!(replay
+        .windows(2)
+        .any(|arguments| arguments == ["--prepared-base-sha", sha]));
+    let replayed = cook_args_from_cli(replay);
+    assert_eq!(replayed.prepared_base_sha.as_deref(), Some(sha));
+}
+
+#[test]
 fn cook_resolves_omitted_base_from_workspace_upstream_for_standard_and_custom_branches() {
     with_isolated_home(|_| {
         for branch in ["main", "master", "trunk", "release/2026"] {

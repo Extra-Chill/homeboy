@@ -1175,6 +1175,15 @@ pub struct AgentTaskCookArgs {
     /// compatibility default when the provider has not materialized a checkout.
     #[arg(long, value_name = "BRANCH")]
     pub base: Option<String>,
+    /// Immutable authoritative base selected by Cook preview. Hidden because
+    /// this is controller replay state, not a user-facing branch selector.
+    #[arg(
+        long = "prepared-base-sha",
+        value_name = "SHA",
+        hide = true,
+        value_parser = parse_prepared_base_sha
+    )]
+    pub prepared_base_sha: Option<String>,
     /// Head branch to push and open the PR from. Defaults to the branch the
     /// destination worktree is already on.
     #[arg(long, value_name = "BRANCH")]
@@ -1231,6 +1240,14 @@ pub struct CookPromptSnapshot {
     pub source: String,
     pub sha256: String,
     pub size_bytes: usize,
+}
+
+fn parse_prepared_base_sha(value: &str) -> Result<String, String> {
+    if value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err("prepared Cook base must be a 40-character hexadecimal commit SHA".to_string())
+    }
 }
 
 pub(crate) fn parse_provider_evidence_input(
