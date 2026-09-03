@@ -520,13 +520,6 @@ impl ClaimedCookContinuation {
     }
 }
 
-/// The consumer boundary is deliberately injected: status/reconciliation only
-/// writes durable signals and never invokes process-local closures.
-pub trait AgentTaskCookContinuationScheduler {
-    /// Returns true only when this call created the durable queue entry.
-    fn enqueue(&self, continuation: &AgentTaskCookContinuation) -> Result<bool>;
-}
-
 pub fn persist_initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
     default_store()?.persist_initial_recipe(options)
 }
@@ -3314,12 +3307,6 @@ impl DurableCookContinuationQueue<'_> {
             Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
         Ok(true)
-    }
-}
-
-impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue<'_> {
-    fn enqueue(&self, continuation: &AgentTaskCookContinuation) -> Result<bool> {
-        self.enqueue(continuation, false)
     }
 }
 

@@ -15,9 +15,6 @@ pub(crate) struct DeadlineProcessOutput {
     pub stderr: Vec<u8>,
 }
 
-/// `Debug` so a test asserting on a deadline-process result can name the
-/// failure it got. Without it `homeboy-core`'s test target does not compile at
-/// all, which takes every other test in the crate down with it.
 #[derive(Debug)]
 pub(crate) struct DeadlineProcessFailure {
     pub message: String,

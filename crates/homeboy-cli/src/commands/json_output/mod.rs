@@ -231,7 +231,6 @@ pub(crate) fn run_command_output(
             let summarize = matches!(
                 args.command,
                 Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
-                    | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
                     | Some(crate::commands::cleanup::CleanupCommand::AutomaticRetention)
             ) && !homeboy::core::lab_routing::is_lab_offload_subprocess();
             command_run_with_summary(

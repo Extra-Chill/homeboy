@@ -1,5 +1,5 @@
 //! Agent-task promotion: validate a succeeded outcome's patch artifact and
-//! promote it into a managed worktree through a workspace provider, capturing
+//! promote it into a native managed worktree, capturing
 //! deterministic verification gate evidence.
 //!
 //! Split into focused submodules:
@@ -7,7 +7,7 @@
 //! - [`promote`]: the promotion entrypoint and report assembly.
 //! - [`committed_changes`]: committed-change discovery and evidence.
 //! - [`patch`]: patch normalization and validation.
-//! - [`apply`]: the workspace provider trait and external provider transport.
+//! - [`apply`]: native workspace mutation and the serialized Lab adapter.
 
 mod apply;
 mod committed_changes;
@@ -18,7 +18,7 @@ mod promote;
 mod run_plan_projection;
 mod types;
 
-pub use apply::{apply_materialized_workspace_patch, preflight_configured_workspace_provider};
+pub use apply::{apply_materialized_workspace_patch, preflight_managed_workspace};
 pub use fingerprint::{
     candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
 };

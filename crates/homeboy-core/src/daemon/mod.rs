@@ -167,6 +167,10 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 pub struct LocalControllerJobClient {
     endpoint: String,
     client: reqwest::blocking::Client,
+    // Keep the shared side until this client has durably handed off the job.
+    // Recovery takes the exclusive side before proving zero active jobs, so a
+    // different build cannot replace this generation after preflight.
+    _admission_guard: Option<File>,
 }
 
 /// The durable admission result for a typed controller job submission.
@@ -202,6 +206,7 @@ impl LocalControllerJobClient {
     /// can deserialize a request while applying stale ownership semantics. Fail
     /// before submission instead of handing new lifecycle records to it.
     pub fn connect_current_build() -> Result<Self> {
+        let admission_guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
         let status = read_status()?;
         if status.reachable && !status.fresh {
             let daemon_identity = status
@@ -236,7 +241,7 @@ impl LocalControllerJobClient {
             });
             return Err(error);
         }
-        Self::connect()
+        Self::connect_with_admission_guard(Some(admission_guard))
     }
 
     /// Connect to the current daemon build, first applying its canonical idle
@@ -263,6 +268,10 @@ impl LocalControllerJobClient {
     }
 
     pub fn connect() -> Result<Self> {
+        Self::connect_with_admission_guard(None)
+    }
+
+    fn connect_with_admission_guard(admission_guard: Option<File>) -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -274,6 +283,7 @@ impl LocalControllerJobClient {
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
             client,
+            _admission_guard: admission_guard,
         })
     }
 
@@ -6299,7 +6309,6 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
 /// Prevent a recovery from observing idle work and then racing a new durable
 /// admission. Normal admissions take a shared lock; destructive recovery takes
 /// the exclusive side for its complete proof-and-signal interval.
-#[cfg(target_os = "linux")]
 pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
     acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
 }
@@ -6311,7 +6320,6 @@ pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>
 
 enum DaemonAdmissionLockMode {
     Shared,
-    #[cfg(target_os = "linux")]
     Exclusive,
 }
 
@@ -6344,7 +6352,6 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
             std::os::fd::AsRawFd::as_raw_fd(&file),
             match mode {
                 DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
-                #[cfg(target_os = "linux")]
                 DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
             },
         )
@@ -6364,7 +6371,6 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
         let flags = match mode {
             DaemonAdmissionLockMode::Shared => 0,
-            #[cfg(target_os = "linux")]
             DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
         };
         if unsafe {
@@ -6464,10 +6470,8 @@ impl Drop for DaemonOwnerLock {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(super) struct DaemonAdmissionFence(File);
 
-#[cfg(target_os = "linux")]
 impl Drop for DaemonAdmissionFence {
     fn drop(&mut self) {
         #[cfg(unix)]

@@ -1048,9 +1048,31 @@ where
     Ok(Some(graph))
 }
 
-/// Read the graph-projected dependency blocks. Resume callers must only
-/// synthesize a dependency-blocked cell for a child the graph explicitly
-/// blocks; a terminal independent child is absent from the ready frontier too.
+pub fn fanout_ready_child_run_ids_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<Option<HashSet<String>>> {
+    let report = store.status(batch_id)?;
+    let Some(graph) = report.dependency_graph else {
+        return Ok(None);
+    };
+    let ready = graph["readiness"]["ready"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    Ok(Some(
+        report
+            .batch
+            .child_runs
+            .into_iter()
+            .filter(|child| ready.contains(child.task_id.as_str()))
+            .map(|child| child.run_id)
+            .collect(),
+    ))
+}
+
 pub(crate) fn fanout_blocked_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
     AgentTaskBatchStore::from_current_data_root()?.fanout_blocked_child_run_ids(batch_id)
 }
@@ -1629,6 +1651,10 @@ impl AgentTaskBatchStore {
     }
 
     /// Read the graph-projected dependency blocks.
+    pub fn fanout_ready_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
+        fanout_ready_child_run_ids_in_store(self, batch_id)
+    }
+
     pub fn fanout_blocked_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
         fanout_blocked_child_run_ids_in_store(self, batch_id)
     }
@@ -1759,8 +1785,6 @@ pub fn finalize_provider_worktree_for_child(
     handle: &str,
     lifecycle: &homeboy_core::worktree_provider::WorktreeProvisionLifecycle,
     disposition: homeboy_core::worktree_provider::WorktreeTerminalDisposition,
-    selected_provider: Option<&homeboy_core::worktree_provider::WorktreeProviderIdentity>,
-    config: &homeboy_core::defaults::HomeboyConfig,
 ) -> Result<BatchProviderWorktreeFinalization> {
     let store = AgentTaskBatchStore::from_current_data_root()?;
     store.with_batch_lock(batch_id, || {
@@ -1777,25 +1801,27 @@ pub fn finalize_provider_worktree_for_child(
         if !operations.is_object() {
             *operations = json!({});
         }
-        let idempotency_key =
-            homeboy_core::worktree_providers::worktree_provider_finalization_idempotency_key(
-                lifecycle,
-            );
-        let selected_provider_id = selected_provider.map(|provider| match provider {
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => "native",
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(id) => id,
-        });
+        let cleanup_policy = match lifecycle.cleanup_policy {
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess => {
+                "remove_on_success"
+            }
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::PreserveOnFailure => {
+                "preserve_on_failure"
+            }
+        };
+        let idempotency_key = format!(
+            "{}:{}:{}",
+            lifecycle.purpose, lifecycle.owner_run_ref, cleanup_policy
+        );
         let exact = |operation: &Value| {
             operation["schema"] == "homeboy/agent-task-provider-worktree-finalization/v2"
                 && operation["handle"] == handle
                 && operation["purpose"] == lifecycle.purpose
                 && operation["owner_run_ref"] == lifecycle.owner_run_ref
-                && operation["cleanup_policy"] == lifecycle.cleanup_policy.as_str()
+                && operation["cleanup_policy"] == cleanup_policy
                 && operation["disposition"] == disposition.as_str()
                 && operation["idempotency_key"] == idempotency_key
-                && operation["provider_id"].as_str().is_some()
-                && selected_provider_id
-                    .is_none_or(|provider_id| operation["provider_id"] == provider_id)
+                && operation["provider_id"] == "native"
         };
         if matches!(
             operations[child_run_id]["status"].as_str(),
@@ -1828,81 +1854,7 @@ pub fn finalize_provider_worktree_for_child(
             .and_then(|operation| operation["mutation_attempted"].as_bool())
             .unwrap_or(false);
 
-        let provider = if let Some(provider_id) = operations
-            .get(child_run_id)
-            .and_then(|existing| existing["provider_id"].as_str())
-        {
-            match provider_id {
-                "native" => homeboy_core::worktree_provider::WorktreeProviderIdentity::Native,
-                provider_id => {
-                    homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(
-                        provider_id.to_string(),
-                    )
-                }
-            }
-        } else {
-            let provider = match selected_provider.cloned().map(Some).map(Ok).unwrap_or_else(|| {
-                homeboy_core::worktree_provider::resolve_worktree_finalization_provider_from_config(
-                    handle, config,
-                )
-            }) {
-                Ok(Some(provider)) => provider,
-                Ok(None) => {
-                    operations
-                        .as_object_mut()
-                        .expect("provider worktree finalization operations object")
-                        .insert(
-                            child_run_id.to_string(),
-                            json!({
-                                "schema": "homeboy/agent-task-provider-worktree-finalization/v2",
-                                "status": "not_found",
-                                "fencing_token": Uuid::new_v4().to_string(),
-                                "handle": handle,
-                                "purpose": lifecycle.purpose,
-                                "owner_run_ref": lifecycle.owner_run_ref,
-                                "cleanup_policy": lifecycle.cleanup_policy.as_str(),
-                                "disposition": disposition.as_str(),
-                                "idempotency_key": idempotency_key,
-                                "last_error": {
-                                    "message": "provider workspace was not found before finalization intent",
-                                    "recorded_at": chrono::Utc::now().to_rfc3339(),
-                                },
-                            }),
-                        );
-                    store.write_batch(&batch)?;
-                    return Ok(BatchProviderWorktreeFinalization::NotFound);
-                }
-                Err(error) => {
-                    operations
-                        .as_object_mut()
-                        .expect("provider worktree finalization operations object")
-                        .insert(
-                            child_run_id.to_string(),
-                            json!({
-                                "schema": "homeboy/agent-task-provider-worktree-finalization/v2",
-                                "status": "resolution_failed",
-                                "fencing_token": Uuid::new_v4().to_string(),
-                                "handle": handle,
-                                "purpose": lifecycle.purpose,
-                                "owner_run_ref": lifecycle.owner_run_ref,
-                                "cleanup_policy": lifecycle.cleanup_policy.as_str(),
-                                "disposition": disposition.as_str(),
-                                "idempotency_key": idempotency_key,
-                                "last_error": {
-                                    "message": error.message,
-                                    "details": error.details,
-                                    "recorded_at": chrono::Utc::now().to_rfc3339(),
-                                },
-                            }),
-                        );
-                    store.write_batch(&batch)?;
-                    return Err(error);
-                }
-            };
-            let provider_id = match &provider {
-                homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => "native",
-                homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(id) => id,
-            };
+        if operations.get(child_run_id).is_none() {
             operations
                 .as_object_mut()
                 .expect("provider worktree finalization operations object")
@@ -1915,44 +1867,40 @@ pub fn finalize_provider_worktree_for_child(
                         "handle": handle,
                         "purpose": lifecycle.purpose,
                         "owner_run_ref": lifecycle.owner_run_ref,
-                        "cleanup_policy": lifecycle.cleanup_policy.as_str(),
+                        "cleanup_policy": cleanup_policy,
                         "disposition": disposition.as_str(),
                         "idempotency_key": idempotency_key,
-                        "provider_id": provider_id,
+                        "provider_id": "native",
                         "mutation_attempted": false,
                     }),
                 );
             store.write_batch(&batch)?;
-            provider
-        };
+        }
 
-        let outcome =
-            match homeboy_core::worktree_provider::finalize_worktree_with_provider_and_effect_fence_from_config(
-                handle,
-                &provider,
-                lifecycle,
-                disposition,
-                config,
-                || {
-                    batch.metadata["provider_worktree_finalizations"][child_run_id]
-                        ["mutation_attempted"] = Value::Bool(true);
-                    store.write_batch(&batch)
-                },
-            ) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let operation = batch.metadata["provider_worktree_finalizations"]
-                        .get_mut(child_run_id)
-                        .expect("durable finalization intent exists");
-                    operation["last_error"] = json!({
-                        "message": error.message,
-                        "details": error.details,
-                        "recorded_at": chrono::Utc::now().to_rfc3339(),
-                    });
-                    store.write_batch(&batch)?;
-                    return Err(error);
-                }
-            };
+        let outcome = match homeboy_core::worktree_provider::finalize_worktree_with_effect_fence(
+            handle,
+            lifecycle,
+            disposition,
+            || {
+                batch.metadata["provider_worktree_finalizations"][child_run_id]
+                    ["mutation_attempted"] = Value::Bool(true);
+                store.write_batch(&batch)
+            },
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let operation = batch.metadata["provider_worktree_finalizations"]
+                    .get_mut(child_run_id)
+                    .expect("durable finalization intent exists");
+                operation["last_error"] = json!({
+                    "message": error.message,
+                    "details": error.details,
+                    "recorded_at": chrono::Utc::now().to_rfc3339(),
+                });
+                store.write_batch(&batch)?;
+                return Err(error);
+            }
+        };
         let operation = batch.metadata["provider_worktree_finalizations"]
             .get_mut(child_run_id)
             .expect("durable finalization intent exists");

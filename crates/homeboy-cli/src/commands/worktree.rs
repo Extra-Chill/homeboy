@@ -8,18 +8,12 @@ use homeboy::core::cleanup::{
     ArtifactCleanupSort,
 };
 use homeboy::core::worktree::{
-    self, CleanupPolicy, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions, WorktreeAdoptOutput,
-    WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeImportOptions,
-    WorktreeImportOutput, WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeListOutput,
-    WorktreeOwnershipProbe, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
-};
-use homeboy::core::worktree_provider::{
-    self, ConfiguredWorktreeCleanupOutput as WorktreeProviderCleanupOutput,
-    ConfiguredWorktreeCreateEvidence, WorktreeCleanupRequest, WorktreeCleanupScope,
-    WorktreeFinalization, WorktreeFinalizationLookup, WorktreeProviderCreateOutput,
-    WorktreeProviderIdentity, WorktreeProviderSafety, WorktreeProviderWorkspace,
-    WorktreeProvisionLifecycle, WorktreeStatusEvidence, WorktreeTerminalDisposition,
+    self, CleanupPolicy, TaskWorktreeRecord, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions,
+    WorktreeAdoptOutput, WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCreateOptions,
+    WorktreeCreateOutput, WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryOptions,
+    WorktreeInventoryOutput, WorktreeListOutput, WorktreeOwnershipProbe,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
@@ -47,9 +41,9 @@ impl WorktreeArgs {
 
 #[derive(Subcommand)]
 enum WorktreeCommand {
-    /// Create a task worktree through the configured or built-in provider
+    /// Create a native task worktree
     Create {
-        /// Component or repository handle for provider creation
+        /// Component or repository handle for native creation
         component_id: String,
         /// Branch to create in the task worktree
         #[arg(long)]
@@ -132,7 +126,7 @@ enum WorktreeCommand {
         #[arg(long, default_value_t = 60)]
         retry_after_seconds: u64,
     },
-    /// List worktrees owned by configured and built-in providers
+    /// List native task worktrees
     List,
     /// Report bounded local task-worktree inventory and reconcile only leased terminal snapshots
     Inventory {
@@ -149,7 +143,7 @@ enum WorktreeCommand {
         #[arg(long)]
         apply: bool,
     },
-    /// Inspect a provider-owned worktree and its safety state
+    /// Inspect a native task worktree and its safety state
     Status {
         /// Task worktree ID, e.g. component@branch-slug
         id: String,
@@ -173,7 +167,7 @@ enum WorktreeCommand {
         #[arg(long, requires = "cleanup_branch")]
         allow_unmerged_branch: bool,
     },
-    /// Clean up eligible configured and built-in provider worktrees
+    /// Clean up eligible native task worktrees
     Cleanup {
         // Remove planned worktrees and artifacts after safety checks.
         // Without --apply, only reports the plan; --dry-run names that
@@ -230,7 +224,9 @@ enum CliTerminalDisposition {
     Interrupted,
 }
 
-impl From<CliTerminalDisposition> for WorktreeTerminalDisposition {
+impl From<CliTerminalDisposition>
+    for homeboy::core::worktree_provider::WorktreeTerminalDisposition
+{
     fn from(value: CliTerminalDisposition) -> Self {
         match value {
             CliTerminalDisposition::Succeeded => Self::Succeeded,
@@ -254,14 +250,14 @@ impl From<CliCleanupPolicy> for CleanupPolicy {
 #[derive(Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WorktreeOutput {
-    Create(WorktreeCreateCommandOutput),
+    Create(WorktreeCreateOutput),
     Import(WorktreeImportOutput),
-    Finalize(WorktreeFinalization),
+    Finalize(TaskWorktreeRecord),
     Adopt(WorktreeAdoptOutput),
     QueueCreate(WorktreeQueueCreateOutput),
-    List(WorktreeListCommandOutput),
+    List(WorktreeListOutput),
     Inventory(WorktreeInventoryOutput),
-    Status(WorktreeStatusCommandOutput),
+    Status(WorktreeStatusOutput),
     Holder(WorktreeOwnershipProbe),
     Remove(WorktreeRemoveOutput),
     Cleanup(WorktreeCleanupCommandOutput),
@@ -272,106 +268,8 @@ pub enum WorktreeOutput {
 }
 
 #[derive(Serialize)]
-#[serde(untagged)]
-pub enum WorktreeCreateCommandOutput {
-    Native(WorktreeCreateOutput),
-    Configured(ConfiguredWorktreeCreateEvidence),
-}
-
-impl From<WorktreeProviderCreateOutput> for WorktreeCreateCommandOutput {
-    fn from(output: WorktreeProviderCreateOutput) -> Self {
-        match output {
-            WorktreeProviderCreateOutput::Native(output) => Self::Native(output),
-            WorktreeProviderCreateOutput::Configured(output) => Self::Configured(output.into()),
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct WorktreeListCommandOutput {
-    #[serde(flatten)]
-    pub native: WorktreeListOutput,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub provider_worktrees: Vec<ProviderWorktreeOutput>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub provider_diagnostics:
-        Vec<homeboy::core::worktree_providers::WorktreeProviderInventoryDiagnostic>,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-pub enum WorktreeStatusCommandOutput {
-    Native(WorktreeStatusOutput),
-    Provider {
-        provider_worktree: ProviderWorktreeOutput,
-    },
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProviderWorktreeOutput {
-    pub provider: String,
-    pub handle: String,
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_run_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal_disposition: Option<String>,
-    pub safety: ProviderWorktreeSafetyOutput,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProviderWorktreeSafetyOutput {
-    pub dirty: bool,
-    pub unpushed: bool,
-    pub primary: bool,
-    pub missing: bool,
-}
-
-impl From<WorktreeProviderWorkspace> for ProviderWorktreeOutput {
-    fn from(workspace: WorktreeProviderWorkspace) -> Self {
-        let provider = match workspace.ownership.provider {
-            WorktreeProviderIdentity::Native => "native".to_string(),
-            WorktreeProviderIdentity::Configured(provider) => provider,
-        };
-        Self {
-            provider,
-            handle: workspace.ownership.handle,
-            path: workspace.ownership.path,
-            branch: workspace.ownership.branch,
-            task_url: workspace.ownership.task_url,
-            repository: workspace.repository,
-            owner_run_ref: workspace.owner_run_ref,
-            created_at: workspace.created_at,
-            terminal_disposition: workspace.terminal_disposition,
-            safety: workspace.safety.into(),
-        }
-    }
-}
-
-impl From<WorktreeProviderSafety> for ProviderWorktreeSafetyOutput {
-    fn from(safety: WorktreeProviderSafety) -> Self {
-        Self {
-            dirty: safety.dirty,
-            unpushed: safety.unpushed,
-            primary: safety.primary,
-            missing: safety.missing,
-        }
-    }
-}
-
-#[derive(Serialize)]
 pub struct WorktreeCleanupCommandOutput {
     pub worktrees: WorktreeCleanupOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_worktrees: Option<WorktreeProviderCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_cleanup: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -519,7 +417,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             }
         }
     }
-    let mut exit_code = 0;
+    let exit_code = 0;
     let output = match args.command {
         WorktreeCommand::Create {
             component_id,
@@ -529,18 +427,15 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             run_id,
             cleanup_policy,
             require_handoff_freshness,
-        } => WorktreeOutput::Create(
-            worktree_provider::create_worktree(WorktreeCreateOptions {
-                component_id,
-                branch,
-                from,
-                task_url,
-                run_id,
-                cleanup_policy: cleanup_policy.map(Into::into),
-                require_handoff_freshness,
-            })?
-            .into(),
-        ),
+        } => WorktreeOutput::Create(worktree::create(WorktreeCreateOptions {
+            component_id,
+            branch,
+            from,
+            task_url,
+            run_id,
+            cleanup_policy: cleanup_policy.map(Into::into),
+            require_handoff_freshness,
+        })?),
         WorktreeCommand::Import {
             component_id,
             handle,
@@ -566,38 +461,11 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             handle,
             owner_run_ref,
             disposition,
-        } => {
-            let lifecycle = WorktreeProvisionLifecycle {
-                purpose: "operator_terminal_finalization".to_string(),
-                owner_run_ref,
-                cleanup_policy:
-                    homeboy::core::worktree_provider::WorktreeCleanupPolicy::PreserveOnFailure,
-            };
-            match worktree_provider::finalize_worktree_from_config(
-                &handle,
-                &lifecycle,
-                disposition.into(),
-                &homeboy::core::defaults::load_config(),
-            )? {
-                WorktreeFinalizationLookup::Finalized(output) => WorktreeOutput::Finalize(output),
-                WorktreeFinalizationLookup::Unsupported => {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "handle",
-                        "selected worktree provider does not support terminal finalization",
-                        Some(handle),
-                        None,
-                    ));
-                }
-                WorktreeFinalizationLookup::NotFound => {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "handle",
-                        "worktree handle was not found",
-                        Some(handle),
-                        None,
-                    ));
-                }
-            }
-        }
+        } => WorktreeOutput::Finalize(worktree::finalize_provider_lifecycle(
+            &handle,
+            &owner_run_ref,
+            disposition.into(),
+        )?),
         WorktreeCommand::Adopt {
             handle,
             path,
@@ -645,19 +513,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             dry_run,
             retry_after_seconds,
         })?),
-        WorktreeCommand::List => {
-            let report = worktree_provider::list_worktrees()?;
-            let provider_worktrees = report
-                .provider_worktrees
-                .into_iter()
-                .map(ProviderWorktreeOutput::from)
-                .collect();
-            WorktreeOutput::List(WorktreeListCommandOutput {
-                native: report.native,
-                provider_worktrees,
-                provider_diagnostics: report.provider_diagnostics,
-            })
-        }
+        WorktreeCommand::List => WorktreeOutput::List(worktree::list()?),
         WorktreeCommand::Inventory {
             limit,
             cursor,
@@ -672,19 +528,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             },
             &AgentTaskAuthority(std::sync::Mutex::new(std::collections::HashMap::new())),
         )?),
-        WorktreeCommand::Status { id } => {
-            let status = match worktree_provider::worktree_status(&id)? {
-                WorktreeStatusEvidence::Native(status) => {
-                    WorktreeStatusCommandOutput::Native(status)
-                }
-                WorktreeStatusEvidence::Provider(workspace) => {
-                    WorktreeStatusCommandOutput::Provider {
-                        provider_worktree: workspace.into(),
-                    }
-                }
-            };
-            WorktreeOutput::Status(status)
-        }
+        WorktreeCommand::Status { id } => WorktreeOutput::Status(worktree::status(&id)?),
         WorktreeCommand::Holder { target } => {
             let path = PathBuf::from(&target);
             let path = if path.exists() {
@@ -721,30 +565,12 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
         } => {
             let apply = mutation.is_apply();
             let deprecated_dry_run = mutation.dry_run;
-            let cleanup = worktree_provider::cleanup_worktrees_from_config(
-                &WorktreeCleanupRequest {
-                    scope: WorktreeCleanupScope::All,
-                    providers: Vec::new(),
-                    all_configured_providers: true,
-                    apply,
-                    force,
-                    cleanup_branches,
-                    allow_unmerged_branches,
-                    timeout: None,
-                    provider_run_id: None,
-                    provider_plan_id: None,
-                },
-                &homeboy::core::defaults::load_config(),
-            )?;
-            let worktrees = cleanup
-                .native
-                .expect("all-provider cleanup includes the built-in provider");
-            let provider_worktrees = cleanup
-                .configured
-                .expect("all-provider cleanup includes configured providers");
-            exit_code = (provider_worktrees.failure_count > 0) as i32;
-            let provider_worktrees =
-                (provider_worktrees.provider_count > 0).then_some(provider_worktrees);
+            let worktrees = worktree::cleanup(WorktreeCleanupOptions {
+                force,
+                dry_run: !apply,
+                cleanup_branches,
+                allow_unmerged_branches,
+            })?;
             let artifact_cleanup = if cleanup_artifacts {
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {
@@ -767,7 +593,6 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             let actionable = worktree_cleanup_actionable(&worktrees, cleanup_branches);
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
-                provider_worktrees,
                 artifact_cleanup,
                 deprecated_flag: deprecated_dry_run.then_some("--dry-run"),
                 actionable,
@@ -832,16 +657,8 @@ mod tests {
         WorktreeImportOutput, WorktreeListOutput,
     };
 
+    use super::{cleanup_is_dry_run, WorktreeCommand, WorktreeOutput};
     use crate::cli_surface::{Cli, Commands};
-    use homeboy::core::worktree_provider::{
-        WorktreeOwnership, WorktreeProviderIdentity, WorktreeProvisionDestination,
-    };
-
-    use super::{
-        cleanup_is_dry_run, ProviderWorktreeOutput, ProviderWorktreeSafetyOutput, WorktreeCommand,
-        WorktreeCreateCommandOutput, WorktreeListCommandOutput, WorktreeOutput,
-        WorktreeStatusCommandOutput,
-    };
 
     fn create_output(reconciliation: Option<WorktreeCreateReconciliation>) -> WorktreeCreateOutput {
         let identity = homeboy::core::worktree::WorkspaceIdentity::new(
@@ -875,14 +692,10 @@ mod tests {
 
     #[test]
     fn worktree_create_serialization_preserves_outer_action_and_adds_restore_detail() {
-        let created = serde_json::to_value(WorktreeOutput::Create(
-            WorktreeCreateCommandOutput::Native(create_output(None)),
-        ))
-        .expect("serialize created output");
-        let existing = serde_json::to_value(WorktreeOutput::Create(
-            WorktreeCreateCommandOutput::Native(create_output(None)),
-        ))
-        .expect("serialize existing output");
+        let created = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
+            .expect("serialize created output");
+        let existing = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
+            .expect("serialize existing output");
         let evidence = WorktreeCreateEvidence {
             task_worktree_id: "fixture@branch".to_string(),
             component_id: "fixture".to_string(),
@@ -896,15 +709,14 @@ mod tests {
             .expect("workspace identity"),
             git_registration: "registered".to_string(),
         };
-        let restored =
-            serde_json::to_value(WorktreeOutput::Create(WorktreeCreateCommandOutput::Native(
-                create_output(Some(WorktreeCreateReconciliation {
-                    action: WorktreeCreateAction::Restored,
-                    previous: evidence.clone(),
-                    current: evidence,
-                })),
-            )))
-            .expect("serialize restored output");
+        let restored = serde_json::to_value(WorktreeOutput::Create(create_output(Some(
+            WorktreeCreateReconciliation {
+                action: WorktreeCreateAction::Restored,
+                previous: evidence.clone(),
+                current: evidence,
+            },
+        ))))
+        .expect("serialize restored output");
 
         assert_eq!(created["action"], "create");
         assert_eq!(existing["action"], "create");
@@ -954,74 +766,27 @@ mod tests {
             imported: true,
         }))
         .expect("serialize import");
-        let finalized = serde_json::to_value(WorktreeOutput::Finalize(
-            homeboy::core::worktree_provider::WorktreeFinalization {
-                provider_id: "builtin".to_string(),
-                handle: "fixture@branch".to_string(),
-                disposition:
-                    homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded,
-                owner_outcome: "success".to_string(),
-                lifecycle_state: "completed".to_string(),
-                inspection_path: "/tmp/fixture@branch".to_string(),
-            },
-        ))
-        .expect("serialize finalization");
+        let mut record = create_output(None).record;
+        record.terminal_disposition = Some("succeeded".to_string());
+        let finalized =
+            serde_json::to_value(WorktreeOutput::Finalize(record)).expect("serialize finalization");
 
         assert_eq!(imported["action"], "import");
         assert_eq!(imported["imported"], true);
         assert_eq!(finalized["action"], "finalize");
-        assert_eq!(finalized["disposition"], "succeeded");
+        assert_eq!(finalized["terminal_disposition"], "succeeded");
     }
 
     #[test]
-    fn configured_worktree_create_serialization_exposes_provider_evidence() {
-        let output =
-            serde_json::to_value(WorktreeOutput::Create(WorktreeCreateCommandOutput::from(
-                homeboy::core::worktree_provider::WorktreeProviderCreateOutput::Configured(
-                    homeboy::core::worktree_provider::WorktreeProvision {
-                        destination: WorktreeProvisionDestination {
-                            ownership: WorktreeOwnership {
-                                provider: WorktreeProviderIdentity::Configured(
-                                    "fixture-provider".to_string(),
-                                ),
-                                handle: "fixture@branch".to_string(),
-                                path: "/tmp/fixture@branch".to_string(),
-                                kind: homeboy::core::worktree_provider::WorktreeWorkspaceKind::Configured,
-                                branch: Some("branch".to_string()),
-                                task_url: Some("https://example.test/1".to_string()),
-                                provenance: None,
-                            },
-                            exact_identity: None,
-                        },
-                        action: homeboy::core::worktree_provider::WorktreeProvisionAction::Ensured,
-                        idempotency_key: "fixture-key".to_string(),
-                    },
-                ),
-            )))
-            .expect("serialize configured create output");
-
-        assert_eq!(output["action"], "create");
-        assert_eq!(output["provider"], "fixture-provider");
-        assert_eq!(output["provision_action"], "ensured");
-        assert_eq!(output["idempotency_key"], "fixture-key");
-        assert!(output.get("record").is_none());
-    }
-
-    #[test]
-    fn worktree_list_preserves_native_schema_when_no_configured_provider_is_present() {
-        let output = serde_json::to_value(WorktreeOutput::List(WorktreeListCommandOutput {
-            native: WorktreeListOutput {
-                worktrees: Vec::new(),
-                diagnostics: Vec::new(),
-            },
-            provider_worktrees: Vec::new(),
-            provider_diagnostics: Vec::new(),
+    fn worktree_list_serializes_native_diagnostics_per_record() {
+        let output = serde_json::to_value(WorktreeOutput::List(WorktreeListOutput {
+            worktrees: Vec::new(),
+            diagnostics: Vec::new(),
         }))
         .expect("serialize worktree list");
 
         assert_eq!(output["action"], "list");
         assert_eq!(output["worktrees"], serde_json::json!([]));
-        assert!(output.get("provider_worktrees").is_none());
     }
 
     #[test]
@@ -1033,36 +798,6 @@ mod tests {
 
         assert_eq!(output["action"], "quarantine_list");
         assert_eq!(output["quarantines"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn configured_provider_status_reports_unsafe_state_without_changing_native_fields() {
-        let provider_worktree = ProviderWorktreeOutput {
-            provider: "fixture-provider".to_string(),
-            handle: "fixture@unsafe".to_string(),
-            path: "/tmp/fixture@unsafe".to_string(),
-            branch: Some("unsafe".to_string()),
-            task_url: None,
-            repository: None,
-            owner_run_ref: None,
-            created_at: None,
-            terminal_disposition: None,
-            safety: ProviderWorktreeSafetyOutput {
-                dirty: true,
-                unpushed: true,
-                primary: false,
-                missing: false,
-            },
-        };
-        let output = serde_json::to_value(WorktreeOutput::Status(
-            WorktreeStatusCommandOutput::Provider { provider_worktree },
-        ))
-        .expect("serialize provider worktree status");
-
-        assert_eq!(output["action"], "status");
-        assert_eq!(output["provider_worktree"]["provider"], "fixture-provider");
-        assert_eq!(output["provider_worktree"]["safety"]["dirty"], true);
-        assert!(output.get("record").is_none());
     }
 
     #[test]

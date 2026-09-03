@@ -1637,6 +1637,7 @@ mod baseline_tests {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_gate_command(
     cwd: &Path,
     index: usize,
@@ -1651,6 +1652,7 @@ pub(crate) fn run_gate_command(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_gate_command_with_policy(
     cwd: &Path,
     index: usize,
@@ -1668,6 +1670,7 @@ pub(crate) fn run_gate_command_with_policy(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
     cwd: &Path,
     index: usize,

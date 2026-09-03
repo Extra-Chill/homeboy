@@ -1,15 +1,8 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::apply::{
-    preflight_configured_workspace_provider_with_config, run_provider_command,
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
-    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
-    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
-};
 use super::super::promote::{
-    normalize_promotion_patch, promote, promote_with_provider,
-    promote_with_provider_and_checkpoint,
+    normalize_promotion_patch, promote_with_provider, promote_with_provider_and_checkpoint,
     promote_with_provider_and_checkpoint_in_observation_store,
     promote_with_provider_in_observation_store, resume_promoted_patch,
     retain_committed_changes_artifact,
@@ -19,150 +12,8 @@ use super::*;
 use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use crate::agent_task_scheduler::AgentTaskAggregate;
-use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::defaults::{
-    HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
-    WorktreeProviderListResultMapping,
-};
-use homeboy_core::worktree::{self, WorktreeAdoptOptions};
 use serde_json::Value;
-use std::path::PathBuf;
 use std::process::Command;
-
-#[test]
-fn configured_promotion_preflight_rejects_missing_provider_before_dispatch() {
-    let error = preflight_configured_workspace_provider_with_config(
-        "fixture@missing",
-        &HomeboyConfig::default(),
-    )
-    .expect_err("missing managed provider must fail preflight");
-
-    assert_eq!(
-        error.code,
-        homeboy_core::ErrorCode::ValidationInvalidArgument
-    );
-    assert!(error
-        .message
-        .contains("no worktree providers are configured"));
-}
-
-#[cfg(unix)]
-#[test]
-fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let workspace = tempfile::tempdir().expect("adopted workspace");
-        let marker = tempfile::NamedTempFile::new().expect("provider marker");
-        let marker_path = marker.into_temp_path();
-        std::fs::remove_file(&marker_path).expect("remove provider marker");
-        let provider = tempfile::NamedTempFile::new()
-            .expect("provider command")
-            .into_temp_path();
-        std::fs::write(
-            &provider,
-            format!("#!/bin/sh\ntouch '{}'\nexit 23\n", marker_path.display()),
-        )
-        .expect("write rejecting provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
-
-        worktree::adopt(WorktreeAdoptOptions {
-            handle: "fixture@adopted".to_string(),
-            path: workspace.path().display().to_string(),
-            kind: None,
-            provenance: None,
-        })
-        .expect("adopt workspace");
-
-        let mut config = HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "rejecting".to_string(),
-            WorktreeProviderConfig {
-                enabled: true,
-                kind: WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(WorktreeProviderListResultMapping {
-                    items: "$.worktrees".to_string(),
-                    handle: "$.handle".to_string(),
-                    path: "$.path".to_string(),
-                    branch: "$.branch".to_string(),
-                    dirty: "$.safety.dirty".to_string(),
-                    unpushed: "$.safety.unpushed".to_string(),
-                    primary: "$.safety.primary".to_string(),
-                    task_url: None,
-                }),
-            },
-        );
-
-        preflight_configured_workspace_provider_with_config("fixture@adopted", &config)
-            .expect("Homeboy adopted workspace bypasses provider preflight");
-        assert!(!marker_path.exists(), "provider must not be invoked");
-        let canonical_workspace = workspace
-            .path()
-            .canonicalize()
-            .expect("canonical workspace");
-
-        let mut promotion =
-            ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
-                &promotion_options("fixture@adopted"),
-                &config,
-                Some(PathBuf::from("/fixture/homeboy")),
-                None,
-            );
-        let error = promotion
-            .apply_patch(AgentTaskPromotionApplyRequest {
-                schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-                to_workspace: "fixture@adopted".to_string(),
-                patch: Some(VALID_PATCH.to_string()),
-                patch_path: "changes.patch".to_string(),
-                changed_files: vec!["src/lib.rs".to_string()],
-                gate_feedback_baseline: None,
-                dry_run: false,
-                trusted_unpushed_candidate_destination: None,
-            })
-            .expect_err("fixture executable is not an adapter");
-
-        assert_eq!(
-            promotion
-                .invocation()
-                .expect("adopted workspace invocation")
-                .argv,
-            vec![
-                "/fixture/homeboy".to_string(),
-                "agent-task".to_string(),
-                "promotion-provider".to_string(),
-                "--workspace".to_string(),
-                canonical_workspace.display().to_string(),
-            ]
-        );
-        assert_eq!(promotion.provenance().expect("provenance")["id"], "homeboy");
-        assert_eq!(
-            error.details["worktree_provider"]["path"],
-            canonical_workspace.display().to_string()
-        );
-        assert!(!marker_path.exists(), "provider must not be invoked");
-
-        std::fs::remove_dir_all(workspace.path()).expect("remove adopted workspace");
-        let error = preflight_configured_workspace_provider_with_config("fixture@adopted", &config)
-            .expect_err("stale Homeboy workspace remains fail-closed");
-        assert!(error.message.contains("missing directory"));
-        assert!(
-            !marker_path.exists(),
-            "stale Homeboy record must not fall back"
-        );
-    });
-}
 
 #[test]
 fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
@@ -459,52 +310,6 @@ fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
 }
 
 #[test]
-fn explicit_promotion_provider_sources_precede_configured_resolution() {
-    let mut options = promotion_options("fixture@missing");
-    options.provider_command = Some("command-provider".to_string());
-    options.provider_invocation = Some(CommandInvocation {
-        argv: vec!["argv-provider".to_string()],
-        ..Default::default()
-    });
-
-    let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
-        &options,
-        &HomeboyConfig::default(),
-        Some(PathBuf::from("/fixture/homeboy")),
-        Some("environment-provider".to_string()),
-    );
-
-    assert_eq!(
-        provider.invocation().expect("invocation").argv,
-        vec!["argv-provider".to_string()]
-    );
-
-    options.provider_invocation = None;
-    let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
-        &options,
-        &HomeboyConfig::default(),
-        Some(PathBuf::from("/fixture/homeboy")),
-        Some("environment-provider".to_string()),
-    );
-    assert_eq!(
-        provider.invocation().expect("invocation").argv,
-        vec!["command-provider".to_string()]
-    );
-
-    options.provider_command = None;
-    let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
-        &options,
-        &HomeboyConfig::default(),
-        Some(PathBuf::from("/fixture/homeboy")),
-        Some("environment-provider".to_string()),
-    );
-    assert_eq!(
-        provider.invocation().expect("invocation").argv,
-        vec!["environment-provider".to_string()]
-    );
-}
-
-#[test]
 fn normalize_promotion_patch_leaves_unrelated_workspace_paths() {
     let patch = "diff --git a/workspace/fixture.txt b/workspace/fixture.txt\n--- a/workspace/fixture.txt\n+++ b/workspace/fixture.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
@@ -765,7 +570,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
             base_ref: Some("main".to_string()),
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "homeboy@restartable".to_string(),
+            to_worktree: worktree_path.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -826,7 +631,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         base_ref: Some("main".to_string()),
         task_base_sha: None,
         candidate_ref: None,
-        to_worktree: "homeboy@restartable".to_string(),
+        to_worktree: worktree_path.display().to_string(),
         task_id: None,
         artifact_id: None,
         dry_run: false,
@@ -875,39 +680,6 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
 }
 
 #[test]
-fn promote_rejects_unresolved_configured_provider_for_apply() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (source_path, source) = write_patch_source(&temp);
-
-        let err = promote(AgentTaskPromotionOptions {
-            source,
-            source_run_id: None,
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@controlled-worktree".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions {
-                verify: Vec::new(),
-                private_verify: Vec::new(),
-                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
-                ..Default::default()
-            },
-            provider_command: None,
-            provider_invocation: None,
-        })
-        .expect_err("unresolved configured provider rejected");
-
-        assert!(err.message.contains("configured worktree provider"));
-    });
-}
-
-#[test]
 fn explicit_candidate_rejects_non_ancestor_base_and_dirty_source_before_apply() {
     let (temp, repo, base, candidate) = adopted_commit_repo();
     git(&repo, &["checkout", "-b", "unrelated", &base]);
@@ -945,74 +717,6 @@ fn explicit_candidate_rejects_non_ancestor_base_and_dirty_source_before_apply() 
     .expect_err("dirty source");
     assert!(error.message.contains("source worktree is dirty"));
     assert!(provider.apply_calls.is_empty());
-}
-
-#[test]
-fn provider_command_response_supplies_workspace_and_evidence() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace_path = temp.path().join("workspace");
-    std::fs::create_dir(&workspace_path).expect("create workspace");
-    assert!(std::process::Command::new("git")
-        .arg("init")
-        .arg(&workspace_path)
-        .status()
-        .expect("git init")
-        .success());
-    let response_path = temp.path().join("response.json");
-    std::fs::write(
-        &response_path,
-        serde_json::json!({
-            "schema": AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
-            "workspace_path": workspace_path.display().to_string(),
-            "command_evidence": [{
-                "command": ["provider", "apply"],
-                "exit_code": 0
-            }]
-        })
-        .to_string(),
-    )
-    .expect("write response");
-    let request_path = temp.path().join("request.json");
-
-    let request = AgentTaskPromotionApplyRequest {
-        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-        to_workspace: "target-workspace".to_string(),
-        patch: None,
-        patch_path: temp.path().join("changes.patch").display().to_string(),
-        changed_files: vec!["src/lib.rs".to_string()],
-        gate_feedback_baseline: None,
-        dry_run: false,
-        trusted_unpushed_candidate_destination: None,
-    };
-    let workspace = run_provider_command(
-        &CommandInvocation {
-            argv: vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!(
-                    "cat > {}; cat {}",
-                    request_path.display(),
-                    response_path.display()
-                ),
-            ],
-            ..Default::default()
-        },
-        &request,
-    )
-    .expect("provider response");
-
-    assert!(workspace.path.ends_with("workspace"));
-    assert_eq!(
-        workspace.command_evidence[0].command,
-        vec!["provider", "apply"]
-    );
-    assert_eq!(
-        serde_json::from_str::<AgentTaskPromotionApplyRequest>(
-            &std::fs::read_to_string(request_path).expect("typed stdin request"),
-        )
-        .expect("decode typed request"),
-        request
-    );
 }
 
 #[test]
@@ -1061,8 +765,7 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
             base_ref: Some(base.to_string()),
             task_base_sha: None,
             candidate_ref: None,
-            // Direct worktree paths must be preflighted too. Previously only
-            // configured provider handles resolved before apply.
+            // Direct worktree paths are preflighted before apply.
             to_worktree: worktree_path.display().to_string(),
             task_id: None,
             artifact_id: None,

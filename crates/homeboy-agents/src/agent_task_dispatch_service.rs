@@ -286,48 +286,6 @@ pub fn preflight_dispatch_provider_admission(
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())
 }
 
-pub fn dispatch_with_provider_requirements(
-    request: AgentTaskDispatchRequest,
-    executor: SharedAgentTaskExecutor,
-    provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
-) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
-    let backend_selection = request.backend_selection.clone();
-    let plan = build_dispatch_plan_with_provider_requirements(
-        &request,
-        provider_requires_cwd_git_checkout,
-    )?;
-    let catalog = AgentTaskProviderCatalog::discover();
-    let execution_plan =
-        match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-            &plan,
-            &catalog,
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        ) {
-            Ok(plan) => {
-                validate_selected_execution_plan(&plan, &catalog)?;
-                plan
-            }
-            Err(error) if error.retryable == Some(true) => {
-                return Err(record_retryable_dispatch_admission_failure(
-                    &plan,
-                    request.run_id.as_deref(),
-                    with_declared_credential_hints(error, &plan, &catalog),
-                ));
-            }
-            Err(error) => {
-                preflight_dispatch_provider_secrets(&plan)?;
-                return Err(with_declared_credential_hints(error, &plan, &catalog));
-            }
-        };
-    run_dispatch_plan(
-        execution_plan,
-        request.run_id.as_deref(),
-        request.core.queue_only,
-        backend_selection,
-        executor,
-    )
-}
-
 fn validate_selected_execution_plan(
     plan: &AgentTaskPlan,
     catalog: &AgentTaskProviderCatalog,

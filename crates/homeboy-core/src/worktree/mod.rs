@@ -651,20 +651,6 @@ pub fn record_active_for_test(id: &str, worktree_path: &Path) {
 }
 
 #[cfg(test)]
-pub(crate) fn record_active_with_source_for_test(
-    id: &str,
-    source_checkout: &Path,
-    worktree_path: &Path,
-) {
-    record_for_test(
-        id,
-        source_checkout,
-        worktree_path,
-        TaskWorktreeState::Active,
-    );
-}
-
-#[cfg(test)]
 pub(crate) fn record_removed_for_test(id: &str, worktree_path: &Path) {
     record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Removed);
 }
@@ -753,12 +739,12 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
             let task_url = request.task_url.clone().ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "task_url",
-                    "provider-owned queue worktree requires task_url",
+                    "managed queue worktree requires task_url",
                     Some(handle.clone()),
                     None,
                 )
             })?;
-            crate::worktree_provider::ensure_worktree_provision_from_config(
+            crate::worktree_provider::ensure_worktree_provision(
                 &crate::worktree_provider::WorktreeProvisionIntent {
                     handle: handle.clone(),
                     repo: options.repo.clone(),
@@ -767,8 +753,6 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     task_url: Some(task_url),
                 },
                 lifecycle,
-                None,
-                &crate::defaults::load_config(),
             )
             .map(|provision| provision.destination.ownership.path)
         } else {

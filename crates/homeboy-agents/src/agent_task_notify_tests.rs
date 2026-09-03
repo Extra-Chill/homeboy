@@ -104,6 +104,23 @@ fn intentional_no_change_terminal_notifications_match_policy_outcome() {
 }
 
 #[test]
+fn rotation_exhaustion_notification_preserves_the_terminal_cause() {
+    let mut report = report("provider_failure", None);
+    report.terminal_phase = Some("provider".to_string());
+    report.terminal_failure_classification = Some("provider_rotation_exhausted".to_string());
+    report.stop_reason = Some(
+        "provider rotation exhausted without a candidate: xai/grok-4.6: provider_account_blocked; zai-coding-plan/glm-5.3: rate_limited; opencode-go/kimi-k3: stalled".to_string(),
+    );
+
+    let payload = terminal_payload(&report, None, 1);
+    let body = payload.render_body();
+    assert!(body.contains("Failure classification: provider_rotation_exhausted"));
+    assert!(body.contains("xai/grok-4.6: provider_account_blocked"));
+    assert!(body.contains("zai-coding-plan/glm-5.3: rate_limited"));
+    assert!(body.contains("opencode-go/kimi-k3: stalled"));
+}
+
+#[test]
 fn failed_cook_forwards_its_own_legal_recovery_commands() {
     let mut failed = report("durable_failure", None);
     failed.failure_context = Some(failure_context());
