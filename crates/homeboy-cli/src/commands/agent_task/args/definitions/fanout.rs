@@ -36,6 +36,9 @@ pub enum AgentTaskFanoutCommand {
     /// Every child requires a deterministic gate from shared --verify/
     /// --private-verify inputs or --verification-profiles. A child that cannot
     /// verify its work cannot promote it (#9838).
+    #[command(
+        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --preview\n\nOne repository per batch: every issue in a cook-batch must belong to --repo. Plan separate batches and coordinate them with the multi-repository wave tracker: https://github.com/Extra-Chill/homeboy/issues/11088\n\nTwo phases: without --run-plan, cook-batch validates and materializes the batch, then returns a fanout run-plan command. Add --run-plan only after reviewing that plan to execute every child.\n\nVerification is required: every child needs a shared --verify/--private-verify gate or an assignment in --verification-profiles; a child that cannot verify cannot promote.\n\nPlacement: run the batch on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nPer-child verification profiles:\n  homeboy agent-task fanout cook-batch --repo REPO --verification-profiles @profiles.json ISSUE_URL... --preview\n\nUse --help-full for provider, gate, resource, environment, artifact, runner, and scheduling controls."
+    )]
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
     /// Normalize and inspect a batch-cook plan without submitting or running it.
     ///
@@ -67,7 +70,15 @@ pub enum AgentTaskFanoutCommand {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(disable_help_flag = true)]
 pub struct AgentTaskFanoutCookBatchArgs {
+    /// Show compact task-first cook-batch help. Use `--help-full` for the
+    /// complete cook-batch option reference.
+    #[arg(short = 'h', long, action = clap::ArgAction::HelpShort)]
+    pub help: Option<bool>,
+    /// Show the complete cook-batch option reference.
+    #[arg(long = "help-full", action = clap::ArgAction::HelpLong)]
+    pub help_full: Option<bool>,
     /// GitHub issue URL cooked by one child of the wave. Repeat for multiple
     /// issues; every URL must be unique and resolve through the tracker.
     #[arg(value_name = "ISSUE_URL", required = true)]
@@ -324,6 +335,8 @@ impl AgentTaskFanoutPlanArgs {
     /// flags are pinned off because `fanout plan` never executes.
     pub(crate) fn into_cook_batch_preview(self) -> AgentTaskFanoutCookBatchArgs {
         AgentTaskFanoutCookBatchArgs {
+            help: None,
+            help_full: None,
             issues: self.issues,
             repo: self.repo.unwrap_or_default(),
             // `fanout plan` does not expose component selection.
