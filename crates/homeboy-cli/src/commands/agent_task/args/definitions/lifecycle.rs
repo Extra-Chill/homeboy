@@ -788,9 +788,12 @@ pub struct FinalizePrArgs {
     /// Related issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
     #[arg(long = "relates-to", value_name = "ISSUE_REF")]
     pub relates_to: Vec<String>,
-    /// Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form.
+    /// Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form. Overrides require a recorded review form; use `--review-form` with `--recover` to supply one when it is absent.
     #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
     pub review_overrides: Vec<String>,
+    /// Complete typed AI review form to supply for a recovered Cook whose historical provider outcome did not record one: inline JSON, `@FILE`, or `-`.
+    #[arg(long, value_name = "JSON|@FILE|-", requires = "recover")]
+    pub review_form: Option<String>,
     /// Validate the complete hydrated dossier and candidate without publishing.
     #[arg(long)]
     pub preflight: bool,

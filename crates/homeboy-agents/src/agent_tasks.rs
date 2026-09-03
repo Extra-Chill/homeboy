@@ -535,7 +535,7 @@ pub mod service {
         reconstruct_adoption_options_with_dispatcher,
         reconstruct_options_for_pre_execution_recovery, reconstruct_options_with_dispatcher,
         reconstruct_options_with_local_placement_override, record_replacement_gate_proof,
-        recover_cook_pr, recover_missing_promotion_aggregate,
+        recover_cook_pr, recover_cook_pr_with_review_form, recover_missing_promotion_aggregate,
         recover_terminal_transport_proxy_evidence, register_cook_batch_work_handler,
         register_cook_work_handler, register_promotion_job_driver, resolve_cook_budget,
         resolve_supervision_policy, resume, resume_cook, resume_cook_batch,
