@@ -250,13 +250,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         .filter(|provider| provider.backend == backend)
         .collect::<Vec<_>>();
     let unresolved = |state: &'static str, reason: &'static str, route_reason: String| {
-        // A selector can fail while the backend's declared providers are otherwise
-        // usable. Preserve that component evidence while route precedence keeps
-        // the aggregate verdict unavailable.
-        let credentials_ready = !candidate_providers.is_empty()
-            && candidate_providers
-                .iter()
-                .all(|provider| provider_credential_readiness(provider).dispatchable);
         let configuration_ready = !candidate_providers.is_empty()
             && candidate_providers
                 .iter()
@@ -271,12 +264,8 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                 reason: None,
             },
             credentials: AgentTaskProviderDispatchabilityCredentialCheck {
-                status: if credentials_ready {
-                    AgentTaskProviderCredentialStatus::Unverified
-                } else {
-                    AgentTaskProviderCredentialStatus::Missing
-                },
-                ready: credentials_ready,
+                status: AgentTaskProviderCredentialStatus::Unverified,
+                ready: false,
                 missing: Vec::new(),
                 // A route that never resolved to one provider was never
                 // probed, so nothing here was live-verified.
@@ -380,19 +369,21 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                     if let Some(remediation) = remediation.as_ref() {
                         runtime_remediation.push(remediation.clone());
                     }
-                    let classification = if verdict.classification.trim().is_empty() {
-                        "unknown"
-                    } else {
-                        verdict.classification.trim()
+                    let classification = match verdict.classification.trim() {
+                        "" => "unknown".to_string(),
+                        "provider_account_blocked" => "account".to_string(),
+                        classification => classification.to_string(),
                     };
                     let reason = (!verdict.ready).then(|| {
                         if verdict.reason.trim().is_empty() {
-                            classification.to_string()
+                            classification.clone()
                         } else {
-                            format!(
-                                "{classification}: {}",
-                                homeboy_core::redaction::redact_string(&verdict.reason)
-                            )
+                            let mut cause = homeboy_core::redaction::redact_string(&verdict.reason);
+                            let prefix = format!("{}:", verdict.classification.trim());
+                            while let Some(next) = cause.strip_prefix(&prefix) {
+                                cause = next.trim_start().to_string();
+                            }
+                            format!("{classification}: {cause}")
                         }
                     });
                     let evidence = AgentTaskProviderRuntimeEvidence {
@@ -723,6 +714,7 @@ fn missing_readiness_invocation_diagnosis(
 
 fn sanitize_classification(classification: &str) -> String {
     match classification {
+        "provider_account_blocked" => "account".to_string(),
         "ready"
         | "deterministic_incompatibility"
         | "auth_failure"
@@ -1736,6 +1728,70 @@ mod tests {
             evaluate_provider_dispatchability(&ambiguous_catalog, "shared", None, None, false);
         assert_eq!(ambiguous.state, "route_ambiguous");
         assert!(!ambiguous.checks.route.ready);
+    }
+
+    #[test]
+    fn unresolved_route_never_claims_credentials_are_missing() {
+        let provider: super::super::AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "credential.provider",
+            "backend": "credential",
+            "provider_defaults": {
+                "credential": {
+                    "required_secret_env": ["HOMEBOY_TEST_UNRESOLVED_ROUTE_CREDENTIAL"]
+                }
+            }
+        }))
+        .expect("provider fixture");
+        let verdict = evaluate_provider_dispatchability(
+            &catalog(provider),
+            "credential",
+            Some("missing.provider"),
+            None,
+            false,
+        );
+
+        assert_eq!(verdict.state, "route_unavailable");
+        assert_eq!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Unverified
+        );
+        assert!(!verdict.checks.credentials.ready);
+        assert!(verdict.checks.credentials.missing.is_empty());
+    }
+
+    #[test]
+    fn repeated_provider_classification_is_normalized_in_readiness_output() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'provider_account_blocked',retryable:false,remediation:'switch account',reason:'provider_account_blocked: provider_account_blocked: account access rejected',cache_key:'blocked',identity:{}}));",
+        )
+        .expect("readiness script");
+
+        let verdict = evaluate_provider_dispatchability(
+            &catalog(provider(&script, &count)),
+            "test",
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(verdict.state, "account_unavailable");
+        assert_eq!(
+            verdict.checks.runtime.reason.as_deref(),
+            Some("account: account access rejected")
+        );
+        assert_eq!(
+            verdict
+                .readiness
+                .live_inference
+                .evidence
+                .as_ref()
+                .map(|evidence| evidence.classification.as_str()),
+            Some("account")
+        );
     }
 
     #[test]

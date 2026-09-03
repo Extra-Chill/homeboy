@@ -1226,6 +1226,60 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn readiness_exhaustion_normalizes_auth_failures_as_credential_rejections() {
+        struct RejectedCredentials;
+
+        impl AgentTaskExecutorAdapter for RejectedCredentials {
+            fn provider_route_readiness(
+                &self,
+                _request: &AgentTaskRequest,
+            ) -> ProviderRouteReadiness {
+                ProviderRouteReadiness {
+                    ready: false,
+                    state: "credentials_unusable".to_string(),
+                    reason: "configured credentials were rejected".to_string(),
+                    reset_at: None,
+                    classification: Some("auth_failure".to_string()),
+                    retryable: false,
+                    remediation: Some("repair provider credentials".to_string()),
+                    cache_identity: None,
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: None,
+                }
+            }
+
+            fn execute(
+                &self,
+                _request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                panic!("rejected credentials must not dispatch")
+            }
+        }
+
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(RejectedCredentials)).run(plan);
+        let outcome = &aggregate.outcomes[0];
+
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
+        );
+        assert_eq!(
+            outcome.metadata["provider_readiness_exhaustion"]["classifications"],
+            json!(["auth_failure"])
+        );
+        assert_eq!(
+            outcome.metadata["provider_readiness_routing"]["skipped"][0]["state"],
+            "credentials_unusable"
+        );
+    }
+
+    #[test]
     fn readiness_diagnostic_class_message_and_data_use_one_route() {
         struct MixedDiagnosticRoutes;
 
