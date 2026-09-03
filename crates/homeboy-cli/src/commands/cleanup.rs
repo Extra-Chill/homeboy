@@ -678,7 +678,7 @@ fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResul
             .map(|output| (output, 0));
     }
 
-    let timeout = cleanup_category_timeout(cleanup_category_base_budget(), None)
+    let timeout = cleanup_category_timeout(cleanup_category_budget(true), None)
         .saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
     let executable = std::env::current_exe().map_err(|error| {
         homeboy::core::Error::internal_io(
@@ -2788,7 +2788,8 @@ fn run_cleanup_category_process(
     args: &CleanupArgs,
     deadline: Option<SystemTime>,
 ) -> std::result::Result<Vec<CleanupInventoryCategory>, Box<CleanupInventoryCategory>> {
-    let wall_clock_budget = cleanup_category_timeout(cleanup_category_base_budget(), deadline);
+    let wall_clock_budget =
+        cleanup_category_timeout(cleanup_category_budget(args.include.len() == 1), deadline);
     if wall_clock_budget <= CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2) {
         return Err(Box::new(cleanup_category_timeout_failure(
             metadata,
@@ -3010,14 +3011,23 @@ fn exhausted_category_budget(deadline: Option<SystemTime>) -> Option<Duration> {
     (remaining < CLEANUP_CATEGORY_MINIMUM_BUDGET).then_some(remaining)
 }
 
-/// Budget every cleanup category starts from, before category-specific needs.
-fn cleanup_category_base_budget() -> Duration {
+/// Budget a cleanup category according to how the operator can resume it.
+///
+/// Multi-category sweeps retain the shorter isolation budget so one hung owner
+/// cannot starve everything after it. A scoped category is itself the published
+/// continuation, so it receives the aggregate budget and can finish legitimate
+/// work whose cost scales with retained resources (#12727).
+fn cleanup_category_budget(scoped: bool) -> Duration {
     test_cleanup_category_timeout().unwrap_or_else(|| {
-        Duration::from_secs(
-            defaults::load_config()
-                .retention
-                .cleanup_category_max_seconds,
-        )
+        let retention = defaults::load_config().retention;
+        let seconds = if scoped {
+            retention
+                .cleanup_category_max_seconds
+                .max(retention.cleanup_aggregate_max_seconds)
+        } else {
+            retention.cleanup_category_max_seconds
+        };
+        Duration::from_secs(seconds)
     })
 }
 
@@ -4434,6 +4444,26 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn scoped_cleanup_continuations_receive_the_aggregate_budget() {
+        with_isolated_home(|_| {
+            let retention = defaults::RetentionConfig::default();
+
+            assert_eq!(
+                cleanup_category_budget(false),
+                Duration::from_secs(retention.cleanup_category_max_seconds)
+            );
+            assert_eq!(
+                cleanup_category_budget(true),
+                Duration::from_secs(
+                    retention
+                        .cleanup_category_max_seconds
+                        .max(retention.cleanup_aggregate_max_seconds)
+                )
+            );
+        });
+    }
 
     fn controller_cleanup_request() -> Value {
         serde_json::to_value(CleanupArgs {
