@@ -592,6 +592,10 @@ mod retry_tests {
 pub struct CancelArgs {
     /// Durable run or Cook ID to cancel.
     pub run_id: String,
+    /// Include the complete, redacted lifecycle record instead of the compact
+    /// cancellation acknowledgement.
+    #[arg(long)]
+    pub full: bool,
     /// Optional explanation recorded with the cancellation.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
