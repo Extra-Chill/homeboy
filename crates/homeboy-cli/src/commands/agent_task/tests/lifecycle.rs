@@ -4308,6 +4308,7 @@ fn cancel_command_marks_queued_run_cancelled() {
 
         let (value, exit_code) = cancel(CancelArgs {
             run_id: "run-cli-cancel".to_string(),
+            full: false,
             reason: Some("not selected".to_string()),
             idempotency_key: Some("cli-cancel-1".to_string()),
         })
@@ -4319,6 +4320,7 @@ fn cancel_command_marks_queued_run_cancelled() {
         assert_eq!(value["cancellation"]["run_id"], "run-cli-cancel");
         let replay = cancel(CancelArgs {
             run_id: "run-cli-cancel".to_string(),
+            full: false,
             reason: Some("not selected".to_string()),
             idempotency_key: Some("cli-cancel-1".to_string()),
         })
@@ -4393,6 +4395,7 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
         let started = std::time::Instant::now();
         let (value, exit_code) = cancel(CancelArgs {
             run_id: run_id.to_string(),
+            full: false,
             reason: None,
             idempotency_key: Some("cli-cancel-deferred-1".to_string()),
         })

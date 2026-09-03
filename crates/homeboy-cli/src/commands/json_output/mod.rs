@@ -51,6 +51,10 @@ pub(crate) fn run_command_output(
                 agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
             let summary_kind = agent_task_summary_kind_for_output(&args);
             let bounded_operation = agent_task_bounded_operation(&args);
+            let redact_cancel = matches!(
+                &args.command,
+                crate::commands::agent_task::AgentTaskCommand::Cancel(_)
+            );
             if matches!(
                 &args.command,
                 crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) if !cook_args.preview
@@ -178,6 +182,7 @@ pub(crate) fn run_command_output(
                         summary_kind,
                         full,
                         bounded_operation,
+                        redact_cancel,
                     )
                     .with_command(spec.name)
                     .with_output_file_already_written();
@@ -190,7 +195,14 @@ pub(crate) fn run_command_output(
                     render_controller_run_from_spec_output_ref(payload, exit_code, output_file)
                 })
             } else {
-                agent_task_command_run(result.0, result.1, summary_kind, full, bounded_operation)
+                agent_task_command_run(
+                    result.0,
+                    result.1,
+                    summary_kind,
+                    full,
+                    bounded_operation,
+                    redact_cancel,
+                )
             }
         }
         Commands::Runner(args) if refresh_homeboy_uses_bounded_output(&args) => {
@@ -885,12 +897,23 @@ fn agent_task_command_run(
     summary_kind: Option<super::agent_task_summary::AgentTaskSummaryKind>,
     full: bool,
     bounded_operation: Option<&'static str>,
+    redact_cancel: bool,
 ) -> CommandRun {
+    // Lifecycle records can retain provider launch metadata. Redact once before
+    // either the compact projection, `--full`, or `--output` can serialize it.
+    let output_file_result = if redact_cancel {
+        output_file_result
+            .map(|value| homeboy::core::redaction::RedactionPolicy::default().redact_json(&value))
+    } else {
+        output_file_result
+    };
     let stdout_result = output_file_result.clone().map(|mut value| {
         if let Some(operation) = bounded_operation {
-            value = crate::commands::agent_task::status::bounded_full_operation_report(
-                value, operation,
-            );
+            value = if operation == "cancel" {
+                crate::commands::agent_task::status::bounded_cancel_report(value)
+            } else {
+                crate::commands::agent_task::status::bounded_full_operation_report(value, operation)
+            };
         } else if !full {
             crate::commands::agent_task::status::project_operator_output(&mut value);
         }
@@ -919,6 +942,7 @@ fn agent_task_bounded_operation(
         AgentTaskCommand::FinalizePr(_) => Some("finalize-pr"),
         AgentTaskCommand::Cook(args) if args.full => Some("cook"),
         AgentTaskCommand::CookContinue(args) if args.full => Some("cook-continue"),
+        AgentTaskCommand::Cancel(args) if !args.full => Some("cancel"),
         _ => None,
     }
 }
@@ -937,6 +961,7 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
         AgentTaskCommand::Promote(args) => args.full,
         AgentTaskCommand::Adopt(args) => args.full,
         AgentTaskCommand::FinalizePr(args) => args.full,
+        AgentTaskCommand::Cancel(args) => args.full,
         _ => false,
     }
 }
@@ -1274,7 +1299,7 @@ mod tests {
     #[test]
     fn agent_task_stdout_is_bounded_while_output_file_result_is_lossless() {
         let payload = serde_json::json!({ "stdout": "x".repeat(512 * 1024) });
-        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, None);
+        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, None, false);
 
         assert!(
             run.stdout_result.as_ref().expect("stdout")["stdout"]
@@ -1288,6 +1313,72 @@ mod tests {
                 .as_ref()
                 .expect("lossless output file"),
             &payload
+        );
+    }
+
+    #[test]
+    fn cancel_stdout_is_compact_redacted_and_output_file_retains_full_evidence() {
+        let payload = serde_json::json!({
+            "run_id": "cancel-run",
+            "state": "cancelled",
+            "metadata": {
+                "provider_launch_environment": { "OPENAI_API_KEY": "actual-secret" },
+                "replay_argv": (0..500).map(|_| "x".repeat(256)).collect::<Vec<_>>(),
+                "execution_records": (0..500).map(|_| serde_json::json!({ "output": "x".repeat(256) })).collect::<Vec<_>>(),
+            },
+            "cancellation": {
+                "requested_run_id": "cook-cancel-run",
+                "run_id": "cancel-run",
+                "prior_state": "running",
+                "state": "cancelled",
+                "acknowledgement": "cancel-run:action:cancel:key",
+                "accepted": true,
+                "outcome": "cancelled",
+                "terminal": true,
+                "status_command": "homeboy agent-task status cancel-run",
+            },
+        });
+        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, Some("cancel"), true);
+        let stdout = run.stdout_result.as_ref().expect("bounded stdout");
+        let rendered = serde_json::to_vec(stdout).expect("serialize bounded stdout");
+
+        assert!(
+            rendered.len() <= 4 * 1024,
+            "projection was {} bytes",
+            rendered.len()
+        );
+        assert_eq!(stdout["run"]["prior_state"], "running");
+        assert_eq!(stdout["run"]["state"], "cancelled");
+        assert_eq!(stdout["cancellation"]["live_process_outcome"], "cancelled");
+        assert_eq!(
+            stdout["next_action"]["command"],
+            "homeboy agent-task status cancel-run"
+        );
+        assert!(!rendered
+            .windows(b"provider_launch_environment".len())
+            .any(|window| window == b"provider_launch_environment"));
+        let output = run
+            .output_file_result(crate::command_contract::CommandOutputFileMode::GenericEnvelope)
+            .as_ref()
+            .expect("lossless output file");
+        assert_eq!(
+            output["metadata"]["replay_argv"],
+            payload["metadata"]["replay_argv"]
+        );
+        assert_eq!(
+            output["metadata"]["provider_launch_environment"]["OPENAI_API_KEY"],
+            "[REDACTED]"
+        );
+
+        let full = agent_task_command_run(Ok(payload.clone()), 0, None, true, None, true);
+        let full = full.stdout_result.as_ref().expect("full stdout");
+        assert_eq!(
+            full["metadata"]["replay_argv"],
+            payload["metadata"]["replay_argv"]
+        );
+        assert_eq!(
+            full["metadata"]["provider_launch_environment"]["OPENAI_API_KEY"],
+            "[REDACTED]"
         );
     }
 

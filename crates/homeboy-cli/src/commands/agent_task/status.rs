@@ -55,6 +55,59 @@ const STATUS_WATCH_CHANGE_BYTE_LIMIT: usize = 8 * 1024;
 const STATUS_WATCH_EVENT_BYTE_LIMIT: usize = 4 * 1024;
 const STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT: usize = 2 * 1024;
 const BOUNDED_FULL_STATUS_BYTE_LIMIT: usize = 16 * 1024;
+const CANCEL_PROJECTION_BYTE_LIMIT: usize = 4 * 1024;
+
+/// Default terminal projection for cancellation. The complete, redacted record
+/// remains available through `--full` and the lossless `--output` artifact.
+pub(crate) fn bounded_cancel_report(value: Value) -> Value {
+    let cancellation = value.get("cancellation").cloned().unwrap_or(Value::Null);
+    let run_id = cancellation
+        .get("run_id")
+        .or_else(|| value.get("run_id"))
+        .and_then(Value::as_str)
+        .filter(|run_id| run_id.len() <= COMPACT_TEXT_LIMIT)
+        .unwrap_or("<oversized-run-id>");
+    let status_command = cancellation
+        .get("status_command")
+        .and_then(Value::as_str)
+        .filter(|command| command.len() <= COMPACT_TEXT_LIMIT)
+        .unwrap_or("homeboy agent-task status <run-id>");
+    let projection = json!({
+        "schema": CANCELLATION_SCHEMA,
+        "presentation": "bounded_operator_projection",
+        "run": {
+            "requested": bounded_value(cancellation.get("requested_run_id").unwrap_or(&Value::Null)),
+            "id": run_id,
+            "prior_state": bounded_value(cancellation.get("prior_state").unwrap_or(&Value::Null)),
+            "state": bounded_value(cancellation.get("state").unwrap_or(&Value::Null)),
+        },
+        "cancellation": {
+            "acknowledgement": bounded_value(cancellation.get("acknowledgement").unwrap_or(&Value::Null)),
+            "accepted": bounded_value(cancellation.get("accepted").unwrap_or(&Value::Null)),
+            "outcome": bounded_value(cancellation.get("outcome").unwrap_or(&Value::Null)),
+            "terminal": bounded_value(cancellation.get("terminal").unwrap_or(&Value::Null)),
+            "live_process_outcome": bounded_value(cancellation.get("outcome").unwrap_or(&Value::Null)),
+        },
+        "next_action": { "command": status_command },
+        "output_budget": {
+            "max_bytes": CANCEL_PROJECTION_BYTE_LIMIT,
+            "full_output": "--full",
+            "lossless_output": "--output <path>",
+        },
+    });
+    let projection = homeboy::core::redaction::RedactionPolicy::default().redact_json(&projection);
+    if serialized_len(&projection) <= CANCEL_PROJECTION_BYTE_LIMIT {
+        projection
+    } else {
+        json!({
+            "schema": CANCELLATION_SCHEMA,
+            "presentation": "bounded_operator_projection",
+            "run": { "id": "<oversized-run-id>" },
+            "next_action": { "command": "homeboy agent-task status <run-id>" },
+            "output_budget": { "max_bytes": CANCEL_PROJECTION_BYTE_LIMIT, "full_output": "--full", "lossless_output": "--output <path>" },
+        })
+    }
+}
 
 /// `--output` retains the lossless report. Terminal stdout instead carries a
 /// bounded, deduplicated view with the decision and recovery command first.
@@ -3512,6 +3565,7 @@ const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const CANCELLATION_SCHEMA: &str = "homeboy/agent-task-cancellation/v1";
 
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
+    let prior_state = run_state_name(agent_task_lifecycle::status(&args.run_id)?.state);
     let idempotency_key = args
         .idempotency_key
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -3536,6 +3590,7 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
         return Ok(attach_action_acknowledgement(
             cancel_output(
                 &args.run_id,
+                &prior_state,
                 record,
                 CancelOutcome::Terminal {
                     waited: Duration::ZERO,
@@ -3557,6 +3612,7 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
         return Ok(attach_action_acknowledgement(
             cancel_output(
                 &args.run_id,
+                &prior_state,
                 record,
                 CancelOutcome::DeferredForTerminalProvider,
             ),
@@ -3564,7 +3620,7 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
         ));
     }
     Ok(attach_action_acknowledgement(
-        wait_for_cancellation_to_settle(&args.run_id, record),
+        wait_for_cancellation_to_settle(&args.run_id, &prior_state, record),
         &acknowledgement,
     ))
 }
@@ -3636,6 +3692,7 @@ enum CancelOutcome {
 /// Wait a bounded time for an accepted cancellation to become durably terminal.
 fn wait_for_cancellation_to_settle(
     requested_run_id: &str,
+    prior_state: &str,
     accepted: AgentTaskRunRecord,
 ) -> (Value, i32) {
     let run_id = accepted.run_id.clone();
@@ -3660,6 +3717,7 @@ fn wait_for_cancellation_to_settle(
     match waited {
         Ok(result) if result.timed_out() => cancel_output(
             requested_run_id,
+            prior_state,
             result.item,
             CancelOutcome::Requested {
                 waited: result.waited,
@@ -3669,6 +3727,7 @@ fn wait_for_cancellation_to_settle(
         ),
         Ok(result) => cancel_output(
             requested_run_id,
+            prior_state,
             result.item,
             CancelOutcome::Terminal {
                 waited: result.waited,
@@ -3679,6 +3738,7 @@ fn wait_for_cancellation_to_settle(
         // its convergence is an unconverged wait, never a failed cancellation.
         Err(error) => cancel_output(
             requested_run_id,
+            prior_state,
             accepted,
             CancelOutcome::Requested {
                 waited: started.elapsed(),
@@ -3697,6 +3757,7 @@ fn wait_for_cancellation_to_settle(
 /// cancellation.
 fn cancel_output(
     requested_run_id: &str,
+    prior_state: &str,
     record: AgentTaskRunRecord,
     outcome: CancelOutcome,
 ) -> (Value, i32) {
@@ -3705,7 +3766,7 @@ fn cancel_output(
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     surface_cancellation_recovery(&mut value);
     let (cancellation, summary, exit_code) =
-        cancellation_projection(requested_run_id, &run_id, &state, &outcome);
+        cancellation_projection(requested_run_id, prior_state, &run_id, &state, &outcome);
     let status_command = cancellation["status_command"]
         .as_str()
         .unwrap_or_default()
@@ -3748,6 +3809,7 @@ fn cancel_output(
 /// code for one outcome. Pure so every reported wording is directly testable.
 fn cancellation_projection(
     requested_run_id: &str,
+    prior_state: &str,
     run_id: &str,
     state: &str,
     outcome: &CancelOutcome,
@@ -3757,6 +3819,7 @@ fn cancellation_projection(
         "schema": CANCELLATION_SCHEMA,
         "requested_run_id": requested_run_id,
         "run_id": run_id,
+        "prior_state": prior_state,
         "state": state,
         "accepted": true,
         "wait_timeout_secs": CANCEL_TERMINAL_WAIT.as_secs(),
@@ -3837,6 +3900,7 @@ mod cancellation_outcome_tests {
     fn a_converged_cancellation_reports_the_cancelled_state_and_succeeds() {
         let (projection, summary, exit_code) = cancellation_projection(
             "cook-12572",
+            "queued",
             "agent-task-12572",
             "cancelled",
             &CancelOutcome::Terminal {
@@ -3850,6 +3914,7 @@ mod cancellation_outcome_tests {
         assert_eq!(projection["outcome"], "cancelled");
         assert_eq!(projection["terminal"], true);
         assert_eq!(projection["requested_run_id"], "cook-12572");
+        assert_eq!(projection["prior_state"], "queued");
         assert_eq!(projection["run_id"], "agent-task-12572");
         assert_eq!(projection["waited_secs"], 2);
         assert_eq!(projection["poll_count"], 3);
@@ -3866,6 +3931,7 @@ mod cancellation_outcome_tests {
     fn an_unconverged_cancellation_times_out_with_the_run_id_and_a_next_command() {
         let (projection, summary, exit_code) = cancellation_projection(
             "agent-task-12572",
+            "running",
             "agent-task-12572",
             "running",
             &CancelOutcome::Requested {
@@ -3903,6 +3969,7 @@ mod cancellation_outcome_tests {
     fn a_failed_convergence_observation_is_not_a_failed_cancellation() {
         let (projection, summary, exit_code) = cancellation_projection(
             "agent-task-12572",
+            "running",
             "agent-task-12572",
             "running",
             &CancelOutcome::Requested {
@@ -3928,6 +3995,7 @@ mod cancellation_outcome_tests {
     fn a_run_that_went_terminal_another_way_is_reported_as_such() {
         let (projection, summary, exit_code) = cancellation_projection(
             "agent-task-12572",
+            "running",
             "agent-task-12572",
             "succeeded",
             &CancelOutcome::Terminal {
@@ -3946,6 +4014,7 @@ mod cancellation_outcome_tests {
     fn a_deferred_cancellation_reports_the_deferral_without_a_wait() {
         let (projection, summary, exit_code) = cancellation_projection(
             "agent-task-12572",
+            "running",
             "agent-task-12572",
             "running",
             &CancelOutcome::DeferredForTerminalProvider,
