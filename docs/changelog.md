@@ -4,6 +4,186 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.7] - 2026-09-03
+
+### Added
+- add materialized rig contract
+- version claim API
+- bound the release artifact store per repository
+- add resource topology contract
+- allow Cook provider route override
+- register agent-task executors through Extension API v1
+- persist multi-repository cook waves
+
+### Changed
+- align fanout replay with admission blockers
+- format release artifact cleanup
+- own exec orchestration in runner API
+- format controller runtime retention test
+- remove inert side-effect seams
+- derive command docs at runtime
+- remove promotion provider abstraction
+- remove configured providers
+- type workspace authority sidecars
+- derive actions from extension catalog
+- resolve policy through extension catalog
+- canonicalize stored execution records
+- unify current submission input
+- route actions through API v1
+- format continuation exports
+- align preflight fixture base
+- make reverse claims envelope-only
+- single-source capability script projection
+- Complete the controller upgrade queue
+- make lifecycle executor validation an explicit dependency
+- Finalize provider worktrees explicitly
+- share component registration fixture
+- consolidate shared Git fixture execution
+- Keep Cook retries on their controller
+- collapse Lab refresh handoff
+- unify direct daemon submission
+- adopt merged PR lifecycle reconciliation
+- Migrate deployment providers to Extension API v1
+- Migrate external check resolvers to Extension API v1
+- Finalize successful candidate adoption correctly
+- Bind cleanup apply retries to active work
+- Report incomplete synchronous cleanup honestly
+- Scope artifact cleanup to the requested checkout
+- Honor configured executable tool probes
+- submit execution envelopes
+- Migrate recipe providers to Extension API v1
+- Unify review test execution plan ownership
+- Unify candidate and baseline gate execution
+- separate record decoding from schema acceptance
+- Remove Runner contract Lab dependency
+- Expose rig package root to bench extensions
+- Execute declared test plans through typed gate lifecycle
+- Migrate environment resolution to Extension API v1
+- share duplication indexes
+- build exact duplicate index once
+- Migrate fingerprint scripts to Extension API v1
+- declare bounded fanout test plans
+- Migrate runner availability to API v1
+- retire policy baseline ratchet
+- Centralize extension manifest loading
+- Add Runner API readiness operation
+- Migrate refactor analysis to Extension API v1
+- Preserve durable candidate presentation
+- Migrate runner capability admission to API v1
+- remove ambient component test wrapper
+- Test runner reconciliation claim replay
+- remove test-only production scaffolding
+- Resolve formatting through Extension API v1
+- Verify runner reconciliation projection
+- Defer stale descendant releases
+- Recover admitted runner jobs without a PID
+- Diagnose queued runner ownership
+- Queue concurrent controller upgrades
+- Resolve file capabilities through Extension API v1
+- Add Runner API v1 capabilities operation
+- retire expired compatibility flags
+
+### Fixed
+- generate recovery changelog
+- bind timeout candidate provenance
+- preserve current retention categories
+- preserve capability probe evidence
+- bound workspace synchronization
+- align retry projection with admission
+- recover repeated push races
+- gate reference against live Clap
+- bind portable readiness to gate
+- preserve native promotion scope
+- project rig workload inventory
+- retry unmaterialized Cook admissions
+- use component version for containment
+- preserve native Cook worktree ownership
+- redact rotation diagnostics
+- defer unconfirmed auto Cook placement
+- fence stale startup cleanup
+- reject malformed canonical claims
+- version provider action contract
+- surface provider rotation causes
+- clarify provider readiness next action
+- refresh stale auto Cook placement
+- fence Cook generation admission
+- derive controller runtime eligibility from retention decisions
+- reclaim runtime-temp locks from exited owners
+- reload materialized aggregate bytes
+- reload selected cook candidate
+- fund fanout child retry budgets
+- project live provider progress
+- validate live inference readiness
+- preserve interrupted fanout child state
+- distinguish retained candidates
+- resolve ambient fanout notifications
+- validate promotion base before mutation
+- rotate quota-blocked providers
+- admit controller-owned promotion
+- cook homeboy
+- deny retryable dispatch admission
+- admit submitted plans before running
+- preserve task deadlines and containment
+- bind queued readiness admission
+- trust the admission-derived plan post-admission
+- persist admitted provider readiness route
+- integrate readiness invocation deadlines
+- close readiness routing blockers
+- harden provider readiness remediation
+- preserve provider readiness routing
+- bind readiness probes to selected credentials
+- route provider readiness across rotation
+- validate queued finalization dispatchers and rearm identity
+- close continuation landing gaps
+- finalize continuation recovery
+- harden continuation recovery invariants
+- close continuation preflight gaps
+- harden continuation preflight admission
+- make continuation preflight read-only
+- resolve equivalent controller artifact projections
+- fault-isolate configured provider inventory
+- carry Cook pinned base into snapshot
+- bound changed-only audit
+- preflight dirty checkout
+- bind Cook harvest workspace
+- infer repo from target worktree
+- scope workspace recovery to explicit owner
+- restrict extension command suggestions
+- promote unresolved preview diagnostics
+- keep metadata show local
+- preserve durable runtime refresh context (#14111) [AI: OpenAI GPT-5.6 Terra via OpenCode]
+- preserve retryable fanout admission
+- validate fanout preview providers
+- retain live admission claims
+- update relink provenance atomically
+- unify provider readiness verdict
+- bound readiness invocations
+- compact cook-batch help
+- supervise explicit local submissions
+- persist Cook before resource admission
+- emit terminal Cook preview
+- converge bounded doctor recovery
+- resolve nested runtime package roots
+- bind harvest to remapped workspace provenance
+- converge cancelled provider ownership
+- preserve timeout workspace candidates
+- hydrate nested component dependencies
+- retain clean dispatch snapshot for harvest
+- project terminal notification state
+- preserve partial upgrade diagnostics
+- compare replacement candidate fingerprints
+- retain list diagnostics
+- persist refresh phase progress
+- validate fanout provider admission
+- retain gate-blocked candidates
+- diagnose invalid provider contracts
+- validate batch targets atomically
+- preserve target version diagnostics
+- skip mutable tagged recovery gates
+- authenticate detached staging requests
+- preserve subdirectory component identity
+- retain partial component inventory
+
 ## [0.367.6] - 2026-08-31
 
 ### Fixed
