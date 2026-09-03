@@ -308,4 +308,118 @@ fi
 assert_contains "${WORK_DIR}/missing-owner.out" "owning package ${missing_owner_package}"
 assert_contains "${WORK_DIR}/missing-owner.out" "${missing_owner_package}/package.json declares no JavaScript test script"
 
+# --- Declared-script runs must publish structured counts (#2778) -----------
+# JS_TEST_SUMMARY carries no passed=/failed= tokens, so the generic parser
+# resolved zero counts and graded a passing JavaScript-only scope as a
+# failure. Jest and wp-scripts print their summary on stderr, so these cases
+# also pin that the runner captures both streams.
+counts_component="${WORK_DIR}/counts-component"
+mkdir -p "${counts_component}/src" "${counts_component}/node_modules"
+cat > "${counts_component}/package.json" <<'JSON'
+{
+  "name": "counts",
+  "scripts": {
+    "test:unit": "wp-scripts test-unit-js"
+  }
+}
+JSON
+cat > "${counts_component}/src/counts.test.js" <<'JS'
+describe( 'counts', () => {
+	it( 'reports structured counts', () => expect( true ).toBe( true ) );
+} );
+JS
+
+counts_write_helper="${WORK_DIR}/write-test-results.sh"
+cat > "$counts_write_helper" <<'SH'
+homeboy_write_test_results() {
+    printf 'total=%s passed=%s failed=%s skipped=%s partial=%s\n' \
+        "$1" "$2" "$3" "$4" "${5:-}" > "$HOMEBOY_TEST_RESULTS_FILE"
+}
+SH
+
+# Jest reports its summary on stderr and exits 0.
+cat > "${stubs}/npm" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'NPM_INVOKED:%s\n' "$*"
+if [ "${1:-}" = "run" ]; then
+    printf 'Tests:       8 passed, 8 total\n' >&2
+fi
+SH
+chmod +x "${stubs}/npm"
+
+counts_results="${WORK_DIR}/counts-pass.txt"
+PATH="${stubs}:${PATH}" \
+HOMEBOY_TEST_RESULTS_FILE="$counts_results" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$counts_write_helper" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="counts" \
+HOMEBOY_COMPONENT_PATH="$counts_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_CHANGED_TEST_FILES="src/counts.test.js" \
+    bash "$RUNNER" > "${WORK_DIR}/counts-pass.out" 2>&1
+
+assert_contains "${WORK_DIR}/counts-pass.out" "JS_TEST_SUMMARY:backend=package-script script=test:unit files=1 status=ok"
+# The defect reported total=0 for this run, which the phase graded as failed.
+assert_contains "$counts_results" "total=8 passed=8 failed=0 skipped=0"
+
+# A failing declared run must still report its failures, never a passing shape.
+cat > "${stubs}/npm" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'NPM_INVOKED:%s\n' "$*"
+if [ "${1:-}" = "run" ]; then
+    printf 'Tests:       2 failed, 6 passed, 8 total\n' >&2
+    exit 1
+fi
+SH
+chmod +x "${stubs}/npm"
+
+counts_fail_results="${WORK_DIR}/counts-fail.txt"
+set +e
+PATH="${stubs}:${PATH}" \
+HOMEBOY_TEST_RESULTS_FILE="$counts_fail_results" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$counts_write_helper" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="counts" \
+HOMEBOY_COMPONENT_PATH="$counts_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_CHANGED_TEST_FILES="src/counts.test.js" \
+    bash "$RUNNER" > "${WORK_DIR}/counts-fail.out" 2>&1
+counts_status=$?
+set -e
+
+if [ "$counts_status" -eq 0 ]; then
+    echo "Expected a failing declared JavaScript run to exit non-zero" >&2
+    sed 's/^/  /' "${WORK_DIR}/counts-fail.out" >&2
+    exit 1
+fi
+assert_contains "${WORK_DIR}/counts-fail.out" "JS_TEST_SUMMARY:backend=package-script script=test:unit files=1 status=failed exit=1"
+assert_contains "$counts_fail_results" "total=8 passed=6 failed=2 skipped=0"
+
+# A declared runner that prints nothing parseable must still not report a
+# passing run as zero executed tests.
+cat > "${stubs}/npm" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'NPM_INVOKED:%s\n' "$*"
+SH
+chmod +x "${stubs}/npm"
+
+counts_opaque_results="${WORK_DIR}/counts-opaque.txt"
+PATH="${stubs}:${PATH}" \
+HOMEBOY_TEST_RESULTS_FILE="$counts_opaque_results" \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$counts_write_helper" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="counts" \
+HOMEBOY_COMPONENT_PATH="$counts_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_CHANGED_TEST_FILES="src/counts.test.js" \
+    bash "$RUNNER" > "${WORK_DIR}/counts-opaque.out" 2>&1
+
+assert_contains "$counts_opaque_results" "total=1 passed=1 failed=0 skipped=0 partial=declared-js-files"
+
 echo "WordPress JavaScript test framework routing smoke passed"

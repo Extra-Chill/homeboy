@@ -630,16 +630,87 @@ homeboy_wordpress_run_declared_js_test_files() {
         echo "JS_TEST_BEGIN:${rel_path}"
     done
 
+    # Declared runners report their terminal counts in human output, and Jest
+    # and wp-scripts write that summary to stderr. Tee both streams so the run
+    # stays visible in logs while a copy remains parseable for structured
+    # counts. Without those counts the phase reports zero executed tests and a
+    # passing JavaScript-only scope is graded as a failure (#2778).
+    local capture
+    capture="$(mktemp "${TMPDIR:-/tmp}/homeboy-js-test.XXXXXX")"
+
     exit_code=0
+    # Jest and wp-scripts write their summary to stderr, so both streams are
+    # merged into one pipe. A `tee` into process substitution would race the
+    # read below, so this pipes through `tee` and recovers the runner's real
+    # status from PIPESTATUS instead of tee's.
     # shellcheck disable=SC2086
-    (cd "$package_root" && $run_command -- "${selected[@]}") || exit_code=$?
+    (cd "$package_root" && $run_command -- "${selected[@]}") 2>&1 | tee -a "$capture"
+    exit_code="${PIPESTATUS[0]}"
 
     if [ "$exit_code" -eq 0 ]; then
         echo "JS_TEST_SUMMARY:backend=package-script script=${JS_TEST_SCRIPT} files=${#selected[@]} status=ok"
     else
         echo "JS_TEST_SUMMARY:backend=package-script script=${JS_TEST_SCRIPT} files=${#selected[@]} status=failed exit=${exit_code}"
     fi
+
+    homeboy_wordpress_write_declared_js_results "$capture" "$exit_code" "${#selected[@]}"
+    rm -f "$capture"
     return "$exit_code"
+}
+
+# Normalize declared-script JavaScript results into structured counts.
+#
+# The generic parser resolves counts from adapters or a `passed=N failed=N`
+# summary line. JS_TEST_SUMMARY carries neither, so a passing run parsed to
+# zero counts and the phase failed with no failing test (#2778). Prefer exact
+# counts from the runner's own summary; fall back to file-granularity only when
+# the declared runner reports nothing parseable.
+homeboy_wordpress_write_declared_js_results() {
+    local capture="$1"
+    local exit_code="$2"
+    local file_count="$3"
+
+    if ! type homeboy_write_test_results >/dev/null 2>&1 \
+        && [ -n "${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}" ] \
+        && [ -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS" ]; then
+        # shellcheck source=/dev/null
+        source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+    fi
+    type homeboy_write_test_results >/dev/null 2>&1 || return 0
+
+    local adapters_helper="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-${SHARED_LIB_DIR}/test-result-adapters.sh}"
+    if ! type homeboy_parse_test_results_with_adapters >/dev/null 2>&1 \
+        && [ -f "$adapters_helper" ]; then
+        # shellcheck source=/dev/null
+        source "$adapters_helper"
+    fi
+
+    local marker="${HOMEBOY_TEST_RESULTS_FILE:-}"
+    if type homeboy_parse_test_results_with_adapters >/dev/null 2>&1; then
+        local stamp=""
+        if [ -n "$marker" ] && [ -f "$marker" ]; then
+            stamp="$(cat "$marker" 2>/dev/null || true)"
+        fi
+        homeboy_parse_test_results_with_adapters "$capture" jest node-test
+        # The adapters only write when a runner summary parsed. A changed
+        # results file means exact counts landed and no fallback is needed.
+        if [ -n "$marker" ] && [ -f "$marker" ]; then
+            local after=""
+            after="$(cat "$marker" 2>/dev/null || true)"
+            if [ "$after" != "$stamp" ]; then
+                return 0
+            fi
+        fi
+    fi
+
+    # No parseable runner summary. Report file granularity so the phase is
+    # graded on something real: a clean run is N passing files, and a failing
+    # run must never be recorded as fully passing.
+    if [ "$exit_code" -eq 0 ]; then
+        homeboy_write_test_results "$file_count" "$file_count" 0 0 "declared-js-files"
+    else
+        homeboy_write_test_results "$file_count" 0 "$file_count" 0 "declared-js-files-failure"
+    fi
 }
 
 # Route selected JavaScript test files to the framework that actually owns

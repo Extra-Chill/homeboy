@@ -136,12 +136,41 @@ def parse_node_test():
     return True
 
 
+def parse_jest():
+    # Jest and wp-scripts write their terminal summary to stderr, so callers
+    # must capture both streams. The per-category counts appear on one line as
+    # "Tests: 1 failed, 2 skipped, 5 passed, 8 total"; categories are omitted
+    # when zero, so each is read independently rather than positionally.
+    summaries = [
+        line
+        for line in text.splitlines()
+        if re.match(r"^Tests:\s+.*\b(\d+)\s+total\s*$", line.strip())
+    ]
+    if not summaries:
+        return False
+    summary = summaries[-1].strip()
+    total = count_before("total", summary)
+    passed = count_before("passed", summary)
+    failed = count_before("failed", summary)
+    # Jest reports "skipped" for it.skip and "todo" for it.todo. Both are
+    # unexecuted, so they fold together into the skipped count.
+    skipped = count_before("skipped", summary) + count_before("todo", summary)
+    # A crash after the summary can leave the counts internally inconsistent.
+    # Trust total and fold the unexplained remainder into failed rather than
+    # reporting a run as fully passing.
+    if total > passed + failed + skipped:
+        failed += total - passed - failed - skipped
+    emit(total, passed, failed, skipped)
+    return True
+
+
 adapter_functions = {
     "host-smoke": parse_host_smoke,
     "phpunit": parse_phpunit,
     "phpunit-testdox": parse_phpunit_testdox,
     "cargo-test": parse_cargo_test,
     "node-test": parse_node_test,
+    "jest": parse_jest,
 }
 
 for adapter in adapters:
