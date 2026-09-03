@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.41.3] - 2026-09-03
+
+### Changed
+- remove wp-codebox agent provider
+- consolidate codebox runtime contracts
+
 ## [3.41.2] - 2026-09-03
 
 ### Fixed
