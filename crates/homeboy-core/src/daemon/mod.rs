@@ -252,18 +252,7 @@ impl LocalControllerJobClient {
     /// rather than terminating an unobserved owner, and the final connection
     /// re-runs exact-build validation before any controller job is submitted.
     pub fn connect_current_build_recovering_idle() -> Result<Self> {
-        let status = read_status()?;
-        if recovery_actions::authorizes_automatic_idle_restart(&status) {
-            match status.freshness.lease_id.as_deref() {
-                Some(lease_id) => {
-                    stop_for_lease(lease_id)?;
-                }
-                None => {
-                    stop()?;
-                }
-            }
-            start_background(DEFAULT_ADDR)?;
-        }
+        let _ = converge_current_build_idle_daemon()?;
         Self::connect_current_build()
     }
 
@@ -491,6 +480,63 @@ impl LocalControllerJobClient {
             )
         })
     }
+}
+
+/// Rotate a stale resident daemon only when its authoritative status permits
+/// the canonical idle restart, then prove the replacement runs this build.
+///
+/// Unlike [`LocalControllerJobClient::connect_current_build_recovering_idle`],
+/// this does not start a daemon when none is resident. Controller upgrades use
+/// it to converge an existing daemon before reporting success.
+pub fn converge_current_build_idle_daemon() -> Result<bool> {
+    let status = read_status()?;
+    if !status.running || status.fresh {
+        return Ok(false);
+    }
+
+    if !recovery_actions::authorizes_automatic_idle_restart(&status) {
+        let plan = recovery_actions::plan_recovery(&status);
+        let recovery_command = if plan.executable && plan.required_confirmations.is_empty() {
+            "homeboy daemon recover --yes".to_string()
+        } else {
+            plan.steps
+                .first()
+                .map(|step| step.command.clone())
+                .unwrap_or_else(|| "homeboy daemon status".to_string())
+        };
+        let mut error = Error::validation_invalid_argument(
+            "daemon_build_identity",
+            "controller upgrade left a resident daemon that cannot be automatically converged",
+            status.freshness.daemon_build_identity,
+            Some(vec![format!("Run: {recovery_command}")]),
+        );
+        error.details["restart_required"] = serde_json::Value::Bool(true);
+        error.details["recovery_command"] = serde_json::Value::String(recovery_command);
+        return Err(error);
+    }
+
+    match status.freshness.lease_id.as_deref() {
+        Some(lease_id) => {
+            stop_for_lease(lease_id)?;
+        }
+        None => {
+            stop()?;
+        }
+    }
+    start_background(DEFAULT_ADDR)?;
+
+    let converged = read_status()?;
+    if converged.fresh {
+        return Ok(true);
+    }
+
+    Err(Error::internal_unexpected(format!(
+        "controller upgrade restarted the resident daemon but it did not converge to the invoking build: {}",
+        converged
+            .stale_reason
+            .as_deref()
+            .unwrap_or("daemon status remains stale")
+    )))
 }
 
 static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
