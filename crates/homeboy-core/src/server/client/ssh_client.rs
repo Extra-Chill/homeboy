@@ -1427,11 +1427,16 @@ const PROCESS_TERMINATION_GRACE: Duration = Duration::from_millis(100);
 /// backgrounding and then explicitly redirect the child's fd 0 from fd 3,
 /// restoring the original stdin stream.
 pub(super) fn wrap_owned_remote_command(command: &str) -> String {
+    // Bind the payload once. Embedding it separately in the setsid and Perl
+    // branches doubled every remote command inside a single `exec` argv, and
+    // large payloads (capability probes composed from runner env plus required
+    // tool, command, and capability entries) reached the exec limit and failed
+    // with `Argument list too long` before any branch ran. See #14304, and
+    // #8855, #8951, #9009, #10492 for the same limit at other sites.
     format!(
-        "exec 3<&0 || {{ printf '%s\\n' 'Homeboy SSH execution could not preserve remote stdin.' >&2; exit 1; }}; if command -v setsid >/dev/null 2>&1; then setsid sh -c {} <&3 & elif command -v perl >/dev/null 2>&1; then perl -MPOSIX -e {} sh -c {} <&3 & else printf '%s\\n' 'Homeboy SSH execution requires remote session authority (setsid or Perl POSIX).' >&2; exec 3<&-; exit 127; fi; __homeboy_remote_pid=$!; exec 3<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
+        "exec 3<&0 || {{ printf '%s\\n' 'Homeboy SSH execution could not preserve remote stdin.' >&2; exit 1; }}; __homeboy_remote_command={}; if command -v setsid >/dev/null 2>&1; then setsid sh -c \"$__homeboy_remote_command\" <&3 & elif command -v perl >/dev/null 2>&1; then perl -MPOSIX -e {} sh -c \"$__homeboy_remote_command\" <&3 & else printf '%s\\n' 'Homeboy SSH execution requires remote session authority (setsid or Perl POSIX).' >&2; exec 3<&-; exit 127; fi; __homeboy_remote_pid=$!; exec 3<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
         shell::quote_arg(command),
         shell::quote_arg("POSIX::setsid() >= 0 or die \"setsid: $!\\n\"; exec @ARGV or die \"exec: $!\\n\";"),
-        shell::quote_arg(command),
     )
 }
 
