@@ -2,6 +2,16 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.41.4] - 2026-09-03
+
+### Changed
+- relocate direct codebox runtime modules
+- use direct codebox fuzz requests
+
+### Fixed
+- keep codebox contracts out of eager exports
+- repoint runtime selection consumers
+
 ## [3.41.3] - 2026-09-03
 
 ### Changed
