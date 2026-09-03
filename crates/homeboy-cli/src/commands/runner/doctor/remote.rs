@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use types::*;
 
 pub fn report(
@@ -275,10 +276,53 @@ pub fn report(
             options.agent_backend.as_deref(),
             options.agent_selector.as_deref(),
         ));
-        checks.extend(probes::provider_readiness_checks(
-            client,
-            &homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
-        ));
+        let extension_dependencies = probes::lab_offload_extension_dependencies(
+            &options.extensions,
+            catalog.providers(),
+            options.agent_backend.as_deref(),
+            options.agent_selector.as_deref(),
+        );
+        let parity_cwd = options.path.as_deref().unwrap_or(workspace_root.as_str());
+        let parity_checks = extension_dependencies
+            .iter()
+            .map(|dependency| {
+                let mut check = extension_parity::remote_live_readiness_check(
+                    client,
+                    runner_id,
+                    runner,
+                    homeboy_command,
+                    Some(parity_cwd),
+                    &dependency.extension_id,
+                );
+                if let Some(provider_id) = &dependency.provider_id {
+                    check
+                        .details
+                        .insert("provider_id".to_string(), provider_id.clone());
+                }
+                check
+            })
+            .collect::<Vec<_>>();
+        let global_parity_blocked = parity_checks.iter().any(|check| {
+            check.status == RunnerDoctorStatus::Error && !check.details.contains_key("provider_id")
+        });
+        let blocked_providers = parity_checks
+            .iter()
+            .filter(|check| check.status == RunnerDoctorStatus::Error)
+            .filter_map(|check| check.details.get("provider_id"))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        checks.extend(parity_checks);
+        if !global_parity_blocked {
+            let readiness_contracts =
+                homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts()
+                    .into_iter()
+                    .filter(|contract| !blocked_providers.contains(&contract.provider_id))
+                    .collect::<Vec<_>>();
+            checks.extend(probes::provider_readiness_checks(
+                client,
+                &readiness_contracts,
+            ));
+        }
         checks.extend(probes::managed_runner_source_checks(
             client,
             &homeboy::agents::agent_tasks::provider::provider_runner_source_contracts(),
@@ -304,13 +348,15 @@ pub fn report(
     });
     checks.extend(daemon_checks);
 
-    for extension_id in normalized_extension_ids(&options.extensions) {
-        checks.push(extension_parity::remote_check(
-            client,
-            homeboy_command,
-            options.path.as_deref(),
-            &extension_id,
-        ));
+    if options.scope != RunnerDoctorScope::LabOffload {
+        for extension_id in normalized_extension_ids(&options.extensions) {
+            checks.push(extension_parity::remote_check(
+                client,
+                homeboy_command,
+                options.path.as_deref(),
+                &extension_id,
+            ));
+        }
     }
 
     let capabilities = probes::capabilities_from(

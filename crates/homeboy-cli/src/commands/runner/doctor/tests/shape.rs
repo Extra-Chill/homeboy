@@ -350,6 +350,26 @@ fn lab_offload_readiness_blocks_a_failed_selected_provider() {
     assert_eq!(readiness.blocked_for, vec!["selected.provider"]);
 }
 
+#[test]
+fn lab_offload_readiness_blocks_all_providers_on_a_runner_prerequisite_error() {
+    let checks = vec![checks::error(
+        "extension.parity",
+        "required extension is stale".to_string(),
+        None,
+        BTreeMap::new(),
+    )];
+    let eligible = vec![
+        "selected.provider".to_string(),
+        "optional.provider".to_string(),
+    ];
+
+    let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+
+    assert_eq!(status, RunnerDoctorStatus::Error);
+    assert!(readiness.ready_for.is_empty());
+    assert_eq!(readiness.blocked_for, eligible);
+}
+
 fn provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::RunnerCheck {
     types::RunnerCheck {
         id: format!("provider.{provider_id}"),

@@ -85,6 +85,116 @@ fn push_setting_key(keys: &mut Vec<String>, value: &str) {
     }
 }
 
+/// Outcome of the generic extension-parity probe used by workload dispatch and
+/// Lab provider readiness. Readiness wrappers may run only when this is
+/// [`Self::Current`].
+#[derive(Debug, Clone)]
+pub enum ExtensionParityProbe {
+    Current,
+    NeedsMaterialization { error: Error },
+    Blocked { error: Error },
+}
+
+impl ExtensionParityProbe {
+    pub fn allows_provider_readiness(&self) -> bool {
+        matches!(self, Self::Current)
+    }
+
+    pub fn error(&self) -> Option<&Error> {
+        match self {
+            Self::Current => None,
+            Self::NeedsMaterialization { error } | Self::Blocked { error } => Some(error),
+        }
+    }
+}
+
+/// Captured `extension show --live-readiness` output interpreted by
+/// [`probe_extension_parity_from_show`].
+#[derive(Debug, Clone, Copy)]
+pub struct ExtensionShowOutput<'a> {
+    pub success: bool,
+    pub stdout: &'a str,
+    pub stderr: &'a str,
+}
+
+/// Interpret an `extension show --live-readiness` result with the same rules
+/// dispatch uses before `ensure_extension_materialized`.
+pub fn probe_extension_parity_from_show(
+    runner_id: &str,
+    runner: &Runner,
+    homeboy_path: &str,
+    extension_id: &str,
+    show: ExtensionShowOutput<'_>,
+) -> ExtensionParityProbe {
+    probe_extension_parity_from_show_with_settings(
+        runner_id,
+        runner,
+        homeboy_path,
+        extension_id,
+        &[],
+        &[],
+        show,
+    )
+}
+
+fn probe_extension_parity_from_show_with_settings(
+    runner_id: &str,
+    runner: &Runner,
+    homeboy_path: &str,
+    extension_id: &str,
+    requested_setting_keys: &[String],
+    accepted_setting_keys: &[String],
+    show: ExtensionShowOutput<'_>,
+) -> ExtensionParityProbe {
+    if !show.success {
+        return ExtensionParityProbe::Blocked {
+            error: missing_runner_extension_error(
+                runner_id,
+                homeboy_path,
+                extension_id,
+                show.stderr,
+                show.stdout,
+            ),
+        };
+    }
+    if let Err(error) =
+        validate_runner_extension_ready(runner_id, homeboy_path, extension_id, show.stdout)
+    {
+        return ExtensionParityProbe::Blocked { error };
+    }
+    if let Err(error) = validate_runner_extension_settings(
+        runner_id,
+        homeboy_path,
+        extension_id,
+        show.stdout,
+        requested_setting_keys,
+        accepted_setting_keys,
+    ) {
+        return ExtensionParityProbe::Blocked { error };
+    }
+    if let Err(error) = validate_runner_extension_core_compatibility(
+        runner_id,
+        homeboy_path,
+        extension_id,
+        show.stdout,
+    ) {
+        return ExtensionParityProbe::Blocked { error };
+    }
+    match validate_runner_extension_revision(
+        runner_id,
+        runner,
+        homeboy_path,
+        extension_id,
+        show.stdout,
+    ) {
+        Ok(()) => ExtensionParityProbe::Current,
+        Err(error) if is_stale_runner_extension_parity_error(&error) => {
+            ExtensionParityProbe::NeedsMaterialization { error }
+        }
+        Err(error) => ExtensionParityProbe::Blocked { error },
+    }
+}
+
 pub(super) fn plan_extension_parity(
     runner_id: &str,
     runner: &Runner,
@@ -120,6 +230,20 @@ pub(super) fn ensure_extension_materialized(plan: &ExtensionParityPlan) -> Resul
     ensure_extension_materialized_with_exec(plan, &mut |runner_id, options| {
         crate::exec(runner_id, options)
     })
+}
+
+/// Bring the named runner extensions to controller parity and prove the
+/// resulting state before a caller executes extension-owned readiness code.
+pub fn ensure_runner_extension_parity(
+    runner_id: &str,
+    cwd: &str,
+    required_extensions: &[String],
+) -> Result<()> {
+    let runner = load(runner_id)?;
+    let plan = plan_extension_parity(runner_id, &runner, cwd, required_extensions, &[], &[])?;
+    ensure_extension_materialized(&plan)?;
+    let runner = load(runner_id)?;
+    validate_extension_ready(runner_id, &runner, cwd, required_extensions, &[], &[])
 }
 
 fn ensure_extension_materialized_with_exec(
@@ -213,54 +337,32 @@ fn plan_runner_extension_parity(
     accepted_setting_keys: &[String],
 ) -> Result<Option<ExtensionParityPlanStep>> {
     let output = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
-
-    if output.success {
-        validate_runner_extension_ready(runner_id, homeboy_path, extension_id, &output.stdout)?;
-        validate_runner_extension_settings(
-            runner_id,
-            homeboy_path,
-            extension_id,
-            &output.stdout,
-            requested_setting_keys,
-            accepted_setting_keys,
-        )?;
-        validate_runner_extension_core_compatibility(
-            runner_id,
-            homeboy_path,
-            extension_id,
-            &output.stdout,
-        )?;
-        return match validate_runner_extension_revision(
-            runner_id,
-            runner,
-            homeboy_path,
-            extension_id,
-            &output.stdout,
-        ) {
-            Ok(()) => Ok(None),
-            Err(err) if is_stale_runner_extension_parity_error(&err) => {
-                Ok(Some(ExtensionParityPlanStep {
-                    id: extension_id.to_string(),
-                    materialization: runner_extension_materialization_request(
-                        runner_id,
-                        homeboy_path,
-                        extension_id,
-                        err.clone(),
-                    )?,
-                    parity_error: err,
-                }))
-            }
-            Err(err) => Err(err),
-        };
-    }
-
-    Err(missing_runner_extension_error(
+    match probe_extension_parity_from_show_with_settings(
         runner_id,
+        runner,
         homeboy_path,
         extension_id,
-        &output.stderr,
-        &output.stdout,
-    ))
+        requested_setting_keys,
+        accepted_setting_keys,
+        ExtensionShowOutput {
+            success: output.success,
+            stdout: &output.stdout,
+            stderr: &output.stderr,
+        },
+    ) {
+        ExtensionParityProbe::Current => Ok(None),
+        ExtensionParityProbe::NeedsMaterialization { error } => Ok(Some(ExtensionParityPlanStep {
+            id: extension_id.to_string(),
+            materialization: runner_extension_materialization_request(
+                runner_id,
+                homeboy_path,
+                extension_id,
+                error.clone(),
+            )?,
+            parity_error: error,
+        })),
+        ExtensionParityProbe::Blocked { error } => Err(error),
+    }
 }
 
 fn validate_runner_extension_ready_state(
@@ -1227,13 +1329,14 @@ mod tests {
         controller_extension_metadata_required_error, controller_local_source_path,
         dev_sync_extension_overlay, ensure_extension_materialized,
         ensure_extension_materialized_with_exec, is_stale_runner_extension_parity_error,
-        plan_extension_parity, record_materialized_extension_overlay,
-        remote_extension_core_compatibility, remote_extension_ready_status,
-        remote_extension_setting_ids, remote_extension_source_revision,
-        requested_setting_keys_for_command, runner_extension_sync_command,
-        validate_extension_ready, validate_runner_extension_core_compatibility,
-        validate_runner_extension_ready, validate_runner_extension_revision,
-        validate_runner_extension_settings, ExtensionParityPlan, ExtensionParityPlanStep,
+        plan_extension_parity, probe_extension_parity_from_show,
+        record_materialized_extension_overlay, remote_extension_core_compatibility,
+        remote_extension_ready_status, remote_extension_setting_ids,
+        remote_extension_source_revision, requested_setting_keys_for_command,
+        runner_extension_sync_command, validate_extension_ready,
+        validate_runner_extension_core_compatibility, validate_runner_extension_ready,
+        validate_runner_extension_revision, validate_runner_extension_settings,
+        ExtensionParityPlan, ExtensionParityPlanStep, ExtensionParityProbe, ExtensionShowOutput,
     };
     use homeboy_core::test_support::with_isolated_home;
 
@@ -1350,6 +1453,84 @@ mod tests {
                 RunnerExtensionMaterializationSource::ControllerSnapshot { .. }
             ));
             assert_eq!(runner.resources, resources_before);
+        });
+    }
+
+    #[test]
+    fn stale_extension_parity_probe_blocks_provider_readiness() {
+        with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("controller source");
+            fs::write(
+                source.path().join("fixture.json"),
+                r#"{"name":"fixture","version":"1.0.0"}"#,
+            )
+            .expect("source manifest");
+            let extension_dir = home.path().join(".config/homeboy/extensions/fixture");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("fixture.json"),
+                format!(
+                    r#"{{"name":"fixture","version":"1.0.0","source_url":"{}"}}"#,
+                    source.path().display()
+                ),
+            )
+            .expect("extension manifest");
+            fs::write(extension_dir.join(".source-revision"), "abc123\n").expect("revision");
+            let runner = runner_with_overlay("other", "/tmp/other", "unused");
+
+            let stale = probe_extension_parity_from_show(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "fixture",
+                ExtensionShowOutput {
+                    success: true,
+                    stdout: r#"{"success":true,"data":{"extension":{"id":"fixture","ready":true,"source_revision":"old456"}}}"#,
+                    stderr: "",
+                },
+            );
+            let current = probe_extension_parity_from_show(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "fixture",
+                ExtensionShowOutput {
+                    success: true,
+                    stdout: r#"{"success":true,"data":{"extension":{"id":"fixture","ready":true,"source_revision":"abc123"}}}"#,
+                    stderr: "",
+                },
+            );
+            let missing = probe_extension_parity_from_show(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "fixture",
+                ExtensionShowOutput {
+                    success: false,
+                    stdout: "",
+                    stderr: "Cannot find module './missing-extension-module'",
+                },
+            );
+
+            assert!(!stale.allows_provider_readiness());
+            assert!(matches!(
+                stale,
+                ExtensionParityProbe::NeedsMaterialization { .. }
+            ));
+            assert!(stale
+                .error()
+                .is_some_and(|error| error.message.contains("stale extension parity")));
+            assert!(current.allows_provider_readiness());
+            assert!(!missing.allows_provider_readiness());
+            assert!(missing.error().is_some_and(|error| {
+                error.message.contains("missing required extension parity")
+                    && error.details["tried"].as_array().is_some_and(|tried| {
+                        tried.iter().any(|item| {
+                            item.as_str()
+                                .is_some_and(|text| text.contains("Cannot find module"))
+                        })
+                    })
+            }));
         });
     }
 

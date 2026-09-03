@@ -67,6 +67,7 @@ pub fn apply(
     }
 
     repair_managed_sources(client, report);
+    repair_extension_parity(client, id, runner_config, options, report);
 
     if let Some(repair) = terminal_daemon_recovery_repair(report) {
         report.repairs.push(repair);
@@ -183,6 +184,115 @@ pub fn apply(
             });
         }
     }
+}
+
+fn repair_extension_parity(
+    client: &SshClient,
+    runner_id: &str,
+    runner_config: &Runner,
+    options: &RunnerDoctorOptions,
+    report: &mut RunnerDoctorOutput,
+) {
+    let extension_dependencies = report
+        .checks
+        .iter()
+        .filter(|check| check.id == "extension.parity" && check.status == RunnerDoctorStatus::Error)
+        .filter_map(|check| {
+            check.details.get("extension_id").map(|extension_id| {
+                (
+                    extension_id.clone(),
+                    check.details.get("provider_id").cloned(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if extension_dependencies.is_empty() {
+        return;
+    }
+    let mut extension_ids = extension_dependencies
+        .iter()
+        .map(|(extension_id, _)| extension_id.clone())
+        .collect::<Vec<_>>();
+    extension_ids.sort();
+    extension_ids.dedup();
+
+    let cwd = options
+        .path
+        .as_deref()
+        .or(runner_config.workspace_root.as_deref())
+        .unwrap_or(".");
+    if let Err(error) = runner::ensure_runner_extension_parity(runner_id, cwd, &extension_ids) {
+        report.repairs.push(RunnerRepair {
+            id: "repair.extension_parity".to_string(),
+            status: RunnerDoctorStatus::Error,
+            message: error.message,
+            commands: Vec::new(),
+        });
+        return;
+    }
+
+    let homeboy_command = match runner::runner_homeboy_path_for_command(
+        runner_id,
+        "Lab provider readiness after extension parity repair",
+    ) {
+        Ok(command) => command,
+        Err(error) => {
+            report.repairs.push(RunnerRepair {
+                id: "repair.extension_parity".to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: error.message,
+                commands: Vec::new(),
+            });
+            return;
+        }
+    };
+    let parity_checks = extension_dependencies
+        .iter()
+        .map(|(extension_id, provider_id)| {
+            let mut check = extension_parity::remote_live_readiness_check(
+                client,
+                runner_id,
+                runner_config,
+                &homeboy_command,
+                Some(cwd),
+                extension_id,
+            );
+            if let Some(provider_id) = provider_id {
+                check
+                    .details
+                    .insert("provider_id".to_string(), provider_id.clone());
+            }
+            check
+        })
+        .collect::<Vec<_>>();
+    let parity_ready = parity_checks
+        .iter()
+        .all(|check| check.status == RunnerDoctorStatus::Ok);
+    report.checks.retain(|check| check.id != "extension.parity");
+    report.checks.extend(parity_checks);
+    if parity_ready {
+        report.checks.extend(probes::provider_readiness_checks(
+            client,
+            &homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
+        ));
+    }
+    report.repairs.push(RunnerRepair {
+        id: "repair.extension_parity".to_string(),
+        status: if parity_ready {
+            RunnerDoctorStatus::Ok
+        } else {
+            RunnerDoctorStatus::Error
+        },
+        message: if parity_ready {
+            format!(
+                "Materialized and verified extension parity for {}",
+                extension_ids.join(", ")
+            )
+        } else {
+            "Materialized extensions, but the parity postcondition failed".to_string()
+        },
+        commands: Vec::new(),
+    });
 }
 
 fn terminal_daemon_recovery_blocker(report: &RunnerDoctorOutput) -> bool {

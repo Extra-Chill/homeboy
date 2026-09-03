@@ -15,6 +15,7 @@ fn provider_readiness_renderer_uses_fake_provider_contract() {
     let contract = AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: Vec::new(),
         env_path: Some(AgentTaskProviderEnvPathReadiness {
@@ -54,6 +55,7 @@ fn provider_readiness_warns_on_non_canonical_checkout() {
     let contract = AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: Vec::new(),
         env_path: Some(AgentTaskProviderEnvPathReadiness {
@@ -92,6 +94,7 @@ fn provider_readiness_ok_when_path_within_canonical_root() {
     let contract = AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: Vec::new(),
         env_path: Some(AgentTaskProviderEnvPathReadiness {
@@ -269,6 +272,33 @@ fn remote_executor_probe_keeps_missing_runner_local_dependency_actionable() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot find module"));
+}
+
+#[test]
+fn command_readiness_failure_preserves_bounded_child_output() {
+    let check = probes::provider_command_readiness_failure_check(
+        "lab.fixture.readiness",
+        "Managed runner readiness",
+        Some("homeboy extension refresh <source> --id fixture-extension".to_string()),
+        BTreeMap::from([("provider_id".to_string(), "fixture.provider".to_string())]),
+        false,
+        "Cannot find module './missing-extension-module'\nRequire stack:\n- /runner/runtime/readiness.cjs",
+        "",
+    );
+
+    assert_eq!(check.id, "lab.fixture.readiness");
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
+    assert!(check
+        .message
+        .contains("Cannot find module './missing-extension-module'"));
+    assert_eq!(
+        check.details.get("stdout").map(String::as_str),
+        Some("Cannot find module './missing-extension-module'\nRequire stack:\n- /runner/runtime/readiness.cjs")
+    );
+    assert_eq!(
+        check.remediation.as_deref(),
+        Some("homeboy extension refresh <source> --id fixture-extension")
+    );
 }
 
 #[test]

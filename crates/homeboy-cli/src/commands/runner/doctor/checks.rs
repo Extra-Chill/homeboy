@@ -283,6 +283,11 @@ pub(crate) fn lab_offload_status(
         }
     }
 
+    if has_runner_error {
+        ready_for.clear();
+        blocked_for = eligible_provider_ids.to_vec();
+    }
+
     let status = if has_runner_error || (!eligible_provider_ids.is_empty() && ready_for.is_empty())
     {
         RunnerDoctorStatus::Error

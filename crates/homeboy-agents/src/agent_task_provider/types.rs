@@ -510,6 +510,10 @@ pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
 pub struct AgentTaskProviderRunnerReadiness {
     pub id: String,
     pub label: String,
+    /// Extensions that must pass runner parity before this readiness command
+    /// may execute.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_extensions: Vec<String>,
     /// Optional extension-owned readiness command run by runner doctor.
     /// `{{runtime_path}}` is resolved against the selected runner's runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
