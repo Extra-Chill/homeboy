@@ -4913,8 +4913,8 @@ fn cook_review_dossier_with_stores_and_review_form(
                 // Deterministic: the orchestrator knows whether/what tool+model ran,
                 // and attributes Homeboy as the harness that drove the change.
                 used: true,
-                tool: review_form.map_or(lineage.tool, |form| form.tool.clone()),
-                model: review_form.map_or(lineage.model, |form| form.model.clone()),
+                tool: lineage.tool,
+                model: lineage.model,
                 used_for: lineage.used_for,
             },
             source_relationships: Vec::new(),

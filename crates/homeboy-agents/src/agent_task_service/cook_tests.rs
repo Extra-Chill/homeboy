@@ -282,8 +282,8 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
 fn supplied_test_review_form() -> AgentTaskSuppliedReviewForm {
     AgentTaskSuppliedReviewForm {
         form: test_review_form(),
-        tool: "OpenCode".to_string(),
-        model: "openai/gpt-5.6-terra".to_string(),
+        tool: "review-form-tool".to_string(),
+        model: "openai/gpt-5.6-sol".to_string(),
         operator: "fixture-operator".to_string(),
     }
 }
@@ -18625,7 +18625,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         );
         assert_eq!(
             preflight["review_dossier"]["ai_assistance"]["tool"],
-            "OpenCode"
+            "Homeboy (fixture)"
         );
         assert_eq!(
             preflight["review_dossier"]["ai_assistance"]["model"],
@@ -18635,9 +18635,13 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             .as_array()
             .unwrap()
             .iter()
-            .any(|evidence| evidence["summary"]
-                .as_str()
-                .is_some_and(|summary| summary.contains("fixture-operator"))));
+            .any(
+                |evidence| evidence["summary"].as_str().is_some_and(|summary| {
+                    summary.contains("fixture-operator")
+                        && summary.contains("review-form-tool")
+                        && summary.contains("openai/gpt-5.6-sol")
+                })
+            ));
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
@@ -18733,7 +18737,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         );
         assert_eq!(
             record.metadata["recovery_review_form"]["submission"]["model"],
-            "openai/gpt-5.6-terra"
+            "openai/gpt-5.6-sol"
         );
         assert_eq!(
             record.metadata["recovery_review_form"]["submission"]["operator"],
