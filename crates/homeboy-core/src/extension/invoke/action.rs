@@ -4,6 +4,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::project;
 use homeboy_core::server::http::ApiClient;
 use homeboy_engine_primitives::validation;
+use homeboy_extension_contract::api::v1::ExtensionApiInvocationProcessEvidence;
 
 use super::scope::ExtensionScope;
 use super::{build_action_env, execute_extension_command, ExtensionExecutionMode};
@@ -11,13 +12,18 @@ use crate::extension::catalog::load_extension;
 use homeboy_extension_contract::action_types::{ActionType, HttpMethod};
 use homeboy_extension_contract::manifest_action_config::ActionConfig;
 
-pub fn execute_action(
+pub(super) struct ActionExecution {
+    pub output: Option<serde_json::Value>,
+    pub process: Option<ExtensionApiInvocationProcessEvidence>,
+}
+
+pub(super) fn execute_action_implementation(
     extension_id: &str,
     action_id: &str,
     project_id: Option<&str>,
-    data: Option<&str>,
+    selected: &[serde_json::Value],
     payload: Option<&serde_json::Value>,
-) -> Result<serde_json::Value> {
+) -> Result<ActionExecution> {
     let extension = load_extension(extension_id)?;
     homeboy_extension_contract::validate_core_compatibility(
         "extension",
@@ -54,14 +60,6 @@ pub fn execute_action(
             )
         })?;
 
-    let selected: Vec<serde_json::Value> = if let Some(data_str) = data {
-        serde_json::from_str(data_str).map_err(|e| {
-            Error::internal_json(e.to_string(), Some("parse action data".to_string()))
-        })?
-    } else {
-        Vec::new()
-    };
-
     match action.action_type {
         ActionType::Api => {
             let pid = validation::require(
@@ -91,15 +89,19 @@ pub fn execute_action(
             let method = action.method.as_ref().unwrap_or(&HttpMethod::Post);
             let project = project::load(pid)?;
             let settings = ExtensionScope::effective_settings(extension_id, Some(&project), None)?;
-            let payload = interpolate_action_payload(action, &selected, &settings, payload)?;
+            let payload = interpolate_action_payload(action, selected, &settings, payload)?;
 
-            match method {
+            let output = match method {
                 HttpMethod::Get => client.get(endpoint),
                 HttpMethod::Post => client.post(endpoint, &payload),
                 HttpMethod::Put => client.put(endpoint, &payload),
                 HttpMethod::Patch => client.patch(endpoint, &payload),
                 HttpMethod::Delete => client.delete(endpoint),
-            }
+            }?;
+            Ok(ActionExecution {
+                output: Some(output),
+                process: None,
+            })
         }
         ActionType::Builtin => Err(Error::validation_invalid_argument(
             "action_id",
@@ -117,7 +119,7 @@ pub fn execute_action(
             let component = None;
             let settings =
                 ExtensionScope::effective_settings(extension_id, project.as_ref(), component)?;
-            let payload = interpolate_action_payload(action, &selected, &settings, payload)?;
+            let payload = interpolate_action_payload(action, selected, &settings, payload)?;
             let extension_path = extension.extension_path.as_deref().unwrap_or(".");
             let vars = vec![("extension_path", extension_path)];
 
@@ -143,15 +145,17 @@ pub fn execute_action(
                 &env,
                 ExtensionExecutionMode::Captured,
             )?;
-            Ok(serde_json::json!({
-                "stdout": execution.output.stdout,
-                "stderr": execution.output.stderr,
-                "exitCode": execution.exit_code,
-                "success": execution.success,
-                "command": command_template,
-                "cwd": working_dir,
-                "payload": payload
-            }))
+            let stdout = execution.output.stdout;
+            let stderr = execution.output.stderr;
+            Ok(ActionExecution {
+                output: None,
+                process: Some(ExtensionApiInvocationProcessEvidence {
+                    exit_code: Some(execution.exit_code),
+                    parsed_output: serde_json::from_str(&stdout).ok(),
+                    stdout,
+                    stderr,
+                }),
+            })
         }
     }
 }

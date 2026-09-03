@@ -1,24 +1,11 @@
 use crate::*;
 use homeboy_core::paths;
-use homeboy_core::server::Server;
 use homeboy_core::test_support;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 fn create_server() {
-    homeboy_core::server::save(&Server {
-        id: "private-host".to_string(),
-        aliases: Vec::new(),
-        host: "private.example.test".to_string(),
-        user: "tester".to_string(),
-        port: 22,
-        identity_file: None,
-        kind: None,
-        auth: None,
-        env: HashMap::new(),
-        runner: None,
-    })
-    .expect("save server");
+    test_support::save_test_server("private-host", "private.example.test").expect("save server");
 }
 
 fn reserve_loopback_port() -> u16 {

@@ -263,11 +263,11 @@ fn update_dependency(
         upstream,
     );
 
-    extension::invoke::execute_action(
+    extension::invoke::action_api::invoke_action(
         &extension_id,
         UPDATE_DEPENDENCY_ACTION,
         None,
-        None,
+        &[],
         Some(&payload),
     )
 }
@@ -277,13 +277,8 @@ fn find_update_dependency_extension(downstream: &Component) -> Result<String> {
     let extensions = super::context::resolve_extensions(downstream)?;
     extensions
         .into_iter()
-        .find(|manifest| {
-            manifest
-                .actions
-                .iter()
-                .any(|action| action.id == UPDATE_DEPENDENCY_ACTION)
-        })
-        .map(|manifest| manifest.id)
+        .find(|extension| extension.provides_action(UPDATE_DEPENDENCY_ACTION))
+        .map(|extension| extension.id)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "cascade.update_dependency",

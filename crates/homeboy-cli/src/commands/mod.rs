@@ -269,6 +269,7 @@ pub mod ssh;
 pub mod stack;
 pub mod status;
 pub mod test;
+pub mod topology;
 pub mod trace;
 pub mod tunnel;
 pub mod undo;

@@ -1,3 +1,4 @@
+pub mod agent_task_executor_api;
 pub mod audit_compiler_warning_provider;
 pub mod audit_fingerprint_script_provider;
 pub mod audit_grammar_source_provider;
@@ -6,6 +7,8 @@ pub mod bench;
 pub mod build;
 pub mod catalog;
 pub mod component_script;
+pub mod deployment_api;
+pub mod external_check_detail_api;
 pub mod grammar;
 pub mod invoke;
 pub mod lifecycle;

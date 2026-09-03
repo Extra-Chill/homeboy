@@ -1062,27 +1062,6 @@ mod tests {
         ])
         .is_err());
     }
-
-    #[test]
-    fn self_repair_bootstrap_cannot_disable_finalization() {
-        assert!(crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "repair the provider",
-            "--repo",
-            "homeboy",
-            "--task-url",
-            "https://github.com/Extra-Chill/homeboy/issues/13410",
-            "--cwd",
-            "/tmp/homeboy-self-repair",
-            "--worktree-provider-self-repair",
-            "fixture",
-            "--no-finalize",
-        ])
-        .is_err());
-    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1125,13 +1104,11 @@ pub struct AgentTaskCookArgs {
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
     /// `repo@fix-1234-x`. Existing destinations are reused. A missing destination
-    /// is created after durable Cook admission through an enabled worktree
-    /// provider with `commands.ensure`, or through Homeboy's built-in local
-    /// provider when no configured provider declares creation capability;
-    /// previewing creation additionally requires that provider's non-mutating
-    /// `commands.plan` counterpart. When omitted, an explicit
+    /// is created after durable Cook admission through Homeboy's native
+    /// worktree lifecycle. When omitted, an explicit
     /// --cwd is the canonical destination. Otherwise, --repo plus --task-url
-    /// derives an issue-owned destination through the same provider boundary.
+    /// derives an issue-owned destination through Homeboy's native worktree
+    /// lifecycle.
     /// An explicit --workspace or --cwd Git checkout
     /// can infer --repo when its remote maps to exactly one
     /// configured component; an explicit --repo must match that checkout. When
@@ -1140,19 +1117,6 @@ pub struct AgentTaskCookArgs {
     /// authority.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
-    /// Temporarily use the explicit clean --cwd as workspace authority while
-    /// repairing the configured provider that owns this repository. The
-    /// provider must declare its repository under
-    /// settings.worktree_provider_self_repair; normal Cook gates, review, PR
-    /// finalization, and durable provenance remain active.
-    /// Deprecated shell command for the promotion apply-provider.
-    #[arg(
-        long,
-        value_name = "PROVIDER_ID",
-        requires = "cwd",
-        conflicts_with_all = ["workspace", "to_worktree", "no_finalize"]
-    )]
-    pub worktree_provider_self_repair: Option<String>,
     /// Exact argv element for the promotion apply-provider. Repeat once per element.
     #[arg(
         long,
@@ -1174,7 +1138,7 @@ pub struct AgentTaskCookArgs {
     /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
     /// and gates; a later attempt can recover from a transient failure. This
     /// derives provider execution and same-provider remediation budgets. An
-    /// explicit --backend plus --model stays on that route; use
+    /// explicit --model pins the provider route; use
     /// --allow-provider-rotation to opt it into configured fallbacks (default 3).
     #[arg(
         long = "max-attempts",
@@ -1184,7 +1148,7 @@ pub struct AgentTaskCookArgs {
     )]
     pub max_attempts: u32,
     /// Permit configured cross-provider/model fallbacks after explicitly
-    /// selecting both --backend and --model. This is distinct from
+    /// selecting a model. This is distinct from
     /// same-provider remediation, which retries the selected route for gate
     /// and required review-form fixes.
     #[arg(long = "allow-provider-rotation")]

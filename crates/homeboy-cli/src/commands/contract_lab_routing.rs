@@ -385,7 +385,7 @@ fn agent_task_fanout_local_only_contract(
 /// A durable run id is resolved through the controller lifecycle store, whose
 /// aggregate and finalized artifact projections are not portable path inputs.
 /// Other promotion source forms retain their existing runner-local behavior.
-fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
+pub(crate) fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
     // A run artifact URI is an immutable selector over controller-owned durable
     // state, even when its bytes must be fetched from the producing runner.
     // Keep its resolution, integrity verification, and target application on

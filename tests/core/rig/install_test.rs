@@ -23,7 +23,9 @@ fn test_config_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-use crate::rig_test_support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
+use crate::rig_test_support::{
+    clone_bare, commit_all, init_main, minimal_rig, minimal_stack, write_rig, write_stack,
+};
 
 fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
     fs::create_dir_all(dir).expect("single rig dir");
@@ -34,9 +36,9 @@ fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
 }
 
 fn bare_package(package: &Path) -> tempfile::TempDir {
-    let git = GitFixture::init(package);
-    git.commit("update rigs");
-    git.clone_bare()
+    init_main(package);
+    commit_all(package, "update rigs");
+    clone_bare(package)
 }
 
 mod discovery {
@@ -208,7 +210,8 @@ mod materialization {
             }"#,
         )
         .expect("rig");
-        GitFixture::init(repo.path()).commit("shared template");
+        init_main(repo.path());
+        commit_all(repo.path(), "shared template");
 
         assert_eq!(
             materialize_rig_spec(&rig, &package).expect("materialize"),
@@ -230,7 +233,8 @@ mod materialization {
             r#"{ "extends": "../../../../shared/templates/base.json" }"#,
         )
         .expect("rig");
-        GitFixture::init(repo.path()).commit("undeclared shared template");
+        init_main(repo.path());
+        commit_all(repo.path(), "undeclared shared template");
 
         let error = materialize_rig_spec(&rig, &package).expect_err("undeclared template rejected");
         assert_eq!(error.details["field"], "extends");
@@ -500,7 +504,8 @@ mod install_flows {
                 }
             }"#,
         );
-        GitFixture::init(repo.path()).commit("nested package with shared dependency");
+        init_main(repo.path());
+        commit_all(repo.path(), "nested package with shared dependency");
 
         let result = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect("install nested package");
@@ -619,7 +624,8 @@ mod install_flows {
                 "package_dependencies": ["../../../outside-shared"]
             }"#,
         );
-        GitFixture::init(&repo).commit("bad dependency");
+        init_main(&repo);
+        commit_all(&repo, "bad dependency");
 
         let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect_err("dependency outside repo should fail");
@@ -643,7 +649,8 @@ mod install_flows {
                 "package_dependencies": ["/tmp/shared"]
             }"#,
         );
-        GitFixture::init(repo.path()).commit("bad dependency");
+        init_main(repo.path());
+        commit_all(repo.path(), "bad dependency");
 
         let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect_err("absolute dependency should fail");

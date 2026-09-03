@@ -443,6 +443,10 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
     );
     assert!(matches!(
         accepted["status"].as_str(),
+        Some("pending_resource_admission")
+    ));
+    assert!(matches!(
+        accepted["admission_state"].as_str(),
         Some("queued" | "blocked_runner_unavailable")
     ));
     assert_eq!(accepted["materialized"], false);

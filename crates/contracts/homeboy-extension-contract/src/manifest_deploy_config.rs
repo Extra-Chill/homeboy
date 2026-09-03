@@ -84,3 +84,44 @@ pub struct DeploymentProviderLayeredInputManifest {
 }
 
 pub const DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA: &str = "homeboy/deployment-provider-payload/v1";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExtensionManifest;
+
+    #[test]
+    fn reads_multiple_generic_provider_descriptors() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "fixture", "version": "1.0.0",
+            "deployment_providers": [
+                { "id": "fixture.alpha", "command": "fixture-alpha --contract {{payload.contract}}" },
+                { "id": "fixture.beta", "command": "fixture-beta --contract {{payload.contract}}", "dry_run_command": "fixture-beta --dry-run --contract {{payload.contract}}", "layered_input": { "schema": "homeboy/deployment-provider-payload/v1", "target_required": true, "result_schema": "fixture/deployment-result/v1" } }
+            ]
+        }))
+        .expect("fixture manifest");
+
+        assert_eq!(manifest.deployment_providers.len(), 2);
+        assert_eq!(manifest.deployment_providers[0].id, "fixture.alpha");
+        assert_eq!(manifest.deployment_providers[1].id, "fixture.beta");
+        assert_eq!(
+            manifest.deployment_providers[1]
+                .layered_input
+                .as_ref()
+                .expect("layered input")
+                .schema,
+            DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA
+        );
+    }
+
+    #[test]
+    fn malformed_provider_descriptor_is_a_named_manifest_error() {
+        let result: Result<ExtensionManifest, _> = serde_json::from_value(serde_json::json!({
+            "name": "fixture", "version": "1.0.0",
+            "deployment_providers": [{ "id": "fixture.alpha" }]
+        }));
+
+        let error = result.expect_err("missing command must not deserialize");
+        assert!(error.to_string().contains("command"));
+    }
+}

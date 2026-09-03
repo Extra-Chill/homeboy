@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::write_component_registration;
 
 /// A caller reading a "missing handle" error needs the handle creation would
 /// actually produce, so the slug rule has to be reachable outside this module.
@@ -91,6 +92,14 @@ fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
         lifecycle_revision: 0,
         terminal_workspace_authority: None,
     }
+}
+
+fn succeeded_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
+    let mut record = fixture_record(source, worktree);
+    record.run_id = Some("completed-owner".to_string());
+    record.terminal_disposition = Some("succeeded".to_string());
+    record.lifecycle_revision = 1;
+    record
 }
 
 fn exact_terminal_proof(record: &TaskWorktreeRecord) -> TerminalWorkspaceAuthorityProof {
@@ -353,20 +362,6 @@ fn merged_task_branch_with_stale_upstream(source: &Path, worktree: &Path) {
         .success());
 }
 
-fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
-    let dir = home.join(".config/homeboy/components");
-    fs::create_dir_all(&dir).expect("components dir");
-    fs::write(
-        dir.join(format!("{id}.json")),
-        serde_json::json!({
-            "local_path": local_path,
-            "remote_path": format!("wp-content/plugins/{id}")
-        })
-        .to_string(),
-    )
-    .expect("component registration");
-}
-
 fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateOptions) {
     let parent = home.join("Developer");
     let source = parent.join(id);
@@ -597,6 +592,256 @@ fn finalization_is_owner_bound_idempotent_conflict_safe_and_never_cleans_up() {
             crate::worktree_provider::WorktreeTerminalDisposition::Succeeded,
         )
         .is_err());
+    });
+}
+
+#[test]
+fn default_ownerless_create_remains_eligible_for_safe_cleanup() {
+    crate::test_support::with_isolated_home(|home| {
+        let (_, options) = registered_create_fixture(home.path(), "ownerless-cleanup");
+        let created = create(options).expect("create ownerless task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        assert_eq!(created.record.run_id, None);
+        assert_eq!(created.record.terminal_disposition, None);
+        assert_eq!(created.record.cleanup_policy, CleanupPolicy::RemoveWhenSafe);
+
+        let output = cleanup(WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        })
+        .expect("clean up ownerless task worktree");
+
+        assert_eq!(output.counts.removed, 1);
+        assert_eq!(output.counts.skipped, 0);
+        assert!(!path.exists());
+    });
+}
+
+#[test]
+fn owned_remove_when_safe_worktree_requires_succeeded_terminal_finalization() {
+    let data_root = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "owned-nonterminal-cleanup");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "owned-nonterminal-cleanup",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    let store = data_root.path().join("task-worktrees");
+    let mut record = fixture_record(source.path(), &worktree);
+    record.run_id = Some("lifecycle-owner".to_string());
+    write_record(&store, &record).unwrap();
+
+    for terminal_disposition in [None, Some("failed".to_string())] {
+        record.terminal_disposition = terminal_disposition;
+        write_record(&store, &record).unwrap();
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            },
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(output.counts.removed, 0);
+        assert_eq!(output.counts.skipped, 1);
+        assert!(output.skipped[0].reasons.iter().any(|reason| {
+            reason.contains("explicit succeeded finalization from lifecycle owner")
+        }));
+        assert!(worktree.exists());
+    }
+}
+
+#[test]
+fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit() {
+    crate::test_support::with_isolated_home(|home| {
+        let developer = home.path().join("Developer");
+        let remote = home.path().join("remote.git");
+        let source = developer.join("lifecycle-fixture");
+        fs::create_dir_all(&developer).expect("developer directory");
+        fs::create_dir_all(&remote).expect("remote directory");
+        run_git(&remote, &["init", "--bare", "-q"]);
+        run_git(
+            &developer,
+            &[
+                "clone",
+                "-q",
+                &remote.to_string_lossy(),
+                "lifecycle-fixture",
+            ],
+        );
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("README.md"), "initial\n").expect("initial file");
+        fs::write(source.join("homeboy.json"), r#"{"id":"lifecycle-fixture"}"#)
+            .expect("component manifest");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+        run_git(&source, &["branch", "-M", "main"]);
+        run_git(&source, &["push", "-q", "-u", "origin", "main"]);
+        write_component_registration(home.path(), "lifecycle-fixture", &source);
+
+        let owner = "cook-lifecycle-attempt-1";
+        let created = create(WorktreeCreateOptions {
+            component_id: "lifecycle-fixture".to_string(),
+            branch: "fix/lifecycle".to_string(),
+            from: Some("main".to_string()),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/13971".to_string()),
+            run_id: Some(owner.to_string()),
+            cleanup_policy: Some(CleanupPolicy::RemoveWhenSafe),
+            require_handoff_freshness: false,
+        })
+        .expect("owned worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        fs::write(path.join("fix.txt"), "fixed\n").expect("task change");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-q", "-m", "fix lifecycle"]);
+        {
+            let _cwd = CurrentDirGuard::set(&path);
+            run_git(&path, &["push", "-q", "-u", "origin", "fix/lifecycle"]);
+
+            let active_status = status(&created.record.id).expect("active owned status");
+            assert!(
+                active_status
+                    .safety
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.contains("live current working directory")),
+                "active lookup must report why the caller workspace cannot be removed"
+            );
+            let before_pr = cleanup(WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            })
+            .expect("cleanup before PR creation");
+            assert_eq!(before_pr.counts.removed, 0);
+            assert!(before_pr.skipped[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("explicit succeeded finalization")));
+            assert!(path.exists(), "a clean push is not terminal owner evidence");
+
+            let bin = home.path().join("bin");
+            fs::create_dir(&bin).expect("fake gh bin");
+            let gh_log = home.path().join("gh-cwd.log");
+            let fake_gh = bin.join("gh");
+            fs::write(
+                &fake_gh,
+                r#"#!/bin/sh
+if [ "$1 $2" = "pr create" ]; then
+  test -d "$PWD" || exit 2
+  pwd > "$HOMEBOY_FAKE_GH_CWD_LOG"
+  printf '%s\n' 'https://github.com/example/lifecycle-fixture/pull/13971'
+fi
+"#,
+            )
+            .expect("write fake gh");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
+                    .expect("make fake gh executable");
+            }
+            let mut command_path = std::ffi::OsString::from(bin.as_os_str());
+            command_path.push(":");
+            command_path.push(std::env::var_os("PATH").unwrap_or_default());
+            let _path_env = crate::test_support::EnvVarGuard::set("PATH", command_path);
+            let _gh_log_env =
+                crate::test_support::EnvVarGuard::set("HOMEBOY_FAKE_GH_CWD_LOG", &gh_log);
+            fs::write(
+                home.path()
+                    .join(".config/homeboy/components/lifecycle-fixture.json"),
+                serde_json::json!({
+                    "local_path": source,
+                    "remote_path": "wp-content/plugins/lifecycle-fixture",
+                    "remote_url": "https://github.com/example/lifecycle-fixture.git"
+                })
+                .to_string(),
+            )
+            .expect("GitHub component registration");
+
+            let pr = crate::git::pr_create(
+                Some("lifecycle-fixture"),
+                crate::git::PrCreateOptions {
+                    base: "main".to_string(),
+                    head: "fix/lifecycle".to_string(),
+                    title: "Fix lifecycle".to_string(),
+                    body: "Lifecycle fixture".to_string(),
+                    draft: false,
+                    path: Some(path.display().to_string()),
+                },
+            )
+            .expect("create PR through fake gh");
+            assert_eq!(pr.number, Some(13971));
+            assert_eq!(
+                PathBuf::from(fs::read_to_string(&gh_log).expect("fake gh cwd").trim()),
+                path.canonicalize().expect("canonical worktree")
+            );
+            assert!(
+                path.exists(),
+                "PR creation must retain its caller workspace"
+            );
+
+            finalize_provider_lifecycle(
+                &created.record.id,
+                owner,
+                crate::worktree_provider::WorktreeTerminalDisposition::Succeeded,
+            )
+            .expect("explicit terminal owner finalization");
+            let finalized_status = status(&created.record.id).expect("finalized status");
+            assert_eq!(finalized_status.record.run_id.as_deref(), Some(owner));
+            assert_eq!(
+                finalized_status.record.terminal_disposition.as_deref(),
+                Some("succeeded")
+            );
+            assert_eq!(finalized_status.record.lifecycle_revision, 1);
+
+            let direct_remove = remove(WorktreeRemoveOptions {
+                id: created.record.id.clone(),
+                force: true,
+                cleanup_branch: false,
+                allow_unmerged_branch: false,
+            })
+            .expect_err("forced direct removal cannot remove the caller cwd");
+            assert!(direct_remove
+                .message
+                .contains("live current working directory"));
+            let live_cwd = cleanup(WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            })
+            .expect("cleanup while caller cwd is live");
+            assert_eq!(live_cwd.counts.removed, 0);
+            assert!(live_cwd.skipped[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("live current working directory")));
+            assert!(path.exists());
+        }
+
+        let after_cwd_exit = cleanup(WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        })
+        .expect("cleanup after terminal finalization and cwd exit");
+        assert_eq!(after_cwd_exit.counts.removed, 1);
+        assert!(!path.exists());
     });
 }
 
@@ -1072,7 +1317,7 @@ fn cleanup_marks_missing_worktree_record_removed() {
     let source = git_repo();
     let worktree = sibling_worktree_path(source.path(), "missing-cleanup");
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -1093,6 +1338,86 @@ fn cleanup_marks_missing_worktree_record_removed() {
     assert_eq!(output.counts.reconciliation_blockers, 1);
     assert!(output.skipped[0].reasons[0].contains("inventory --apply"));
     assert_eq!(updated.state, TaskWorktreeState::Active);
+}
+
+#[test]
+fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
+    let data_root = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "durably-owned-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    let store = data_root.path().join("task-worktrees");
+    let mut record = fixture_record(source.path(), &worktree);
+    record.run_id = Some("completed-owner".to_string());
+    record.terminal_disposition = Some("succeeded".to_string());
+    record.lifecycle_revision = 1;
+    write_record(&store, &record).unwrap();
+    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root
+            .path()
+            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    );
+    let now = now_ms();
+    let owner = claims
+        .register_owner(
+            record.effective_workspace_identity().unwrap(),
+            "live-agent",
+            60_000,
+            now,
+        )
+        .unwrap();
+
+    for force in [false, true] {
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(output.counts.removed, 0);
+        assert!(output.skipped[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("durable live owner")));
+        assert!(worktree.exists());
+    }
+    let error = remove_with_store(
+        WorktreeRemoveOptions {
+            id: record.id.clone(),
+            force: true,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+        },
+        &store,
+    )
+    .expect_err("direct removal must honor durable ownership");
+    assert!(error.message.contains("durable live owner"));
+
+    claims.release_owner(&owner, now + 1).unwrap();
+    let removed = remove_with_store(
+        WorktreeRemoveOptions {
+            id: record.id,
+            force: false,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+        },
+        &store,
+    )
+    .unwrap();
+    assert!(removed.removed);
+    assert_eq!(
+        removed.record.terminal_disposition.as_deref(),
+        Some("succeeded")
+    );
+    assert_eq!(removed.record.lifecycle_revision, 2);
+    assert!(!worktree.exists());
 }
 
 #[test]
@@ -1384,7 +1709,7 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
     let worktree = sibling_worktree_path(source.path(), "merged-branch-cleanup");
     merged_task_branch_with_stale_upstream(source.path(), &worktree);
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -1479,11 +1804,11 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
         &["worktree", "lock", &locked_worktree.to_string_lossy()],
     );
     let store = dir.path().join("store");
-    let mut locked_record = fixture_record(source.path(), &locked_worktree);
+    let mut locked_record = succeeded_record(source.path(), &locked_worktree);
     locked_record.id = "fixture@locked".to_string();
     locked_record.branch = "locked-task".to_string();
     let removable_worktree = sibling_worktree_path(source.path(), "cleanup-continues");
-    let mut removable_record = fixture_record(source.path(), &removable_worktree);
+    let mut removable_record = succeeded_record(source.path(), &removable_worktree);
     removable_record.id = "fixture@removable".to_string();
     write_record(&store, &locked_record).unwrap();
     write_record(&store, &removable_record).unwrap();
@@ -1534,8 +1859,8 @@ fn cleanup_separates_actionable_candidates_from_reconciliation_blockers() {
             &removable.to_string_lossy(),
         ],
     );
-    let removable_record = fixture_record(source.path(), &removable);
-    let mut missing_record = fixture_record(
+    let removable_record = succeeded_record(source.path(), &removable);
+    let mut missing_record = succeeded_record(
         source.path(),
         &sibling_worktree_path(source.path(), "mixed-missing"),
     );
@@ -1572,7 +1897,7 @@ fn cleanup_reports_unmerged_task_branch_without_deleting_by_default() {
     run_git(source.path(), &["checkout", "-q", "-"]);
     let worktree = sibling_worktree_path(source.path(), "unmerged-branch-cleanup");
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -1811,7 +2136,7 @@ fn cleanup_dry_run_reports_safe_candidate_without_removing() {
         ],
     );
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -1853,7 +2178,7 @@ fn cleanup_force_removes_dirty_worktree_after_homeboy_gates_pass() {
     );
     fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -2068,136 +2393,6 @@ fn queue_create_records_successful_homeboy_worktree() {
             record.task_url.as_deref(),
             Some("https://github.com/Extra-Chill/homeboy/issues/5924")
         );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn queue_create_uses_provider_lifecycle_with_per_child_metadata() {
-    use std::os::unix::fs::PermissionsExt;
-
-    crate::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("provider fixture");
-        let workspace = temp.path().join("workspace");
-        let records = temp.path().join("records");
-        let script = temp.path().join("provider");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-12124\",\"path\":\"{}\",\"branch\":\"fix/12124\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi\nelif [ \"$1\" = ensure ]; then\n  printf 'ensure|%s|%s|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\" \"$9\" >> '{}'\n  if [ ! -d '{}' ]; then git init -q -b fix/12124 '{}'; fi\nelse\n  printf 'finalize|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
-                workspace.display(),
-                workspace.display(),
-                records.display(),
-                workspace.display(),
-                workspace.display(),
-                records.display(),
-            ),
-        )
-        .expect("write provider");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("make provider executable");
-
-        let mut config = crate::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            crate::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: crate::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: crate::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![
-                        script.display().to_string(),
-                        "resolve".to_string(),
-                        "{handle}".to_string(),
-                    ]),
-                    resolve_not_found_exit_codes: vec![1],
-                    ensure: Some(vec![
-                        script.display().to_string(),
-                        "ensure".to_string(),
-                        "{handle}".to_string(),
-                        "{repo}".to_string(),
-                        "{base}".to_string(),
-                        "{head}".to_string(),
-                        "{task_url}".to_string(),
-                        "{purpose}".to_string(),
-                        "{owner_run_ref}".to_string(),
-                        "{cleanup_policy}".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(crate::defaults::WorktreeProviderListResultMapping {
-                    items: "$.worktrees".to_string(),
-                    handle: "$.handle".to_string(),
-                    path: "$.path".to_string(),
-                    branch: "$.branch".to_string(),
-                    dirty: "$.safety.dirty".to_string(),
-                    unpushed: "$.safety.unpushed".to_string(),
-                    primary: "$.safety.primary".to_string(),
-                    task_url: None,
-                }),
-            },
-        );
-        config.settings.insert(
-            crate::worktree_providers::WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY.to_string(),
-            serde_json::json!({ "fixture": { "finalize": [script.display().to_string(), "finalize", "{handle}", "{purpose}", "{owner_run_ref}", "{cleanup_policy}", "{disposition}", "{idempotency_key}"] } }),
-        );
-        crate::defaults::save_config(&config).expect("save provider config");
-
-        let lifecycle = crate::worktree_providers::WorktreeProviderLifecycleIntent {
-            purpose: "agent_task_cook".to_string(),
-            owner_run_ref: "cook-issue-12124".to_string(),
-            cleanup_policy:
-                crate::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
-        };
-        let request = WorktreeQueueCreateRequest {
-            branch: "fix/12124".to_string(),
-            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/12124".to_string()),
-            task_ref: Some("Extra-Chill/homeboy#12124".to_string()),
-            run_id: Some(lifecycle.owner_run_ref.clone()),
-            provider_lifecycle: Some(lifecycle.clone()),
-        };
-        let options = WorktreeQueueCreateOptions {
-            repo: "homeboy".to_string(),
-            requests: vec![request],
-            from: "main".to_string(),
-            dry_run: false,
-            retry_after_seconds: 30,
-        };
-        let first = queue_create(options.clone()).expect("provider creates worktree");
-        let second = queue_create(options).expect("provider reuses worktree");
-        assert_eq!(
-            first.rows[0].path.as_deref(),
-            workspace.to_str(),
-            "provider queue row: {:?}",
-            first.rows[0]
-        );
-        assert_eq!(second.rows[0].status, WorktreeQueueCreateStatus::Created);
-        let records_text = std::fs::read_to_string(&records).expect("provider records");
-        assert!(records_text.lines().all(|line| line == "ensure|homeboy@fix-12124|homeboy|main|fix/12124|https://github.com/Extra-Chill/homeboy/issues/12124|agent_task_cook|cook-issue-12124|remove_on_success"));
-
-        let resolution =
-            crate::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-                "homeboy@fix-12124",
-                &config,
-                None,
-            )
-            .expect("resolve provider worktree");
-        crate::worktree_providers::finalize_apply_enabled_worktree_provider_from_config(
-            &resolution,
-            &lifecycle,
-            crate::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded,
-            &config,
-        )
-        .expect("finalize provider worktree");
-        assert!(std::fs::read_to_string(records).expect("finalization record").contains(
-            "finalize|homeboy@fix-12124|agent_task_cook|cook-issue-12124|remove_on_success|succeeded|finalize:cook-issue-12124"
-        ));
     });
 }
 

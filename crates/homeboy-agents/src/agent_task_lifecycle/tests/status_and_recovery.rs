@@ -8,7 +8,7 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::reconcile_stale_active_runs;
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -236,6 +236,7 @@ fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
             &lifecycle_store,
             &run.run_id,
             (attempt != 1).then(|| format!("attempt {attempt} failed")),
+            false,
         )
         .expect("finish terminal adoption");
         runs.push(run);
@@ -465,7 +466,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     let adoption = finalizing.candidate_adoption.expect("attempt");
     assert_eq!(adoption.phase, "finalization");
     assert_eq!(adoption.active_gate, "finalize pull request");
-    finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None)
+    finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None, false)
         .expect("terminal completion");
     let completed = reconcile_status_in_store(
         &lifecycle_store,
@@ -475,6 +476,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     )
     .expect("completed status")
     .record;
+    assert_eq!(completed.state, AgentTaskRunState::Queued);
     let adoption = completed
         .candidate_adoption
         .expect("terminal attempt retained");
@@ -1200,7 +1202,7 @@ fn pending_submission_owns_running_proxy_until_job_projection_arrives() {
         record_lab_offload_submission_request(run_id, &request)
             .expect("persist pending broker request");
         let accepted_job = store
-            .submit_remote_runner_job(request)
+            .submit_runner_api_fixture(request)
             .expect("broker accepts before response projection");
         rewrite_record_for_test(run_id, |record| {
             set_run_state(record, AgentTaskRunState::Running);
@@ -1443,7 +1445,7 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
             let request = replay_request(run_id, &command);
             record_lab_offload_submission_request(run_id, &request).expect("pending request");
             let job = store
-                .submit_remote_runner_job(request)
+                .submit_runner_api_fixture(request)
                 .expect("accepted broker job");
 
             if run_id == "accepted-then-expired" {
@@ -3145,10 +3147,10 @@ impl RunnerContinuationProvider for CountingRunnerProvider {
         Err(Error::internal_unexpected("counted runner exec"))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         self.record();
         Err(Error::internal_unexpected("counted reverse broker job"))
@@ -3332,6 +3334,12 @@ fn durable_aggregate_read_does_not_pair_a_record_with_an_unmirrored_cache() {
 
     assert_eq!(snapshot.record.run_id, record.run_id);
     assert!(snapshot.aggregate.is_none());
+    assert!(
+        lifecycle_store
+            .read_aggregate_readonly(&record.run_id)
+            .is_err(),
+        "read-only admission must not fall back to independently cached aggregate bytes"
+    );
     assert_eq!(snapshot.unavailable_sources.len(), 1);
     assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
     assert_eq!(

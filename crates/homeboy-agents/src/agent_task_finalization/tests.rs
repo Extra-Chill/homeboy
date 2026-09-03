@@ -2775,26 +2775,6 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
         })
         .to_string();
         std::fs::write(outcome.path(), &source).expect("write adoption outcome");
-        let provider = tempfile::NamedTempFile::new().expect("promotion provider");
-        std::fs::write(
-            provider.path(),
-            format!(
-                "#!/bin/sh\ncat >/dev/null\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\",\"command_evidence\":[]}}'\n",
-                repo.path().display()
-            ),
-        )
-        .expect("write promotion provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(provider.path())
-                .expect("provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(provider.path(), permissions)
-                .expect("make provider executable");
-        }
         let promotion = crate::agent_task_promotion::promote_with_checkpoint(
             crate::agent_task_promotion::AgentTaskPromotionOptions {
                 source,
@@ -2804,7 +2784,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                 base_ref: Some(base_branch.clone()),
                 task_base_sha: Some(historical_base),
                 candidate_ref: Some(merged_candidate.clone()),
-                to_worktree: "repo@adopted".to_string(),
+                to_worktree: repo.path().display().to_string(),
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,
@@ -2812,7 +2792,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                     verify: vec!["true".to_string()],
                     ..Default::default()
                 },
-                provider_command: Some(provider.path().display().to_string()),
+                provider_command: None,
                 provider_invocation: None,
             },
             |checkpoint| {

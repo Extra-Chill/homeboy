@@ -8,11 +8,11 @@ use crate::agent_task_handoff_event::{
 };
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events;
 use homeboy_core::api_jobs::{
-    Job, JobArtifactMetadata, RemoteRunnerJobRequest, RemoteRunnerJobResult,
-    RemoteRunnerObservationRunDetail,
+    Job, JobArtifactMetadata, RemoteRunnerJobResult, RemoteRunnerObservationRunDetail,
 };
 use homeboy_core::execution_contract::EXECUTION_CONTRACT;
 use homeboy_core::run_outcome_envelope::RunOutcomeEnvelope;
+use homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope;
 
 use super::super::capabilities::RunnerCapabilityPreflight;
 use super::types::{ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
@@ -378,9 +378,11 @@ pub(super) fn cancelled_output(
 /// available on this runner before execution starts, mirroring the direct
 /// `runner exec` path's preflight contract (#5093).
 pub(super) fn reverse_worker_capability_preflight(
-    request: &RemoteRunnerJobRequest,
+    envelope: &RunnerExecutionEnvelope,
 ) -> Option<RunnerCapabilityPreflight> {
-    let required_commands: Vec<String> = request
+    let required_commands: Vec<String> = envelope
+        .dispatch
+        .as_ref()?
         .command
         .first()
         .filter(|program| !program.trim().is_empty())

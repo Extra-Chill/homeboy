@@ -29,12 +29,24 @@ The wire schemas are:
 - `homeboy/extension-api-readiness-response/v1`
 - `homeboy/extension-api-invoke-request/v1`
 - `homeboy/extension-api-invoke-response/v1`
+- `homeboy/extension-api-action-invoke-request/v1`
+- `homeboy/extension-api-action-invoke-response/v1`
 - `homeboy/extension-api-environment-resolve-request/v1`
 - `homeboy/extension-api-environment-resolve-response/v1`
+- `homeboy/extension-api-deployment-provider-inventory-request/v1`
+- `homeboy/extension-api-deployment-provider-inventory-response/v1`
+- `homeboy/extension-api-deployment-provider-resolve-request/v1`
+- `homeboy/extension-api-deployment-provider-resolve-response/v1`
+- `homeboy/extension-api-deployment-provider-invoke-request/v1`
+- `homeboy/extension-api-deployment-provider-invoke-response/v1`
 - `homeboy/extension-api-recipe-run-provider-inventory-request/v1`
 - `homeboy/extension-api-recipe-run-provider-inventory-response/v1`
 - `homeboy/extension-api-recipe-run-plan-request/v1`
 - `homeboy/extension-api-recipe-run-plan-response/v1`
+- `homeboy/extension-api-external-check-detail-inventory-request/v1`
+- `homeboy/extension-api-external-check-detail-inventory-response/v1`
+- `homeboy/extension-api-external-check-detail-hydrate-request/v1`
+- `homeboy/extension-api-external-check-detail-hydrate-response/v1`
 
 Additive optional fields may be added within v1. Changes to identity,
 capability meaning, compatibility decisions, or required fields require a new
@@ -146,6 +158,21 @@ This synchronous operation is intentionally limited to analysis. It does not
 perform durable mutation and therefore has no idempotency, cancellation,
 reconciliation, activity, or terminal-result lifecycle.
 
+## Action Invocation
+
+`extension::invoke::action_api::invoke_action_api` executes one manifest action
+after resolving its advertised `action.<id>` capability through v1. The typed
+request carries extension and action identity plus selected values, project
+identity, and the action payload. Core keeps the manifest, command, working
+directory, environment, settings, and interpolated payload private.
+
+Command-backed actions return bounded process evidence: exit code, stdout,
+stderr, and parsed stdout when it is JSON. API-backed actions return only the
+remote operation output. Neither response shape exposes command text, cwd,
+payload echoes, environment declarations, extension paths, or provider
+configuration. Release, rig lifecycle, and direct CLI action execution all use
+this operation rather than a parallel manifest-action executor.
+
 ## Environment Resolution
 
 `extension::invoke::resolve_environment_api` resolves the `environment`
@@ -176,6 +203,71 @@ no shell parsing and no runner execution. The existing runner placement,
 workspace hydration, artifact promotion, and durable terminal-result recording
 consume that plan unchanged.
 
+## Deployment Providers
+
+`extension::deployment_api::DeploymentProviderApi` discovers
+`deployment-provider.<id>` capabilities once per deploy operation. The immutable
+session supplies safe provider metadata for planning and invokes the selected
+provider without exposing command templates, extension paths, environment
+construction, or manifest values to `homeboy-deploy`.
+
+Inventory and resolution expose provider identity, owning extension, dry-run
+support, layered input and result schema references, target requirements,
+resolvability, and typed diagnostics. Invocation carries the selected deployment
+and component identities, then resolves readiness and private execution details
+inside core. Component and provider-input filesystem paths are private service
+context and never enter the serialized request. Layered provider stdout is
+projected only when it matches the
+declared result schema; all other layered output becomes opaque so target input
+and secrets cannot enter deployment evidence or errors. Legacy unlayered
+providers retain their existing structured or unstructured result.
+
+Deployment routing, repository policy validation, payload construction,
+observation phases, and component result aggregation remain deploy-subsystem
+policy over this operation.
+
+## Agent-Task Executor Registration
+
+`extension::agent_task_executor_api::AgentTaskExecutorApi` discovers
+`agent-task-executor.<id>` capabilities from installed extensions and returns one
+immutable registration inventory. Each entry exposes the executor id, backend,
+owning extension, owning runtime, declared capability tokens, whether a readiness
+probe is declared, its readiness budget, resolvability, and a typed diagnostic.
+
+Everything an executor needs in order to run stays private: argv, commands,
+extension and runtime paths, secret and environment declarations, materialization
+contracts, and provider-specific options never enter an inventory response.
+
+Entries are ordered by owning extension, runtime, and executor id. A declaration
+that cannot be parsed, an extension that is incompatible or invalid, and an
+executor id claimed by more than one source are each registered as an unusable
+entry that keeps its identity and states its diagnostic kind, rather than being
+dropped. A colliding id makes every claimant unusable so selection never depends
+on discovery order.
+
+Extension install, replace, and relink validate declared executors against this
+inventory, so the install-time gate and ordinary agent-task discovery cannot
+disagree about what an extension registers. Resolving a declaration into an
+executable provider, selection policy, workspace preparation, retries, and
+dispatch remain agent-task subsystem policy over this operation.
+
+## External Check Detail Hydration
+
+`extension::external_check_detail_api` discovers
+`external-check-detail-resolver.<provider>` capabilities once per CI triage and
+uses that immutable catalog snapshot for slot accounting, deterministic owner
+selection, and hydration. Inventory responses expose only provider identity,
+owning extension, resolvability, and safe diagnostics. Manifest paths, literal
+argv, and environment declarations remain private to the core adapter.
+
+Hydration accepts the existing extension-owned external-check request fields and
+returns its typed response or an operation-local diagnostic. The host environment
+and absolute aggregate deadline are explicit private service context. Core starts
+from an empty child environment, projects only declared values, bounds output,
+redacts secret values, and terminates contained descendants before returning.
+The CLI retains source check evidence and only adapts the typed result into its
+existing triage presentation.
+
 ## Contract Classification
 
 `homeboy-extension-contract` predates the stable API and contains several kinds
@@ -185,7 +277,7 @@ stability.
 
 | Classification | Modules | Direction |
 | --- | --- | --- |
-| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, environment-resolution, and recipe-provider planning envelopes. |
+| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, environment-resolution, deployment-provider execution, recipe-provider planning, and external-check hydration envelopes. |
 | Stable API candidates | `capability`, `core_compat`, `exec_context`, `runtime_helper`, `sidecar_config` | Reuse or reference from future v1 operations after their wire semantics are reviewed. |
 | Extension-owned domain contracts | `action_types`, `agent_task_executor_declaration`, `autofix_config`, `bench_artifact`, `bench_diagnostics`, `bench_distribution`, `bench_gate`, `bench_metric_preset`, `bench_responsiveness`, `bench_result`, `bench_results`, `bench_stage`, `ci_config`, `ci_context`, `external_check_detail_resolver`, `external_storage_retention`, `fuzz_config`, `lint_result`, `lint_results`, `notification_transport_config`, `source_metadata_repair`, `test_analysis`, `test_drift`, `test_duration`, `test_inventory_config`, `test_parsing`, `test_result`, `test_results`, `test_workflow`, `trace_config`, `trace_parsing`, `trace_preview`, `trace_results`, `trace_spec`, `update_output`, `worktree_retention` | Remain portable domain schemas; the Extension API references their schema IDs rather than absorbing their fields. |
 | Manifest and implementation detail | `extension_contract_producer`, `hook_event`, `manifest`, `manifest_action_config`, `manifest_artifact_cleanup`, `manifest_capabilities`, `manifest_capability_config`, `manifest_deploy_config`, `manifest_test_config`, `manifest_toolchain_config`, `runner_contract`, `version` | Inputs and helpers used to build or execute descriptors. They are not a stable service API. |

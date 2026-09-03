@@ -8,8 +8,14 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use serde_json::json;
 
-use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobClaim, RemoteRunnerJobResult};
+use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobResult};
 use homeboy_core::error::{Error, Result};
+use homeboy_runner_contract::{
+    RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
+    RunnerApiClaimedExecution, RunnerJobExecutionProtocol, WorkspaceClaimBinding,
+    WorkspaceClaimProtocol, WorkspaceOwnerLease, WorkspaceOwnerLeaseProtocol,
+    RUNNER_API_CLAIM_REQUEST_SCHEMA, RUNNER_API_V1,
+};
 
 use super::super::broker_http;
 use super::types::ReverseRunnerWorkerOptions;
@@ -17,33 +23,43 @@ use super::types::ReverseRunnerWorkerOptions;
 pub(super) fn claim_job(
     client: &Client,
     options: &ReverseRunnerWorkerOptions,
-) -> Result<Option<RemoteRunnerJobClaim>> {
+) -> Result<Option<RunnerApiClaimedExecution>> {
     let data = broker_http::post_json(
         client,
         &options.broker_url,
         "/runner/jobs/claim",
-        json!({
-            "runner_id": options.runner_id,
-            "project_id": options.project_id,
-            "lease_ms": options.lease_ms.max(1),
-            "concurrency_limit": options.concurrency_limit,
-            "execution_protocol": homeboy_core::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
-            "workspace_claim_protocol": homeboy_core::workspace_claim::WorkspaceClaimProtocol::current(),
-            "workspace_owner_lease_protocol": homeboy_core::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
-        }),
+        serde_json::to_value(RunnerApiClaimRequest {
+            schema: RUNNER_API_CLAIM_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: options.runner_id.clone(),
+            project_id: options.project_id.clone(),
+            lease_ms: Some(options.lease_ms.max(1)),
+            concurrency_limit: options.concurrency_limit,
+            execution_protocol: Some(RunnerJobExecutionProtocol::current()),
+            workspace_claim_protocol: Some(WorkspaceClaimProtocol::current()),
+            workspace_owner_lease_protocol: Some(WorkspaceOwnerLeaseProtocol::current()),
+        })
+        .expect("runner API claim request serializes"),
         "claim reverse runner job",
         options.broker_token.as_deref(),
     )?;
-    let claim = data["claim"].clone();
-    if claim.is_null() {
-        return Ok(None);
+    let response: RunnerApiClaimResponse = serde_json::from_value(data["response"].clone())
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse reverse runner job claim".to_string()),
+            )
+        })?;
+    match response.outcome {
+        RunnerApiClaimOutcome::Claimed { claim } => Ok(Some(claim)),
+        RunnerApiClaimOutcome::Empty => Ok(None),
+        RunnerApiClaimOutcome::Rejected { failure } => Err(Error::validation_invalid_argument(
+            "claim",
+            failure.message,
+            None,
+            None,
+        )),
     }
-    serde_json::from_value(claim).map(Some).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse reverse runner job claim".to_string()),
-        )
-    })
 }
 
 #[expect(
@@ -55,16 +71,16 @@ pub(super) fn append_progress_data(
     broker_url: &str,
     token: Option<&str>,
     runner_id: &str,
-    job: &Job,
+    claim: &RunnerApiClaimedExecution,
     data: serde_json::Value,
-    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
-    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    workspace_claim_binding: Option<&WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&WorkspaceOwnerLease>,
 ) -> Result<()> {
-    let claim_id = remote_runner_claim_id(job)?;
+    let claim_id = remote_runner_claim_id(claim);
     broker_http::post_json(
         client,
         broker_url,
-        &format!("/runner/jobs/{}/events", job.id),
+        &format!("/runner/jobs/{}/events", claim.job_id),
         json!({
             "runner_id": runner_id,
             "claim_id": claim_id,
@@ -88,16 +104,16 @@ pub(super) fn finish_job(
     broker_url: &str,
     token: Option<&str>,
     runner_id: &str,
-    job: &Job,
+    claim: &RunnerApiClaimedExecution,
     result: RemoteRunnerJobResult,
-    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
-    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    workspace_claim_binding: Option<&WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&WorkspaceOwnerLease>,
 ) -> Result<Job> {
-    let claim_id = remote_runner_claim_id(job)?;
+    let claim_id = remote_runner_claim_id(claim);
     let data = broker_http::post_json(
         client,
         broker_url,
-        &format!("/runner/jobs/{}/finish", job.id),
+        &format!("/runner/jobs/{}/finish", claim.job_id),
         json!({
             "runner_id": runner_id,
             "claim_id": claim_id,
@@ -126,16 +142,16 @@ pub(super) fn consume_execution(
     broker_url: &str,
     token: Option<&str>,
     runner_id: &str,
-    job: &Job,
+    claim: &RunnerApiClaimedExecution,
     context_id: &str,
-    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
-    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    workspace_claim_binding: Option<&WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&WorkspaceOwnerLease>,
 ) -> Result<Job> {
-    let claim_id = remote_runner_claim_id(job)?;
+    let claim_id = remote_runner_claim_id(claim);
     let data = broker_http::post_json(
         client,
         broker_url,
-        &format!("/runner/jobs/{}/consume", job.id),
+        &format!("/runner/jobs/{}/consume", claim.job_id),
         json!({
             "runner_id": runner_id,
             "claim_id": claim_id,
@@ -162,14 +178,14 @@ pub(super) fn validate_workspace_owner(
     broker_url: &str,
     token: Option<&str>,
     runner_id: &str,
-    job: &Job,
-    workspace_owner_lease: &homeboy_core::workspace_claim::WorkspaceOwnerLease,
+    claim: &RunnerApiClaimedExecution,
+    workspace_owner_lease: &WorkspaceOwnerLease,
 ) -> Result<()> {
-    let claim_id = remote_runner_claim_id(job)?;
+    let claim_id = remote_runner_claim_id(claim);
     let data = broker_http::post_json(
         client,
         broker_url,
-        &format!("/runner/jobs/{}/validate-owner", job.id),
+        &format!("/runner/jobs/{}/validate-owner", claim.job_id),
         json!({
             "runner_id": runner_id,
             "claim_id": claim_id,
@@ -182,7 +198,7 @@ pub(super) fn validate_workspace_owner(
         return Err(Error::validation_invalid_argument(
             "workspace_owner_lease",
             "reverse runner workspace owner lease is no longer live",
-            Some(job.id.to_string()),
+            Some(claim.job_id.clone()),
             None,
         ));
     }
@@ -198,19 +214,16 @@ fn renew_claim(
     broker_url: &str,
     token: Option<&str>,
     runner_id: &str,
-    job: &Job,
+    claim: &RunnerApiClaimedExecution,
     lease_ms: u64,
-    workspace_claim_binding: Option<&homeboy_core::workspace_claim::WorkspaceClaimBinding>,
-    workspace_owner_lease: Option<&homeboy_core::workspace_claim::WorkspaceOwnerLease>,
-) -> Result<(
-    Job,
-    Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
-)> {
-    let claim_id = remote_runner_claim_id(job)?;
+    workspace_claim_binding: Option<&WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&WorkspaceOwnerLease>,
+) -> Result<(Job, Option<WorkspaceOwnerLease>)> {
+    let claim_id = remote_runner_claim_id(claim);
     let data = broker_http::post_json(
         client,
         broker_url,
-        &format!("/runner/jobs/{}/heartbeat", job.id),
+        &format!("/runner/jobs/{}/heartbeat", claim.job_id),
         json!({
             "runner_id": runner_id,
             "claim_id": claim_id,
@@ -234,17 +247,17 @@ fn renew_claim(
 pub(super) fn start_claim_heartbeat(
     client: &Client,
     options: &ReverseRunnerWorkerOptions,
-    job: &Job,
-    workspace_claim_binding: Option<homeboy_core::workspace_claim::WorkspaceClaimBinding>,
-    workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    claim: &RunnerApiClaimedExecution,
+    workspace_claim_binding: Option<WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<WorkspaceOwnerLease>,
 ) -> Result<ClaimHeartbeat> {
-    remote_runner_claim_id(job)?;
+    remote_runner_claim_id(claim);
     let (stop, stopped) = mpsc::channel();
     let client = client.clone();
     let broker_url = options.broker_url.clone();
     let broker_token = options.broker_token.clone();
     let runner_id = options.runner_id.clone();
-    let job = job.clone();
+    let claim = claim.clone();
     let lease_ms = options.lease_ms.max(1);
     let interval = Duration::from_millis((lease_ms / 2).max(1));
     let current_owner = Arc::new(Mutex::new(workspace_owner_lease));
@@ -260,7 +273,7 @@ pub(super) fn start_claim_heartbeat(
             &broker_url,
             broker_token.as_deref(),
             &runner_id,
-            &job,
+            &claim,
             lease_ms,
             workspace_claim_binding.as_ref(),
             presented_owner.as_ref(),
@@ -276,7 +289,7 @@ pub(super) fn start_claim_heartbeat(
                         "event": "claim_heartbeat_failed",
                         "runner_id": runner_id,
                         "broker_url": broker_url,
-                        "job_id": job.id,
+                        "job_id": claim.job_id,
                         "error": err.to_string(),
                     })
                 );
@@ -293,13 +306,11 @@ pub(super) fn start_claim_heartbeat(
 pub(super) struct ClaimHeartbeat {
     stop: Option<Sender<()>>,
     handle: Option<JoinHandle<()>>,
-    owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+    owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
 }
 
 impl ClaimHeartbeat {
-    pub(super) fn owner_lease_handle(
-        &self,
-    ) -> Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>> {
+    pub(super) fn owner_lease_handle(&self) -> Arc<Mutex<Option<WorkspaceOwnerLease>>> {
         self.owner_lease.clone()
     }
 }
@@ -319,12 +330,12 @@ pub(super) fn cancelled_job_snapshot(
     client: &Client,
     broker_url: &str,
     token: Option<&str>,
-    job: &Job,
+    claim: &RunnerApiClaimedExecution,
 ) -> Result<Option<Job>> {
     let data = broker_http::get_json(
         client,
         broker_url,
-        &format!("/jobs/{}", job.id),
+        &format!("/jobs/{}", claim.job_id),
         "inspect reverse runner job cancellation state",
         token,
     )?;
@@ -341,13 +352,6 @@ pub(super) fn cancelled_job_snapshot(
     }
 }
 
-pub(super) fn remote_runner_claim_id(job: &Job) -> Result<&str> {
-    job.claim_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "claim_id",
-            "claimed remote runner job is missing a claim id",
-            Some(job.id.to_string()),
-            None,
-        )
-    })
+pub(super) fn remote_runner_claim_id(claim: &RunnerApiClaimedExecution) -> &str {
+    &claim.claim_id
 }

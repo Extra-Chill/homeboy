@@ -265,6 +265,7 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                     run_max_bytes: policy.runtime_run_max_bytes,
                     run_max_count: policy.runtime_run_max_count,
                     cursor: args.cursor.as_deref(),
+                    deadline: None,
                 },
             )?;
             let mut json = serde_json::to_value(output)

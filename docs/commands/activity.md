@@ -33,7 +33,7 @@ The default (and `--limit`-bounded) view compacts every retained record to that 
 
 ## Counts: executing work vs open resources
 
-Activity items carry two work classes. **Executing work** is a unit of work the system runs to completion — an observation run, an agent-task record, a daemon job, or a runner-resident job. **Open resources** are inventory that work uses: worktree-provider records, whose presence says nothing about whether anything is executing in them (#13620).
+Activity items carry two work classes. **Executing work** is a unit of work the system runs to completion — an observation run, an agent-task record, a daemon job, or a runner-resident job. **Open resources** are inventory that work uses: native task-worktree records, whose presence says nothing about whether anything is executing in them (#13620).
 
 `counts` separates the classes:
 

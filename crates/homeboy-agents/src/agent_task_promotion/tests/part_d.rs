@@ -1,10 +1,6 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::apply::{
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
-    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
-};
 use super::super::promote::{
     normalize_promotion_patch, promote_with_provider, promote_with_provider_in_observation_store,
 };
@@ -18,12 +14,8 @@ use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
     AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
-use homeboy_core::defaults::{
-    HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
-    WorktreeProviderListResultMapping,
-};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[test]
 fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_sources() {
@@ -132,97 +124,6 @@ fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
         AgentTaskPromotionStatus::Applied
     );
     assert_eq!(apply_calls, 1);
-}
-
-#[test]
-fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    git(workspace.path(), &["init", "-b", "cook-target"]);
-    let provider = tempfile::NamedTempFile::new().expect("provider command");
-    std::fs::write(
-        provider.path(),
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-            serde_json::json!({
-                "worktrees": [{
-                    "handle": "fixture@cook-target",
-                    "path": workspace.path(),
-                    "branch": "cook-target",
-                    "safety": { "dirty": false, "unpushed": false, "primary": false }
-                }]
-            })
-        ),
-    )
-    .expect("write provider command");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(provider.path())
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
-    }
-    let provider_path = provider.into_temp_path();
-    let mut config = HomeboyConfig::default();
-    config.worktree_providers.insert(
-        "fixture".to_string(),
-        WorktreeProviderConfig {
-            enabled: true,
-            kind: WorktreeProviderKind::Command,
-            apply_enabled: false,
-            lookup_timeout_ms: 10_000,
-            mutation_timeout_ms: 30_000,
-            lookup_output_limit_bytes: 64 * 1024,
-            commands: WorktreeProviderCommands {
-                resolve: Some(vec![
-                    provider_path.display().to_string(),
-                    "{handle}".to_string(),
-                ]),
-                ..Default::default()
-            },
-            list_result_mapping: Some(WorktreeProviderListResultMapping {
-                items: "$.worktrees".to_string(),
-                handle: "$.handle".to_string(),
-                path: "$.path".to_string(),
-                branch: "$.branch".to_string(),
-                dirty: "$.safety.dirty".to_string(),
-                unpushed: "$.safety.unpushed".to_string(),
-                primary: "$.safety.primary".to_string(),
-                task_url: None,
-            }),
-        },
-    );
-
-    homeboy_core::worktree_provider::resolve_worktree_ownership_from_config(
-        "fixture@cook-target",
-        &config,
-    )
-    .expect("lookup-only provider resolves for non-mutating callers");
-
-    let error = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
-        &promotion_options("fixture@cook-target"),
-        &config,
-        Some(PathBuf::from("/fixture/homeboy")),
-        None,
-    );
-    let mut error = error;
-    let error = error
-        .apply_patch(AgentTaskPromotionApplyRequest {
-            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-            to_workspace: "fixture@cook-target".to_string(),
-            patch: Some(VALID_PATCH.to_string()),
-            patch_path: "changes.patch".to_string(),
-            changed_files: vec!["src/lib.rs".to_string()],
-            gate_feedback_baseline: None,
-            dry_run: false,
-            trusted_unpushed_candidate_destination: None,
-        })
-        .expect_err("lookup-only provider must not authorize promotion");
-
-    assert!(error
-        .message
-        .contains("not apply-enabled provider(s): fixture"));
 }
 
 #[test]

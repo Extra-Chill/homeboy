@@ -2,13 +2,13 @@
 #![cfg(test)]
 
 use super::super::apply::{
-    run_provider_command, run_provider_command_with_timeout, AgentTaskPromotionApplyRequest,
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
-    normalize_promotion_patch, promote_with_provider, promote_with_provider_and_checkpoint,
-    promote_with_provider_in_observation_store, resume_promoted_patch, select_patch_artifact,
-    validate_artifact_content,
+    canonical_recoverable_patch_artifacts_in_observation_store, normalize_promotion_patch,
+    preflight_patch_artifact_admission_in_observation_store, promote_with_provider,
+    promote_with_provider_and_checkpoint, promote_with_provider_in_observation_store,
+    resume_promoted_patch, select_patch_artifact, validate_artifact_content,
 };
 use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
 use super::*;
@@ -20,7 +20,6 @@ use crate::agent_task_gate::{
     AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use homeboy_core::command_invocation::CommandInvocation;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -418,7 +417,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     })
     .to_string();
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(target),
+        workspace_path: Some(target.clone()),
         ..Default::default()
     };
 
@@ -431,7 +430,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
             base_ref: Some("main".to_string()),
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: target.display().to_string(),
             task_id: Some("follow-up".to_string()),
             artifact_id: Some("patch".to_string()),
             dry_run: false,
@@ -474,6 +473,115 @@ fn promote_recoverable_candidate_collapses_duplicate_digest_aliases() {
     assert_eq!(report.patch_artifact.id, "candidate-0");
     assert_eq!(report.patch_artifact.kind, "patch");
     assert_eq!(apply_calls, 1);
+}
+
+#[test]
+fn promote_recoverable_candidate_retains_patch_larger_than_256_kib() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = recoverable_patch_source(&temp, 1);
+    let patch = padded_patch(300 * 1024, 'x');
+    std::fs::write(temp.path().join("candidate-0.patch"), &patch).expect("write large patch");
+    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+    source["artifacts"][0]["size_bytes"] = Value::from(patch.len());
+    source["artifacts"][0]["sha256"] = Value::String(sha256_hex(&patch));
+    let source = source.to_string();
+    std::fs::write(&source_path, &source).expect("rewrite source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("recoverable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@recoverable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("large patch remains promotable within the aggregate budget");
+
+    assert_eq!(report.patch_artifact.id, "candidate-0");
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(provider.applied_patch_contents, vec![patch]);
+}
+
+#[test]
+fn canonical_recoverable_candidates_reject_aggregate_byte_overflow() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source_path, source) = recoverable_patch_source(&temp, 2);
+        let first = padded_patch(600 * 1024, 'a');
+        let second = padded_patch(600 * 1024, 'b');
+        std::fs::write(temp.path().join("candidate-0.patch"), &first).expect("write first patch");
+        std::fs::write(temp.path().join("candidate-1.patch"), &second).expect("write second patch");
+        let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+        for (index, patch) in [&first, &second].into_iter().enumerate() {
+            source["artifacts"][index]["size_bytes"] = Value::from(patch.len());
+            source["artifacts"][index]["sha256"] = Value::String(sha256_hex(patch));
+        }
+        let outcome: AgentTaskOutcome = serde_json::from_value(source.clone()).expect("outcome");
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+
+        let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
+            &outcome,
+            &AgentTaskPromotionOptions {
+                source: source.to_string(),
+                source_run_id: Some("recoverable-run".to_string()),
+                source_path: Some(source_path),
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "repo@recoverable".to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &store,
+        )
+        .expect("canonical selection remains bounded");
+
+        assert_eq!(
+            canonical
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["candidate-0"]
+        );
+        assert_eq!(canonical.omitted_patch_bytes, second.len() as u64);
+        assert_eq!(
+            canonical.unavailable,
+            vec![serde_json::json!({
+                "id": "candidate-1",
+                "reason": "canonical_patch_byte_budget_exceeded",
+                "size_bytes": second.len(),
+            })]
+        );
+    });
+}
+
+fn padded_patch(size: usize, fill: char) -> String {
+    assert!(size > VALID_PATCH.len() + 2);
+    format!(
+        "{VALID_PATCH}+{}\n",
+        fill.to_string().repeat(size - VALID_PATCH.len() - 2)
+    )
 }
 
 #[test]
@@ -1081,7 +1189,7 @@ fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
             base_ref: Some("main".to_string()),
             task_base_sha: Some(base.clone()),
             candidate_ref: None,
-            to_worktree: "repo@promoted".to_string(),
+            to_worktree: repo.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -1126,6 +1234,84 @@ fn validate_artifact_content_rejects_sha_mismatch() {
     let err = validate_artifact_content(&artifact, VALID_PATCH).expect_err("sha rejected");
 
     assert!(err.message.contains("sha256 mismatch"));
+}
+
+#[test]
+fn shared_patch_preflight_rejects_execution_hash_and_normalization_failures() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source_path, source) = write_patch_source(&temp);
+        let mut outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
+        let options = AgentTaskPromotionOptions {
+            source,
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@preflight".to_string(),
+            task_id: None,
+            artifact_id: Some("patch".to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        };
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+
+        std::fs::write(temp.path().join("changes.patch"), "different").unwrap();
+        let hash_error =
+            preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
+                .expect_err("preflight and execution share content authentication");
+        assert!(hash_error.message.contains("size mismatch"));
+
+        let unsafe_patch = "diff --git a/../secret b/../secret\n--- a/../secret\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n";
+        std::fs::write(temp.path().join("changes.patch"), unsafe_patch).unwrap();
+        outcome.artifacts[0].size_bytes = Some(unsafe_patch.len() as u64);
+        outcome.artifacts[0].sha256 = Some(sha256_hex(unsafe_patch));
+        let normalization_error =
+            preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
+                .expect_err("preflight and execution share patch normalization");
+        assert!(normalization_error.message.contains("unsafe patch path"));
+    });
+}
+
+#[test]
+fn execution_revalidates_artifact_bytes_after_passing_preflight() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source_path, source) = write_patch_source(&temp);
+        let outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
+        let options = AgentTaskPromotionOptions {
+            source,
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@preflight-revalidation".to_string(),
+            task_id: None,
+            artifact_id: Some("patch".to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        };
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
+            .expect("original artifact passes preflight");
+        std::fs::write(temp.path().join("changes.patch"), "changed after preflight")
+            .expect("mutate admitted artifact");
+        let mut provider = FakePromotionWorkspaceProvider::default();
+
+        let error = promote_with_provider_in_observation_store(options, &mut provider, &store)
+            .expect_err("execution rejects artifact drift");
+
+        assert!(error.message.contains("size mismatch"), "{error:?}");
+        assert!(provider.applied_patch_contents.is_empty());
+    });
 }
 
 #[test]
@@ -2292,191 +2478,4 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
         )
         .is_err()
     );
-}
-
-#[test]
-fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
-    let request = AgentTaskPromotionApplyRequest {
-        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-        to_workspace: "target-workspace".to_string(),
-        patch: None,
-        patch_path: "changes.patch".to_string(),
-        changed_files: vec!["src/lib.rs".to_string()],
-        gate_feedback_baseline: None,
-        dry_run: false,
-        trusted_unpushed_candidate_destination: None,
-    };
-
-    let error = run_provider_command(
-        &CommandInvocation {
-            argv: vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "cat >/dev/null; printf provider-stdout; printf provider-stderr >&2; exit 7"
-                    .to_string(),
-            ],
-            ..Default::default()
-        },
-        &request,
-    )
-    .expect_err("provider failure");
-
-    assert_eq!(error.details["command_evidence"]["exit_code"], 7);
-    assert_eq!(
-        error.details["command_evidence"]["stdout"],
-        "provider-stdout"
-    );
-    assert_eq!(
-        error.details["command_evidence"]["stderr"],
-        "provider-stderr"
-    );
-}
-
-#[test]
-fn configured_provider_timeout_is_bounded_and_retains_command_evidence() {
-    let request = AgentTaskPromotionApplyRequest {
-        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-        to_workspace: "target-workspace".to_string(),
-        patch: None,
-        patch_path: "changes.patch".to_string(),
-        changed_files: vec!["src/lib.rs".to_string()],
-        gate_feedback_baseline: None,
-        dry_run: false,
-        trusted_unpushed_candidate_destination: None,
-    };
-    let started = std::time::Instant::now();
-    let error = run_provider_command_with_timeout(
-        &CommandInvocation {
-            argv: vec!["sh".to_string(), "-c".to_string(), "sleep 2".to_string()],
-            ..Default::default()
-        },
-        &request,
-        std::time::Duration::from_millis(100),
-    )
-    .expect_err("silent provider must be terminated");
-
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    assert!(error.message.contains("timed out after 100 ms"));
-    assert_eq!(
-        error.details["command_evidence"]["command"],
-        "sh -c sleep 2"
-    );
-}
-
-#[test]
-fn provider_response_validation_distinguishes_json_schema_and_required_field_errors() {
-    let request = AgentTaskPromotionApplyRequest {
-        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-        to_workspace: "target-workspace".to_string(),
-        patch: None,
-        patch_path: "changes.patch".to_string(),
-        changed_files: vec!["src/lib.rs".to_string()],
-        gate_feedback_baseline: None,
-        dry_run: false,
-        trusted_unpushed_candidate_destination: None,
-    };
-    let cases = [
-        ("{", "Invalid JSON"),
-        (
-            r#"{"workspace_path":"/workspace"}"#,
-            "expected homeboy/agent-task-promotion-apply-response/v1, got missing schema",
-        ),
-        (
-            r#"{"schema":"homeboy/agent-task-promotion-apply-request/v1"}"#,
-            "expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/agent-task-promotion-apply-request/v1",
-        ),
-        (
-            r#"{"schema":1}"#,
-            "expected homeboy/agent-task-promotion-apply-response/v1, got 1",
-        ),
-        (
-            r#"{"schema":"homeboy/agent-task-promotion-apply-response/v1"}"#,
-            "missing field `workspace_path`",
-        ),
-    ];
-
-    for (response, expected) in cases {
-        let error = run_provider_command(
-            &CommandInvocation {
-                argv: vec![
-                    "sh".to_string(),
-                    "-c".to_string(),
-                    "printf '%s' \"$1\"".to_string(),
-                    "sh".to_string(),
-                    response.to_string(),
-                ],
-                ..Default::default()
-            },
-            &request,
-        )
-        .expect_err("invalid provider response");
-
-        // Print `details` too. `Error::message` for an infrastructure failure
-        // is the canned string "IO error"; the operation that actually failed
-        // lives only in `details` (#12741). Asserting on `message` alone made
-        // every such failure undiagnosable from CI.
-        assert!(
-            error.message.contains(expected),
-            "{} {}",
-            error.message,
-            error.details
-        );
-        assert_eq!(error.details["command_evidence"]["exit_code"], 0);
-        assert_eq!(error.details["command_evidence"]["stdout"], response);
-    }
-}
-
-/// A provider that exits without draining its request keeps its own verdict.
-///
-/// Rust sets SIGPIPE to SIG_IGN, so writing to a pipe whose read end has closed
-/// returns `BrokenPipe` here instead of terminating this process. Treating that
-/// as `internal_io` replaced the provider's actual result with the canned
-/// message "IO error" and discarded its exit code and captured stdout (#12741).
-///
-/// Every provider in this module's other tests exits immediately without
-/// reading stdin, so they hit this racily -- whichever side won scheduling
-/// decided whether the run passed. The request below is deliberately larger
-/// than a pipe buffer (64 KiB on Linux) so `write_all` cannot possibly finish
-/// before the provider exits. That makes `BrokenPipe` certain rather than
-/// probable, which is what makes this a regression test rather than one more
-/// dice roll.
-#[test]
-fn provider_that_exits_without_draining_its_request_still_yields_its_own_verdict() {
-    let request = AgentTaskPromotionApplyRequest {
-        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-        to_workspace: "target-workspace".to_string(),
-        patch: None,
-        patch_path: "changes.patch".to_string(),
-        changed_files: (0..20_000)
-            .map(|index| format!("src/generated/file_{index}.rs"))
-            .collect(),
-        gate_feedback_baseline: None,
-        dry_run: false,
-        trusted_unpushed_candidate_destination: None,
-    };
-
-    let error = run_provider_command(
-        &CommandInvocation {
-            argv: vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf '%s' \"$1\"".to_string(),
-                "sh".to_string(),
-                r#"{"schema":"homeboy/agent-task-promotion-apply-response/v1"}"#.to_string(),
-            ],
-            ..Default::default()
-        },
-        &request,
-    )
-    .expect_err("the provider response is still validated");
-
-    // The provider's own verdict, not an opaque infrastructure error.
-    assert!(
-        error.message.contains("missing field `workspace_path`"),
-        "a provider that ignored its request must still be judged on what it \
-         returned, not on the write that failed: {} {}",
-        error.message,
-        error.details
-    );
-    assert_eq!(error.details["command_evidence"]["exit_code"], 0);
 }

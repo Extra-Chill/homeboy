@@ -579,6 +579,58 @@ fn agent_task_run_plan_component_contract_paths_get_component_contract_evidence_
 }
 
 #[test]
+fn agent_task_run_plan_workspace_gets_its_own_materialized_provenance() {
+    let controller = tempfile::tempdir().expect("controller");
+    let source = controller.path().join("derived-baseline");
+    let issue_worktree = controller.path().join("homeboy@issue-14145");
+    let plan = source.join(".ci/cook-retry.agent-task-plan.json");
+    std::fs::create_dir_all(plan.parent().expect("plan parent")).expect("plan parent directory");
+    std::fs::create_dir_all(&issue_worktree).expect("issue worktree directory");
+    std::fs::write(
+        &plan,
+        serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "derived-cook-retry",
+            "tasks": [{
+                "task_id": "issue-14145",
+                "instructions": "fix provenance",
+                "executor": { "backend": "test" },
+                "workspace": { "root": issue_worktree },
+                "metadata": {
+                    "cook_workspace_base_snapshot": {
+                        "schema": "homeboy/cook-workspace-base-snapshot/v1",
+                        "mode": "isolated_attempt_snapshot",
+                        "resolved_base": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                }
+            }]
+        })
+        .to_string(),
+    )
+    .expect("plan file");
+
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        format!("--plan=@{}", plan.display()),
+    ];
+
+    let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].role, "agent_task_plan_workspace");
+    assert_eq!(
+        workspaces[0].git_fetch_refs,
+        ["0123456789abcdef0123456789abcdef01234567"]
+    );
+    assert_eq!(
+        workspaces[0].path,
+        issue_worktree.canonicalize().expect("issue worktree")
+    );
+}
+
+#[test]
 fn agent_task_run_plan_file_inside_primary_workspace_needs_no_extra_sync() {
     let controller = tempfile::tempdir().expect("controller");
     let source = controller.path().join("primary");
@@ -936,98 +988,6 @@ fn path_setting_workspace_ref_resolves_adopted_workspace() {
     });
 }
 
-#[cfg(unix)]
-#[test]
-fn path_setting_workspace_ref_resolves_configured_provider_workspace() {
-    use homeboy_core::defaults::{
-        save_config, HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig,
-        WorktreeProviderKind, WorktreeProviderListResultMapping,
-    };
-    use std::collections::HashMap;
-    use std::os::unix::fs::PermissionsExt;
-
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let workspace = home.path().join("configured-workspace");
-        std::fs::create_dir(&workspace).expect("configured workspace");
-        let fixture = workspace.join("fixtures");
-        std::fs::create_dir(&fixture).expect("fixture directory");
-        std::fs::write(fixture.join("input.json"), "{}\n").expect("fixture file");
-        for args in [
-            &["init", "-b", "cook"][..],
-            &["config", "user.email", "homeboy@example.test"][..],
-            &["config", "user.name", "Homeboy Test"][..],
-            &["add", "."][..],
-            &["commit", "-m", "fixture"][..],
-        ] {
-            git(&workspace, args);
-        }
-        let script = home.path().join("provider");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"configured@cook\",\"path\":\"{}\",\"branch\":\"cook\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
-                workspace.display()
-            ),
-        )
-        .expect("provider script");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("executable provider");
-        let mut providers = HashMap::new();
-        providers.insert(
-            "fixture".to_string(),
-            WorktreeProviderConfig {
-                enabled: true,
-                kind: WorktreeProviderKind::Command,
-                apply_enabled: false,
-                commands: WorktreeProviderCommands {
-                    list: Some(vec![script.display().to_string()]),
-                    ..Default::default()
-                },
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                list_result_mapping: Some(WorktreeProviderListResultMapping {
-                    items: "$.worktrees".to_string(),
-                    handle: "$.handle".to_string(),
-                    path: "$.path".to_string(),
-                    branch: "$.branch".to_string(),
-                    dirty: "$.safety.dirty".to_string(),
-                    unpushed: "$.safety.unpushed".to_string(),
-                    primary: "$.safety.primary".to_string(),
-                    task_url: None,
-                }),
-            },
-        );
-        save_config(&HomeboyConfig {
-            worktree_providers: providers,
-            ..HomeboyConfig::default()
-        })
-        .expect("provider config");
-        let ownership =
-            homeboy_core::worktree_provider::resolve_worktree_ownership("configured@cook")
-                .expect("configured ownership");
-        assert_eq!(ownership.path, workspace.display().to_string());
-
-        let args = vec![
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--setting=fixture=@workspace:configured@cook/fixtures/input.json".to_string(),
-        ];
-        let (rewritten, resolutions) =
-            resolve_path_setting_workspace_refs_in_args(&args).expect("configured workspace ref");
-
-        assert_eq!(
-            rewritten[2],
-            format!("--setting=fixture={}", fixture.join("input.json").display())
-        );
-        assert_eq!(resolutions[0].source_kind, "configured_worktree");
-        assert!(resolutions[0].source_provenance.is_none());
-    });
-}
-
 #[test]
 fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
     homeboy_core::test_support::with_isolated_home(|home| {
@@ -1122,6 +1082,7 @@ fn workspace_ref_provenance_is_recorded_on_mapping_entry() {
         role: "path_setting_workspace_ref".to_string(),
         path: PathBuf::from("/local/repo@cook"),
         snapshot_includes: Vec::new(),
+        git_fetch_refs: Vec::new(),
         allow_dirty_lab_workspace: false,
         source_provenance: Some(serde_json::json!({
             "source_provenance": "workspace_ref",

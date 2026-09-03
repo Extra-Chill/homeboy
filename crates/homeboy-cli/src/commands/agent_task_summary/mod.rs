@@ -260,10 +260,16 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
     if let Some(next_action) = summary.get("next_action").and_then(Value::as_str) {
         lines.push(format!("Next: {next_action}"));
     }
+    if let Some(refresh_action) = summary.get("refresh_action").and_then(Value::as_str) {
+        lines.push(format!("Refresh: {refresh_action}"));
+    }
     Some(lines.join("\n"))
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
+    if payload.get("schema").and_then(Value::as_str) == Some("homeboy/agent-task-cook-preview/v1") {
+        return render_cook_preview_summary(payload);
+    }
     let run_id =
         string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["latest_run_id"]))?;
     let raw_state = string_value(payload, &["state"])
@@ -388,6 +394,69 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     Some(finish(lines))
 }
 
+fn render_cook_preview_summary(payload: &Value) -> Option<String> {
+    let resolved = payload.get("resolved")?;
+    let placement = resolved
+        .pointer("/placement/requested")
+        .and_then(Value::as_str)?;
+    let provider = resolved
+        .get("provider")
+        .and_then(Value::as_object)
+        .and_then(|provider| {
+            provider.get("backend").and_then(|backend| {
+                backend
+                    .as_str()
+                    .or_else(|| backend.get("state").and_then(Value::as_str))
+            })
+        })
+        .unwrap_or("unresolved");
+    let model = resolved
+        .pointer("/provider/model")
+        .and_then(Value::as_str)
+        .unwrap_or("unresolved");
+    let destination = resolved
+        .pointer("/workspace/path")
+        .and_then(Value::as_str)
+        .or_else(|| resolved.get("worktree").and_then(Value::as_str))
+        .or_else(|| {
+            resolved
+                .pointer("/workspace/action")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("unresolved");
+    let public_gates = resolved
+        .pointer("/gates/public")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let private_gates = resolved
+        .pointer("/gates/private")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let replay = payload
+        .get("replay_argv")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        "Cook preview".to_string(),
+        format!("Placement: {placement}"),
+        format!("Provider: {provider}"),
+        format!("Model: {model}"),
+        format!("Destination: {destination}"),
+        format!("Gates: {public_gates} public, {private_gates} private"),
+        format!(
+            "Replay: {}",
+            homeboy::core::engine::shell::quote_args(&replay)
+        ),
+    ];
+    if let Some(failure) = payload.pointer("/failure/message").and_then(Value::as_str) {
+        lines.push(format!("Blocked: {failure}"));
+    }
+    Some(finish(lines))
+}
+
 fn render_status_summary(payload: &Value) -> Option<String> {
     let run_id = string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["run"]))?;
     let raw_state = string_value(payload, &["state"]).unwrap_or("unknown");
@@ -445,6 +514,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         production_lines[1] = format!("Candidate state: {candidate}");
     }
     lines.extend(production_lines);
+    if let Some(line) = target_application_line(payload) {
+        lines.push(line);
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -710,9 +782,19 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .then(|| command_line(payload, &["promotion_candidates", "0", "command"]))
         .flatten();
 
+    let target_applied = payload
+        .pointer("/execution_states/promotion/patch_promoted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let verified = payload
+        .pointer("/execution_states/promotion/verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let outcome = if metrics.candidate_state == CandidateState::Finalized {
         "pull request finalized"
-    } else if metrics.candidate_state == CandidateState::Promoted {
+    } else if target_applied && verified {
+        "patch promoted and verified"
+    } else if target_applied {
         "patch promoted"
     } else if promotable {
         "patch produced, not promoted"
@@ -731,6 +813,9 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         format!("Outcome: {outcome}"),
     ];
     lines.extend(code_production_lines(&metrics));
+    if let Some(line) = target_application_line(payload) {
+        lines.push(line);
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -745,6 +830,25 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: {next}"));
     }
     Some(finish(lines))
+}
+
+fn target_application_line(payload: &Value) -> Option<String> {
+    let promotion = value_at(payload, &["execution_states", "promotion"])?;
+    let target = string_value(promotion, &["target", "worktree"]).unwrap_or("not declared");
+    let target_state = string_value(promotion, &["target", "state"]).unwrap_or("not_applied");
+    let fingerprint = promotion
+        .pointer("/target/candidate_fingerprint_matches")
+        .and_then(Value::as_bool)
+        .map(|matches| if matches { "matches" } else { "does not match" })
+        .unwrap_or("unknown");
+    let verification = promotion
+        .get("verified")
+        .and_then(Value::as_bool)
+        .map(|verified| if verified { "verified" } else { "not verified" })
+        .unwrap_or("unknown");
+    Some(format!(
+        "Target application: {target_state} (worktree: {target}; candidate fingerprint: {fingerprint}; verification: {verification})"
+    ))
 }
 
 fn first_actionable_diagnostic(payload: &Value) -> Option<&str> {
@@ -966,6 +1070,25 @@ fn finish(lines: Vec<String>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cook_preview_summary_renders_the_terminal_preview_payload() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": { "requested": "local" },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 2 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        assert_eq!(
+            render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
+            Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+        );
+    }
 
     #[test]
     fn providers_summary_presents_selection_without_calling_it_blocked() {
@@ -1345,15 +1468,14 @@ mod tests {
     }
 
     #[test]
-    fn review_summary_uses_the_promoted_candidate_fingerprint() {
-        // A promoted candidate is no longer an apply candidate, but its durable
-        // promotion fingerprint remains the authoritative review summary source.
+    fn review_summary_uses_a_target_applied_candidate_fingerprint() {
+        // Target application is independent from retained candidate selection.
         let payload = json!({
             "run_id": "agent-task-11805",
             "state": "succeeded",
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
+                "state": "apply_ready",
                 "diff_bytes": 0,
                 "counts": { "patch_available": 1 },
                 "scan": { "degraded": false }
@@ -1364,15 +1486,55 @@ mod tests {
                 "size_bytes": 7635,
                 "changed_files": ["a.rs", "b.rs", "c.rs"]
             },
+            "execution_states": {
+                "promotion": {
+                    "patch_promoted": true,
+                    "verified": true,
+                    "target": { "state": "applied", "worktree": "fixture@target", "candidate_fingerprint_matches": true }
+                }
+            },
             "aggregate_review": { "summary": { "apply_candidates": 0, "failed": 0 } },
             "next_actions": ["finalize the pull request"]
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
 
-        assert!(summary.contains("Outcome: patch promoted\n"));
+        assert!(summary.contains("Outcome: patch promoted and verified\n"));
+        assert!(summary.contains("Target application: applied (worktree: fixture@target; candidate fingerprint: matches; verification: verified)\n"));
         assert!(summary.contains("Changed files: 3\n"));
         assert!(summary.contains("Diff bytes: 7635\n"));
+    }
+
+    #[test]
+    fn review_summary_keeps_a_pre_apply_candidate_out_of_the_promoted_outcome() {
+        let payload = json!({
+            "run_id": "retained-candidate",
+            "state": "partial_recoverable",
+            "canonical_candidate": {
+                "schema": "homeboy/agent-task-candidate/v1",
+                "state": "apply_ready",
+                "counts": { "patch_available": 1 }, "scan": { "degraded": false }
+            },
+            "selected_candidate": { "status": "verification_pending" },
+            "execution_states": {
+                "promotion": {
+                    "state": "verification_pending",
+                    "patch_promoted": false,
+                    "verification_phase": "pre_apply",
+                    "target": { "state": "not_applied", "worktree": "fixture@clean-target", "candidate_fingerprint_matches": false }
+                }
+            },
+            "aggregate_review": { "summary": { "apply_candidates": 1, "failed": 0 } }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(
+            summary.contains("Outcome: patch produced, not promoted\n"),
+            "{summary}"
+        );
+        assert!(!summary.contains("Outcome: patch promoted\n"), "{summary}");
+        assert!(summary.contains("Target application: not_applied (worktree: fixture@clean-target; candidate fingerprint: does not match; verification: not verified)\n"), "{summary}");
     }
 
     #[test]
@@ -1815,11 +1977,11 @@ mod tests {
             "cook": { "state": "finalization_failed", "publication": "blocked" },
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
+                "state": "apply_ready",
                 "counts": {}, "scan": {}
             },
             "execution_states": {
-                "candidate": { "state": "promoted_finalization_failed" },
+                "candidate": { "state": "apply_ready_finalization_failed" },
                 "gate": { "state": "passed" },
                 "finalization": { "state": "finalization_failed" },
                 "provider": [{ "task_id": "cook", "state": "succeeded" }]
@@ -1841,12 +2003,12 @@ mod tests {
 
         assert!(
             summary.starts_with(
-                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (promoted; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
+                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (apply_ready; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
             ),
             "{summary}"
         );
         assert!(!summary.contains("Status: succeeded"), "{summary}");
-        assert!(summary.contains("Candidate state: promoted_finalization_failed\n"));
+        assert!(summary.contains("Candidate state: apply_ready_finalization_failed\n"));
         assert!(summary.contains("Publication: blocked\n"));
         assert!(summary.contains("Provider/task evidence:\n"));
         assert!(summary.contains("Tasks attempted: 1\n"));

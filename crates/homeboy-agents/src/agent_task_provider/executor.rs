@@ -1,12 +1,585 @@
-use super::command_runner::{failure_outcome, run_materialized_provider_command};
+use super::command_runner::{failure_outcome, run_materialized_provider_command_with_credentials};
 use super::*;
 
+const PROVIDER_ACCOUNT_BLOCK_TTL: chrono::Duration = chrono::Duration::minutes(5);
+
+pub(super) fn effective_provider_for_request(
+    request: &AgentTaskRequest,
+    providers: &[AgentTaskExecutorProvider],
+) -> std::result::Result<Option<AgentTaskExecutorProvider>, String> {
+    if let Some(identity) = request
+        .metadata
+        .get("resolved_runtime_identity")
+        .filter(|identity| !identity.is_null())
+    {
+        let identity: homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity =
+            serde_json::from_value(identity.clone())
+                .map_err(|error| format!("invalid controller runtime identity: {error}"))?;
+        if !homeboy_core::agent_runtime_manifest::is_immutable_revision(&identity.source_revision) {
+            return Err(format!(
+                "controller runtime identity for provider '{}' has a non-immutable source revision '{}'",
+                identity.provider_id, identity.source_revision
+            ));
+        }
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(identity.provider)
+            .map_err(|error| format!("invalid controller-selected provider: {error}"))?;
+        if provider.id != identity.provider_id || provider.backend != request.executor.backend {
+            return Err(format!(
+                "controller runtime identity does not match requested provider backend '{}' and id '{}'",
+                request.executor.backend, identity.provider_id
+            ));
+        }
+        let requirements = request.capability_requirements()?;
+        if requirements
+            .provider
+            .iter()
+            .any(|capability| !provider.capabilities.contains(capability))
+        {
+            return Ok(None);
+        }
+        return Ok(Some(provider));
+    }
+
+    let requirements = request.capability_requirements()?;
+    let capable = providers
+        .iter()
+        .filter(|provider| {
+            requirements
+                .provider
+                .iter()
+                .all(|capability| provider.capabilities.contains(capability))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(resolve_provider_for_backend(
+        &capable,
+        &request.executor.backend,
+        request.executor.selector.as_deref(),
+    )
+    .resolved()
+    .cloned())
+}
+
+fn request_with_effective_provider_contract(
+    request: &AgentTaskRequest,
+    providers: &[AgentTaskExecutorProvider],
+) -> AgentTaskRequest {
+    let mut request = request.clone();
+    let base_secret_env = request
+        .metadata
+        .get("provider_admission")
+        .and_then(|value| value.get("base_secret_env"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+        .unwrap_or_else(|| request.executor.secret_env.clone());
+    if let Ok(Some(provider)) = effective_provider_for_request(&request, providers) {
+        super::secrets::apply_provider_runner_secret_env_contract_for_request(
+            &mut request,
+            &provider,
+            &base_secret_env,
+        );
+    }
+    request
+}
+
+fn provider_capacity_key(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> homeboy_core::Result<String> {
+    let credential_env =
+        super::secrets::provider_request_credential_env(request, provider).unwrap_or_default();
+    provider_capacity_key_with_credentials(request, provider, &credential_env)
+}
+
+fn provider_capacity_key_with_credentials(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    credential_env: &[(String, String)],
+) -> homeboy_core::Result<String> {
+    let effective_config = provider_capacity_config(request);
+    let value = serde_json::json!({
+        "provider": provider,
+        "probe_request": readiness_request_key(provider, &effective_config)?,
+        "runtime_selection": request.executor.runtime_selection(),
+        "required_capabilities": request.executor.required_capabilities,
+        "effective_config": effective_config,
+        "resolved_runtime_identity": request.metadata.get("resolved_runtime_identity"),
+        "credential_identity": credential_env.iter().map(|(name, value)| (
+            name,
+            homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes()),
+        )).collect::<Vec<_>>(),
+    });
+    let encoded = serde_json::to_vec(&value)
+        .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    Ok(homeboy_engine_primitives::content_hash::sha256_hex(
+        &encoded,
+    ))
+}
+
+fn reported_capacity_key(request_key: &str, evidence: &AgentTaskProviderRuntimeEvidence) -> String {
+    let encoded = serde_json::to_vec(&(
+        request_key,
+        evidence.cache_identity.as_deref(),
+        evidence.provider_identity.as_deref(),
+    ))
+    .unwrap_or_default();
+    homeboy_engine_primitives::content_hash::sha256_hex(&encoded)
+}
+
+fn production_execution_preflight(
+    request: &AgentTaskRequest,
+    providers: &[AgentTaskExecutorProvider],
+    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
+    evidence: &Arc<Mutex<ProviderEvidenceStore>>,
+    credential_env: Option<&[(String, String)]>,
+) -> Option<AgentTaskOutcome> {
+    let Ok(Some(provider)) = effective_provider_for_request(request, providers) else {
+        return None;
+    };
+    let catalog = AgentTaskProviderCatalog {
+        providers: providers.to_vec(),
+        diagnostics: diagnostics.to_vec(),
+        version: None,
+    };
+    let execution_plan = AgentTaskPlan::new(
+        format!("execution-preflight-{}", request.task_id),
+        vec![request.clone()],
+    );
+    for preflight in [
+        catalog.validate_selected_models(&execution_plan),
+        catalog.enforce_runtime_preflight_checks_for_plan(&execution_plan),
+        super::config_preflight::preflight_plan_provider_config_with_providers(
+            &execution_plan,
+            catalog.providers(),
+        ),
+    ] {
+        if let Err(error) = preflight {
+            return Some(AgentTaskOutcome {
+                task_id: request.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Failed,
+                failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
+                summary: Some(format!(
+                    "provider route failed execution preflight: {}",
+                    error.message
+                )),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: "agent_task.provider_execution_preflight_failed".to_string(),
+                    message: error.message,
+                    data: error.details,
+                }],
+                ..Default::default()
+            });
+        }
+    }
+    let mut readiness_cache = evidence
+        .lock()
+        .map(|evidence| evidence.readiness.clone())
+        .unwrap_or_default();
+    let dispatchability = match credential_env {
+        Some(credential_env) => {
+            super::dispatchability::evaluate_request_dispatchability_with_credentials(
+                &catalog,
+                request,
+                provider,
+                credential_env,
+                &mut readiness_cache,
+            )
+        }
+        None => super::dispatchability::evaluate_request_dispatchability(
+            &catalog,
+            request,
+            &mut readiness_cache,
+        ),
+    }
+    .dispatchability;
+    if dispatchability.ready {
+        return None;
+    }
+    let timeout = dispatchability
+        .checks
+        .runtime
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("execution deadline expired"));
+    Some(AgentTaskOutcome {
+        task_id: request.task_id.clone(),
+        status: if timeout {
+            AgentTaskOutcomeStatus::Timeout
+        } else {
+            AgentTaskOutcomeStatus::Failed
+        },
+        failure_classification: Some(if timeout {
+            AgentTaskFailureClassification::Timeout
+        } else if !dispatchability.checks.model.ready || !dispatchability.checks.route.ready {
+            AgentTaskFailureClassification::CapabilityMissing
+        } else {
+            AgentTaskFailureClassification::InvalidInput
+        }),
+        summary: Some(format!(
+            "provider route failed execution preflight: {}",
+            dispatchability.reason
+        )),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.provider_execution_preflight_failed".to_string(),
+            message: dispatchability.reason.clone(),
+            data: serde_json::to_value(dispatchability).unwrap_or(Value::Null),
+        }],
+        ..Default::default()
+    })
+}
+
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
+    fn provider_route_capacity_key(&self, request: &AgentTaskRequest) -> String {
+        let request = request_with_effective_provider_contract(request, self.providers());
+        effective_provider_for_request(&request, self.providers())
+            .ok()
+            .flatten()
+            .and_then(|provider| provider_capacity_key(&request, &provider).ok())
+            .unwrap_or_else(|| provider_usage_cap_key_for_request(&request))
+    }
+
+    fn provider_route_readiness(&self, request: &AgentTaskRequest) -> ProviderRouteReadiness {
+        if is_fixture_backend(&request.executor.backend) || is_repo_local_gate_request(request) {
+            return ProviderRouteReadiness::dispatchable();
+        }
+        let request = request_with_effective_provider_contract(request, self.providers());
+        let provider = match effective_provider_for_request(&request, self.providers()) {
+            Ok(Some(provider)) => provider,
+            Ok(None) => {
+                let resolution = resolve_provider_for_backend(
+                    self.providers(),
+                    &request.executor.backend,
+                    request.executor.selector.as_deref(),
+                );
+                let route_exists = resolution.clone().resolved().is_some();
+                let requires_provider_capabilities = request
+                    .capability_requirements()
+                    .is_ok_and(|requirements| !requirements.provider.is_empty());
+                if route_exists && requires_provider_capabilities {
+                    return ProviderRouteReadiness {
+                        ready: false,
+                        state: "provider_capability_unavailable".to_string(),
+                        reason: "the route does not satisfy required provider capabilities"
+                            .to_string(),
+                        reset_at: None,
+                        classification: Some("capability".to_string()),
+                        retryable: false,
+                        remediation: None,
+                        cache_identity: None,
+                        provider_identity: None,
+                        capacity_key: None,
+                        diagnostic_data: Some(
+                            ProviderRouteDiagnosticData::ProviderCapabilityUnavailable {
+                                layer: "provider".to_string(),
+                                required_capabilities: request
+                                    .executor
+                                    .required_capabilities
+                                    .clone(),
+                            },
+                        ),
+                    };
+                }
+                let (state, reason, diagnostic_data) = match resolution {
+                    ProviderResolution::NotFound => {
+                        let diagnostics = runtime_discovery_diagnostics_for_backend(
+                            self.diagnostics(),
+                            &request.executor.backend,
+                        );
+                        (
+                            "provider_missing",
+                            provider_not_found_message(&request.executor.backend, &diagnostics),
+                            ProviderRouteDiagnosticData::ProviderMissing {
+                                backend: request.executor.backend.clone(),
+                                runtime_discovery_diagnostics: diagnostics,
+                            },
+                        )
+                    }
+                    ProviderResolution::SelectorMismatch {
+                        available_ids,
+                        selector_hint,
+                    } => (
+                            "provider_selector_mismatch",
+                            selector_mismatch_message(
+                                &request.executor.backend,
+                                request.executor.selector.as_deref(),
+                            ),
+                            ProviderRouteDiagnosticData::ProviderSelectorMismatch {
+                                backend: request.executor.backend.clone(),
+                                selector: request.executor.selector.clone(),
+                                available_provider_ids: available_ids,
+                                hint: selector_hint,
+                            },
+                        ),
+                    ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => (
+                        "provider_ambiguous",
+                        format!(
+                            "multiple extension agent-task providers match backend '{}'; pass --selector with one provider id: {}",
+                            request.executor.backend,
+                            candidate_ids.join(", ")
+                        ),
+                        ProviderRouteDiagnosticData::ProviderAmbiguous {
+                            backend: request.executor.backend.clone(),
+                            available_provider_ids: candidate_ids,
+                        },
+                    ),
+                    ProviderResolution::Resolved(_) => (
+                        "provider_capability_unavailable",
+                        "the route does not satisfy required provider capabilities".to_string(),
+                        ProviderRouteDiagnosticData::ProviderCapabilityUnavailable {
+                            layer: "provider".to_string(),
+                            required_capabilities: request.executor.required_capabilities.clone(),
+                        },
+                    ),
+                };
+                return ProviderRouteReadiness {
+                    ready: false,
+                    state: state.to_string(),
+                    reason,
+                    reset_at: None,
+                    classification: Some("capability".to_string()),
+                    retryable: false,
+                    remediation: None,
+                    cache_identity: None,
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: Some(diagnostic_data),
+                };
+            }
+            Err(reason) => {
+                return ProviderRouteReadiness {
+                    ready: false,
+                    state: "provider_identity_invalid".to_string(),
+                    reason,
+                    reset_at: None,
+                    classification: Some("identity".to_string()),
+                    retryable: false,
+                    remediation: None,
+                    cache_identity: None,
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: None,
+                }
+            }
+        };
+        let credential_env =
+            match super::secrets::provider_request_credential_env(&request, &provider) {
+                Ok(env) => env,
+                Err(error) => {
+                    return ProviderRouteReadiness {
+                        ready: false,
+                        state: "provider_credentials_unavailable".to_string(),
+                        reason: error.message,
+                        reset_at: None,
+                        classification: Some("auth_failure".to_string()),
+                        retryable: false,
+                        remediation: Some(
+                            "repair the selected provider credential source".to_string(),
+                        ),
+                        cache_identity: None,
+                        provider_identity: Some(provider.id.clone()),
+                        capacity_key: None,
+                        diagnostic_data: None,
+                    };
+                }
+            };
+        let request_capacity_key =
+            match provider_capacity_key_with_credentials(&request, &provider, &credential_env) {
+                Ok(key) => key,
+                Err(error) => {
+                    return ProviderRouteReadiness {
+                        ready: false,
+                        state: "provider_identity_invalid".to_string(),
+                        reason: error.message,
+                        reset_at: None,
+                        classification: Some("identity".to_string()),
+                        retryable: false,
+                        remediation: None,
+                        cache_identity: None,
+                        provider_identity: Some(provider.id.clone()),
+                        capacity_key: None,
+                        diagnostic_data: None,
+                    }
+                }
+            };
+        let mut readiness_cache = match self.evidence.lock() {
+            Ok(evidence) => evidence,
+            Err(_) => {
+                return ProviderRouteReadiness {
+                    ready: false,
+                    state: "provider_evidence_unavailable".to_string(),
+                    reason: "provider evidence lock was poisoned".to_string(),
+                    reset_at: None,
+                    classification: Some("evidence".to_string()),
+                    retryable: true,
+                    remediation: None,
+                    cache_identity: None,
+                    provider_identity: Some(provider.id.clone()),
+                    capacity_key: None,
+                    diagnostic_data: None,
+                }
+            }
+        }
+        .readiness
+        .clone();
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![provider.clone()],
+            diagnostics: Vec::new(),
+            version: None,
+        };
+        let evaluated = super::dispatchability::evaluate_request_dispatchability_with_credentials(
+            &catalog,
+            &request,
+            provider.clone(),
+            &credential_env,
+            &mut readiness_cache,
+        );
+        let verdict = evaluated.dispatchability;
+        let runtime_evidence = evaluated.runtime_evidence;
+        let capacity_key = runtime_evidence
+            .as_ref()
+            .filter(|evidence| {
+                evidence.cache_identity.is_some() || evidence.provider_identity.is_some()
+            })
+            .map(|evidence| reported_capacity_key(&request_capacity_key, evidence))
+            .unwrap_or_else(|| request_capacity_key.clone());
+        let now = chrono::Utc::now();
+        let mut evidence = match self.evidence.lock() {
+            Ok(evidence) => evidence,
+            Err(_) => {
+                return ProviderRouteReadiness {
+                    ready: false,
+                    state: "provider_evidence_unavailable".to_string(),
+                    reason: "provider evidence lock was poisoned".to_string(),
+                    reset_at: None,
+                    classification: Some("evidence".to_string()),
+                    retryable: true,
+                    remediation: None,
+                    cache_identity: None,
+                    provider_identity: Some(provider.id.clone()),
+                    capacity_key: None,
+                    diagnostic_data: None,
+                }
+            }
+        };
+        if let Some(reset_at) = evidence.usage_caps.active(&capacity_key, now) {
+            return ProviderRouteReadiness {
+                ready: false,
+                state: "usage_capped".to_string(),
+                reason: "known provider usage cap is active".to_string(),
+                reset_at: Some(reset_at),
+                classification: Some("capacity".to_string()),
+                retryable: true,
+                remediation: None,
+                cache_identity: Some(capacity_key.clone()),
+                provider_identity: Some(provider.id.clone()),
+                capacity_key: Some(capacity_key.clone()),
+                diagnostic_data: None,
+            };
+        }
+
+        if (!verdict.ready || !verdict.checks.credentials.verified)
+            && evidence
+                .account_blocks
+                .get(&capacity_key)
+                .is_some_and(|block| block.expires_at > now)
+        {
+            return ProviderRouteReadiness {
+                ready: false,
+                state: "provider_account_blocked".to_string(),
+                reason: "provider account was recently rejected for this exact credential/config identity".to_string(),
+                reset_at: evidence.account_blocks.get(&capacity_key).map(|block| block.expires_at),
+                classification: Some("account".to_string()),
+                retryable: true,
+                remediation: Some("switch provider account credentials or wait for the bounded account block to expire".to_string()),
+                cache_identity: Some(capacity_key.clone()),
+                provider_identity: Some(provider.id.clone()),
+                capacity_key: Some(capacity_key.clone()),
+                diagnostic_data: None,
+            };
+        }
+        evidence.account_blocks.remove(&capacity_key);
+        if verdict.ready {
+            evidence
+                .launch_credentials
+                .entry(capacity_key.clone())
+                .or_default()
+                .push_back(BoundProviderCredentials {
+                    env: credential_env,
+                });
+        }
+        drop(evidence);
+        ProviderRouteReadiness {
+            ready: verdict.ready,
+            state: verdict.state.to_string(),
+            reason: verdict.checks.runtime.reason.unwrap_or(verdict.reason),
+            reset_at: None,
+            classification: runtime_evidence
+                .as_ref()
+                .map(|evidence| evidence.classification.clone()),
+            retryable: runtime_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.retryable),
+            remediation: runtime_evidence
+                .as_ref()
+                .and_then(|evidence| evidence.remediation.clone()),
+            cache_identity: runtime_evidence
+                .as_ref()
+                .and_then(|evidence| evidence.cache_identity.clone()),
+            provider_identity: runtime_evidence
+                .and_then(|evidence| evidence.provider_identity)
+                .or_else(|| Some(provider.id)),
+            capacity_key: Some(capacity_key),
+            diagnostic_data: None,
+        }
+    }
+
+    fn record_provider_outcome(
+        &self,
+        _request: &AgentTaskRequest,
+        capacity_key: &str,
+        outcome: &AgentTaskOutcome,
+    ) {
+        let Ok(mut evidence) = self.evidence.lock() else {
+            return;
+        };
+        let capacity_key = capacity_key.to_string();
+        if let Some(reset_at) = reset_at_from_outcome(outcome) {
+            evidence.usage_caps.record(capacity_key.clone(), reset_at);
+        }
+        {
+            if matches!(
+                outcome.failure_classification,
+                Some(
+                    AgentTaskFailureClassification::ProviderAccountBlocked
+                        | AgentTaskFailureClassification::ProviderQuotaExhausted
+                        | AgentTaskFailureClassification::ProviderBillingBlocked
+                        | AgentTaskFailureClassification::ProviderCredentialsExhausted
+                )
+            ) {
+                let now = chrono::Utc::now();
+                evidence
+                    .account_blocks
+                    .retain(|_, block| block.expires_at > now);
+                evidence.account_blocks.insert(
+                    capacity_key,
+                    AccountBlockEvidence {
+                        expires_at: now + PROVIDER_ACCOUNT_BLOCK_TTL,
+                    },
+                );
+            } else if matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+            ) {
+                evidence.account_blocks.remove(&capacity_key);
+            }
+        }
+    }
+
     fn execute(
         &self,
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
+        let request = request_with_effective_provider_contract(&request, self.providers());
         let materialized = match context.lifecycle_store.as_ref() {
             Some(store) => {
                 materialize_executor_request_at_root(request, &context, store.artifact_root())
@@ -43,6 +616,54 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         if is_repo_local_gate_request(&request) {
             return run_repo_local_gate_task(&request);
         }
+        let bound_credentials = self.evidence.lock().ok().and_then(|mut evidence| {
+            let key = context.provider_capacity_key.as_deref()?;
+            let bound = evidence.launch_credentials.get_mut(key)?.pop_front();
+            if evidence
+                .launch_credentials
+                .get(key)
+                .is_some_and(VecDeque::is_empty)
+            {
+                evidence.launch_credentials.remove(key);
+            }
+            bound
+        });
+        let launch_credentials = if let Some(capacity_key) =
+            context.provider_capacity_key.as_deref()
+        {
+            let Some(bound) = bound_credentials else {
+                return failure_outcome(
+                    &request,
+                    AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::Provider,
+                    "agent_task.provider_credential_binding_missing",
+                    "provider execution lost the exact credentials bound during readiness"
+                        .to_string(),
+                    json!({
+                        "capacity_key": capacity_key,
+                        "remediation": "retry admission so readiness and execution bind one credential snapshot"
+                    }),
+                );
+            };
+            Some(bound.env)
+        } else {
+            effective_provider_for_request(&request.request, self.providers())
+                .ok()
+                .flatten()
+                .and_then(|provider| {
+                    super::secrets::provider_request_credential_env(&request.request, &provider)
+                        .ok()
+                })
+        };
+        if let Some(outcome) = production_execution_preflight(
+            &request.request,
+            self.providers(),
+            self.diagnostics(),
+            &self.evidence,
+            launch_credentials.as_deref(),
+        ) {
+            return outcome;
+        }
 
         let requirements = match request.capability_requirements() {
             Ok(requirements) => requirements,
@@ -57,7 +678,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 )
             }
         };
-        let provider = match resolved_provider_from_request(&request) {
+        let provider = match effective_provider_for_request(&request.request, self.providers()) {
             Ok(Some(provider)) => provider,
             Ok(None) => match resolve_provider_for_backend(
                 &self
@@ -230,7 +851,12 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 &ready_tools,
             ));
 
-        run_materialized_provider_command(&request, &provider, &context)
+        run_materialized_provider_command_with_credentials(
+            &request,
+            &provider,
+            &context,
+            launch_credentials.as_deref(),
+        )
     }
 }
 
@@ -263,37 +889,6 @@ fn bind_workspace_permission_root(
             "workspace_permission_root".to_string(),
             Value::String(root.to_string()),
         );
-}
-
-fn resolved_provider_from_request(
-    request: &AgentTaskExecutorRequest,
-) -> std::result::Result<Option<AgentTaskExecutorProvider>, String> {
-    let Some(identity) = request
-        .request
-        .metadata
-        .get("resolved_runtime_identity")
-        .filter(|identity| !identity.is_null())
-    else {
-        return Ok(None);
-    };
-    let identity: homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity =
-        serde_json::from_value(identity.clone())
-            .map_err(|error| format!("invalid controller runtime identity: {error}"))?;
-    if !homeboy_core::agent_runtime_manifest::is_immutable_revision(&identity.source_revision) {
-        return Err(format!(
-            "controller runtime identity for provider '{}' has a non-immutable source revision '{}'",
-            identity.provider_id, identity.source_revision
-        ));
-    }
-    let provider: AgentTaskExecutorProvider = serde_json::from_value(identity.provider)
-        .map_err(|error| format!("invalid controller-selected provider: {error}"))?;
-    if provider.id != identity.provider_id || provider.backend != request.request.executor.backend {
-        return Err(format!(
-            "controller runtime identity does not match requested provider backend '{}' and id '{}'",
-            request.request.executor.backend, identity.provider_id
-        ));
-    }
-    Ok(Some(provider))
 }
 
 #[expect(
@@ -461,6 +1056,268 @@ mod tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
     };
 
+    fn readiness_request(model: &str) -> AgentTaskRequest {
+        AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "readiness-route".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: Some(model.to_string()),
+                config: Value::Null,
+            },
+            instructions: "run".to_string(),
+            inputs: Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
+            metadata: Value::Null,
+        }
+    }
+
+    fn readiness_executor() -> ExtensionProviderAgentTaskExecutor {
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![serde_json::from_value(
+            json!({ "id": "test.provider", "backend": "test" }),
+        )
+        .expect("provider")])
+    }
+
+    #[test]
+    fn capacity_bound_execution_fails_closed_without_bound_credentials() {
+        let executor = readiness_executor();
+        let request = readiness_request("bound-model");
+        let outcome = executor.execute(
+            request,
+            AgentTaskExecutionContext {
+                plan_id: "bound-plan".to_string(),
+                run_id: None,
+                attempt: 1,
+                cancellation: Default::default(),
+                lifecycle_store: None,
+                provider_capacity_key: Some("missing-binding".to_string()),
+            },
+        );
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(
+            outcome.diagnostics[0].class,
+            "agent_task.provider_credential_binding_missing"
+        );
+    }
+
+    #[test]
+    fn provider_capacity_evidence_is_shared_across_plans_and_scoped_to_the_model_identity() {
+        let executor = readiness_executor();
+        let blocked = readiness_request("blocked-model");
+        let mut blocked_outcome = AgentTaskOutcome {
+            task_id: blocked.task_id.clone(),
+            status: AgentTaskOutcomeStatus::ProviderError,
+            failure_classification: Some(AgentTaskFailureClassification::ProviderAccountBlocked),
+            ..Default::default()
+        };
+        let capacity_key = executor.provider_route_capacity_key(&blocked);
+        executor.record_provider_outcome(&blocked, &capacity_key, &blocked_outcome);
+
+        assert_eq!(
+            executor.provider_route_readiness(&blocked).state,
+            "provider_account_blocked"
+        );
+        assert!(
+            executor
+                .provider_route_readiness(&readiness_request("changed-model"))
+                .ready,
+            "a changed model/config identity must not inherit an account block"
+        );
+
+        let capped = readiness_request("capped-model");
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        blocked_outcome.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
+        blocked_outcome.diagnostics = vec![AgentTaskDiagnostic {
+            class: AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS.to_string(),
+            message: "usage cap".to_string(),
+            data: json!({ "reset_at": reset_at.to_rfc3339() }),
+        }];
+        let capacity_key = executor.provider_route_capacity_key(&capped);
+        executor.record_provider_outcome(&capped, &capacity_key, &blocked_outcome);
+
+        let separately_constructed_for_later_plan = readiness_executor();
+        let readiness = separately_constructed_for_later_plan.provider_route_readiness(&capped);
+        assert_eq!(readiness.state, "usage_capped");
+        assert_eq!(readiness.reset_at, Some(reset_at));
+
+        let provider = effective_provider_for_request(&blocked, executor.providers())
+            .expect("provider resolution")
+            .expect("provider");
+        let key = provider_capacity_key(&blocked, &provider).expect("capacity key");
+        executor
+            .evidence
+            .lock()
+            .expect("evidence")
+            .account_blocks
+            .get_mut(&key)
+            .expect("account block")
+            .expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        assert!(
+            readiness_executor()
+                .provider_route_readiness(&blocked)
+                .ready,
+            "expired negative evidence must re-admit a recovered account"
+        );
+    }
+
+    #[test]
+    fn account_block_registry_preserves_more_than_sixty_four_active_bindings() {
+        let executor = readiness_executor();
+        for index in 0..65 {
+            let request = readiness_request(&format!("model-{index}"));
+            let key = executor.provider_route_capacity_key(&request);
+            executor.record_provider_outcome(
+                &request,
+                &key,
+                &AgentTaskOutcome {
+                    task_id: request.task_id.clone(),
+                    status: AgentTaskOutcomeStatus::ProviderError,
+                    failure_classification: Some(
+                        AgentTaskFailureClassification::ProviderAccountBlocked,
+                    ),
+                    ..Default::default()
+                },
+            );
+        }
+
+        assert_eq!(
+            executor
+                .evidence
+                .lock()
+                .expect("provider evidence")
+                .account_blocks
+                .len(),
+            65
+        );
+    }
+
+    #[test]
+    fn provider_capacity_identity_changes_when_the_reported_account_credential_changes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credential = root.path().join("account.json");
+        std::fs::write(&credential, r#"{"token":"account-one"}"#).expect("first credential");
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "conditional-account": {
+                    "secret_env": ["TEST_ACCOUNT_TOKEN"],
+                    "secret_env_sources": {
+                        "TEST_ACCOUNT_TOKEN": {
+                            "source": "json-file",
+                            "path": credential,
+                            "field": "token"
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("provider");
+        let mut request = readiness_request("model");
+        request.executor.config = json!({"provider":"conditional-account"});
+        let first = provider_capacity_key(&request, &provider).expect("first capacity key");
+        std::fs::write(&credential, r#"{"token":"account-two"}"#).expect("rotated credential");
+        let second = provider_capacity_key(&request, &provider).expect("second capacity key");
+        assert_ne!(first, second);
+        assert!(!first.contains("account-one"));
+        assert!(!second.contains("account-two"));
+    }
+
+    #[test]
+    fn provider_reported_account_switch_does_not_inherit_capacity_evidence() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let account = root.path().join("account");
+        let script = root.path().join("readiness.js");
+        std::fs::write(&account, "account-a").expect("account A");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const account=fs.readFileSync(process.argv[2],'utf8').trim();process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'capacity-'+account,identity:{account}}));",
+        )
+        .expect("readiness script");
+        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.provider",
+            "backend": "test"
+        }))
+        .expect("provider");
+        provider.readiness_invocation = Some(
+            homeboy_core::command_invocation::CommandInvocation {
+                argv: vec![
+                    "node".to_string(),
+                    script.display().to_string(),
+                    account.display().to_string(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+        );
+        let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
+        let request = readiness_request("model");
+        let readiness = executor.provider_route_readiness(&request);
+        assert!(readiness.ready);
+        let capacity_key = readiness.capacity_key.expect("reported capacity binding");
+
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        executor.record_provider_outcome(
+            &request,
+            &capacity_key,
+            &AgentTaskOutcome {
+                task_id: request.task_id.clone(),
+                status: AgentTaskOutcomeStatus::ProviderError,
+                failure_classification: Some(AgentTaskFailureClassification::RateLimited),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS.to_string(),
+                    message: "usage cap".to_string(),
+                    data: json!({"reset_at": reset_at.to_rfc3339()}),
+                }],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            executor.provider_route_readiness(&request).state,
+            "usage_capped"
+        );
+
+        std::fs::write(&account, "account-b").expect("account B");
+        executor
+            .evidence
+            .lock()
+            .expect("evidence")
+            .readiness
+            .expire_all();
+        assert!(
+            executor.provider_route_readiness(&request).ready,
+            "provider-reported account B must not inherit account A's cap"
+        );
+
+        std::fs::write(&account, "account-a").expect("restore account A");
+        executor
+            .evidence
+            .lock()
+            .expect("evidence")
+            .readiness
+            .expire_all();
+        assert_eq!(
+            executor.provider_route_readiness(&request).state,
+            "usage_capped"
+        );
+    }
+
     #[test]
     fn materialization_fails_before_execution_when_runner_root_is_not_a_directory() {
         let blocked_root = tempfile::NamedTempFile::new().expect("blocked artifact root");
@@ -497,6 +1354,7 @@ mod tests {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         };
 
         let (_, path, error) = materialize_executor_request_at_root(

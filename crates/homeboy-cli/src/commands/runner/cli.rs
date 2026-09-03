@@ -438,6 +438,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         hydrate_deps: bool,
 
+        /// Bound --sync-workspace snapshot preparation and transfer before command handoff. Defaults to 240s; does not limit dependency hydration or the runner command itself.
+        #[arg(long = "workspace-sync-timeout", default_value = "240s", value_parser = crate::commands::utils::watch::parse_duration_arg, value_name = "DURATION")]
+        workspace_sync_timeout: std::time::Duration,
+
         /// Project ID used for runner trust policy checks
         #[arg(long)]
         project: Option<String>,
@@ -797,6 +801,33 @@ mod tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
+
+    #[test]
+    fn runner_exec_workspace_sync_timeout_defaults_and_overrides() {
+        for (extra, expected) in [
+            (Vec::<&str>::new(), std::time::Duration::from_secs(240)),
+            (
+                vec!["--workspace-sync-timeout", "7s"],
+                std::time::Duration::from_secs(7),
+            ),
+        ] {
+            let mut argv = vec!["homeboy", "runner", "exec", "lab"];
+            argv.extend(extra);
+            argv.extend(["--", "pwd"]);
+            let cli = Cli::try_parse_from(argv).expect("parse runner exec timeout");
+            let Commands::Runner(RunnerArgs {
+                command:
+                    RunnerCommand::Exec {
+                        workspace_sync_timeout,
+                        ..
+                    },
+            }) = cli.command
+            else {
+                panic!("expected runner exec command");
+            };
+            assert_eq!(workspace_sync_timeout, expected);
+        }
+    }
 
     #[test]
     fn preflight_accepts_only_the_request_json_flag() {

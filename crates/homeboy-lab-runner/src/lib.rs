@@ -350,7 +350,7 @@ pub use connection::{
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
     reconcile_status_with_outcome, reconcile_terminal_jobs, reconnect_job_log_owner,
     reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, statuses_indexed, submit_reverse_broker_job,
+    runner_artifact_content, status, statuses, statuses_indexed, submit_runner_api_request,
     PeerSessionMaintenanceReport,
 };
 pub(crate) use connection::{
@@ -374,10 +374,11 @@ pub use evidence::{
 };
 pub(crate) use execution::exec_with_status_snapshot;
 pub use execution::{
-    daemon_api_get, daemon_api_post, exec, finish_scheduled_terminal_runner_exec_recovery,
-    promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
-    promote_runner_exec_artifacts_in_store, promote_runner_exec_summaries_in_store,
-    promoted_output, reconcile_runner_generation_after_evidence,
+    daemon_api_get, daemon_api_post, exec, exec_request,
+    finish_scheduled_terminal_runner_exec_recovery, promote_runner_exec_artifact_dirs,
+    promote_runner_exec_artifact_dirs_in_store, promote_runner_exec_artifacts_in_store,
+    promote_runner_exec_summaries_in_store, promoted_output,
+    reconcile_runner_generation_after_evidence,
     record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
@@ -385,7 +386,8 @@ pub use execution::{
     runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
     runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics,
     RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
-    RunnerExecRecoveryChildSchedule, RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
+    RunnerExecRecoveryChildSchedule, RunnerExecRecoveryDiagnostic, RunnerExecRequest,
+    RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;
@@ -461,8 +463,8 @@ pub use workspace::reap_run_workspace;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,
     prune_workspaces, pull_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
-    sync_workspace, update_workspace, verify_workspace_ref_hydration_source, workspace_snapshots,
-    ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
+    sync_workspace, sync_workspace_before, update_workspace, verify_workspace_ref_hydration_source,
+    workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
