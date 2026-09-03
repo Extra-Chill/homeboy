@@ -1090,7 +1090,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
             .collect::<homeboy::core::Result<Vec<_>>>()?,
     };
     review_dossier.apply_overrides()?;
-    let review_profile = resolve_review_profile(&path)?;
+    let review_profile = resolve_review_profile(args.component.as_deref(), &path)?;
     let options = AgentTaskPrFinalizationOptions {
         path,
         run_id,
@@ -5604,7 +5604,7 @@ mod tests {
 
     #[test]
     fn manual_preflight_rejects_dirty_and_unpushed_candidates_then_recovers_idempotently() {
-        homeboy::test_support::with_isolated_home(|_| {
+        homeboy::test_support::with_isolated_home(|home| {
             let root = tempfile::tempdir().expect("fixture root");
             let remote = root.path().join("origin.git");
             let checkout = root.path().join("checkout");
@@ -5632,6 +5632,13 @@ mod tests {
                 r#"{"id":"manual-finalization","remote_url":"https://github.com/example/manual-finalization.git"}"#,
             )
             .expect("write portable component config");
+            let nested_component = checkout.join("components/nested");
+            std::fs::create_dir_all(&nested_component).expect("create nested component");
+            std::fs::write(
+                nested_component.join("homeboy.json"),
+                r#"{"id":"nested-component"}"#,
+            )
+            .expect("write nested component config");
             std::fs::write(checkout.join("base.txt"), "base\n").expect("write base");
             run_git(&checkout, &["add", "."]);
             run_git(&checkout, &["commit", "-m", "base"]);
@@ -5942,6 +5949,19 @@ esac
             std::env::set_var("HOMEBOY_FAKE_GIT_REMOTE", &remote);
             std::env::set_var("GIT_SSH_COMMAND", &ssh);
 
+            let registrations = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&registrations).expect("create component registrations");
+            for (id, local_path) in [
+                ("manual-finalization", checkout.as_path()),
+                ("nested-component", nested_component.as_path()),
+            ] {
+                std::fs::write(
+                    registrations.join(format!("{id}.json")),
+                    serde_json::json!({ "local_path": local_path }).to_string(),
+                )
+                .expect("write component registration");
+            }
+
             let preflight = dispatch_agent_task(&[
                 "homeboy",
                 "agent-task",
@@ -5952,6 +5972,8 @@ esac
                 "manual-cli-11974",
                 "--path",
                 checkout.to_str().expect("checkout path"),
+                "--component",
+                "manual-finalization",
                 "--base",
                 "main",
                 "--verified-base-sha",

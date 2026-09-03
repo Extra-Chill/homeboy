@@ -407,6 +407,12 @@ and digest, and exact commands remain bound to the current candidate. The report
 labels these gates as `verified_inherited`; any stale, red, or malformed receipt
 requires fresh verification instead of silently accepting it.
 
+When multiple registered components share the candidate repository, pass
+`--component <component-id>` with `--manual-finalization` to select the component
+whose review profile applies. Homeboy verifies that the explicit component is
+registered and matches the candidate path. Recovery derives component identity
+from its durable record and does not accept this selector.
+
 Fresh manual finalization can execute repeated candidate-bound verification
 commands and derive separate gate results plus reviewer evidence from them:
 

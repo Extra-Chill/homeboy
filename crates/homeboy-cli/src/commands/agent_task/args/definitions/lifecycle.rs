@@ -165,7 +165,7 @@ pub struct RuntimeValidateArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use crate::{
         cli_surface::{Cli, Commands},
@@ -283,6 +283,56 @@ mod tests {
                 "recovery must reject {flag} instead of silently discarding it"
             );
         }
+    }
+
+    #[test]
+    fn manual_finalization_parses_component_selector_and_recovery_rejects_it() {
+        let help = Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("finalize-pr")
+            .expect("finalize-pr command")
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--component <COMPONENT_ID>"), "{help}");
+        assert!(help.contains("shared-repository worktree"), "{help}");
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "finalize-pr",
+            "--manual-finalization",
+            "--run-id",
+            "manual-component",
+            "--path",
+            "/tmp/manual-component",
+            "--component",
+            "nested-component",
+            "--title",
+            "Manual component",
+            "--commit-message",
+            "record component",
+        ])
+        .expect("manual finalization component parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+            panic!("expected finalize-pr command");
+        };
+        assert_eq!(args.component.as_deref(), Some("nested-component"));
+
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "finalize-pr",
+            "--recover",
+            "cook-a",
+            "--component",
+            "nested-component",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -684,6 +734,9 @@ pub struct FinalizePrArgs {
     /// Worktree path containing the manual finalization candidate.
     #[arg(long, value_name = "PATH", required_unless_present = "recover")]
     pub path: Option<String>,
+    /// Registered component identity for disambiguating a shared-repository worktree.
+    #[arg(long, value_name = "COMPONENT_ID", conflicts_with = "recover")]
+    pub component: Option<String>,
     /// Base branch for the manual finalization candidate.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
