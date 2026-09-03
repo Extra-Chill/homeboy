@@ -9,7 +9,7 @@ use homeboy_extension_contract::api::v1::{
 };
 
 use super::super::CmdResult;
-use super::exec::exec_with_hydration;
+use super::exec::{execute, RunnerExecInput};
 
 pub(super) fn recipe_run(
     runner_id: &str,
@@ -54,31 +54,11 @@ pub(super) fn recipe_run(
         }
     };
     let command = plan.command;
-    let (output, exit_code) = exec_with_hydration(
-        runner_id,
-        None,
-        Some(sync_workspace),
-        None,
-        false,
-        None,
-        false,
-        false,
-        Vec::new(),
-        None,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        false,
-        Some(run_id.clone()),
-        Vec::new(),
-        vec![artifacts],
-        Vec::new(),
-        false,
-        false,
-        command.clone(),
-        Vec::new(),
-    )?;
+    let mut input = RunnerExecInput::new(runner_id, command.clone());
+    input.sync_workspace = Some(sync_workspace);
+    input.run_id = Some(run_id.clone());
+    input.artifact_dir_outputs = vec![artifacts];
+    let (output, exit_code) = execute(input)?;
     let terminal_json = serde_json::from_str(&output.stdout).unwrap_or_else(|_| {
         serde_json::json!({ "exit_code": output.exit_code, "stdout": output.stdout, "stderr": output.stderr })
     });

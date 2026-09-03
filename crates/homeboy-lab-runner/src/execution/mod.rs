@@ -119,6 +119,9 @@ pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
 pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
 
+mod request;
+pub use request::{exec_request, RunnerExecRequest};
+
 // Public surface re-exported by the parent `runner` module. These mirror the
 // pre-split `pub` items so external callers keep referencing them unchanged.
 pub use artifact_promotion::{
