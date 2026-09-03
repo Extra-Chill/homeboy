@@ -1288,3 +1288,63 @@ fn an_interactive_session_carrying_a_command_requests_a_terminal() {
         "ssh already allocates a tty when no command is given: {bare:?}"
     );
 }
+
+/// A remote command is embedded once in the owned-execution wrapper.
+///
+/// The wrapper previously inlined the payload separately in its `setsid` and
+/// Perl branches, so every remote command was doubled inside one `exec` argv.
+/// Large payloads (capability probes composed from runner env plus required
+/// tool, command, and capability entries) then failed with `Argument list too
+/// long` before either branch ran, which stalled Lab handoff for every Cook.
+/// See #14304, and #8855, #8951, #9009, #10492 for the same limit elsewhere.
+#[test]
+fn owned_remote_wrapper_embeds_its_payload_once() {
+    let payload_body = "x".repeat(64 * 1024);
+    let command = format!(
+        "printf '%s' {}",
+        crate::engine::shell::quote_arg(&payload_body)
+    );
+    let wrapped = wrap_owned_remote_command(&command);
+
+    let occurrences = wrapped.matches(&payload_body).count();
+    assert_eq!(
+        occurrences, 1,
+        "wrapper must embed the remote payload once, found {occurrences} copies"
+    );
+
+    // The exec footprint is what actually hit the limit, so bound it against
+    // the payload rather than trusting the copy count alone.
+    let overhead = wrapped.len().saturating_sub(command.len());
+    assert!(
+        overhead < command.len(),
+        "wrapper overhead {overhead} must stay below the payload size {}",
+        command.len()
+    );
+}
+
+/// The de-duplicated wrapper still executes the payload it was given.
+#[test]
+fn owned_remote_wrapper_executes_a_large_payload() {
+    let filler = "#".repeat(64 * 1024);
+    let command = format!("{filler}\nprintf '%s' homeboy-14304-marker");
+    let mut process = Command::new("sh");
+    process
+        .args(["-c", &wrap_owned_remote_command(&command)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::server::process_cleanup::configure_process_group_cleanup(&mut process);
+
+    let output = execute_command_with_stdin_source_timeout(
+        process,
+        StdinSource::Reader(Box::new(Cursor::new(Vec::new()))),
+        Duration::from_secs(30),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert!(
+        output.stdout.contains("homeboy-14304-marker"),
+        "expected the large payload to execute, got stdout={:?} stderr={:?}",
+        output.stdout,
+        output.stderr
+    );
+}
