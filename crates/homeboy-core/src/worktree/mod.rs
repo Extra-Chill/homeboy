@@ -846,8 +846,10 @@ pub fn planned_create_path(repo: &str, branch: &str, from: &str) -> Result<Strin
         path_override: None,
         project: None,
         capability: None,
-        allow_synthetic: false,
-        accept_bare_directory: false,
+        // Preview must resolve repository paths exactly as create does. Otherwise
+        // Cook can provision an unregistered checkout but cannot preview it.
+        allow_synthetic: true,
+        accept_bare_directory: true,
         ..TargetSpec::default()
     })?;
     let source_checkout = queue_ops::source_checkout_for_worktree(&target)?;

@@ -566,6 +566,49 @@ fn repo_only_cook_without_registered_component_persists_requested_repository_exp
 }
 
 #[test]
+fn repo_only_cook_preview_preserves_an_unregistered_repository_path_for_native_creation() {
+    with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("repository root");
+        let checkout = root.path().join("repository-fixture");
+        std::fs::create_dir(&checkout).expect("repository checkout");
+        init_runtime_component_checkout(&checkout);
+        let repository_path = checkout.display().to_string();
+        let repository_name = checkout
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("repository basename");
+
+        let mut args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            repository_path.clone(),
+            "--task-url".to_string(),
+            "https://github.com/example/repository-fixture/issues/14117".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+        super::super::run::bind_cook_preview_lifecycle(&mut args);
+        let (args, preview) = super::super::run::resolve_cook_preview_destination(args)
+            .expect("preview unregistered repository path");
+
+        assert_eq!(
+            args.dispatch.repo.as_deref(),
+            Some(repository_name.to_ascii_lowercase().as_str())
+        );
+        assert_eq!(
+            args.repository_identity.as_ref().expect("identity")["repository_path"],
+            repository_path
+        );
+        assert_eq!(preview["action"], "planned_create");
+        assert_eq!(preview["handle"], args.to_worktree.expect("derived handle"));
+        assert_eq!(preview["intent"]["repo"], repository_path);
+    });
+}
+
+#[test]
 fn cook_preserves_repository_and_component_identity_for_every_destination_form() {
     with_isolated_home(|_| {
         let checkout = tempfile::tempdir().expect("repository checkout");

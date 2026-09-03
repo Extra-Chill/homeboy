@@ -844,7 +844,7 @@ pub(crate) fn rewrite_cook_identity_replay_argv(
     }
 }
 
-fn bind_cook_preview_lifecycle(args: &mut AgentTaskCookArgs) {
+pub(super) fn bind_cook_preview_lifecycle(args: &mut AgentTaskCookArgs) {
     let requested_cook_id = args.dispatch.run_id.clone();
     let owner_run_ref = args.attempt_run_id.clone().unwrap_or_else(|| {
         requested_cook_id.as_deref().map_or_else(
@@ -3519,10 +3519,18 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
 fn cook_provision_repository(args: &AgentTaskCookArgs) -> Option<String> {
     args.repository_identity
         .as_ref()
-        .and_then(|identity| identity.get("repository_name"))
+        .and_then(|identity| identity.get("repository_path"))
         .and_then(Value::as_str)
         .filter(|repository| !repository.trim().is_empty())
         .map(str::to_string)
+        .or_else(|| {
+            args.repository_identity
+                .as_ref()
+                .and_then(|identity| identity.get("repository_name"))
+                .and_then(Value::as_str)
+                .filter(|repository| !repository.trim().is_empty())
+                .map(str::to_string)
+        })
         .or_else(|| args.dispatch.repo.clone())
 }
 
@@ -3755,7 +3763,7 @@ pub(crate) fn corrected_cook_base_replay_argv(
 /// declared read-only plan command. It never invokes provider mutation or task
 /// execution, and reports remote destinations as a typed materialization
 /// requirement before filesystem-dependent planning.
-fn resolve_cook_preview_destination(
+pub(super) fn resolve_cook_preview_destination(
     args: AgentTaskCookArgs,
 ) -> homeboy::core::Result<(AgentTaskCookArgs, Value)> {
     let mut args = resolve_cook_destination(args)?;
@@ -4087,6 +4095,11 @@ fn bind_cook_repository_identity_from_config(
     args.dispatch.repo = Some(repository_name);
     args.component =
         homeboy::core::component::registered_by_id(&component_id)?.map(|component| component.id);
+    let repository_path = (args.component.is_none() && Path::new(&repo).is_dir()).then_some(repo);
+    let mut identity = identity;
+    if let Some(repository_path) = repository_path {
+        identity["repository_path"] = Value::String(repository_path);
+    }
     args.repository_identity = Some(identity);
     Ok(())
 }

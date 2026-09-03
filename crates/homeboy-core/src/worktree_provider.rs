@@ -492,7 +492,15 @@ fn handle_mismatch_error(record_handle: &str, requested_handle: &str) -> Error {
 }
 
 fn native_provision_intent(intent: &WorktreeProvisionIntent) -> Result<WorktreeProvisionIntent> {
-    let expected = worktree::handle_for_branch(&intent.repo, &intent.head);
+    let repo = Path::new(&intent.repo);
+    let repository = repo
+        .is_dir()
+        .then(|| repo.file_name())
+        .flatten()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&intent.repo);
+    let expected = worktree::handle_for_branch(repository, &intent.head);
     if intent.handle != expected {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
