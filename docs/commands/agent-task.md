@@ -1397,27 +1397,6 @@ homeboy agent-task cook \
 External workspace managers should resolve their own handles to local paths and
 call cook with `--cwd <resolved-path>`.
 
-When a configured worktree provider cannot resolve or create the checkout for a
-repair to its own repository, declare that ownership under
-`settings.worktree_provider_self_repair.<provider-id>.repository`. The failure
-then includes typed replay argv for the explicit bootstrap route:
-
-```bash
-homeboy agent-task cook \
-  --repo workspace-service-component \
-  --task-url https://tracker.example/issues/123 \
-  --cwd /path/to/existing-clean-linked-worktree \
-  --worktree-provider-self-repair workspace-service \
-  --verify "homeboy review test <component>" \
-  --prompt @task.txt
-```
-
-This route never invokes the failed workspace provider. It validates that the
-provider declares the requested repository, pins the explicit checkout branch,
-and runs the ordinary Cook provider, deterministic gates, review, and PR
-finalization. The durable `self_repair_bootstrap` provenance remains marked for
-normal provider lifecycle reconciliation after the repair ships.
-
 When `agent-task cook` is Lab-offloaded with a
 patch-producing provider, `--cwd` must point at a clean git checkout with
 `remote.origin.url` configured. Homeboy uses that contract to materialize a real

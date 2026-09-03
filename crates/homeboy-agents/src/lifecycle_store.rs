@@ -404,14 +404,15 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        let aggregate = self.read_aggregate(&record.run_id)?;
-        let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("serialize agent-task aggregate {}", record.run_id)),
-            )
+        let path = self.aggregate_path(&record.run_id);
+        let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
+        serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(path.display().to_string()))
         })?;
-        Ok((raw, self.aggregate_path(&record.run_id)))
+        let raw = String::from_utf8(raw).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(path.display().to_string()))
+        })?;
+        Ok((raw, path))
     }
 
     pub fn operation_claim(
@@ -1270,6 +1271,16 @@ pub(super) fn read_aggregate_bounded_in_store(
     run_id: &str,
 ) -> Result<AgentTaskAggregate> {
     let path = store.aggregate_path(run_id);
+    let raw = read_aggregate_bytes_bounded_in_store(store, run_id)?;
+    serde_json::from_slice(&raw)
+        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+}
+
+fn read_aggregate_bytes_bounded_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Vec<u8>> {
+    let path = store.aggregate_path(run_id);
     let metadata = fs::metadata(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     if metadata.len() > DURABLE_AGGREGATE_MAX_BYTES {
@@ -1302,8 +1313,7 @@ pub(super) fn read_aggregate_bounded_in_store(
         error.details = json!({ "reason_code": "durable_read.oversized" });
         return Err(error);
     }
-    serde_json::from_slice(&raw)
-        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+    Ok(raw)
 }
 
 pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {

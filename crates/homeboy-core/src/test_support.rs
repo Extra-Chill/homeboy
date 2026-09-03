@@ -2255,6 +2255,38 @@ fn handle_reverse_broker_request(
         return ok(json!({ "result": store.lookup_remote_runner_submission(submission_key) }));
     }
     if request.method == "POST" && request.path == "/runner/jobs/claim" {
+        if let Ok(request) =
+            serde_json::from_value::<homeboy_runner_contract::RunnerApiClaimRequest>(request.body)
+        {
+            let claim = store
+                .claim_remote_runner_job_with_protocols(
+                    &request.runner_id,
+                    request.project_id.as_deref(),
+                    request.lease_ms.unwrap_or(30_000),
+                    request.concurrency_limit,
+                    crate::api_jobs::RemoteRunnerClaimProtocols {
+                        execution: request.execution_protocol.as_ref(),
+                        workspace_claim: request.workspace_claim_protocol.as_ref(),
+                        workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+                    },
+                )
+                .expect("claim canonical broker job");
+            let outcome = match claim {
+                Some(claim) => homeboy_runner_contract::RunnerApiClaimOutcome::Claimed {
+                    claim: claim
+                        .runner_api_claimed_execution()
+                        .expect("project canonical broker claim"),
+                },
+                None => homeboy_runner_contract::RunnerApiClaimOutcome::Empty,
+            };
+            return ok(json!({
+                "response": homeboy_runner_contract::RunnerApiClaimResponse {
+                    schema: homeboy_runner_contract::RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
+                    api_version: homeboy_runner_contract::RUNNER_API_V1,
+                    outcome,
+                },
+            }));
+        }
         let claim = store
             .claim_remote_runner_job(runner_id, None, 30_000, None)
             .expect("claim broker job");

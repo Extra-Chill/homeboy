@@ -13,7 +13,7 @@ use homeboy_core::api_jobs::JobStore;
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
@@ -309,6 +309,267 @@ fn unmaterialized_cook_admission_is_typed_secret_free_and_idempotent() {
     assert!(replay.metadata["unmaterialized_cook_admission"]["commands"]
         .get("run")
         .is_none());
+}
+
+#[test]
+fn unmaterialized_admission_initial_submission_includes_retry_lineage_metadata() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let source_run_id = "unmaterialized-lineage-source";
+    let binding = json!({
+        "schema": "homeboy/unmaterialized-cook-binding/v1",
+        "request_ref": "sha256:request",
+        "worktree_ref": "repo@branch",
+        "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+    });
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        binding.clone(),
+        "queued",
+        "source admission",
+    )
+    .expect("persist source admission");
+
+    let record = record_unmaterialized_cook_admission_with_metadata_in_store(
+        &store,
+        "unmaterialized-lineage-child",
+        binding,
+        "queued",
+        "retry admission",
+        serde_json::Map::from_iter([
+            ("retry_of".to_string(), json!(source_run_id)),
+            ("retried_from".to_string(), json!(source_run_id)),
+            ("retry_root".to_string(), json!(source_run_id)),
+            (
+                "retry_requested_at".to_string(),
+                json!("2026-09-02T00:00:00Z"),
+            ),
+        ]),
+    )
+    .expect("persist retry admission");
+
+    assert_eq!(record.metadata["retry_of"], source_run_id);
+    assert_eq!(record.metadata["retried_from"], source_run_id);
+    assert_eq!(record.metadata["retry_root"], source_run_id);
+    assert_eq!(
+        record.metadata["retry_requested_at"],
+        "2026-09-02T00:00:00Z"
+    );
+}
+
+#[test]
+fn concurrent_unmaterialized_retries_reserve_one_non_force_successor() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let source_run_id = "terminal-unmaterialized-source";
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "sha256:request",
+            "worktree_ref": "repo@branch",
+            "provider_runtime_refs": { "backend": "fixture" },
+            "retry": { "provider_rotations": 0 },
+            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("persist source admission");
+    store
+        .mutate_record(source_run_id, |record| {
+            record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize source admission");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let retry_ids = ["concurrent-retry-a", "concurrent-retry-b"];
+    let outcomes = std::thread::scope(|scope| {
+        let handles = retry_ids.map(|retry_id| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                retry_unmaterialized_cook_admission_in_store(&store, source_run_id, retry_id, false)
+            })
+        });
+        handles.map(|handle| handle.join().expect("retry thread"))
+    });
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+        1
+    );
+    let successors = store
+        .read_records()
+        .expect("read retry records")
+        .into_iter()
+        .filter(|record| {
+            record.run_id != source_run_id && record.metadata["retry_root"] == source_run_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(successors.len(), 1);
+}
+
+#[test]
+fn unmaterialized_retry_lineage_requires_force_and_retains_its_root() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let source_run_id = "unmaterialized-lineage-root";
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "sha256:request",
+            "worktree_ref": "repo@branch",
+            "provider_runtime_refs": { "backend": "fixture" },
+            "retry": { "provider_rotations": 0 },
+            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("persist source admission");
+    store
+        .mutate_record(source_run_id, |record| {
+            record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize source admission");
+
+    let (first, created) = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        "unmaterialized-lineage-first",
+        false,
+    )
+    .expect("create first successor");
+    assert!(created);
+    store
+        .mutate_record(&first.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize first successor");
+
+    let error = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        "unmaterialized-lineage-without-force",
+        false,
+    )
+    .expect_err("terminal successor requires force");
+    assert!(error.message.contains("terminal successor(s); use --force"));
+
+    let (descendant, created) = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        &first.run_id,
+        "unmaterialized-lineage-descendant",
+        true,
+    )
+    .expect("retry terminal descendant with force");
+    assert!(created);
+    assert_eq!(first.metadata["retry_root"], source_run_id);
+    assert_eq!(descendant.metadata["retry_of"], first.run_id);
+    assert_eq!(descendant.metadata["retry_root"], source_run_id);
+    assert_eq!(
+        descendant.metadata["unmaterialized_cook_admission"]["binding"]["retry_of"],
+        first.run_id
+    );
+}
+
+#[test]
+fn concurrent_unmaterialized_retries_from_root_and_descendant_share_the_root_lock() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let source_run_id = "cross-entry-lineage-root";
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "sha256:request",
+            "worktree_ref": "repo@branch",
+            "provider_runtime_refs": { "backend": "fixture" },
+            "retry": { "provider_rotations": 0 },
+            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("persist source admission");
+    store
+        .mutate_record(source_run_id, |record| {
+            record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize source admission");
+    let (first, _) = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        "cross-entry-terminal-descendant",
+        false,
+    )
+    .expect("create terminal descendant");
+    store
+        .mutate_record(&first.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize descendant");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let outcomes = std::thread::scope(|scope| {
+        let root_store = Arc::clone(&store);
+        let root_barrier = Arc::clone(&barrier);
+        let root = scope.spawn(move || {
+            root_barrier.wait();
+            retry_unmaterialized_cook_admission_in_store(
+                &root_store,
+                source_run_id,
+                "cross-entry-root-retry",
+                true,
+            )
+        });
+        let descendant_store = Arc::clone(&store);
+        let descendant_barrier = Arc::clone(&barrier);
+        let descendant = scope.spawn(move || {
+            descendant_barrier.wait();
+            retry_unmaterialized_cook_admission_in_store(
+                &descendant_store,
+                &first.run_id,
+                "cross-entry-descendant-retry",
+                false,
+            )
+        });
+        [
+            root.join().expect("root retry thread"),
+            descendant.join().expect("descendant retry thread"),
+        ]
+    });
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+        1
+    );
+    let active = store
+        .read_records()
+        .expect("read retry records")
+        .into_iter()
+        .filter(|record| {
+            record.metadata["retry_root"] == source_run_id && !record.state.is_terminal()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(active.len(), 1);
 }
 
 #[test]

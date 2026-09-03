@@ -32,9 +32,7 @@ use crate::agent_task_promotion::{
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
-use crate::agent_task_timeout::{
-    capture_cook_deadline, current_cook_deadline, expired_cook_deadline, now_unix_ms, CookDeadline,
-};
+use crate::agent_task_timeout::{capture_cook_deadline, expired_cook_deadline, CookDeadline};
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
@@ -58,8 +56,8 @@ use super::cook_pre_execution::materialize_initial_cook_attempt_with_stores;
 use super::cook_pre_execution::{
     materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores_outcome,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
-    record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
-    with_pre_execution_phase, CookExecutionPreparation,
+    provider_rotation_attempts, record_pre_execution_failure, retryable_pre_execution_failure,
+    terminal_executor_matches, with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
@@ -538,16 +536,6 @@ const COOK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// Poll durable provider state between samples so post-provider artifact work
 /// does not hold the foreground liveness loop for a full heartbeat interval.
 const COOK_PROVIDER_TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// Resolve is read-only. Give a transient provider timeout one bounded retry
-/// before Cook can start any provider mutation or execution.
-const COOK_PROVIDER_RESOLVE_ATTEMPTS: u32 = 2;
-const COOK_PROVIDER_RESOLVE_BACKOFF: Duration = Duration::from_millis(100);
-// Leave a small, explicit grace window around a provider's maximum supported
-// lookup budget so a configured 120-second exact-handle lookup is not cut off
-// by Cook before the provider can return its authoritative answer.
-const COOK_PROVIDER_RESOLVE_DEADLINE: Duration = Duration::from_secs(121);
-const COOK_PROVIDER_RESOLVE_MIN_BUDGET: Duration = Duration::from_millis(50);
-
 fn provider_timeout_heartbeat_detail(
     timeout_ms: u64,
     remaining_ms: u64,
@@ -882,52 +870,19 @@ fn truncate_diagnostic_text(text: &str) -> String {
     }
 }
 
-/// The generic cook side-effect boundary the attempt loop drives its external
-/// effects through: promotion, moving-base recovery, and PR finalization.
-///
-/// Routing every external effect through one injectable object (rather than a
-/// mix of free-function calls and ad-hoc closures) gives durable exactly-once
-/// operation claims a single wiring point, and lets deterministic tests inject
-/// side effects without real Git/GitHub mutations (#8357). Promotion is wired
-/// through the claim primitive here (`promote_with_operation_claim`); retry
-/// dispatch and finalization follow as separate slices.
-pub trait CookSideEffectService {
-    /// Promote the successful candidate for `run_id`, or load the already-persisted
-    /// promotion when this attempt was interrupted after promoting.
-    fn promote(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport>;
-
-    /// Rebase and re-verify a candidate whose base moved under it.
-    fn recover_moving_base(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport>;
-
-    /// Commit, push, and open/update the PR for a green promoted candidate, or
-    /// load the already-finalized PR when this attempt was interrupted after
-    /// finalizing.
-    fn finalize(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-        promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value>;
+/// A preceding `key: ` can make the prose redactor consume a following
+/// `token=value` as ordinary text. Redact each whitespace-delimited fragment a
+/// second time so provider-produced diagnostic prose cannot bypass it.
+fn redact_diagnostic_text(text: &str) -> String {
+    let redacted = homeboy_core::redaction::redact_string(text);
+    redacted
+        .split_inclusive(char::is_whitespace)
+        .map(homeboy_core::redaction::redact_string)
+        .collect()
 }
 
-/// The PR-finalization closure a cook side-effect boundary drives.
-///
-/// Boxed rather than carried as a type parameter so [`DefaultCookSideEffects`]
-/// is a concrete type that can live in a struct field — which is what lets one
-/// `CookContext` replace the former `run_cook*` wrapper family. The `'a` is
-/// load-bearing: the production finalizer closes over a `&CookRecipeStore`, so
-/// a `'static` bound would reject every real construction site.
+/// The PR-finalization closure driven by the Cook runtime. The lifetime is
+/// load-bearing because production finalizers borrow their recipe store.
 pub(crate) type CookFinalizeFn<'a> = Box<
     dyn FnMut(
             &AgentTaskLifecycleStore,
@@ -938,16 +893,34 @@ pub(crate) type CookFinalizeFn<'a> = Box<
         + 'a,
 >;
 
-/// Production cook side-effect boundary. Each method delegates to the existing
-/// promotion/finalization free functions, so behavior is identical to the prior
-/// direct calls; the trait only relocates the call sites behind one seam.
-pub(crate) struct DefaultCookSideEffects<'a> {
+#[cfg(test)]
+type TestCookPromoteFn<'a> = Box<
+    dyn FnMut(&AgentTaskLifecycleStore, &CookRequest, &str) -> Result<AgentTaskPromotionReport>
+        + 'a,
+>;
+
+#[cfg(test)]
+type TestCookRecoverFn<'a> = Box<
+    dyn FnMut(
+            &AgentTaskLifecycleStore,
+            &CookRequest,
+            &MovingBaseCookRecovery,
+        ) -> Result<AgentTaskPromotionReport>
+        + 'a,
+>;
+
+/// Concrete production side effects. Promotion and recovery have one native
+/// implementation; only finalization varies because callers bind different
+/// durable recipe stores and backends.
+pub(crate) struct CookSideEffects<'a> {
     finalize: CookFinalizeFn<'a>,
+    #[cfg(test)]
+    test_promote: Option<TestCookPromoteFn<'a>>,
+    #[cfg(test)]
+    test_recover: Option<TestCookRecoverFn<'a>>,
 }
 
-impl<'a> DefaultCookSideEffects<'a> {
-    /// Generic in the closure so existing construction sites are unchanged; the
-    /// type parameter is erased at the boundary and never reaches the struct.
+impl<'a> CookSideEffects<'a> {
     pub(crate) fn new<F>(finalize: F) -> Self
     where
         F: FnMut(
@@ -960,17 +933,49 @@ impl<'a> DefaultCookSideEffects<'a> {
     {
         Self {
             finalize: Box::new(finalize),
+            #[cfg(test)]
+            test_promote: None,
+            #[cfg(test)]
+            test_recover: None,
         }
     }
-}
 
-impl CookSideEffectService for DefaultCookSideEffects<'_> {
+    #[cfg(test)]
+    pub(crate) fn for_test<P, R, F>(promote: P, recover: R, finalize: F) -> Self
+    where
+        P: FnMut(&AgentTaskLifecycleStore, &CookRequest, &str) -> Result<AgentTaskPromotionReport>
+            + 'a,
+        R: FnMut(
+                &AgentTaskLifecycleStore,
+                &CookRequest,
+                &MovingBaseCookRecovery,
+            ) -> Result<AgentTaskPromotionReport>
+            + 'a,
+        F: FnMut(
+                &AgentTaskLifecycleStore,
+                &CookRequest,
+                &str,
+                &AgentTaskPromotionReport,
+            ) -> Result<Value>
+            + 'a,
+    {
+        Self {
+            finalize: Box::new(finalize),
+            test_promote: Some(Box::new(promote)),
+            test_recover: Some(Box::new(recover)),
+        }
+    }
+
     fn promote(
         &mut self,
         lifecycle_store: &AgentTaskLifecycleStore,
         options: &CookRequest,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
+        #[cfg(test)]
+        if let Some(promote) = self.test_promote.as_mut() {
+            return promote(lifecycle_store, options, run_id);
+        }
         promote_with_operation_claim_in_store(lifecycle_store, options, run_id)
     }
 
@@ -980,6 +985,10 @@ impl CookSideEffectService for DefaultCookSideEffects<'_> {
         options: &CookRequest,
         recovery: &MovingBaseCookRecovery,
     ) -> Result<AgentTaskPromotionReport> {
+        #[cfg(test)]
+        if let Some(recover) = self.test_recover.as_mut() {
+            return recover(lifecycle_store, options, recovery);
+        }
         recover_moving_base_cook_candidate_in_store(lifecycle_store, options, recovery)
     }
 
@@ -999,70 +1008,6 @@ impl CookSideEffectService for DefaultCookSideEffects<'_> {
                 (self.finalize)(lifecycle_store, options, run_id, promotion)
             },
         )
-    }
-}
-
-/// Test cook side-effect boundary with injectable `finalize` and
-/// `recover_moving_base` closures, so recovery/finalization control flow can be
-/// exercised without real Git/GitHub mutations. `promote` delegates to the real
-/// promotion path (tests that need to intercept promotion persist a promotion
-/// first, exactly as before).
-#[cfg(test)]
-pub(crate) type TestCookFinalizeFn<'a> =
-    Box<dyn FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value> + 'a>;
-
-#[cfg(test)]
-pub(crate) type TestCookRecoverFn<'a> =
-    Box<dyn FnMut(&CookRequest, &MovingBaseCookRecovery) -> Result<AgentTaskPromotionReport> + 'a>;
-
-#[cfg(test)]
-pub(crate) struct TestCookSideEffects<'a> {
-    finalize: TestCookFinalizeFn<'a>,
-    recover: TestCookRecoverFn<'a>,
-}
-
-#[cfg(test)]
-impl<'a> TestCookSideEffects<'a> {
-    pub(crate) fn new<F, R>(finalize: F, recover: R) -> Self
-    where
-        F: FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value> + 'a,
-        R: FnMut(&CookRequest, &MovingBaseCookRecovery) -> Result<AgentTaskPromotionReport> + 'a,
-    {
-        Self {
-            finalize: Box::new(finalize),
-            recover: Box::new(recover),
-        }
-    }
-}
-
-#[cfg(test)]
-impl CookSideEffectService for TestCookSideEffects<'_> {
-    fn promote(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport> {
-        promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
-    }
-
-    fn recover_moving_base(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport> {
-        (self.recover)(options, recovery)
-    }
-
-    fn finalize(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-        promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value> {
-        (self.finalize)(options, run_id, promotion)
     }
 }
 
@@ -1851,7 +1796,7 @@ pub struct AgentTaskCookRecoveryAction {
     pub command: String,
 }
 
-/// Bounded primary cause for a provider command that failed before dispatch.
+/// Bounded primary cause for a terminal provider failure.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskCookPrimaryFailure {
     pub schema: &'static str,
@@ -1862,6 +1807,10 @@ pub struct AgentTaskCookPrimaryFailure {
     pub stderr_excerpt: String,
     pub evidence_ref: String,
     pub next_action: AgentTaskCookRecoveryAction,
+    /// The typed terminal diagnostic when provider execution, rather than
+    /// pre-execution setup, exhausted its available routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<Value>,
 }
 
 /// A bounded collection of independently durable cooks. Each cook retains the
@@ -3211,20 +3160,27 @@ where
             });
             continue;
         }
-        if let Some(record) = durably_terminal_child_record(&child.run_id).filter(|record| {
-            matches!(
-                record.state,
-                agent_task_lifecycle::AgentTaskRunState::Failed
-                    | agent_task_lifecycle::AgentTaskRunState::Cancelled
-            )
-        }) {
-            cells.push(observed_batch_child_cell(child, &record));
-            continue;
-        }
         // Roster `run_id` is the canonical durable attempt, including transport
-        // replacements. Resolve the recipe from that attempt so resume still
-        // finds the cook after lineage moves off the synthesized cook id.
-        let cook_id = super::load_recipe_for_attempt(&child.run_id)?
+        // replacements. Resolve the recipe before treating a terminal alias as
+        // final: its immutable verification checkpoint can remain resumable
+        // even when a later attempt failed.
+        let recipe = super::load_recipe_for_attempt(&child.run_id)?
+            .or_else(|| super::load_recipe(&child.run_id).ok());
+        if recipe.is_none() {
+            if let Some(record) = durably_terminal_child_record(&child.run_id).filter(|record| {
+                matches!(
+                    record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Failed
+                        | agent_task_lifecycle::AgentTaskRunState::Cancelled
+                )
+            }) {
+                cells.push(observed_batch_child_cell(child, &record));
+                continue;
+            }
+        }
+        // Resolve the recipe from that attempt so resume still finds the cook
+        // after lineage moves off the synthesized cook id.
+        let cook_id = recipe
             .map(|recipe| recipe.cook_id)
             .unwrap_or_else(|| child.run_id.clone());
         let cell = match resume_batch_child(
@@ -3448,9 +3404,8 @@ where
             &format!("homeboy agent-task fanout resume {batch_id}"),
         )?;
     }
-    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
-        finalize(options, run_id, promotion)
-    });
+    let side_effects =
+        CookSideEffects::new(|_, options, run_id, promotion| finalize(options, run_id, promotion));
     let store = CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     Ok(CookService::run(
@@ -3459,7 +3414,7 @@ where
             executor,
             &store,
             &lifecycle_store,
-            Box::new(side_effects),
+            side_effects,
             &noop_cook_progress_observer,
         ),
         CookMode::Resume,
@@ -4201,6 +4156,90 @@ fn make_provider_timeout_actionable(
     }
 }
 
+/// Project the scheduler's already-normalized rotation evidence onto every
+/// terminal Cook surface. The aggregate remains the complete record; this is a
+/// bounded top-level explanation for the no-candidate terminal path.
+fn make_provider_rotation_actionable(
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    aggregate: &AgentTaskAggregate,
+    run_id: &str,
+) {
+    let Some((outcome, diagnostic)) = aggregate.outcomes.iter().find_map(|outcome| {
+        outcome
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.provider_rotation_exhausted")
+            .map(|diagnostic| (outcome, diagnostic))
+    }) else {
+        return;
+    };
+    let diagnostic_message = redact_diagnostic_text(&diagnostic.message);
+    let mut diagnostic_value = homeboy_core::redaction::redact_json(&serde_json::json!({
+        "class": diagnostic.class,
+        "message": diagnostic_message,
+        "data": diagnostic.data,
+    }));
+    bound_diagnostic_value(&mut diagnostic_value, 0);
+    let routes = provider_rotation_attempts(outcome)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|attempt| {
+            let model = attempt
+                .candidate_producing_model
+                .or(attempt.attempted_model)
+                .or(attempt.model)
+                .unwrap_or_else(|| "default model".to_string());
+            let classification = attempt
+                .failure_classification
+                .and_then(|classification| serde_json::to_value(classification).ok())
+                .and_then(|classification| classification.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unclassified_failure".to_string());
+            format!("{}/{}: {classification}", attempt.backend, model)
+        })
+        .collect::<Vec<_>>();
+    let routes = if routes.is_empty() {
+        truncate_diagnostic_text(&diagnostic_message)
+    } else {
+        truncate_diagnostic_text(&redact_diagnostic_text(&routes.join("; ")))
+    };
+    let budget = aggregate
+        .outcomes
+        .iter()
+        .flat_map(|outcome| &outcome.diagnostics)
+        .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+        .map(|diagnostic| {
+            format!(
+                "; {}",
+                truncate_diagnostic_text(&redact_diagnostic_text(&diagnostic.message))
+            )
+        })
+        .unwrap_or_default();
+    report.value.terminal_phase = Some("provider".to_string());
+    report.value.terminal_failure_classification = Some("provider_rotation_exhausted".to_string());
+    report.value.stop_reason = Some(format!(
+        "provider rotation exhausted without a candidate: {routes}{budget}"
+    ));
+    report.value.primary_failure = Some(AgentTaskCookPrimaryFailure {
+        schema: "homeboy/agent-task-cook-primary-failure/v1",
+        provider_id: "provider_rotation".to_string(),
+        operation: "route_selection".to_string(),
+        phase: "provider".to_string(),
+        exit_code: 1,
+        stderr_excerpt: truncate_diagnostic_text(&diagnostic_message),
+        evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
+        next_action: AgentTaskCookRecoveryAction {
+            action: "diagnose".to_string(),
+            command: format!("homeboy agent-task diagnose {run_id} --full"),
+        },
+        diagnostic: Some(diagnostic_value.clone()),
+    });
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "provider".to_string();
+        context.reason_code = "provider_rotation_exhausted".to_string();
+        context.diagnostic = Some(diagnostic_value);
+    }
+}
+
 fn make_review_form_timeout_actionable(
     report: &mut AgentTaskRunResult<AgentTaskCookReport>,
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
@@ -4418,6 +4457,8 @@ pub fn preflight_cook_continuation_admission_for_observation(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Vec<&'static str>> {
+    let mut options = options.clone();
+    canonicalize_native_cook_workspace(&mut options)?;
     let moving_base_continuation = record.metadata.get("cook_moving_base_recovery").is_some();
     let verification_pending_continuation = record
         .metadata
@@ -4526,19 +4567,19 @@ impl CookMode {
 /// bind every dependency explicitly; there are no environment-derived stores or
 /// optional side-effect/observer fallbacks in the execution API.
 pub struct CookRuntime<'a> {
-    pub executor: SharedAgentTaskExecutor,
-    pub store: &'a CookRecipeStore,
-    pub lifecycle_store: &'a AgentTaskLifecycleStore,
-    pub side_effects: Box<dyn CookSideEffectService + 'a>,
-    pub durable_observer: &'a CookProgressObserver<'a>,
+    executor: SharedAgentTaskExecutor,
+    store: &'a CookRecipeStore,
+    lifecycle_store: &'a AgentTaskLifecycleStore,
+    side_effects: CookSideEffects<'a>,
+    durable_observer: &'a CookProgressObserver<'a>,
 }
 
 impl<'a> CookRuntime<'a> {
-    pub fn new(
+    fn new(
         executor: SharedAgentTaskExecutor,
         store: &'a CookRecipeStore,
         lifecycle_store: &'a AgentTaskLifecycleStore,
-        side_effects: Box<dyn CookSideEffectService + 'a>,
+        side_effects: CookSideEffects<'a>,
         durable_observer: &'a CookProgressObserver<'a>,
     ) -> Self {
         Self {
@@ -4548,6 +4589,33 @@ impl<'a> CookRuntime<'a> {
             side_effects,
             durable_observer,
         }
+    }
+
+    /// Bind a caller-owned finalizer while retaining native promotion, recovery,
+    /// and durable operation-claim behavior.
+    pub fn with_finalizer<F>(
+        executor: SharedAgentTaskExecutor,
+        store: &'a CookRecipeStore,
+        lifecycle_store: &'a AgentTaskLifecycleStore,
+        finalize: F,
+        durable_observer: &'a CookProgressObserver<'a>,
+    ) -> Self
+    where
+        F: FnMut(
+                &AgentTaskLifecycleStore,
+                &CookRequest,
+                &str,
+                &AgentTaskPromotionReport,
+            ) -> Result<Value>
+            + 'a,
+    {
+        Self::new(
+            executor,
+            store,
+            lifecycle_store,
+            CookSideEffects::new(finalize),
+            durable_observer,
+        )
     }
 
     /// Explicit production wiring with the standard side-effect boundary and a
@@ -4575,17 +4643,15 @@ impl<'a> CookRuntime<'a> {
             executor,
             store,
             lifecycle_store,
-            Box::new(DefaultCookSideEffects::new(
-                move |lifecycle_store, options, run_id, promotion| {
-                    finalize_or_load_cook_pr_with_stores(
-                        store,
-                        lifecycle_store,
-                        options,
-                        run_id,
-                        promotion,
-                    )
-                },
-            )),
+            CookSideEffects::new(move |lifecycle_store, options, run_id, promotion| {
+                finalize_or_load_cook_pr_with_stores(
+                    store,
+                    lifecycle_store,
+                    options,
+                    run_id,
+                    promotion,
+                )
+            }),
             durable_observer,
         )
     }
@@ -4604,7 +4670,7 @@ pub(crate) struct CookContext<'a> {
     pub executor: SharedAgentTaskExecutor,
     pub store: Option<&'a CookRecipeStore>,
     pub lifecycle_store: Option<&'a AgentTaskLifecycleStore>,
-    pub side_effects: Option<Box<dyn CookSideEffectService + 'a>>,
+    pub side_effects: Option<CookSideEffects<'a>>,
     pub durable_observer: Option<&'a CookProgressObserver<'a>>,
     pub mode: CookMode,
 }
@@ -4635,17 +4701,15 @@ pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentT
         None => AgentTaskLifecycleStore::from_current_environment()?,
     };
     let mut side_effects = ctx.side_effects.unwrap_or_else(|| {
-        Box::new(DefaultCookSideEffects::new(
-            |lifecycle_store, options, run_id, promotion| {
-                finalize_or_load_cook_pr_with_stores(
-                    &store,
-                    lifecycle_store,
-                    options,
-                    run_id,
-                    promotion,
-                )
-            },
-        ))
+        CookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(
+                &store,
+                lifecycle_store,
+                options,
+                run_id,
+                promotion,
+            )
+        })
     });
     let observer = ctx.durable_observer.unwrap_or(&noop_cook_progress_observer);
     run_cook_with_runtime(
@@ -4653,7 +4717,7 @@ pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentT
         ctx.executor,
         &store,
         &lifecycle_store,
-        side_effects.as_mut(),
+        &mut side_effects,
         observer,
         ctx.mode,
     )
@@ -4680,7 +4744,7 @@ impl CookService {
             executor,
             store,
             lifecycle_store,
-            side_effects.as_mut(),
+            &mut side_effects,
             durable_observer,
             mode,
         )
@@ -4692,7 +4756,7 @@ fn run_cook_with_runtime(
     executor: SharedAgentTaskExecutor,
     store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    side_effects: &mut dyn CookSideEffectService,
+    side_effects: &mut CookSideEffects<'_>,
     durable_observer: &CookProgressObserver<'_>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
@@ -4770,7 +4834,7 @@ fn run_cook_reported(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: CookRequest,
     executor: SharedAgentTaskExecutor,
-    side_effects: &mut dyn CookSideEffectService,
+    side_effects: &mut CookSideEffects<'_>,
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
@@ -5093,7 +5157,7 @@ fn run_cook_spine(
     lifecycle_store: &AgentTaskLifecycleStore,
     mut options: CookRequest,
     executor: SharedAgentTaskExecutor,
-    side_effects: &mut dyn CookSideEffectService,
+    side_effects: &mut CookSideEffects<'_>,
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
@@ -5278,8 +5342,9 @@ fn run_cook_spine(
     {
         let workspace_base = validate_cook_workspace_with_adopted_candidate(
             &options,
-            options.workspace.source_worktree_path.is_some()
-                && !cook_uses_explicit_cwd_workspace(&options),
+            verification_pending_continuation
+                || (options.workspace.source_worktree_path.is_some()
+                    && !cook_uses_explicit_cwd_workspace(&options)),
         )
         .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
@@ -5296,7 +5361,7 @@ fn run_cook_spine(
     // recipe/run saga so retry and replay have durable zero-provider evidence.
     pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
         |error| {
-            let mut error = with_pre_execution_phase(error, "workspace_base_capture");
+            let mut error = error;
             error.details["cook_materialized_by_invocation"] = Value::Bool(true);
             error
         },
@@ -5314,8 +5379,9 @@ fn run_cook_spine(
     {
         let workspace_base = validate_cook_workspace_with_adopted_candidate(
             &options,
-            options.workspace.source_worktree_path.is_some()
-                && !cook_uses_explicit_cwd_workspace(&options),
+            verification_pending_continuation
+                || (options.workspace.source_worktree_path.is_some()
+                    && !cook_uses_explicit_cwd_workspace(&options)),
         )
         .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
@@ -5378,8 +5444,6 @@ fn run_cook_spine(
         let (lookup_stop, lookup_wait) = mpsc::channel();
         let lookup_cook_id = options.identity.cook_id.clone();
         let lookup_run_id = options.identity.initial_run_id.clone();
-        let lookup_control = homeboy_core::worktree_provider::WorktreeCommandControl::default();
-        let heartbeat_control = lookup_control.clone();
         // Bound before the `move` closure: naming the store inside it would
         // capture the store itself by value rather than this borrow.
         let lookup_lifecycle_store = &lifecycle_store;
@@ -5398,7 +5462,6 @@ fn run_cook_spine(
                             record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
                         })
                     {
-                        heartbeat_control.cancel();
                         break;
                     }
                     if Instant::now() >= next_heartbeat {
@@ -5430,10 +5493,7 @@ fn run_cook_spine(
                     }
                 }
             });
-            let result = homeboy_core::worktree_provider::with_configured_worktree_command_control(
-                lookup_control,
-                || materialize_pending_cook_workspace_with_retry(lifecycle_store, &mut options),
-            );
+            let result = materialize_pending_cook_workspace(lifecycle_store, &mut options);
             let _ = lookup_stop.send(());
             result
         });
@@ -6697,6 +6757,7 @@ fn run_cook_spine(
                 )
                 .unwrap_or(true),
             );
+            make_provider_rotation_actionable(&mut report, &aggregate, &run_id);
             if report.value.terminal_phase.is_none() {
                 if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
                     record.metadata["provider_executions_consumed"]
@@ -7527,124 +7588,38 @@ fn validate_cook_workspace_with_adopted_candidate(
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
     let continuation = tracked_promotion_continuation(options)?;
     let source = options.workspace.source_worktree_path.as_deref();
-    let target = if let Some(source) = source {
-        let native_target =
-            homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
-                &options.workspace.to_worktree,
-                homeboy_core::worktree_provider::WorktreeMutationContext::default(),
-            )?;
-        if cook_uses_explicit_cwd_workspace(options) {
-            source.to_path_buf()
-        } else if let Some(target) = native_target {
-            target.path
-        } else {
-            trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
-        }
-    } else if std::path::Path::new(&options.workspace.to_worktree).is_dir() {
-        std::path::Path::new(&options.workspace.to_worktree).to_path_buf()
+    let target = if cook_uses_explicit_cwd_workspace(options) {
+        source
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "explicit Cook workspace is missing its source path",
+                    Some(options.workspace.to_worktree.clone()),
+                    None,
+                )
+            })?
+            .to_path_buf()
+    } else if Path::new(&options.workspace.to_worktree).is_dir() {
+        PathBuf::from(&options.workspace.to_worktree)
     } else if let Some(target) =
         homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
             &options.workspace.to_worktree,
-            homeboy_core::worktree_provider::WorktreeMutationContext::default(),
         )?
     {
         target.path
-    } else if let Some(expected) = options
-        .identity
-        .initial_plan
-        .metadata
-        .pointer("/cook_provision/workspace_identity")
-    {
-        let expected: homeboy_core::worktree_provider::WorktreeExactIdentity =
-            serde_json::from_value(expected.clone()).map_err(|error| {
-                Error::validation_invalid_argument(
-                    "cook_provision.workspace_identity",
-                    format!("persisted Cook workspace identity is invalid: {error}"),
-                    None,
-                    None,
-                )
-            })?;
-        let config = homeboy_core::defaults::load_config();
-        let identity = homeboy_core::worktree_provider::resolve_configured_worktree_exact_identity_from_config(
-            &options.workspace.to_worktree,
-            Some(&expected.provider_id),
-            &config,
-        )?;
-        if expected.schema != identity.schema
-            || expected.provider_id != identity.provider_id
-            || expected.token != identity.token
-            || expected.handle != identity.handle
-            || expected.path != identity.path
-            || expected.branch != identity.branch
-            || expected.primary != identity.primary
-        {
-            return Err(Error::validation_invalid_argument(
-                "to_worktree",
-                "provider exact identity no longer matches the durable Cook identity",
-                Some(options.workspace.to_worktree.clone()),
-                None,
-            ));
-        }
-        let safety =
-            homeboy_core::worktree_provider::attest_configured_worktree_safety_from_config(
-                &identity, &config,
-            )?;
-        // A persisted identity must still be fresh, non-primary, and pushed.
-        // Its only admissible dirty state is authenticated below against this
-        // attempt's persisted promoted-candidate fingerprint.
-        if !safety.fresh
-            || safety.unpushed
-            || identity.primary
-            || (safety.dirty && continuation.is_none())
-        {
-            return Err(Error::validation_invalid_argument(
-                "to_worktree",
-                "provider safety attestation is not current and safe for Cook execution",
-                Some(options.workspace.to_worktree.clone()),
-                None,
-            ));
-        }
-        PathBuf::from(identity.path)
     } else {
-        let trusted_unpushed = continuation
-            .as_ref()
-            .map(|continuation| cook_owned_unpushed_destination(continuation))
-            .transpose()?
-            .flatten();
-        homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
-            &options.workspace.to_worktree,
-            &homeboy_core::defaults::load_config(),
-            homeboy_core::worktree_provider::WorktreeMutationContext {
-                safety_baseline: continuation
-                    .as_ref()
-                    .map(|continuation| &continuation.baseline),
-                trusted_unpushed_destination: trusted_unpushed.as_ref(),
-            },
-        )?
-        .path
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook requires an active native worktree",
+            Some(options.workspace.to_worktree.clone()),
+            None,
+        ));
     };
-    homeboy_core::worktree_provider::validate_worktree_root(
-        &target,
-        &options.workspace.to_worktree,
-    )?;
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
     if let Some(continuation) = continuation {
         authenticate_tracked_promotion_continuation(&target, &continuation)?;
-    }
-    if let Some(source) = source {
-        let source = std::fs::canonicalize(source).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(source.display().to_string()))
-        })?;
-        if source != target {
-            return Err(Error::validation_invalid_argument(
-                "workspace",
-                "Cook provider workspace differs from its declared task worktree; refusing provider execution",
-                Some(options.workspace.to_worktree.clone()),
-                Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
-            ));
-        }
     }
     preflight_cook_workspace_base_ancestry_with_provider(&target, options, adopted_dirty_candidate)
         .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
@@ -7871,7 +7846,6 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             if let Some(native) =
                 homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
                     &options.workspace.to_worktree,
-                    homeboy_core::worktree_provider::WorktreeMutationContext::default(),
                 )?
             {
                 // Homeboy owns this task worktree directly, so it can converge
@@ -7898,49 +7872,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                     })),
                 }));
             }
-            let config = homeboy_core::defaults::load_config();
-            let handle = if std::path::Path::new(&options.workspace.to_worktree).is_dir() {
-                let Some(target) =
-                    homeboy_core::worktree_provider::resolve_configured_worktree_path_from_config(
-                        target, &config,
-                    )?
-                else {
-                    return Err(error);
-                };
-                target.handle
-            } else {
-                options.workspace.to_worktree.clone()
-            };
-            let convergence =
-                homeboy_core::worktree_provider::converge_configured_worktree_to_base_from_config(
-                    &handle, base, &config,
-                )?;
-            let snapshot = preflight_cook_workspace_base_ancestry(
-                target,
-                base,
-                &ignored_evidence,
-                adopted_dirty_candidate,
-            )
-            .map_err(|mut error| {
-                error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
-                    "provider_id": convergence.provider_id,
-                    "handle": convergence.handle,
-                    "path": convergence.path,
-                    "base_sha": convergence.base_sha,
-                });
-                error
-            })?;
-            Ok(Some(match snapshot {
-                Some(snapshot) => CookWorkspaceBaseValidation::Snapshot(snapshot),
-                None => CookWorkspaceBaseValidation::Convergence(serde_json::json!({
-                    "schema": "homeboy/cook-workspace-base-convergence/v1",
-                    "planned_base_sha": base,
-                    "provider_id": convergence.provider_id,
-                    "handle": convergence.handle,
-                    "path": convergence.path,
-                    "provider_evidence": convergence.evidence,
-                })),
-            }))
+            Err(error)
         }
         Err(error) => Err(error),
     }
@@ -8123,141 +8055,24 @@ fn preflight_cook_workspace_base_ancestry(
 /// bind the exception to the exact clean, issue-owned linked worktree and the
 /// task's immutable base. The provider resolver consumes the existing
 /// path+HEAD capability; no broader unpushed exception is introduced here.
-fn trusted_initial_cook_workspace(options: &CookRequest, source: &Path) -> Result<Option<PathBuf>> {
-    let task_url = options
-        .identity
-        .initial_plan
-        .tasks
-        .first()
-        .and_then(|task| task.workspace.task_url.as_deref())
-        .filter(|task_url| !task_url.trim().is_empty());
-    let Some(task_base_sha) = options.workspace.task_base_sha.as_deref() else {
-        return Ok(None);
-    };
-    if task_url.is_none() {
-        return Ok(None);
-    }
-    let source = std::fs::canonicalize(source).map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            format!("cannot resolve explicitly targeted Cook checkout: {error}"),
-            Some(options.workspace.to_worktree.clone()),
-            None,
-        )
-    })?;
-    let head = homeboy_core::git::run_git(
-        &source,
-        &["rev-parse", "--verify", "HEAD^{commit}"],
-        "resolve explicitly targeted Cook checkout HEAD",
-    )?
-    .trim()
-    .to_string();
-    let clean = homeboy_core::git::run_git(
-        &source,
-        &["status", "--porcelain=v1", "--untracked-files=all"],
-        "verify explicitly targeted Cook checkout cleanliness",
-    )?
-    .trim()
-    .is_empty();
-    let safe_ancestry =
-        homeboy_core::git::is_ancestor(&source.display().to_string(), task_base_sha, &head)
-            .unwrap_or(false);
-    let config = homeboy_core::defaults::load_config();
-    match homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
-        &options.workspace.to_worktree,
-        &config,
-        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
-    ) {
-        Ok(target) => return Ok(Some(target.path)),
-        Err(error)
-            if error.details.pointer("/workspace/classification")
-                != Some(&Value::String("workspace.untrusted_unpushed".to_string())) =>
-        {
-            return Err(error);
-        }
-        Err(_) => {}
-    }
-    if !clean || task_url.is_none() || !safe_ancestry {
-        let mut error = Error::validation_invalid_argument(
-            "to_worktree",
-            "clean unpushed provider checkout cannot be trusted for initial Cook adoption",
-            Some(options.workspace.to_worktree.clone()),
-            Some(vec![format!(
-                "Adopt or continue this exact Cook with: {}",
-                cook_continue_command(None, &options.identity.cook_id, false, None)
-            )]),
-        );
-        if !clean {
-            error.details["workspace"] = serde_json::json!({
-                "classification": "workspace.resolved_but_dirty",
-                "reason": "unattributed_drift",
-                "owning_layer": "cook",
-                "path": source,
-            });
-        }
-        return Err(error);
-    }
-    homeboy_core::worktree_provider::validate_worktree_root(
-        &source,
-        &options.workspace.to_worktree,
-    )?;
-    let trust = homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
-        path: source.clone(),
-        head,
-    };
-    let target =
-        homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
-            &options.workspace.to_worktree,
-            &config,
-            homeboy_core::worktree_provider::WorktreeMutationContext {
-                safety_baseline: None,
-                trusted_unpushed_destination: Some(&trust),
-            },
-        )?;
-    if target.task_url.as_deref() != task_url {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "explicitly targeted provider worktree is not owned by this Cook task",
-            Some(options.workspace.to_worktree.clone()),
-            Some(vec![format!(
-                "Continue the owning Cook with: {}",
-                cook_continue_command(None, &options.identity.cook_id, false, None)
-            )]),
-        ));
-    }
-    let resolved = std::fs::canonicalize(&target.path).map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
-            format!("provider returned an unresolved targeted Cook checkout: {error}"),
-            Some(options.workspace.to_worktree.clone()),
-            None,
-        )
-    })?;
-    if resolved != source {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "provider resolved a different checkout than the explicitly targeted Cook checkout",
-            Some(options.workspace.to_worktree.clone()),
-            Some(vec![format!(
-                "Continue the owning Cook with: {}",
-                cook_continue_command(None, &options.identity.cook_id, false, None)
-            )]),
-        ));
-    }
-    Ok(Some(source))
-}
-
 fn preflight_initial_cook_workspace_provider(options: &CookRequest) -> Result<()> {
-    if let Some(source) = options.workspace.source_worktree_path.as_deref() {
-        if cook_uses_explicit_cwd_workspace(options) {
-            return Ok(());
-        }
-        trusted_initial_cook_workspace(options, source)?;
+    if cook_uses_explicit_cwd_workspace(options)
+        || Path::new(&options.workspace.to_worktree).is_dir()
+    {
         return Ok(());
     }
-    crate::agent_task_promotion::preflight_configured_workspace_provider(
+    homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
         &options.workspace.to_worktree,
-    )
+    )?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook requires an active native worktree",
+            Some(options.workspace.to_worktree.clone()),
+            None,
+        )
+    })?;
+    Ok(())
 }
 
 fn cook_uses_explicit_cwd_workspace(options: &CookRequest) -> bool {
@@ -8399,78 +8214,10 @@ fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {
     )
 }
 
-/// Older recipes stored deferred provider provisioning on the task projection
-/// only. Restore that exact record into the plan contract before resolving it;
-/// all provider identity, safety, and workspace checks then use one authority.
-fn restore_legacy_cook_provision(plan: &mut AgentTaskPlan) -> Result<()> {
-    if plan.metadata.get("cook_provision").is_some() {
-        return Ok(());
-    }
-    let provision = plan
-        .tasks
-        .first()
-        .and_then(|task| task.metadata.get("worktree_provision"))
-        .filter(|provision| provision.is_object())
-        .cloned()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_provision",
-                "Cook pending workspace is missing its durable provision record",
-                None,
-                None,
-            )
-        })?;
-    plan.metadata["cook_provision"] = provision;
-    Ok(())
-}
-
-/// A pending lookup carries no provider path. Resolve the declared exact handle
-/// only after Cook's recipe and first run record exist, then persist that path
-/// before any provider can receive work.
-fn with_controller_pre_provider_heartbeat<T>(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    phase: &str,
-    detail: &str,
-    interval: Duration,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    agent_task_lifecycle::record_cook_progress_in_store(
-        lifecycle_store,
-        run_id,
-        phase,
-        1,
-        Some(detail),
-    )?;
-    let (stop, wait) = mpsc::channel();
-    std::thread::scope(|scope| {
-        scope.spawn(move || loop {
-            match wait.recv_timeout(interval) {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let _ = agent_task_lifecycle::record_cook_progress_in_store(
-                        lifecycle_store,
-                        run_id,
-                        phase,
-                        1,
-                        Some(detail),
-                    );
-                }
-            }
-        });
-        let result = operation();
-        let _ = stop.send(());
-        result
-    })
-}
-
 fn materialize_pending_cook_workspace(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut CookRequest,
-    effective_lookup_timeout_ms: Option<u64>,
 ) -> Result<()> {
-    let initial_run_id = options.identity.initial_run_id.clone();
-    restore_legacy_cook_provision(&mut options.identity.initial_plan)?;
     if options.workspace.task_base_sha.is_none() {
         options.workspace.task_base_sha = options
             .identity
@@ -8480,219 +8227,13 @@ fn materialize_pending_cook_workspace(
             .and_then(Value::as_str)
             .map(str::to_string);
     }
-    let provider_id = |options: &CookRequest| {
-        options
-            .identity
-            .initial_plan
-            .metadata
-            .pointer("/cook_provision/workspace_identity/provider_id")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                options
-                    .identity
-                    .initial_plan
-                    .metadata
-                    .pointer("/cook_provision/worktree_provider_id")
-                    .and_then(Value::as_str)
-            })
-            .map(str::to_string)
+    let provider = homeboy_core::worktree_provider::NativeWorktreeProvider;
+    let destination = match provider.resolve(&options.workspace.to_worktree)? {
+        Some(ownership) => {
+            homeboy_core::worktree_provider::WorktreeProvisionDestination { ownership }
+        }
+        None => provision_pending_cook_workspace(lifecycle_store, options)?.destination,
     };
-    let mut config = homeboy_core::defaults::load_config();
-    if let Some(timeout_ms) = effective_lookup_timeout_ms {
-        for provider in config.worktree_providers.values_mut() {
-            provider.lookup_timeout_ms = provider.lookup_timeout_ms.min(timeout_ms);
-        }
-    }
-    let task_url = options
-        .identity
-        .initial_plan
-        .metadata
-        .pointer("/cook_provision/provision_intent/task_url")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            options
-                .identity
-                .initial_plan
-                .tasks
-                .first()
-                .and_then(|task| task.workspace.task_url.as_deref())
-        })
-        .map(str::to_string);
-    let attachment = task_url
-        .as_deref()
-        .map(|task_url| {
-            homeboy_core::worktree_provider::preview_configured_worktree_task_attachment_from_config(
-                &options.workspace.to_worktree,
-                task_url,
-                &config,
-            )
-        })
-        .transpose()?
-        .flatten();
-    if let Some(attachment) = &attachment {
-        options.identity.initial_plan.metadata["cook_provision"]["worktree_provider_id"] =
-            Value::String(attachment.provider_id.clone());
-        agent_task_lifecycle::persist_controller_plan_in_store(
-            lifecycle_store,
-            &initial_run_id,
-            &options.identity.initial_plan,
-        )?;
-        if attachment.status
-            == homeboy_core::worktree_provider::WorktreeTaskAttachmentStatus::Eligible
-        {
-            with_controller_pre_provider_heartbeat(
-                lifecycle_store,
-                &initial_run_id,
-                "worktree_provider_task_attachment",
-                "attaching tracker ownership to controller-owned provider workspace",
-                COOK_HEARTBEAT_INTERVAL,
-                || {
-                    homeboy_core::worktree_provider::apply_configured_worktree_task_attachment_from_config(
-                        attachment,
-                        &config,
-                    )
-                },
-            )?;
-        }
-    }
-    let resolve =
-        |options: &CookRequest,
-         selected: Option<&homeboy_core::worktree_provider::WorktreeProviderIdentity>| {
-            homeboy_core::worktree_provider::admit_worktree_provision_from_config(
-                &options.workspace.to_worktree,
-                selected,
-                &config,
-            )
-        };
-    let selected_provider = provider_id(options)
-        .map(homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured);
-    let mut destination = match with_controller_pre_provider_heartbeat(
-        lifecycle_store,
-        &initial_run_id,
-        "worktree_provider_lookup",
-        "resolving controller-owned provider workspace identity",
-        COOK_HEARTBEAT_INTERVAL,
-        || resolve(options, selected_provider.as_ref()),
-    ) {
-        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::Admitted(destination)) => {
-            destination
-        }
-        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::NotFound) => {
-            match with_controller_pre_provider_heartbeat(
-                lifecycle_store,
-                &initial_run_id,
-                "worktree_provider_ensure",
-                "materializing controller-owned provider workspace",
-                COOK_HEARTBEAT_INTERVAL,
-                || provision_pending_cook_workspace(lifecycle_store, options, &config),
-            ) {
-                Ok(provision) => {
-                    // Pin the provider that performed the durable mutation. A later
-                    // continuation re-resolves this exact destination through its owner.
-                    let ensured_provider = provision.destination.ownership.provider.clone();
-                    if let homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(
-                        provider_id,
-                    ) = &ensured_provider
-                    {
-                        options.identity.initial_plan.metadata["cook_provision"]
-                            ["worktree_provider_id"] = Value::String(provider_id.clone());
-                    }
-                    agent_task_lifecycle::persist_controller_plan_in_store(
-                        lifecycle_store,
-                        &initial_run_id,
-                        &options.identity.initial_plan,
-                    )?;
-                    with_controller_pre_provider_heartbeat(
-                        lifecycle_store,
-                        &initial_run_id,
-                        "worktree_provider_lookup",
-                        "resolving materialized provider workspace identity",
-                        COOK_HEARTBEAT_INTERVAL,
-                        || resolve(options, Some(&ensured_provider)),
-                    )?
-                    .into_admitted(&options.workspace.to_worktree)?
-                }
-                Err(ensure_error) if provider_ensure_timeout(&ensure_error) => {
-                    // Ensure is a mutation and must never be retried after its
-                    // result is unknown. It may still have created the exact
-                    // destination before timing out. Persist the provider that
-                    // owned the lifecycle mutation before reconciling through
-                    // its read-only exact-identity contract.
-                    let Some(provider_id) = ensure_error
-                        .details
-                        .get("worktree_provider_id")
-                        .and_then(Value::as_str)
-                    else {
-                        return Err(ensure_error);
-                    };
-                    options.identity.initial_plan.metadata["cook_provision"]
-                        ["worktree_provider_id"] = Value::String(provider_id.to_string());
-                    agent_task_lifecycle::persist_controller_plan_in_store(
-                        lifecycle_store,
-                        &options.identity.initial_run_id,
-                        &options.identity.initial_plan,
-                    )?;
-                    match with_controller_pre_provider_heartbeat(
-                        lifecycle_store,
-                        &options.identity.initial_run_id,
-                        "worktree_provider_lookup",
-                        "reconciling provider workspace identity after ensure timeout",
-                        COOK_HEARTBEAT_INTERVAL,
-                        || {
-                            resolve(
-                                options,
-                                Some(&homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(
-                                    provider_id.to_string(),
-                                )),
-                            )
-                        },
-                    ) {
-                        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::Admitted(
-                            destination,
-                        )) => destination,
-                        Ok(homeboy_core::worktree_provider::WorktreeProvisionLookup::NotFound) => {
-                            return Err(annotate_pending_provider_self_repair_route(
-                                ensure_error,
-                                options,
-                            ));
-                        }
-                        Err(resolve_error) if provider_resolve_timeout(&resolve_error) => {
-                            return Err(resolve_error);
-                        }
-                        Err(_) => {
-                            return Err(annotate_pending_provider_self_repair_route(
-                                ensure_error,
-                                options,
-                            ));
-                        }
-                    }
-                }
-                Err(error) => {
-                    return Err(annotate_pending_provider_self_repair_route(error, options));
-                }
-            }
-        }
-        Err(_error) if task_url.is_some() && attachment.is_none() => {
-            return Err(homeboy_core::worktree_provider::unsupported_configured_worktree_task_attachment_error(
-                &options.workspace.to_worktree,
-                task_url.as_deref().expect("task URL checked"),
-            ));
-        }
-        Err(error) => return Err(error),
-    };
-    if let Some(identity) = destination.exact_identity.as_ref().filter(|identity| {
-        homeboy_core::worktree_provider::configured_worktree_path_requires_materialization(
-            &identity.path,
-        )
-    }) {
-        let identity =
-            homeboy_core::worktree_provider::materialize_configured_worktree_from_config(
-                identity, &config,
-            )?;
-        destination.ownership.path = identity.path.clone();
-        destination.ownership.branch = Some(identity.branch.clone());
-        destination.exact_identity = Some(identity);
-    }
     if destination.ownership.handle != options.workspace.to_worktree {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
@@ -8701,69 +8242,7 @@ fn materialize_pending_cook_workspace(
             None,
         ));
     }
-    if let Some(expected) = options
-        .identity
-        .initial_plan
-        .metadata
-        .pointer("/cook_provision/workspace_identity")
-    {
-        let identity = destination.exact_identity.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_provision.workspace_identity",
-                "pending Cook configured identity resolved through a different provider kind",
-                Some(options.workspace.to_worktree.clone()),
-                None,
-            )
-        })?;
-        let expected: homeboy_core::worktree_provider::WorktreeExactIdentity =
-            serde_json::from_value(expected.clone()).map_err(|error| {
-                Error::validation_invalid_argument(
-                    "cook_provision.workspace_identity",
-                    format!("pending Cook identity is invalid: {error}"),
-                    None,
-                    None,
-                )
-            })?;
-        if expected.schema != identity.schema
-            || expected.provider_id != identity.provider_id
-            || expected.token != identity.token
-            || expected.handle != identity.handle
-            || expected.path != identity.path
-            || expected.branch != identity.branch
-            || expected.primary != identity.primary
-        {
-            return Err(Error::validation_invalid_argument(
-                "to_worktree",
-                "provider exact identity no longer matches the durable pending Cook identity",
-                Some(options.workspace.to_worktree.clone()),
-                None,
-            ));
-        }
-    }
-    let configured_evidence = destination
-        .exact_identity
-        .as_ref()
-        .map(|identity| {
-            let safety = homeboy_core::worktree_provider::attest_configured_worktree_safety_from_config(
-                identity,
-                &config,
-            )?;
-            if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
-                return Err(Error::validation_invalid_argument(
-                    "to_worktree",
-                    "provider safety attestation is not current and safe for pending Cook execution",
-                    Some(options.workspace.to_worktree.clone()),
-                    None,
-                ));
-            }
-            Ok((identity.clone(), safety))
-        })
-        .transpose()?;
     let target = PathBuf::from(&destination.ownership.path);
-    homeboy_core::worktree_provider::validate_worktree_root(
-        &target,
-        &options.workspace.to_worktree,
-    )?;
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
@@ -8778,21 +8257,8 @@ fn materialize_pending_cook_workspace(
         task.metadata["cook_workspace_identity"] =
             crate::agent_task_workspace_identity::attest_workspace(&target)?;
     }
-    if let Some((identity, safety)) = configured_evidence {
-        options.identity.initial_plan.metadata["cook_provision"]["workspace_identity"] =
-            serde_json::to_value(&identity).expect("workspace identity serializes");
-        options.identity.initial_plan.metadata["cook_provision"]["workspace_safety"] =
-            serde_json::to_value(&safety).expect("workspace safety serializes");
-    }
     options.identity.initial_plan.metadata["cook_provision"]["provider_identity"] =
-        match destination.ownership.provider {
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
-                Value::String("native".to_string())
-            }
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider_id) => {
-                serde_json::json!({ "configured": provider_id })
-            }
-        };
+        Value::String("native".to_string());
     options.identity.initial_plan.metadata["cook_provision"]["action"] =
         Value::String("existing".to_string());
     options.workspace.source_worktree_path = Some(target);
@@ -8890,418 +8356,11 @@ fn bind_materialized_cook_component_workspace(
     Ok(())
 }
 
-/// Retry only supervised, read-only resolve timeouts. Not-found, malformed, and
-/// every mutation-path failure remain a single fail-closed provider call.
-fn materialize_pending_cook_workspace_with_retry(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    options: &mut CookRequest,
-) -> Result<()> {
-    let cook_deadline_ms = current_cook_deadline().map(|deadline| deadline.deadline_unix_ms());
-    let deadline_ms = cook_deadline_ms.unwrap_or_else(|| {
-        now_unix_ms().saturating_add(COOK_PROVIDER_RESOLVE_DEADLINE.as_millis() as u64)
-    });
-
-    for attempt in 1..=COOK_PROVIDER_RESOLVE_ATTEMPTS {
-        let remaining_ms = deadline_ms.saturating_sub(now_unix_ms());
-        let reserve_ms = if attempt < COOK_PROVIDER_RESOLVE_ATTEMPTS {
-            COOK_PROVIDER_RESOLVE_BACKOFF.as_millis() as u64
-        } else {
-            0
-        };
-        if remaining_ms < COOK_PROVIDER_RESOLVE_MIN_BUDGET.as_millis() as u64 + reserve_ms {
-            let mut error = Error::validation_invalid_argument(
-                "to_worktree",
-                "Cook pre-execution deadline expired before worktree provider resolve could start",
-                Some(options.workspace.to_worktree.clone()),
-                None,
-            );
-            error.retryable = Some(true);
-            error.details["worktree_provider_lookup"] = Value::String("timed_out".to_string());
-            error.details["worktree_provider_call_classification"] =
-                Value::String("timeout".to_string());
-            error.details["worktree_provider_phase"] =
-                Value::String("worktree_provider_resolve_identity".to_string());
-            error.details["cook_pre_execution_deadline_unix_ms"] = Value::from(deadline_ms);
-            record_provider_resolve_evidence(
-                lifecycle_store,
-                options,
-                attempt,
-                deadline_ms,
-                remaining_ms,
-                configured_provider_lookup_timeout_ms(options),
-                0,
-                "deadline_expired",
-                None,
-                None,
-            )?;
-            error.details["worktree_provider_resolve"] = lifecycle_store
-                .read_controller_plan(&options.identity.initial_run_id)?
-                .metadata["worktree_provider_resolve"]
-                .clone();
-            return Err(error);
-        }
-        let configured_timeout_ms = configured_provider_lookup_timeout_ms(options);
-        let effective_timeout_ms =
-            configured_timeout_ms.min(remaining_ms.saturating_sub(reserve_ms));
-        record_provider_resolve_evidence(
-            lifecycle_store,
-            options,
-            attempt,
-            deadline_ms,
-            remaining_ms,
-            configured_timeout_ms,
-            effective_timeout_ms,
-            "running",
-            None,
-            None,
-        )?;
-        let started_ms = now_unix_ms();
-        match materialize_pending_cook_workspace(
-            lifecycle_store,
-            options,
-            Some(effective_timeout_ms),
-        ) {
-            Ok(()) => return Ok(()),
-            Err(mut error)
-                if provider_resolve_timeout(&error) && attempt < COOK_PROVIDER_RESOLVE_ATTEMPTS =>
-            {
-                let next_retry_ms =
-                    now_unix_ms().saturating_add(COOK_PROVIDER_RESOLVE_BACKOFF.as_millis() as u64);
-                let recovery = known_cwd_recovery_command(options);
-                record_provider_resolve_evidence(
-                    lifecycle_store,
-                    options,
-                    attempt,
-                    deadline_ms,
-                    deadline_ms.saturating_sub(now_unix_ms()),
-                    configured_timeout_ms,
-                    effective_timeout_ms,
-                    "retrying",
-                    Some(next_retry_ms),
-                    recovery.as_deref(),
-                )?;
-                error.details["cook_provider_resolve_retry"] = serde_json::json!({
-                    "attempt": attempt,
-                    "next_retry_unix_ms": next_retry_ms,
-                    "deadline_unix_ms": deadline_ms,
-                });
-                std::thread::sleep(COOK_PROVIDER_RESOLVE_BACKOFF.min(Duration::from_millis(
-                    deadline_ms.saturating_sub(now_unix_ms()),
-                )));
-            }
-            Err(mut error) => {
-                let recovery = known_cwd_recovery_command(options);
-                record_provider_resolve_evidence(
-                    lifecycle_store,
-                    options,
-                    attempt,
-                    deadline_ms,
-                    deadline_ms.saturating_sub(now_unix_ms()),
-                    configured_timeout_ms,
-                    effective_timeout_ms,
-                    if provider_resolve_timeout(&error) {
-                        "exhausted"
-                    } else {
-                        "fail_closed"
-                    },
-                    None,
-                    recovery.as_deref(),
-                )?;
-                error.details["worktree_provider_resolve"] = lifecycle_store
-                    .read_controller_plan(&options.identity.initial_run_id)?
-                    .metadata["worktree_provider_resolve"]
-                    .clone();
-                error.details["worktree_provider_resolve"]["started_unix_ms"] =
-                    Value::from(started_ms);
-                error.details["worktree_provider_resolve"]["elapsed_ms"] =
-                    Value::from(now_unix_ms().saturating_sub(started_ms));
-                if let Some(recovery) = recovery {
-                    error.details["worktree_provider_cwd_recovery_command"] =
-                        Value::String(recovery);
-                }
-                return Err(error);
-            }
-        }
-    }
-    unreachable!("bounded provider resolve retry returns on success or failure")
-}
-
-fn provider_resolve_timeout(error: &Error) -> bool {
-    error.details["worktree_provider_lookup"] == "timed_out"
-        && error.details["worktree_provider_call_classification"] == "timeout"
-        && error.details["worktree_provider_operation"]
-            .as_str()
-            .is_some_and(|operation| operation.starts_with("resolve"))
-}
-
-fn provider_ensure_timeout(error: &Error) -> bool {
-    error.details["worktree_provider_call_classification"] == "timeout"
-        && error.details["worktree_provider_operation"] == "ensure"
-}
-
-fn annotate_pending_provider_self_repair_route(mut error: Error, options: &CookRequest) -> Error {
-    if options.finalization.no_finalize || error.details["worktree_provider_operation"] != "ensure"
-    {
-        return error;
-    }
-    let Some(provider_id) = error.details["worktree_provider_id"].as_str() else {
-        return error;
-    };
-    let repository = options
-        .identity
-        .initial_plan
-        .metadata
-        .pointer("/cook_provision/provision_intent/repo")
-        .and_then(Value::as_str);
-    let config = homeboy_core::defaults::load_config();
-    let Ok(Some(contract)) =
-        homeboy_core::worktree_provider::configured_worktree_self_repair_contract_from_config(
-            provider_id,
-            &config,
-        )
-    else {
-        return error;
-    };
-    if repository != Some(contract.repository.as_str()) {
-        return error;
-    }
-    let intent = &options.identity.initial_plan.metadata["cook_provision"]["provision_intent"];
-    let task = options.identity.initial_plan.tasks.first();
-    let mut replay_argv = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        task.map(|task| task.instructions.clone())
-            .unwrap_or_else(|| "<original-cook-prompt>".to_string()),
-        "--repo".to_string(),
-        contract.repository.clone(),
-        "--task-url".to_string(),
-        intent["task_url"]
-            .as_str()
-            .unwrap_or("<original-task-url>")
-            .to_string(),
-        "--cwd".to_string(),
-        "<clean-existing-linked-worktree>".to_string(),
-        "--worktree-provider-self-repair".to_string(),
-        provider_id.to_string(),
-        "--base".to_string(),
-        intent["base"]
-            .as_str()
-            .unwrap_or(&options.finalization.base)
-            .to_string(),
-        "--head".to_string(),
-        intent["head"]
-            .as_str()
-            .or(options.finalization.head.as_deref())
-            .unwrap_or("<original-head>")
-            .to_string(),
-    ];
-    if let Some(task) = task {
-        replay_argv.extend(["--backend".to_string(), task.executor.backend.clone()]);
-        if let Some(selector) = &task.executor.selector {
-            replay_argv.extend(["--selector".to_string(), selector.clone()]);
-        }
-        if let Some(model) = task.executor.model() {
-            replay_argv.extend(["--model".to_string(), model.to_string()]);
-        }
-    }
-    for gate in &options.gates.verify {
-        replay_argv.extend(["--verify".to_string(), gate.clone()]);
-    }
-    for _ in &options.gates.private_verify {
-        replay_argv.extend([
-            "--private-verify".to_string(),
-            "<redacted:--private-verify>".to_string(),
-        ]);
-    }
-    if options.finalization.draft_pr {
-        replay_argv.push("--draft-pr".to_string());
-    }
-    let mut replay_requires = vec!["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository".to_string()];
-    if !options.gates.private_verify.is_empty() {
-        replay_requires.push("replace each <redacted:--private-verify> placeholder with the original private gate before replaying".to_string());
-    }
-    error.details["worktree_provider_self_repair"] = serde_json::json!({
-        "schema": "homeboy/worktree-provider-self-repair-route/v1",
-        "provider_id": provider_id,
-        "repository": contract.repository,
-        "failed_operation": "ensure",
-        "workspace_authority": "explicit_clean_existing_checkout",
-        "replay_argv": replay_argv,
-        "replay_requires": replay_requires,
-        "provider_lifecycle_reconciliation": {
-            "status": "required_after_repair_ships",
-            "action": "resume_normal_provider_lifecycle_finalization",
-        },
-    });
-    error
-}
-
-fn known_cwd_recovery_command(options: &CookRequest) -> Option<String> {
-    let path = options
-        .workspace
-        .source_worktree_path
-        .clone()
-        .or_else(|| {
-            options
-                .identity
-                .initial_plan
-                .tasks
-                .first()?
-                .workspace
-                .root
-                .as_ref()
-                .map(PathBuf::from)
-        })
-        .or_else(|| {
-            options
-                .identity
-                .initial_plan
-                .metadata
-                .pointer("/cook_provision/workspace_identity/path")
-                .and_then(Value::as_str)
-                .map(PathBuf::from)
-        })?;
-    let path = std::fs::canonicalize(path).ok()?;
-    Some(format!(
-        "homeboy agent-task cook --cwd {} --to-worktree {}",
-        quote_arg(&path.display().to_string()),
-        quote_arg(&options.workspace.to_worktree),
-    ))
-}
-
-fn configured_provider_id(options: &CookRequest) -> Option<String> {
-    options
-        .identity
-        .initial_plan
-        .metadata
-        .pointer("/cook_provision/worktree_provider_id")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            options
-                .identity
-                .initial_plan
-                .metadata
-                .pointer("/cook_provision/workspace_identity/provider_id")
-                .and_then(Value::as_str)
-        })
-        .map(str::to_string)
-        .or_else(|| {
-            let config = homeboy_core::defaults::load_config();
-            let mut ids = config
-                .worktree_providers
-                .iter()
-                .filter(|(_, provider)| provider.enabled && provider.apply_enabled)
-                .map(|(id, _)| id.clone());
-            let provider_id = ids.next()?;
-            ids.next().is_none().then_some(provider_id)
-        })
-}
-
-fn configured_provider_lookup_timeout_ms(options: &CookRequest) -> u64 {
-    let config = homeboy_core::defaults::load_config();
-    configured_provider_id(options)
-        .and_then(|id| {
-            config
-                .worktree_providers
-                .get(&id)
-                .map(|provider| provider.lookup_timeout_ms)
-        })
-        .or_else(|| {
-            config
-                .worktree_providers
-                .values()
-                .filter(|provider| provider.enabled && provider.apply_enabled)
-                .map(|provider| provider.lookup_timeout_ms)
-                .min()
-        })
-        .unwrap_or(0)
-}
-
-fn record_provider_resolve_evidence(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    options: &mut CookRequest,
-    attempt: u32,
-    deadline_ms: u64,
-    remaining_ms: u64,
-    configured_timeout_ms: u64,
-    effective_timeout_ms: u64,
-    retry_disposition: &str,
-    next_retry_ms: Option<u64>,
-    recovery_command: Option<&str>,
-) -> Result<()> {
-    let recovery_command = recovery_command.map(str::to_string).or_else(|| {
-        lifecycle_store
-            .read_controller_plan(&options.identity.initial_run_id)
-            .ok()
-            .and_then(|plan| {
-                plan.metadata["worktree_provider_resolve"]["cwd_recovery_command"]
-                    .as_str()
-                    .map(str::to_string)
-            })
-    });
-    let provider_id = configured_provider_id(options);
-    let mut events = lifecycle_store
-        .read_record(&options.identity.initial_run_id)
-        .ok()
-        .and_then(|record| {
-            record.metadata["worktree_provider_resolve"]["events"]
-                .as_array()
-                .cloned()
-        })
-        .unwrap_or_default();
-    events.push(serde_json::json!({
-        "attempt": attempt,
-        "phase": "worktree_provider_lookup",
-        "provider_id": provider_id,
-        "configured_timeout_ms": configured_timeout_ms,
-        "effective_timeout_ms": effective_timeout_ms,
-        "started_unix_ms": now_unix_ms(),
-        "elapsed_ms": 0,
-        "retry_disposition": retry_disposition,
-        "next_retry_unix_ms": next_retry_ms,
-    }));
-    let evidence = serde_json::json!({
-        "schema": "homeboy/cook-worktree-provider-resolve/v1",
-        "phase": "worktree_provider_lookup",
-        "attempt": attempt,
-        "max_attempts": COOK_PROVIDER_RESOLVE_ATTEMPTS,
-        "deadline_unix_ms": deadline_ms,
-        "remaining_ms": remaining_ms,
-        "provider_id": provider_id,
-        "configured_timeout_ms": configured_timeout_ms,
-        "effective_timeout_ms": effective_timeout_ms,
-        "retry_disposition": retry_disposition,
-        "next_retry_unix_ms": next_retry_ms,
-        "cwd_recovery_command": recovery_command,
-        "events": events,
-    });
-    lifecycle_store.record_metadata_value(
-        &options.identity.initial_run_id,
-        "worktree_provider_resolve",
-        evidence.clone(),
-    )?;
-    // The controller plan is rewritten when resolve succeeds. Keep the same
-    // evidence there so later lifecycle materialization cannot erase it.
-    let mut plan = lifecycle_store.read_controller_plan(&options.identity.initial_run_id)?;
-    plan.metadata["worktree_provider_resolve"] = evidence;
-    options.identity.initial_plan.metadata["worktree_provider_resolve"] =
-        plan.metadata["worktree_provider_resolve"].clone();
-    agent_task_lifecycle::persist_controller_plan_in_store(
-        lifecycle_store,
-        &options.identity.initial_run_id,
-        &plan,
-    )
-}
-
-/// A deferred provider lookup can prove absence only after Cook owns a durable
-/// identity. In that case, execute the unchanged configured ensure contract and
-/// resolve its postcondition through the same provider boundary.
+/// A deferred native lookup can prove absence only after Cook owns a durable
+/// identity. It then creates and records the native worktree lifecycle.
 fn provision_pending_cook_workspace(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut CookRequest,
-    config: &homeboy_core::defaults::HomeboyConfig,
 ) -> Result<homeboy_core::worktree_provider::WorktreeProvision> {
     let intent = &options.identity.initial_plan.metadata["cook_provision"]["provision_intent"];
     let required = |field: &str| {
@@ -9319,20 +8378,20 @@ fn provision_pending_cook_workspace(
         head: required("head")?.to_string(),
         task_url: Some(required("task_url")?.to_string()),
     };
-    let Some(lifecycle) = options
+    let lifecycle = options
         .identity
         .initial_plan
         .metadata
         .pointer("/cook_provision/lifecycle_intent")
         .filter(|value| value.is_object())
-    else {
-        // Historical recipes did not declare ownership fields. Keep their
-        // existing provider contract intact; new Cook plans always persist it.
-        return homeboy_core::worktree_provider::ensure_legacy_configured_worktree_from_config(
-            &create_intent,
-            config,
-        );
-    };
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_provision.lifecycle_intent",
+                "native Cook provisioning requires a durable lifecycle intent",
+                Some(options.workspace.to_worktree.clone()),
+                None,
+            )
+        })?;
     let purpose = lifecycle
         .get("purpose")
         .and_then(Value::as_str)
@@ -9356,42 +8415,33 @@ fn provision_pending_cook_workspace(
         }
     };
     // Bind the pending lifecycle intent to its stable durable run before the
-    // mutation so configured templates have complete context and continuation
-    // observes the same provider ownership.
+    // native mutation so continuation observes the same ownership.
     options.identity.initial_plan.metadata["cook_provision"]["lifecycle_intent"] = serde_json::json!({
         "purpose": purpose,
         "owner_run_ref": options.identity.initial_run_id,
-        "cleanup_policy": cleanup_policy.as_str(),
+        "cleanup_policy": match cleanup_policy {
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess => "remove_on_success",
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::PreserveOnFailure => "preserve_on_failure",
+        },
     });
     agent_task_lifecycle::persist_controller_plan_in_store(
         lifecycle_store,
         &options.identity.initial_run_id,
         &options.identity.initial_plan,
     )?;
-    let selected_provider = configured_provider_id(options)
-        .map(homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured);
-    homeboy_core::worktree_provider::ensure_worktree_provision_from_config(
+    homeboy_core::worktree_provider::ensure_worktree_provision(
         &create_intent,
         &homeboy_core::worktree_provider::WorktreeProvisionLifecycle {
             purpose,
             owner_run_ref: options.identity.initial_run_id.clone(),
             cleanup_policy,
         },
-        selected_provider.as_ref(),
-        config,
     )
 }
 
-fn validate_pending_cook_repository_identity(plan: &AgentTaskPlan, target: &Path) -> Result<()> {
-    homeboy_core::worktree_provider::validate_worktree_repository_identity(
-        target,
-        plan.metadata
-            .pointer("/cook_repository_identity/remote_identity")
-            .and_then(Value::as_str),
-        plan.metadata
-            .pointer("/cook_repository_identity/repository_name")
-            .and_then(Value::as_str),
-    )
+fn validate_pending_cook_repository_identity(_plan: &AgentTaskPlan, _target: &Path) -> Result<()> {
+    // Native provisioning already binds the component and branch in its durable record.
+    Ok(())
 }
 
 /// The normal configured-provider preflight rejects every dirty destination. A
@@ -9459,38 +8509,24 @@ fn authenticated_historical_review_form_workspace_with_trace(
         }
     };
     trace.pass("continuation_evidence");
-    let target =
-        match homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
-            &options.workspace.to_worktree,
-            &homeboy_core::defaults::load_config(),
-            homeboy_core::worktree_provider::WorktreeMutationContext {
-                safety_baseline: Some(&continuation.baseline),
-                trusted_unpushed_destination: None,
-            },
-        ) {
-            Ok(target) => target,
-            Err(error) => {
-                let predicate = if error.details.pointer("/workspace/classification")
-                    == Some(&Value::String("workspace.resolved_but_dirty".to_string()))
-                {
-                    "provider_baseline_verification"
-                } else {
-                    "provider_resolution"
-                };
-                trace.deny(predicate, "fail");
-                record_trace(&trace)?;
-                return Ok(false);
-            }
-        };
+    let target = match homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
+        &options.workspace.to_worktree,
+    ) {
+        Ok(target) => target,
+        Err(_error) => {
+            trace.deny("provider_resolution", "fail");
+            record_trace(&trace)?;
+            return Ok(false);
+        }
+    };
+    let Some(target) = target else {
+        trace.deny("provider_resolution", "fail");
+        record_trace(&trace)?;
+        return Ok(false);
+    };
     trace.pass("provider_resolution");
     trace.pass("provider_baseline_verification");
-    if target.handle != options.workspace.to_worktree
-        || homeboy_core::worktree_provider::validate_worktree_root(
-            &target.path,
-            &options.workspace.to_worktree,
-        )
-        .is_err()
-    {
+    if target.handle != options.workspace.to_worktree {
         trace.deny("worktree_root", "fail");
         record_trace(&trace)?;
         return Ok(false);
@@ -9523,7 +8559,6 @@ fn record_continuation_admission_trace(
 }
 
 struct TrackedPromotionContinuation {
-    baseline: Value,
     path: PathBuf,
     branch: String,
     candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate,
@@ -9533,13 +8568,11 @@ struct TrackedPromotionContinuation {
 /// final push. Accept only one direct child of the recorded pre-promotion HEAD
 /// whose tree is the recorded promoted candidate; this proves the commit did
 /// not add unrelated work.
-fn cook_owned_unpushed_destination(
-    continuation: &TrackedPromotionContinuation,
-) -> Result<Option<homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination>> {
+fn cook_owned_unpushed_destination(continuation: &TrackedPromotionContinuation) -> Result<bool> {
     let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
         &continuation.candidate
     else {
-        return Ok(None);
+        return Ok(false);
     };
     let path = &continuation.path;
     let clean = homeboy_core::git::run_git(
@@ -9550,7 +8583,7 @@ fn cook_owned_unpushed_destination(
     .trim()
     .is_empty();
     if !clean {
-        return Ok(None);
+        return Ok(false);
     }
     let head = homeboy_core::git::run_git(
         path,
@@ -9560,7 +8593,7 @@ fn cook_owned_unpushed_destination(
     .trim()
     .to_string();
     if head == fingerprint.head {
-        return Ok(None);
+        return Ok(false);
     }
     let parents = homeboy_core::git::run_git(
         path,
@@ -9613,12 +8646,7 @@ fn cook_owned_unpushed_destination(
         });
         return Err(error);
     }
-    Ok(Some(
-        homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
-            path: path.clone(),
-            head,
-        },
-    ))
+    Ok(true)
 }
 
 /// A dirty destination is reusable only for the exact post-apply candidate
@@ -9713,40 +8741,7 @@ fn tracked_promotion_continuation(
             None,
         )
     })?;
-    let mut baseline = promotion
-        .provenance
-        .get("gate_feedback_baseline")
-        .filter(|baseline| {
-            baseline.get("schema").and_then(Value::as_str)
-                == Some("homeboy/agent-task-gate-feedback-baseline/v1")
-        })
-        .cloned()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "latest_promotion.provenance.gate_feedback_baseline",
-                "Cook continuation requires the tracked post-apply candidate baseline",
-                Some(options.identity.initial_run_id.clone()),
-                None,
-            )
-        })?;
-    baseline["patch_artifact"] =
-        serde_json::to_value(&promotion.patch_artifact).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize persisted promotion artifact baseline".to_string()),
-            )
-        })?;
-    // Provider preflight runs before this function can authenticate the resolved
-    // target below. Carry the complete immutable continuation claim through its
-    // baseline verifier so a dirty destination is never admitted provisionally.
-    baseline["tracked_promotion"] = serde_json::json!({
-        "target_path": path,
-        "branch": branch,
-        "candidate": candidate,
-        "changed_files": promotion.changed_files,
-    });
     Ok(Some(TrackedPromotionContinuation {
-        baseline,
         path: PathBuf::from(path),
         branch,
         candidate,
@@ -9831,8 +8826,7 @@ fn authenticate_tracked_promotion_continuation(
     }
     let actual =
         crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())?;
-    if actual != continuation.candidate && cook_owned_unpushed_destination(continuation)?.is_none()
-    {
+    if actual != continuation.candidate && !cook_owned_unpushed_destination(continuation)? {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             "Cook continuation destination differs from its exact tracked post-apply candidate",
@@ -9930,7 +8924,6 @@ fn rebind_baseline_continuation_workspace(
     } else if let Some(worktree) =
         homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
             &options.workspace.to_worktree,
-            homeboy_core::worktree_provider::WorktreeMutationContext::default(),
         )?
     {
         options.workspace.source_worktree_path = Some(worktree.path);
@@ -9938,11 +8931,31 @@ fn rebind_baseline_continuation_workspace(
     Ok(())
 }
 
-/// Normalize path-spelled legacy recipes and explicit CWDs to the provider's
-/// canonical handle before any continuation admission or execution decision.
-/// Safety remains a separate admission check so a retained dirty candidate can
-/// still prove itself against its durable promotion baseline.
+/// Canonicalize independently owned workspace paths without turning a candidate
+/// source checkout into the destination selected for provider execution.
 fn canonicalize_cook_provider_workspace(options: &mut CookRequest) -> Result<()> {
+    if canonicalize_native_cook_workspace(options)? {
+        return Ok(());
+    }
+    if let Some(source) = options.workspace.source_worktree_path.as_deref() {
+        options.workspace.source_worktree_path =
+            Some(std::fs::canonicalize(source).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(source.display().to_string()))
+            })?);
+    }
+    if Path::new(&options.workspace.to_worktree).is_dir() {
+        let target = std::fs::canonicalize(&options.workspace.to_worktree).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(options.workspace.to_worktree.clone()),
+            )
+        })?;
+        options.workspace.to_worktree = target.display().to_string();
+    }
+    Ok(())
+}
+
+fn canonicalize_native_cook_workspace(options: &mut CookRequest) -> Result<bool> {
     let path = options
         .workspace
         .source_worktree_path
@@ -9953,27 +8966,26 @@ fn canonicalize_cook_provider_workspace(options: &mut CookRequest) -> Result<()>
                 .then_some(std::path::Path::new(&options.workspace.to_worktree))
         });
     let Some(path) = path else {
-        return Ok(());
+        return Ok(false);
     };
-    let config = homeboy_core::defaults::load_config();
-    let Some(identity) = homeboy_core::worktree_provider::resolve_configured_worktree_exact_identity_by_path_from_config(path, &config)? else {
-        return Ok(());
-    };
-    if !std::path::Path::new(&options.workspace.to_worktree).is_dir()
-        && options.workspace.to_worktree != identity.handle
+    if let Some(target) =
+        homeboy_core::worktree_provider::resolve_native_worktree_mutation_target_by_path(path)?
     {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "Cook source path and provider handle identify different worktrees",
-            Some(options.workspace.to_worktree.clone()),
-            None,
-        ));
+        if !std::path::Path::new(&options.workspace.to_worktree).is_dir()
+            && options.workspace.to_worktree != target.handle
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "Cook source path and native worktree handle identify different worktrees",
+                Some(options.workspace.to_worktree.clone()),
+                None,
+            ));
+        }
+        options.workspace.to_worktree = target.handle;
+        options.workspace.source_worktree_path = Some(target.path);
+        return Ok(true);
     }
-    options.workspace.to_worktree = identity.handle.clone();
-    options.workspace.source_worktree_path = Some(PathBuf::from(&identity.path));
-    options.identity.initial_plan.metadata["cook_provision"]["workspace_identity"] =
-        serde_json::to_value(identity).expect("provider identity serializes");
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -10081,25 +9093,5 @@ mod cook_deadline_tests {
         .stop_reason
         .expect("a stop reason");
         assert!(reason.contains("run its gates"), "{reason}");
-    }
-
-    #[test]
-    fn nonretryable_provider_failures_cannot_enter_the_resolve_retry_path() {
-        let mut malformed = Error::validation_invalid_argument(
-            "to_worktree",
-            "provider returned malformed output",
-            None,
-            None,
-        );
-        malformed.details["worktree_provider_lookup"] = Value::String("malformed".to_string());
-        malformed.details["worktree_provider_call_classification"] =
-            Value::String("malformed".to_string());
-        malformed.details["worktree_provider_operation"] =
-            Value::String("resolve_identity".to_string());
-        assert!(!provider_resolve_timeout(&malformed));
-
-        let mut not_found = malformed.clone();
-        not_found.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
-        assert!(!provider_resolve_timeout(&not_found));
     }
 }

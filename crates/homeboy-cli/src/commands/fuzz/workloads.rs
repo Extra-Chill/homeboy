@@ -6,7 +6,7 @@ use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::fuzz::{
     merge_fuzz_target_inventory, parse_fuzz_target_inventory_file, FuzzTargetInventory,
-    FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA,
+    FuzzWorkload, FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA,
 };
 use homeboy::rig::{self, RigSpec};
 use homeboy_core;
@@ -525,6 +525,7 @@ pub(super) fn select_workload<'a>(
 pub(super) fn build_target_inventory(
     component_id: &str,
     workloads: &[FuzzWorkloadOutput],
+    selected_workload: Option<&FuzzWorkloadOutput>,
     run_id: Option<String>,
     inventory_path: Option<&Path>,
 ) -> homeboy::core::Result<FuzzTargetInventory> {
@@ -548,7 +549,93 @@ pub(super) fn build_target_inventory(
         inventory.metadata["inventory_file"] =
             serde_json::Value::String(path.to_string_lossy().to_string());
         merge_fuzz_target_inventory(&mut inventory, discovered);
+    } else if let Some(workload) = selected_workload {
+        project_workload_inventory(&mut inventory, component_id, workload)?;
     }
 
     Ok(inventory)
+}
+
+fn project_workload_inventory(
+    inventory: &mut FuzzTargetInventory,
+    component_id: &str,
+    workload: &FuzzWorkloadOutput,
+) -> homeboy::core::Result<()> {
+    let Some(path) = workload.manifest_path.as_deref().map(Path::new) else {
+        return Ok(());
+    };
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some(format!("parse fuzz workload file {}", path.display())),
+            Some(contents),
+        )
+    })?;
+    let contract = FuzzWorkload::from_value(value.clone()).map_err(|message| {
+        homeboy::core::Error::invalid_argument_for("workload", message, path.display().to_string())
+    })?;
+    let target = value.get("target").and_then(serde_json::Value::as_object);
+    let target_id = target
+        .and_then(|target| {
+            ["id", "component", "slug"]
+                .iter()
+                .find_map(|key| target.get(*key))
+        })
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(component_id);
+    let target_kind = target
+        .and_then(|target| ["kind", "type"].iter().find_map(|key| target.get(*key)))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("component");
+    let operations = contract
+        .operations
+        .iter()
+        .map(|operation| {
+            serde_json::json!({
+                "id": operation,
+                "kind": operation,
+                "target_id": target_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    let surfaces = contract
+        .surface_ids
+        .iter()
+        .map(|surface_id| {
+            serde_json::json!({
+                "id": surface_id,
+                "kind": target_kind,
+                "target": target_id,
+                "safety_class": contract.safety_class,
+            })
+        })
+        .collect::<Vec<_>>();
+    let projected = FuzzTargetInventory::from_value(serde_json::json!({
+        "id": format!("{}-workload-inventory", contract.id),
+        "surfaces": surfaces,
+        "targets": [{
+            "id": target_id,
+            "kind": target_kind,
+            "locator": target.and_then(|target| target.get("slug")),
+            "operations": operations,
+            "source_refs": [path.to_string_lossy()],
+        }],
+        "workloads": [contract],
+    }))
+    .map_err(|message| {
+        homeboy::core::Error::invalid_argument_for(
+            "workload.inventory",
+            message,
+            path.display().to_string(),
+        )
+    })?;
+    merge_fuzz_target_inventory(inventory, projected);
+    inventory.metadata["workload_inventory_source"] =
+        serde_json::Value::String(path.to_string_lossy().to_string());
+    Ok(())
 }

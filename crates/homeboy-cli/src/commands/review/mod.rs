@@ -121,6 +121,7 @@ pub enum ReviewCommand {
 /// executes in the selected checkout.
 #[derive(Serialize)]
 struct ReviewChildReadinessEvidence {
+    gate: String,
     requested_source_commit: String,
     source_commit: String,
     runner_id: Option<String>,
@@ -348,6 +349,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
                 audit::run(audit_args),
                 &component,
                 requested_source.as_deref(),
+                "audit",
             )
         }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
@@ -359,6 +361,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
                 lint::run(review_lint_args(args)),
                 &component,
                 requested_source.as_deref(),
+                "lint",
             )
         }
         Some(ReviewCommand::Test(args)) => {
@@ -369,6 +372,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
                 test::run(args),
                 &component,
                 requested_source.as_deref(),
+                "test",
             )
         }
         Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
@@ -401,6 +405,7 @@ fn to_value_with_readiness_provenance<T: Serialize>(
     result: CmdResult<T>,
     component: &homeboy::core::component::Component,
     requested_source: Option<&str>,
+    gate: &str,
 ) -> CmdResult<Value> {
     let (output, exit_code) = result?;
     let mut value = serde_json::to_value(output).map_err(|error| {
@@ -422,6 +427,7 @@ fn to_value_with_readiness_provenance<T: Serialize>(
         object.insert(
             "release_readiness".to_string(),
             serde_json::to_value(ReviewChildReadinessEvidence {
+                gate: gate.to_string(),
                 requested_source_commit: requested_source.to_string(),
                 source_commit,
                 runner_id,
@@ -1291,6 +1297,24 @@ mod tests {
             .as_deref(),
             Some("homeboy-lab")
         );
+    }
+
+    #[test]
+    fn release_readiness_evidence_preserves_each_portable_gate_discriminator() {
+        for gate in ["audit", "lint", "test"] {
+            let evidence = serde_json::to_value(ReviewChildReadinessEvidence {
+                gate: gate.to_string(),
+                requested_source_commit: "frozen-source".to_string(),
+                source_commit: "frozen-source".to_string(),
+                runner_id: Some("homeboy-lab".to_string()),
+                provenance: Default::default(),
+            })
+            .expect("serialize readiness evidence");
+
+            assert_eq!(evidence["gate"], gate);
+            assert_eq!(evidence["requested_source_commit"], "frozen-source");
+            assert_eq!(evidence["source_commit"], "frozen-source");
+        }
     }
 
     #[test]

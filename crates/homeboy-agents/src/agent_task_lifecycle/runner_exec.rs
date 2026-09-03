@@ -164,6 +164,10 @@ fn ensure_runner_exec_observation_run(
     if !run.metadata_json.is_object() {
         run.metadata_json = json!({ "homeboy_original_metadata": run.metadata_json });
     }
+    // A pre-handoff run starts with the configured root, but a later workspace
+    // sync resolves its immutable execution path. Keep the canonical run field
+    // aligned with that durable snapshot provenance.
+    run.cwd = Some(remote_workspace.to_string());
     let metadata = run.metadata_json.as_object_mut().expect("metadata object");
     metadata.insert("kind".to_string(), json!(RUNNER_EXEC_RUN_KIND));
     metadata.insert("runner_id".to_string(), json!(runner_id));

@@ -5211,8 +5211,6 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 }),
             });
         }
-        let provider_failure =
-            homeboy::core::worktree_provider::compact_worktree_provider_failure_details(details);
         return Some(CollectedDiagnostic {
             task_id: "controller".to_string(),
             class: failure
@@ -5231,7 +5229,6 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 "error_code": failure.get("error_code"),
                 "provider_executions_consumed": failure.get("provider_executions_consumed"),
                 "details": details,
-                "worktree_provider_failure": provider_failure,
             }),
         });
     }

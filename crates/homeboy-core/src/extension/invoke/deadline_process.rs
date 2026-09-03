@@ -15,6 +15,7 @@ pub(crate) struct DeadlineProcessOutput {
     pub stderr: Vec<u8>,
 }
 
+#[derive(Debug)]
 pub(crate) struct DeadlineProcessFailure {
     pub message: String,
 }

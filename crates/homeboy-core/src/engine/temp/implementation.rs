@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 mod contract {
     use super::*;
@@ -20,7 +20,19 @@ mod contract {
     pub(super) const RUN_OWNER_FILE: &str = ".homeboy-run-owner-v1.json";
     pub(super) const RUN_OWNER_SCHEMA: &str = "homeboy/runtime-run-owner/v1";
     pub(super) const CLEANUP_LOCK_DIR: &str = ".cleanup.lock";
+    /// Lease a live cleanup owner renews on every heartbeat.
+    ///
+    /// This bounds only the case where the owner's process identity cannot be
+    /// disproved. An owner whose recorded identity has demonstrably exited is
+    /// reclaimed without waiting this out — see `acquire_cleanup_lock_with_policy`.
     pub(super) const CLEANUP_LOCK_STALE_AFTER: Duration = Duration::from_secs(300);
+    /// Contention tolerance for a *live* holder: ~2s of retries.
+    ///
+    /// Deliberately far shorter than [`CLEANUP_LOCK_STALE_AFTER`]. Waiting out a
+    /// 300s lease inside one acquisition would turn a busy lock into a 300s
+    /// hang, and it is unnecessary: reclaim is driven by process identity, not
+    /// by the lease, so an abandoned lock is recovered on the first attempt
+    /// rather than after the lease expires.
     pub(super) const CLEANUP_LOCK_ATTEMPTS: usize = 100;
     pub(super) const CLEANUP_LOCK_SLEEP: Duration = Duration::from_millis(20);
     pub(super) const CLEANUP_LOCK_OWNER_FILE: &str = "owner.json";
@@ -246,6 +258,22 @@ pub struct RuntimeTempCleanupOptions<'a> {
     pub run_max_bytes: u64,
     pub run_max_count: usize,
     pub cursor: Option<&'a str>,
+    /// Wall-clock budget for this sweep. When it is spent the sweep stops at an
+    /// entry boundary and returns what it already reclaimed, with `has_more`
+    /// and a resumable `next_cursor`.
+    ///
+    /// Without it, a caller that imposes its own deadline — the aggregate
+    /// `cleanup` per-category wall — can only *kill* the sweep. That discards
+    /// every reclaimed byte and, because a killed process runs no destructor,
+    /// abandons the cleanup lock directory on every run (#14221).
+    pub deadline: Option<Instant>,
+}
+
+impl RuntimeTempCleanupOptions<'_> {
+    fn budget_spent(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
 }
 
 #[derive(Debug)]
@@ -1014,6 +1042,7 @@ pub fn cleanup_runtime_tmp(
         run_max_bytes: u64::MAX,
         run_max_count: usize::MAX,
         cursor: None,
+        deadline: None,
     })
 }
 
@@ -1048,7 +1077,10 @@ fn cleanup_runtime_tmp_bounded_with_remover(
         // a bounded report. Exhausting it here defers the drain to the next
         // invocation rather than silently dropping it.
         let remaining = options.limit.max(1).saturating_sub(output.rows.len());
-        if remaining == 0 {
+        // The wall-clock budget is shared across roots for the same reason the
+        // row bound is: the drain must defer to the next invocation rather than
+        // push the sweep past the caller's deadline and be killed (#14221).
+        if remaining == 0 || options.budget_spent() {
             output.has_more = true;
             break;
         }
@@ -1201,17 +1233,31 @@ fn cleanup_runtime_tmp_root(
     let page_end = start
         .saturating_add(options.limit.max(1))
         .min(managed.len());
-    let managed_has_more = page_end < managed.len();
-    let page_last_name = managed
+    let mut managed_has_more = page_end < managed.len();
+    let mut page_last_name = managed
         .get(page_end.saturating_sub(1))
         .map(|entry| entry.file_name().to_string_lossy().to_string());
     let managed = managed.into_iter().skip(start).take(options.limit.max(1));
 
     let mut managed_inspections = Vec::new();
+    // Resume point for a budget-truncated page: the last entry this invocation
+    // actually finished with, so the next one starts at the first it did not.
+    let mut last_inspected_name: Option<String> = None;
     for entry in managed {
+        // Inspecting an entry recursively measures its storage, which on a
+        // large runtime root is the dominant cost of the whole sweep. Stopping
+        // here — at an entry boundary, before that walk — is what lets the
+        // sweep return normally, release its lock, and hand the caller a
+        // resumable cursor instead of being killed mid-scan (#14221).
+        if options.budget_spent() {
+            managed_has_more = true;
+            page_last_name = last_inspected_name.clone().or(page_last_name);
+            break;
+        }
         lock.heartbeat()?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        last_inspected_name = Some(name.clone());
         if options
             .prefix
             .is_some_and(|prefix| !name.starts_with(prefix))
@@ -1379,6 +1425,12 @@ fn cleanup_runtime_tmp_root(
     });
     for (inspection, eligibility_reason) in managed_decisions.into_iter().take(options.limit.max(1))
     {
+        // Removal is the phase that actually reclaims bytes, so a spent budget
+        // stops it rather than abandoning the rows it already applied.
+        if options.budget_spent() {
+            managed_has_more = true;
+            break;
+        }
         lock.heartbeat()?;
         output.totals.inspected_count += 1;
         let mut row = RuntimeTempCleanupRow {
@@ -1484,15 +1536,20 @@ fn cleanup_runtime_tmp_root(
             .to_string_lossy()
             .to_string()
     });
+    let mut unmanaged_truncated_at = None;
     for entry in unmanaged
         .into_iter()
         .skip(unmanaged_start)
         .take(unmanaged_capacity)
     {
+        if options.budget_spent() {
+            break;
+        }
         lock.heartbeat()?;
         output.totals.inspected_count += 1;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        unmanaged_truncated_at = Some(name.clone());
         let mut row = RuntimeTempCleanupRow {
             path: path.display().to_string(),
             name: name.clone(),
@@ -1569,15 +1626,23 @@ fn cleanup_runtime_tmp_root(
         output.rows.push(row);
     }
 
+    // A budget-truncated unmanaged page resumes from the last entry it actually
+    // reached, not from the page end it never got to.
+    let unmanaged_resume = if options.budget_spent() {
+        unmanaged_truncated_at.or(unmanaged_last_name)
+    } else {
+        unmanaged_last_name
+    };
+    let unmanaged_has_more = unmanaged_end < unmanaged_len || options.budget_spent();
     if managed_has_more {
         output.has_more = true;
         output.next_cursor = page_last_name
             .map(|name| format_runtime_cursor("managed", &name, retained_count, retained_bytes));
-    } else if unmanaged_end < unmanaged_len {
+    } else if unmanaged_has_more {
         output.has_more = true;
         output.next_cursor = Some(format_runtime_cursor(
             "unmanaged",
-            unmanaged_last_name.as_deref().unwrap_or(""),
+            unmanaged_resume.as_deref().unwrap_or(""),
             retained_count,
             retained_bytes,
         ));
@@ -1710,10 +1775,24 @@ mod cleanup_support {
                         .and_then(|raw| {
                             serde_json::from_str::<RuntimeTempCleanupLockOwner>(&raw).ok()
                         });
+                    // An owner whose recorded process identity has demonstrably
+                    // exited holds nothing: there is no process left to finish
+                    // the operation or release the directory. Requiring its
+                    // lease to *also* expire made the documented reclaim
+                    // unreachable in the case it exists for. The lease is 300s
+                    // but acquisition only retries for ~2s, so a dead owner's
+                    // lock could never be reclaimed by any invocation — every
+                    // run timed out and leaked another dead-owner lock on top
+                    // of it, permanently blocking the category (#14221).
+                    //
+                    // The lease still governs the *unverifiable* case, where
+                    // the identity can be neither confirmed live nor proven
+                    // dead. There, expiry is the only evidence available.
                     let stale = owner.as_ref().is_some_and(|owner| {
-                        unix_time_ms().saturating_sub(owner.heartbeat_unix_ms)
-                            > stale_after.as_millis() as u64
-                            && process_identity_is_stale(owner)
+                        process_identity_is_stale(owner)
+                            || (process_identity_is_unverifiable(owner)
+                                && unix_time_ms().saturating_sub(owner.heartbeat_unix_ms)
+                                    > stale_after.as_millis() as u64)
                     }) || owner.is_none()
                         && fs::metadata(&path)
                             .ok()
@@ -1844,11 +1923,24 @@ mod cleanup_support {
         )
     }
 
+    /// The recorded owner has provably exited, or the PID now belongs to a
+    /// different process. Either way nothing is holding the lock.
     fn process_identity_is_stale(owner: &RuntimeTempCleanupLockOwner) -> bool {
         matches!(
             process_identity_state(owner),
             crate::process::ProcessIdentityState::Dead
                 | crate::process::ProcessIdentityState::IdentityMismatch
+        )
+    }
+
+    /// The owner's liveness cannot be determined — an unreadable `/proc` entry,
+    /// an owner recorded on another host, or a platform without identity
+    /// inspection. Lease expiry is the only evidence available for these, so
+    /// they alone still have to wait out [`CLEANUP_LOCK_STALE_AFTER`].
+    fn process_identity_is_unverifiable(owner: &RuntimeTempCleanupLockOwner) -> bool {
+        matches!(
+            process_identity_state(owner),
+            crate::process::ProcessIdentityState::Unverifiable
         )
     }
 
@@ -2091,6 +2183,7 @@ mod tests {
             run_max_bytes: 1024 * 1024 * 1024,
             run_max_count: 100,
             cursor: None,
+            deadline: None,
         }
     }
 

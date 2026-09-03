@@ -55,7 +55,8 @@ explain why `--runner` is unavailable.
 
 ## Subcommands
 
-See the full list of supported subcommands in the [Commands index](../../commands/commands-index.md).
+Run `homeboy --help` for the exact supported subcommands, or
+`homeboy self docs commands/commands-index` for the runtime-derived index.
 
 Automation that needs command safety, docs, output, and Lab metadata should use
 the first-class recursive manifest surface:

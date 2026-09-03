@@ -28,7 +28,7 @@ pub use sync::{
     reap_run_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
     verify_workspace_ref_hydration_source, workspace_snapshots,
 };
-pub use sync::{sync_workspace, update_workspace};
+pub use sync::{sync_workspace, sync_workspace_before, update_workspace};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,

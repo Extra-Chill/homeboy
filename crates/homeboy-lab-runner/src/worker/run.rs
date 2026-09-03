@@ -216,16 +216,17 @@ fn run_once_output(
     // Every cancellation checkpoint in this claim lifecycle polls the broker for
     // the same claimed job snapshot through identical plumbing; funnel them
     // through one borrow-only helper so the three checkpoints stay in lockstep.
-    let poll_cancelled = |client: &Client,
-                          options: &ReverseRunnerWorkerOptions,
-                          job: &homeboy_core::api_jobs::Job| {
-        cancelled_job_snapshot(
-            client,
-            &options.broker_url,
-            options.broker_token.as_deref(),
-            job,
-        )
-    };
+    let poll_cancelled =
+        |client: &Client,
+         options: &ReverseRunnerWorkerOptions,
+         claim: &homeboy_runner_contract::RunnerApiClaimedExecution| {
+            cancelled_job_snapshot(
+                client,
+                &options.broker_url,
+                options.broker_token.as_deref(),
+                claim,
+            )
+        };
     let claim = claim_job(&client, &options)?;
     let Some(claim) = claim else {
         let loop_mode = options.loop_mode;
@@ -257,7 +258,7 @@ fn run_once_output(
         Error::validation_invalid_argument(
             "execution_context",
             "reverse runner claim predates authenticated execution context support",
-            Some(claim.job.id.to_string()),
+            Some(claim.job_id.clone()),
             Some(vec![
                 "Resubmit the handoff through a compatible controller before retrying.".to_string(),
             ]),
@@ -270,11 +271,20 @@ fn run_once_output(
             Error::validation_invalid_argument(
                 "execution_protocol",
                 "reverse runner claim predates execution-context protocol negotiation",
-                Some(claim.job.id.to_string()),
+                Some(claim.job_id.clone()),
                 None,
             )
         })?
-        .verify()?;
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "execution_protocol",
+                "reverse runner claim has an unsupported execution-context protocol",
+                Some(claim.job_id.clone()),
+                None,
+            )
+        })?;
     if claim.workspace_claim_binding.is_some() {
         claim
             .workspace_claim_protocol
@@ -283,7 +293,7 @@ fn run_once_output(
                 Error::validation_invalid_argument(
                     "workspace_claim_protocol",
                     "reverse runner claim predates workspace-claim protocol negotiation",
-                    Some(claim.job.id.to_string()),
+                    Some(claim.job_id.clone()),
                     None,
                 )
             })?
@@ -297,20 +307,21 @@ fn run_once_output(
                 Error::validation_invalid_argument(
                     "workspace_owner_lease_protocol",
                     "reverse runner claim predates workspace owner lease protocol negotiation",
-                    Some(claim.job.id.to_string()),
+                    Some(claim.job_id.clone()),
                     None,
                 )
             })?
             .verify()?;
     }
-    let execution_context = execution_context.verify_claim(&claim.job, &claim.envelope)?;
+    let execution_context = RunnerJobExecutionContext::from_assertion(execution_context.clone())
+        .verify_claimed_execution(&claim.job_id, &options.runner_id, claim.claim_expires_at_ms)?;
 
     // Commit runner-owned evidence before materializing any broker input. The
     // controller persists the same identity in its claim event; keeping both
     // records lets either side recover after its own restart.
     persist_runner_execution_context(&options.runner_id, &execution_context)?;
 
-    if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
+    if let Some(job) = poll_cancelled(&client, &options, &claim)? {
         return Ok(cancelled_output(
             options,
             iterations,
@@ -329,7 +340,7 @@ fn run_once_output(
         &options.broker_url,
         options.broker_token.as_deref(),
         &options.runner_id,
-        &claim.job,
+        &claim,
         serde_json::json!({
             "phase": "runner_job_execution_context_verified",
             "runner_job_execution_context": execution_context.evidence_record()?,
@@ -340,7 +351,7 @@ fn run_once_output(
     let heartbeat = start_claim_heartbeat(
         &client,
         &options,
-        &claim.job,
+        &claim,
         claim.workspace_claim_binding.clone(),
         claim.workspace_owner_lease.clone(),
     )?;
@@ -372,16 +383,15 @@ fn run_once_output(
             &options.broker_url,
             options.broker_token.as_deref(),
             &options.runner_id,
-            &claim.job,
+            &claim,
             lease,
         )?;
     }
-    let _command_assets =
-        materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
+    let _command_assets = materialize_command_assets(&claim.job_id, &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
     let _staged_workspace = materialize_staged_source_artifact(
         &options.runner_id,
-        &claim.job.id.to_string(),
+        &claim.job_id,
         &mut execution_envelope,
     )?;
     materialize_snapshot_git_baseline(&execution_envelope)?;
@@ -393,7 +403,7 @@ fn run_once_output(
             &options.broker_url,
             options.broker_token.as_deref(),
             &options.runner_id,
-            &claim.job,
+            &claim,
             result,
             claim.workspace_claim_binding.as_ref(),
             current_owner_lease
@@ -407,7 +417,7 @@ fn run_once_output(
     let claimed_run_id = claimed_job_run_id(&execution_envelope);
     let progress_client = client.clone();
     let progress_options = options.clone();
-    let progress_job = claim.job.clone();
+    let progress_claim = claim.clone();
     let progress_workspace_claim_binding = claim.workspace_claim_binding.clone();
     let progress_owner_lease = current_owner_lease.clone();
     let progress_sink = Arc::new(move |data| {
@@ -416,7 +426,7 @@ fn run_once_output(
             &progress_options.broker_url,
             progress_options.broker_token.as_deref(),
             &progress_options.runner_id,
-            &progress_job,
+            &progress_claim,
             data,
             progress_workspace_claim_binding.as_ref(),
             progress_owner_lease
@@ -432,7 +442,7 @@ fn run_once_output(
             capability_preflight,
             claimed_run_id,
             execution_context.clone(),
-            claim.job.id.to_string(),
+            claim.job_id.clone(),
         )?,
         || {
             verify_staged_workspace_before_execution(
@@ -447,7 +457,7 @@ fn run_once_output(
                 &options.broker_url,
                 options.broker_token.as_deref(),
                 &options.runner_id,
-                &claim.job,
+                &claim,
                 recovered.id(),
                 claim.workspace_claim_binding.as_ref(),
                 current_owner_lease
@@ -467,7 +477,7 @@ fn run_once_output(
                 return cancel_seen;
             }
             last_cancel_poll = Instant::now();
-            cancel_seen = poll_cancelled(&client, &options, &claim.job)
+            cancel_seen = poll_cancelled(&client, &options, &claim)
                 .map(|job| job.is_some())
                 .unwrap_or(false);
             cancel_seen
@@ -477,7 +487,7 @@ fn run_once_output(
     let (exec_output, exit_code) = match exec_result {
         Ok(result) => result,
         Err(err) => {
-            if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
+            if let Some(job) = poll_cancelled(&client, &options, &claim)? {
                 return Ok(cancelled_output(
                     options,
                     iterations,
@@ -519,7 +529,7 @@ fn run_once_output(
             ));
         }
     };
-    if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
+    if let Some(job) = poll_cancelled(&client, &options, &claim)? {
         return Ok(cancelled_output(
             options,
             iterations,
