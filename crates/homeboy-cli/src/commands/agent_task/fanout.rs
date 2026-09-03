@@ -8292,7 +8292,7 @@ fi
                 .expect("replay existing wave"));
             let replayed = batch::read_batch_record(&plan.fanout_id).expect("read replayed wave");
             assert_eq!(replayed.metadata["cell_manifest"], before);
-            assert!(replayed.metadata["terminal_failure"].is_object());
+            assert!(replayed.metadata["admission_blocker"].is_object());
         });
     }
 
