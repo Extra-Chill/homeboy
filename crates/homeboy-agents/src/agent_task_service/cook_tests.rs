@@ -7276,6 +7276,17 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             .status()
             .expect("push base")
             .success());
+        let previewed_base = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&source)
+                .output()
+                .expect("resolve previewed base")
+                .stdout,
+        )
+        .expect("previewed base SHA is UTF-8")
+        .trim()
+        .to_string();
         let upstream = tempfile::tempdir().expect("upstream checkout");
         assert!(Command::new("git")
             .args([
@@ -7336,6 +7347,7 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.to_worktree = "fixture@native-provision".to_string();
+        options.workspace.task_base_sha = Some(previewed_base.clone());
         options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -7367,7 +7379,7 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             .expect("ensure native Cook destination");
         assert_eq!(
             options.workspace.task_base_sha.as_deref(),
-            Some(moving_base.as_str())
+            Some(previewed_base.as_str())
         );
         let first_path = options
             .workspace
@@ -7392,7 +7404,11 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         .expect("native destination SHA is UTF-8")
         .trim()
         .to_string();
-        assert_eq!(destination_head, moving_base);
+        assert_ne!(
+            destination_head, moving_base,
+            "remote advanced after preview"
+        );
+        assert_eq!(destination_head, previewed_base);
 
         let record = homeboy_core::worktree::resolve_if_present(&options.workspace.to_worktree)
             .expect("native lookup")

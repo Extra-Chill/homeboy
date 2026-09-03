@@ -41,6 +41,7 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
+const COOK_BASE_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn run_cook_explicit(
     request: agent_task_service::CookRequest,
@@ -1195,6 +1196,13 @@ mod preview_tests {
             preview["base_resolution"]["authoritative"]["admission"],
             "admitted"
         );
+        let mut deferred = resolved.clone();
+        deferred.to_worktree = Some("fixture@deferred-base-pin".to_string());
+        let provision = provision_cook_destination(&deferred).expect("defer native creation");
+        assert_eq!(
+            provision["provision_intent"]["base"], authoritative,
+            "deferred native creation must retain the previewed immutable base"
+        );
 
         let replay = cook_replay_argv(&resolved);
         let replay = replay.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1203,6 +1211,97 @@ mod preview_tests {
         assert_eq!(
             replayed.base_resolution.as_ref().unwrap()["sha"],
             authoritative
+        );
+    }
+
+    #[test]
+    fn authoritative_base_accepts_only_one_exact_advertised_ref() {
+        let sha = "a".repeat(40);
+        let reference = "refs/heads/main";
+        assert_eq!(
+            authoritative_cook_base_sha(&format!("{sha}\t{reference}\n"), reference),
+            Some(sha.clone())
+        );
+        assert_eq!(
+            authoritative_cook_base_sha(
+                &format!("{sha}\trefs/heads/main-next\n{sha}\trefs/heads/main\n"),
+                reference
+            ),
+            None,
+            "a wildcard or prefix result is not an exact base identity"
+        );
+        assert_eq!(
+            authoritative_cook_base_sha(&format!("{sha}\trefs/heads/main-next\n"), reference),
+            None
+        );
+    }
+
+    #[test]
+    fn authoritative_base_timeout_is_deferred_not_unavailable() {
+        let (sha, reason) = authoritative_cook_base_probe(
+            homeboy::core::git::BoundedGitRead::TimedOut,
+            "refs/heads/main",
+        );
+        assert_eq!(sha, None);
+        assert_eq!(reason, "remote_timeout");
+    }
+
+    #[test]
+    fn authoritative_base_pattern_does_not_pin_a_matching_branch() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let remote = fixture.path().join("remote.git");
+        let checkout = fixture.path().join("checkout");
+        let git = |path: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(
+            fixture.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            fixture.path(),
+            &["init", "--initial-branch=main", checkout.to_str().unwrap()],
+        );
+        git(&checkout, &["config", "user.email", "test@example.com"]);
+        git(&checkout, &["config", "user.name", "Test"]);
+        git(&checkout, &["commit", "--allow-empty", "-m", "initial"]);
+        git(
+            &checkout,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&checkout, &["push", "-u", "origin", "main"]);
+
+        let resolved = resolve_cook_destination(cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "fix it",
+            "--backend",
+            "fixture",
+            "--repo",
+            "fixture",
+            "--to-worktree",
+            checkout.to_str().unwrap(),
+            "--base",
+            "main*",
+            "--no-finalize",
+        ]))
+        .expect("pattern is deferred rather than resolved as a different branch");
+        assert_eq!(resolved.base_sha, None);
+        assert_eq!(
+            resolved.base_resolution.as_ref().unwrap()["authoritative"]["freshness"],
+            "deferred"
         );
     }
 
@@ -3615,7 +3714,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         "handle": to_worktree,
         "provision_intent": {
             "repo": cook_provision_repository(args),
-            "base": args.base,
+            "base": args.base_sha.clone().or_else(|| args.base.clone()),
             "head": args.head,
             "task_url": args.dispatch.task_url,
         },
@@ -3847,22 +3946,12 @@ fn resolve_authoritative_cook_base(
     let base = args.base.as_deref().expect("Cook base is resolved");
     let reference = format!("refs/heads/{base}");
     let expected = args.base_sha.clone();
-    let output = Command::new("git")
-        .args(["ls-remote", "--heads", &remote, &reference])
-        .current_dir(&path)
-        .output()
-        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
-    let sha = output
-        .status
-        .success()
-        .then(|| {
-            String::from_utf8_lossy(&output.stdout)
-                .split_whitespace()
-                .next()
-                .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                .map(str::to_string)
-        })
-        .flatten();
+    let probe = homeboy::core::git::output_optional_within(
+        &path,
+        &["ls-remote", "--heads", &remote, &reference],
+        COOK_BASE_REMOTE_TIMEOUT,
+    );
+    let (sha, deferred_reason) = authoritative_cook_base_probe(probe, &reference);
     let Some(sha) = sha else {
         if let Some(expected) = expected {
             return Err(homeboy::core::Error::validation_invalid_argument(
@@ -3878,7 +3967,7 @@ fn resolve_authoritative_cook_base(
             "reference": reference,
             "freshness": "deferred",
             "admission": "deferred",
-            "reason": "remote_unavailable",
+            "reason": deferred_reason,
         });
         return Ok(());
     };
@@ -3905,6 +3994,37 @@ fn resolve_authoritative_cook_base(
         "admission": "admitted",
     });
     Ok(())
+}
+
+/// `git ls-remote` treats its ref argument as a pattern. Accept only one
+/// advertised line whose ref exactly equals the declared heads ref, never a
+/// prefix or wildcard match.
+fn authoritative_cook_base_sha(output: &str, reference: &str) -> Option<String> {
+    let advertised = output
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect::<Vec<_>>();
+    let [(sha, advertised_ref)] = advertised.as_slice() else {
+        return None;
+    };
+    (*advertised_ref == reference
+        && sha.len() == 40
+        && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| (*sha).to_string())
+}
+
+fn authoritative_cook_base_probe(
+    probe: homeboy::core::git::BoundedGitRead,
+    reference: &str,
+) -> (Option<String>, &'static str) {
+    match probe {
+        homeboy::core::git::BoundedGitRead::Resolved(output) => (
+            authoritative_cook_base_sha(&output, reference),
+            "remote_unavailable",
+        ),
+        homeboy::core::git::BoundedGitRead::TimedOut => (None, "remote_timeout"),
+        homeboy::core::git::BoundedGitRead::Unresolved => (None, "remote_unavailable"),
+    }
 }
 
 fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
