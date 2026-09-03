@@ -8034,8 +8034,7 @@ fn preflight_cook_workspace_base_ancestry(
         ),
         Some(target.display().to_string()),
         Some(vec![format!(
-            "Update the destination with `{}` and rerun Cook; provider execution has not started.",
-            format!("git merge --ff-only {resolved_base}")
+            "Merge `{resolved_base}` into the destination or rebase its commits onto it, resolve any conflicts, and rerun Cook; provider execution has not started."
         )]),
     );
     error.details["workspace_base_ancestry"] = serde_json::json!({
@@ -8371,10 +8370,17 @@ fn provision_pending_cook_workspace(
             )])
         })
     };
+    // The CLI may have already observed an authoritative immutable base before
+    // this deferred native creation. Creating from that object preserves the
+    // preview contract even when the branch advances before admission.
+    let create_base = match options.workspace.task_base_sha.clone() {
+        Some(base_sha) => base_sha,
+        None => required("base")?.to_string(),
+    };
     let create_intent = homeboy_core::worktree_provider::WorktreeProvisionIntent {
         handle: options.workspace.to_worktree.clone(),
         repo: required("repo")?.to_string(),
-        base: required("base")?.to_string(),
+        base: create_base,
         head: required("head")?.to_string(),
         task_url: Some(required("task_url")?.to_string()),
     };

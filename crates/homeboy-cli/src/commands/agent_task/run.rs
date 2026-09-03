@@ -41,6 +41,7 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
+const COOK_BASE_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn run_cook_explicit(
     request: agent_task_service::CookRequest,
@@ -475,6 +476,7 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
         "repository_identity": args.repository_identity,
         "worktree": args.to_worktree,
         "base": args.base,
+        "base_resolution": args.base_resolution,
         "head": args.head,
         "placement": placement,
         "workspace": null,
@@ -696,6 +698,7 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
             .collect::<Vec<_>>();
         rewrite_cook_identity_replay_argv(&mut replay, args);
         append_preview_lifecycle_replay_argv(&mut replay, args);
+        append_preview_base_replay_argv(&mut replay, args);
         return finalize_cook_preview_replay(replay, args);
     }
 
@@ -766,6 +769,9 @@ pub(crate) fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     }
     if let Some(base) = &args.base {
         argv.extend(["--base".to_string(), base.clone()]);
+    }
+    if let Some(base_sha) = &args.base_sha {
+        argv.extend(["--base-sha".to_string(), base_sha.clone()]);
     }
     if let Some(head) = &args.head {
         argv.extend(["--head".to_string(), head.clone()]);
@@ -871,6 +877,23 @@ fn append_preview_lifecycle_replay_argv(argv: &mut Vec<String>, args: &AgentTask
             ]);
         }
     }
+}
+
+fn append_preview_base_replay_argv(argv: &mut Vec<String>, args: &AgentTaskCookArgs) {
+    let Some(base_sha) = args.base_sha.as_ref() else {
+        return;
+    };
+    let mut index = 0;
+    while index < argv.len() {
+        if argv[index] == "--base-sha" {
+            argv.drain(index..(index + 2).min(argv.len()));
+        } else if argv[index].starts_with("--base-sha=") {
+            argv.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    argv.extend(["--base-sha".to_string(), base_sha.clone()]);
 }
 
 fn redact_preview_replay_argv(argv: impl IntoIterator<Item = String>) -> PreviewReplayArgv {
@@ -1089,6 +1112,197 @@ mod preview_tests {
             .windows(2)
             .any(|parts| parts == ["--provider-argv", "--repo"]));
         assert!(replay.iter().any(|arg| arg == "--placement=lab"));
+    }
+
+    #[test]
+    fn preview_base_pin_uses_newer_remote_not_stale_tracking_ref_and_survives_replay() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let remote = fixture.path().join("remote.git");
+        let seed = fixture.path().join("seed");
+        let checkout = fixture.path().join("checkout");
+        let git = |path: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(
+            fixture.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            fixture.path(),
+            &["init", "--initial-branch=main", seed.to_str().unwrap()],
+        );
+        git(&seed, &["config", "user.email", "test@example.com"]);
+        git(&seed, &["config", "user.name", "Test"]);
+        git(&seed, &["commit", "--allow-empty", "-m", "initial"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-u", "origin", "main"]);
+        git(
+            fixture.path(),
+            &[
+                "clone",
+                remote.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        let stale = git(&checkout, &["rev-parse", "origin/main"]);
+        git(&seed, &["commit", "--allow-empty", "-m", "new base"]);
+        git(&seed, &["push"]);
+        let authoritative = git(&seed, &["rev-parse", "HEAD"]);
+
+        let resolved = resolve_cook_destination(cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "fix it",
+            "--backend",
+            "fixture",
+            "--repo",
+            "fixture",
+            "--to-worktree",
+            checkout.to_str().unwrap(),
+            "--base",
+            "main",
+            "--no-finalize",
+        ]))
+        .expect("preview resolution");
+        assert_ne!(stale, authoritative);
+        assert_eq!(resolved.base_sha.as_deref(), Some(authoritative.as_str()));
+        assert_eq!(
+            resolved.base_resolution.as_ref().unwrap()["authoritative"]["freshness"],
+            "checked"
+        );
+        let preview = cook_preview_resolved_request(&resolved, Value::Null);
+        assert_eq!(preview["base_resolution"]["sha"], authoritative);
+        assert_eq!(
+            preview["base_resolution"]["authoritative"]["admission"],
+            "admitted"
+        );
+        let mut deferred = resolved.clone();
+        deferred.to_worktree = Some("fixture@deferred-base-pin".to_string());
+        let provision = provision_cook_destination(&deferred).expect("defer native creation");
+        assert_eq!(
+            provision["provision_intent"]["base"], authoritative,
+            "deferred native creation must retain the previewed immutable base"
+        );
+
+        let replay = cook_replay_argv(&resolved);
+        let replay = replay.iter().map(String::as_str).collect::<Vec<_>>();
+        let replayed = resolve_cook_destination(cook(&replay)).expect("replay resolution");
+        assert_eq!(replayed.base_sha.as_deref(), Some(authoritative.as_str()));
+        assert_eq!(
+            replayed.base_resolution.as_ref().unwrap()["sha"],
+            authoritative
+        );
+    }
+
+    #[test]
+    fn authoritative_base_accepts_only_one_exact_advertised_ref() {
+        let sha = "a".repeat(40);
+        let reference = "refs/heads/main";
+        assert_eq!(
+            authoritative_cook_base_sha(&format!("{sha}\t{reference}\n"), reference),
+            Some(sha.clone())
+        );
+        assert_eq!(
+            authoritative_cook_base_sha(
+                &format!("{sha}\trefs/heads/main-next\n{sha}\trefs/heads/main\n"),
+                reference
+            ),
+            None,
+            "a wildcard or prefix result is not an exact base identity"
+        );
+        assert_eq!(
+            authoritative_cook_base_sha(&format!("{sha}\trefs/heads/main-next\n"), reference),
+            None
+        );
+    }
+
+    #[test]
+    fn authoritative_base_timeout_is_deferred_not_unavailable() {
+        let (sha, reason) = authoritative_cook_base_probe(
+            homeboy::core::git::BoundedGitRead::TimedOut,
+            "refs/heads/main",
+        );
+        assert_eq!(sha, None);
+        assert_eq!(reason, "remote_timeout");
+    }
+
+    #[test]
+    fn authoritative_base_pattern_does_not_pin_a_matching_branch() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let remote = fixture.path().join("remote.git");
+        let checkout = fixture.path().join("checkout");
+        let git = |path: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(
+            fixture.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            fixture.path(),
+            &["init", "--initial-branch=main", checkout.to_str().unwrap()],
+        );
+        git(&checkout, &["config", "user.email", "test@example.com"]);
+        git(&checkout, &["config", "user.name", "Test"]);
+        git(&checkout, &["commit", "--allow-empty", "-m", "initial"]);
+        git(
+            &checkout,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&checkout, &["push", "-u", "origin", "main"]);
+
+        let resolved = resolve_cook_destination(cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "fix it",
+            "--backend",
+            "fixture",
+            "--repo",
+            "fixture",
+            "--to-worktree",
+            checkout.to_str().unwrap(),
+            "--base",
+            "main*",
+            "--no-finalize",
+        ]))
+        .expect("pattern is deferred rather than resolved as a different branch");
+        assert_eq!(resolved.base_sha, None);
+        assert_eq!(
+            resolved.base_resolution.as_ref().unwrap()["authoritative"]["freshness"],
+            "deferred"
+        );
     }
 
     #[test]
@@ -3500,7 +3714,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         "handle": to_worktree,
         "provision_intent": {
             "repo": cook_provision_repository(args),
-            "base": args.base,
+            "base": args.base_sha.clone().or_else(|| args.base.clone()),
             "head": args.head,
             "task_url": args.dispatch.task_url,
         },
@@ -3682,12 +3896,135 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
         compatibility_fallback: Some("main"),
     })?;
     args.base = Some(resolution.base.clone());
-    args.base_resolution = Some(serde_json::to_value(resolution).map_err(|error| {
+    let mut resolution = serde_json::to_value(resolution).map_err(|error| {
         homeboy::core::Error::internal_unexpected(format!(
             "serialize Cook default-branch resolution: {error}"
         ))
-    })?);
+    })?;
+    resolve_authoritative_cook_base(args, &mut resolution)?;
+    args.base_resolution = Some(resolution);
     Ok(())
+}
+
+/// Resolve the base from the remote without updating a caller-owned checkout.
+/// Preview and execution share this contract; when no checkout exists yet the
+/// output explicitly records that remote freshness is deferred.
+fn resolve_authoritative_cook_base(
+    args: &mut AgentTaskCookArgs,
+    resolution: &mut Value,
+) -> homeboy::core::Result<()> {
+    let path = args
+        .dispatch
+        .workspace
+        .as_deref()
+        .or(args.dispatch.cwd.as_deref())
+        .map(PathBuf::from)
+        .or_else(|| {
+            args.to_worktree
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+        })
+        .or_else(|| {
+            cook_component_id(args).and_then(|repo| {
+                homeboy::core::component::registered_by_id(repo)
+                    .ok()
+                    .flatten()
+                    .map(|component| PathBuf::from(component.local_path))
+            })
+        });
+    let Some(path) = path else {
+        resolution["authoritative"] = serde_json::json!({
+            "schema": "homeboy/cook-base-authority/v1",
+            "freshness": "deferred",
+            "admission": "deferred",
+            "reason": "no_local_repository",
+        });
+        return Ok(());
+    };
+    let remote = homeboy::core::git::resolve_default_remote(&path);
+    let base = args.base.as_deref().expect("Cook base is resolved");
+    let reference = format!("refs/heads/{base}");
+    let expected = args.base_sha.clone();
+    let probe = homeboy::core::git::output_optional_within(
+        &path,
+        &["ls-remote", "--heads", &remote, &reference],
+        COOK_BASE_REMOTE_TIMEOUT,
+    );
+    let (sha, deferred_reason) = authoritative_cook_base_probe(probe, &reference);
+    let Some(sha) = sha else {
+        if let Some(expected) = expected {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "base-sha",
+                format!("could not revalidate pinned Cook base `{base}` from `{remote}`"),
+                Some(expected),
+                None,
+            ));
+        }
+        resolution["authoritative"] = serde_json::json!({
+            "schema": "homeboy/cook-base-authority/v1",
+            "remote": remote,
+            "reference": reference,
+            "freshness": "deferred",
+            "admission": "deferred",
+            "reason": deferred_reason,
+        });
+        return Ok(());
+    };
+    if let Some(expected) = expected.as_deref() {
+        if expected != sha {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "base-sha",
+                format!(
+                    "Cook replay base contract changed: `{base}` resolved to {sha}, expected {expected}"
+                ),
+                Some(expected.to_string()),
+                None,
+            ));
+        }
+    }
+    args.base_sha = Some(sha.clone());
+    resolution["sha"] = serde_json::json!(sha);
+    resolution["authoritative"] = serde_json::json!({
+        "schema": "homeboy/cook-base-authority/v1",
+        "remote": remote,
+        "reference": reference,
+        "sha": args.base_sha,
+        "freshness": "checked",
+        "admission": "admitted",
+    });
+    Ok(())
+}
+
+/// `git ls-remote` treats its ref argument as a pattern. Accept only one
+/// advertised line whose ref exactly equals the declared heads ref, never a
+/// prefix or wildcard match.
+fn authoritative_cook_base_sha(output: &str, reference: &str) -> Option<String> {
+    let advertised = output
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect::<Vec<_>>();
+    let [(sha, advertised_ref)] = advertised.as_slice() else {
+        return None;
+    };
+    (*advertised_ref == reference
+        && sha.len() == 40
+        && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| (*sha).to_string())
+}
+
+fn authoritative_cook_base_probe(
+    probe: homeboy::core::git::BoundedGitRead,
+    reference: &str,
+) -> (Option<String>, &'static str) {
+    match probe {
+        homeboy::core::git::BoundedGitRead::Resolved(output) => (
+            authoritative_cook_base_sha(&output, reference),
+            "remote_unavailable",
+        ),
+        homeboy::core::git::BoundedGitRead::TimedOut => (None, "remote_timeout"),
+        homeboy::core::git::BoundedGitRead::Unresolved => (None, "remote_unavailable"),
+    }
 }
 
 fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -3748,6 +4085,36 @@ fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::
     Err(error)
 }
 
+/// Execution materializes the previewed immutable object without moving any
+/// tracking ref. The service then uses this SHA rather than resolving the
+/// branch again after provider admission begins.
+fn materialize_cook_base_pin(
+    args: &AgentTaskCookArgs,
+    provision: &Value,
+) -> homeboy::core::Result<()> {
+    let Some(base_sha) = args.base_sha.as_deref() else {
+        return Ok(());
+    };
+    let Some(path) = provision.get("path").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let remote = homeboy::core::git::resolve_default_remote(Path::new(path));
+    let output = Command::new("git")
+        .args(["fetch", "--no-tags", &remote, base_sha])
+        .current_dir(path)
+        .output()
+        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "base-sha",
+        format!("could not materialize pinned Cook base {base_sha} from `{remote}`"),
+        Some(base_sha.to_string()),
+        None,
+    ))
+}
+
 /// Build the correction as typed argv first. The rendered shell command is a
 /// display projection only, so branch and worktree values never become syntax.
 pub(crate) fn corrected_cook_base_replay_argv(
@@ -3766,7 +4133,7 @@ pub(crate) fn corrected_cook_base_replay_argv(
 pub(super) fn resolve_cook_preview_destination(
     args: AgentTaskCookArgs,
 ) -> homeboy::core::Result<(AgentTaskCookArgs, Value)> {
-    let mut args = resolve_cook_destination(args)?;
+    let args = resolve_cook_destination(args)?;
     let handle = args.to_worktree.clone().expect("preview destination set");
     let path = if let Some(cwd) = args.dispatch.cwd.as_deref() {
         let path = std::fs::canonicalize(cwd).map_err(|error| {
@@ -3837,7 +4204,6 @@ pub(super) fn resolve_cook_preview_destination(
             }),
         ));
     };
-    resolve_cook_base(&mut args)?;
     Ok((
         args,
         serde_json::json!({
@@ -4950,6 +5316,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
     let provision = provision_cook_destination(&args)?;
+    materialize_cook_base_pin(&args, &provision)?;
 
     let mut dispatch_args = resolved_dispatch_args_for_cook(&args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
@@ -5044,7 +5411,10 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .first()
         .and_then(|task| task.workspace.root.as_ref())
         .map(std::path::PathBuf::from);
-    let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
+    let task_base_sha = args
+        .base_sha
+        .clone()
+        .or_else(|| source_worktree_path.as_deref().and_then(git_head_sha));
     let title = default_loop_title(&args, source_worktree_path.as_deref());
     let commit_message = args
         .commit_message
