@@ -91,8 +91,8 @@ fn collect_ssh_child_output(
     pid: u32,
     status: Option<std::io::Result<std::process::ExitStatus>>,
     stdin_failed: bool,
-    stdout: Option<Receiver<String>>,
-    stderr: Option<Receiver<String>>,
+    stdout: Option<Receiver<Vec<u8>>>,
+    stderr: Option<Receiver<Vec<u8>>>,
 ) -> CommandOutput {
     let wait_failed = status.as_ref().is_some_and(|status| status.is_err());
     let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
@@ -702,21 +702,24 @@ pub(super) fn run_command_with_stdin_source(
     collect_ssh_child_output(&mut child, pid, Some(status), stdin_failed, stdout, stderr)
 }
 
-fn read_stream(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
+pub(super) fn read_stream(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = pipe.read_to_end(&mut bytes);
-        let _ = sender.send(String::from_utf8_lossy(&bytes).to_string());
+        // Signal EOF before decoding potentially large output. Snapshot metadata
+        // can be hundreds of megabytes, and UTF-8 conversion must not consume the
+        // process cleanup allowance after the SSH child has already succeeded.
+        let _ = sender.send(bytes);
     });
     receiver
 }
 
-fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Instant) -> (String, bool) {
+fn collect_stream_before(receiver: Option<Receiver<Vec<u8>>>, deadline: Instant) -> (String, bool) {
     match receiver {
         Some(receiver) => {
             match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(output) => (output, false),
+                Ok(output) => (String::from_utf8_lossy(&output).into_owned(), false),
                 Err(RecvTimeoutError::Timeout) => (String::new(), true),
                 Err(RecvTimeoutError::Disconnected) => (String::new(), false),
             }
@@ -726,8 +729,8 @@ fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Instant) 
 }
 
 fn collect_streams_before(
-    stdout: Option<Receiver<String>>,
-    stderr: Option<Receiver<String>>,
+    stdout: Option<Receiver<Vec<u8>>>,
+    stderr: Option<Receiver<Vec<u8>>>,
     deadline: Instant,
 ) -> (String, String, bool) {
     let (stdout, stdout_stalled) = collect_stream_before(stdout, deadline);
