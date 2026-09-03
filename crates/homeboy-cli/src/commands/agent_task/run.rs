@@ -324,11 +324,36 @@ pub(crate) fn preview_cook(
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
     record_preview_phase(&mut progress, "destination_resolution");
-    let (args, mut provision) =
+    let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
             resolve_cook_preview_destination(args)
         })?;
     project_preview_dirty_admission(&mut provision);
+    let base_preparation = if let (Some(path), Some(base)) = (
+        provision
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| Path::new(path).is_dir()),
+        args.base.as_deref(),
+    ) {
+        record_preview_phase(&mut progress, "base_preparation");
+        let preparation = with_preview_heartbeat(&mut progress, "base_preparation", || {
+            homeboy::agents::agent_task_service::prepare_cook_workspace_base(Path::new(path), base)
+        })?;
+        args.prepared_base_sha = preparation.base_sha.clone();
+        serde_json::to_value(preparation)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?
+    } else {
+        serde_json::json!({
+            "schema": "homeboy/cook-base-preparation/v1",
+            "declared_base": args.base,
+            "base_sha": null,
+            "provenance": "workspace_unmaterialized",
+            "remote_freshness": "deferred",
+            "topology": null,
+        })
+    };
+    provision["base_preparation"] = base_preparation;
     let replay = cook_preview_replay_argv(&args);
     if provision["details"]["worktree_provider_lookup"] == "timed_out" {
         provision["recovery_argv"] = serde_json::json!(replay.argv.clone());
@@ -347,6 +372,7 @@ pub(crate) fn preview_cook(
             0
         };
         let mut resolved = cook_preview_resolved_request(&args, placement);
+        resolved["base_preparation"] = provision["base_preparation"].clone();
         resolved["workspace"] = provision;
         return Ok((
             cook_preview_result(resolved, progress, replay, None, failure),
@@ -433,6 +459,7 @@ pub(crate) fn preview_cook(
         .map(|task| serde_json::to_value(&task.executor).unwrap_or(Value::Null))
         .unwrap_or(Value::Null);
     let mut resolved = cook_preview_resolved_request(&args, placement);
+    resolved["base_preparation"] = provision["base_preparation"].clone();
     resolved["workspace"] = provision;
     resolved["provider"] = executor;
     resolved["retry_budget"] = plan.metadata["cook_retry_policy"].clone();
@@ -475,6 +502,14 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
         "repository_identity": args.repository_identity,
         "worktree": args.to_worktree,
         "base": args.base,
+        "base_preparation": {
+            "schema": "homeboy/cook-base-preparation/v1",
+            "declared_base": args.base,
+            "base_sha": null,
+            "provenance": "resolution_deferred",
+            "remote_freshness": "deferred",
+            "topology": null,
+        },
         "head": args.head,
         "placement": placement,
         "workspace": null,
@@ -696,6 +731,7 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
             .collect::<Vec<_>>();
         rewrite_cook_identity_replay_argv(&mut replay, args);
         append_preview_lifecycle_replay_argv(&mut replay, args);
+        append_prepared_base_replay_argv(&mut replay, args);
         return finalize_cook_preview_replay(replay, args);
     }
 
@@ -714,6 +750,12 @@ fn finalize_cook_preview_replay(
     {
         replay.requires.push(
             "replay requires the original non-empty prompt on stdin for `--prompt -`".to_string(),
+        );
+    }
+    if args.prepared_base_sha.is_none() {
+        replay.requires.push(
+            "base admission is indeterminate; materialize an origin-backed workspace and rerun `homeboy agent-task cook --preview` before execution"
+                .to_string(),
         );
     }
     replay
@@ -767,6 +809,7 @@ pub(crate) fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     if let Some(base) = &args.base {
         argv.extend(["--base".to_string(), base.clone()]);
     }
+    append_prepared_base_replay_argv(&mut argv, args);
     if let Some(head) = &args.head {
         argv.extend(["--head".to_string(), head.clone()]);
     }
@@ -777,6 +820,26 @@ pub(crate) fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
         argv.push("--draft-pr".to_string());
     }
     argv
+}
+
+fn append_prepared_base_replay_argv(argv: &mut Vec<String>, args: &AgentTaskCookArgs) {
+    if let Some(sha) = &args.prepared_base_sha {
+        let flag = "--prepared-base-sha";
+        let mut index = 0;
+        while index < argv.len() {
+            if argv[index] == flag {
+                if let Some(value) = argv.get_mut(index + 1) {
+                    *value = sha.clone();
+                    return;
+                }
+            } else if argv[index].starts_with("--prepared-base-sha=") {
+                argv[index] = format!("{flag}={sha}");
+                return;
+            }
+            index += 1;
+        }
+        argv.extend([flag.to_string(), sha.clone()]);
+    }
 }
 
 fn dispatch_command_for_cook(
@@ -5044,7 +5107,13 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .first()
         .and_then(|task| task.workspace.root.as_ref())
         .map(std::path::PathBuf::from);
-    let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
+    let task_base_sha = args
+        .prepared_base_sha
+        .clone()
+        .or_else(|| source_worktree_path.as_deref().and_then(git_head_sha));
+    if let Some(prepared_base_sha) = &args.prepared_base_sha {
+        initial_plan.metadata["cook_prepared_base_sha"] = Value::String(prepared_base_sha.clone());
+    }
     let title = default_loop_title(&args, source_worktree_path.as_deref());
     let commit_message = args
         .commit_message

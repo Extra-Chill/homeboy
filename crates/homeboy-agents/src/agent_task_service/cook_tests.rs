@@ -4942,22 +4942,38 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         git(workspace.path(), &["push", "-u", "origin", "main"]);
         let destination_root = tempfile::tempdir().expect("candidate worktree root");
         let destination = destination_root.path().join("candidate");
-        git(
-            workspace.path(),
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "candidate",
-                destination.to_str().expect("candidate path"),
+        let output = Command::new("git")
+            .args([
+                "clone",
+                "--branch",
                 "main",
-            ],
+                remote.path().to_str().unwrap(),
+                destination.to_str().expect("candidate path"),
+            ])
+            .output()
+            .expect("clone candidate");
+        assert!(
+            output.status.success(),
+            "candidate clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
+        git(&destination, &["config", "user.email", "test@example.com"]);
+        git(&destination, &["config", "user.name", "Test"]);
+        git(&destination, &["checkout", "-b", "candidate"]);
         std::fs::write(workspace.path().join("newer-base.txt"), "base only\n").unwrap();
         git(workspace.path(), &["add", "newer-base.txt"]);
         git(workspace.path(), &["commit", "-m", "advance base"]);
         git(workspace.path(), &["push"]);
         let observed_base = git(workspace.path(), &["rev-parse", "HEAD"]);
+        let destination_has_observed_base = || {
+            Command::new("git")
+                .args(["cat-file", "-e", &format!("{observed_base}^{{commit}}")])
+                .current_dir(&destination)
+                .status()
+                .expect("inspect candidate object database")
+                .success()
+        };
+        assert!(!destination_has_observed_base());
         // Shallow and single-branch checkouts may not retain this local ref. The
         // admission check must still resolve the authoritative origin base.
         git(
@@ -4965,11 +4981,26 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             &["update-ref", "-d", "refs/remotes/origin/main"],
         );
 
-        let snapshot = preflight_cook_workspace_base_ancestry(&destination, "main", &[], false)
-            .expect("clean behind destination is admitted as an isolated snapshot")
-            .expect("behind destination has a base snapshot");
-        assert_eq!(snapshot["resolved_base"], observed_base);
+        let preparation = prepare_cook_workspace_base(&destination, "main")
+            .expect("preview preparation resolves the authoritative base");
+        assert_eq!(
+            preparation.base_sha.as_deref(),
+            Some(observed_base.as_str())
+        );
+        assert_eq!(preparation.provenance, "origin_ls_remote");
+        assert_eq!(preparation.remote_freshness, "checked");
+        assert_eq!(
+            preparation
+                .topology
+                .as_ref()
+                .expect("behind destination topology")["resolved_base"],
+            observed_base
+        );
         assert_ne!(git(&destination, &["rev-parse", "HEAD"]), observed_base);
+        assert!(
+            !destination_has_observed_base(),
+            "preview preparation must not mutate the candidate object database"
+        );
 
         let dispatches = Arc::new(AtomicUsize::new(0));
         let mut options = batch_cook_options(
@@ -4980,11 +5011,14 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         );
         options.workspace.to_worktree = destination.display().to_string();
         options.workspace.source_worktree_path = Some(destination.clone());
+        options.workspace.task_base_sha = preparation.base_sha.clone();
         options.identity.initial_plan.tasks[0].workspace.root =
             Some(destination.display().to_string());
         options.identity.initial_plan.tasks[0].metadata = serde_json::json!({
             "worktree_provision": { "kind": "explicit_cwd" }
         });
+        options.identity.initial_plan.metadata["cook_prepared_base_sha"] =
+            serde_json::json!(preparation.base_sha);
         options.provider_transport.attempt_dispatcher = None;
         let provider_starts = Arc::new(AtomicUsize::new(0));
         let attempt_base = Arc::new(Mutex::new(None));
@@ -5068,6 +5102,13 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             diverged.details["workspace_base_ancestry"]["candidate_only_commits"],
             1
         );
+        let suggestions = diverged.details["tried"]
+            .as_array()
+            .expect("divergence recovery suggestions");
+        assert!(suggestions.iter().all(|suggestion| !suggestion
+            .as_str()
+            .unwrap_or_default()
+            .contains("--ff-only")));
     });
 }
 

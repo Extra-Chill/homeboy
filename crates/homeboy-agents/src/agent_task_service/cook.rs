@@ -1192,6 +1192,16 @@ pub struct CookWorkspace {
     pub source_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct CookBasePreparation {
+    pub schema: &'static str,
+    pub declared_base: String,
+    pub base_sha: Option<String>,
+    pub provenance: &'static str,
+    pub remote_freshness: &'static str,
+    pub topology: Option<Value>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CookProviderTransport {
     pub provider_command: Option<String>,
@@ -7822,6 +7832,28 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     // Explicit CWDs are caller-owned and must remain untouched. Resolve their
     // declared ref into an isolated scheduler snapshot instead of treating the
     // persisted pin as authority to converge the caller's checkout.
+    let prepared_base = options
+        .identity
+        .initial_plan
+        .metadata
+        .get("cook_prepared_base_sha")
+        .and_then(Value::as_str)
+        .filter(|sha| options.workspace.task_base_sha.as_deref() == Some(*sha));
+    if cook_uses_explicit_cwd_workspace(options) {
+        if let Some(prepared_base) = prepared_base {
+            let prepared_base = materialize_prepared_cook_base(target, prepared_base)?;
+            return preflight_cook_workspace_resolved_base_ancestry(
+                target,
+                target,
+                &options.finalization.base,
+                &options.finalization.base,
+                &prepared_base,
+                &explicit_cook_evidence_paths(options, target),
+                adopted_dirty_candidate,
+            )
+            .map(|snapshot| snapshot.map(CookWorkspaceBaseValidation::Snapshot));
+        }
+    }
     let base = if cook_uses_explicit_cwd_workspace(options) {
         &options.finalization.base
     } else {
@@ -7890,11 +7922,6 @@ fn preflight_cook_workspace_base_ancestry(
     ignored_evidence: &[String],
     adopted_dirty_candidate: bool,
 ) -> Result<Option<Value>> {
-    let AgentTaskPromotionCandidate::Git { fingerprint } =
-        candidate_fingerprint(target.to_string_lossy().as_ref())?
-    else {
-        return Ok(None);
-    };
     // A provider-owned Git destination can intentionally have no origin. When
     // origin is configured, resolve its authoritative base directly instead of
     // trusting a potentially absent shallow or single-branch tracking ref.
@@ -7911,13 +7938,7 @@ fn preflight_cook_workspace_base_ancestry(
     {
         (
             base.to_string(),
-            homeboy_core::git::run_git(
-                target,
-                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-                "resolve pinned Cook base",
-            )?
-            .trim()
-            .to_string(),
+            materialize_prepared_cook_base(target, base)?,
         )
     } else {
         let Some(base) = crate::agent_task_promotion::capture_declared_base(target, Some(base))?
@@ -7926,13 +7947,141 @@ fn preflight_cook_workspace_base_ancestry(
         };
         (base.base, base.sha)
     };
-    let counts = homeboy_core::git::run_git(
+    preflight_cook_workspace_resolved_base_ancestry(
         target,
+        target,
+        base,
+        &declared_base,
+        &resolved_base,
+        ignored_evidence,
+        adopted_dirty_candidate,
+    )
+}
+
+fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<String> {
+    if let Some(resolved) = homeboy_core::git::output_optional(
+        target,
+        &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
+    ) {
+        return Ok(resolved.trim().to_string());
+    }
+    homeboy_core::git::run_git(
+        target,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            base_sha,
+        ],
+        "materialize prepared Cook base",
+    )?;
+    Ok(homeboy_core::git::run_git(
+        target,
+        &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
+        "verify prepared Cook base",
+    )?
+    .trim()
+    .to_string())
+}
+
+/// Resolve one authoritative Cook base and classify the destination against
+/// that same immutable identity. Preview serializes the SHA into replay so
+/// execution cannot refresh the branch to a different candidate contract.
+pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBasePreparation> {
+    let origin = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(target)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !origin.status.success() {
+        return Ok(CookBasePreparation {
+            schema: "homeboy/cook-base-preparation/v1",
+            declared_base: base.to_string(),
+            base_sha: None,
+            provenance: "origin_unavailable",
+            remote_freshness: "deferred",
+            topology: None,
+        });
+    }
+    let origin = String::from_utf8_lossy(&origin.stdout).trim().to_string();
+    let graph = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create isolated Cook base preparation repository".to_string()),
+        )
+    })?;
+    homeboy_core::git::run_git(
+        graph.path(),
+        &["init", "--bare", "--quiet"],
+        "initialize isolated Cook base preparation repository",
+    )?;
+    homeboy_core::git::run_git(
+        graph.path(),
+        &["remote", "add", "origin", &origin],
+        "configure isolated Cook base preparation origin",
+    )?;
+    let common_dir = homeboy_core::git::run_git(
+        target,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "resolve Cook destination object database",
+    )?;
+    let alternates = graph.path().join("objects/info/alternates");
+    std::fs::write(&alternates, format!("{}/objects\n", common_dir.trim())).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(alternates.display().to_string()))
+    })?;
+    let Some(resolved) =
+        crate::agent_task_promotion::capture_declared_base(graph.path(), Some(base))?
+    else {
+        return Ok(CookBasePreparation {
+            schema: "homeboy/cook-base-preparation/v1",
+            declared_base: base.to_string(),
+            base_sha: None,
+            provenance: "base_unresolved",
+            remote_freshness: "deferred",
+            topology: None,
+        });
+    };
+    let topology = preflight_cook_workspace_resolved_base_ancestry(
+        target,
+        graph.path(),
+        base,
+        &resolved.base,
+        &resolved.sha,
+        &[],
+        false,
+    )?;
+    Ok(CookBasePreparation {
+        schema: "homeboy/cook-base-preparation/v1",
+        declared_base: resolved.base,
+        base_sha: Some(resolved.sha),
+        provenance: "origin_ls_remote",
+        remote_freshness: "checked",
+        topology,
+    })
+}
+
+fn preflight_cook_workspace_resolved_base_ancestry(
+    target: &Path,
+    graph: &Path,
+    base: &str,
+    declared_base: &str,
+    resolved_base: &str,
+    ignored_evidence: &[String],
+    adopted_dirty_candidate: bool,
+) -> Result<Option<Value>> {
+    let AgentTaskPromotionCandidate::Git { fingerprint } =
+        candidate_fingerprint(target.to_string_lossy().as_ref())?
+    else {
+        return Ok(None);
+    };
+    let counts = homeboy_core::git::run_git(
+        graph,
         &[
             "rev-list",
             "--left-right",
             "--count",
-            &format!("{resolved_base}...HEAD"),
+            &format!("{resolved_base}...{}", fingerprint.head),
         ],
         "compare Cook destination to resolved base",
     )?;
@@ -8033,10 +8182,10 @@ fn preflight_cook_workspace_base_ancestry(
             base, resolved_base
         ),
         Some(target.display().to_string()),
-        Some(vec![format!(
-            "Update the destination with `{}` and rerun Cook; provider execution has not started.",
-            format!("git merge --ff-only {resolved_base}")
-        )]),
+        Some(vec![
+            format!("Merge the prepared base with `git merge {resolved_base}` and rerun Cook."),
+            format!("Or rebase the candidate with `git rebase {resolved_base}` and rerun Cook."),
+        ]),
     );
     error.details["workspace_base_ancestry"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base-ancestry/v1",
