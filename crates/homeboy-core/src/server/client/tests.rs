@@ -15,7 +15,7 @@ use super::local_exec::{
 };
 use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_source_timeout,
-    execute_command_with_stdin_timeout, execute_command_with_writer_factory,
+    execute_command_with_stdin_timeout, execute_command_with_writer_factory, read_stream,
     run_command_with_stdin_source, run_ssh_with_child, wrap_command_with_secret_env_read_loop,
     wrap_owned_remote_command, SECRET_ENV_STDIN_SENTINEL,
 };
@@ -965,6 +965,18 @@ fn ssh_equivalent_untimed_piped_execution_reaps_remote_pipe_holder() {
         "piped SSH child leaked its descendant"
     );
     let _ = std::fs::remove_file(marker);
+}
+
+#[test]
+fn ssh_stream_reader_signals_eof_with_raw_large_output() {
+    let output = vec![0xff; 16 * 1024 * 1024];
+    let receiver = read_stream(Cursor::new(output.clone()));
+
+    let received = receiver
+        .recv_timeout(Duration::from_millis(250))
+        .expect("large stream bytes must arrive within the cleanup allowance");
+
+    assert_eq!(received, output);
 }
 
 #[cfg(unix)]
