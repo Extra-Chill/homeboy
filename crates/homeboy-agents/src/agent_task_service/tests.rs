@@ -2064,6 +2064,59 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
 }
 
 #[test]
+fn upgrade_admission_allows_unmaterialized_cook_blocked_on_runner_convergence() {
+    with_isolated_home(|_| {
+        let stale_cook_id = "cook-blocked-on-runner-convergence";
+        let unavailable_cook_id = "cook-blocked-on-runner-unavailable";
+        for (cook_id, state) in [
+            (stale_cook_id, "blocked_runner_stale"),
+            (unavailable_cook_id, "blocked_runner_unavailable"),
+        ] {
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                serde_json::json!({ "placement": { "local_fallback": false } }),
+                state,
+                "waiting for Lab runner admission",
+            )
+            .expect("unmaterialized Cook admission");
+        }
+
+        let stale = agent_task_lifecycle::exact_record(stale_cook_id).expect("stale Cook");
+        assert_eq!(stale.state, AgentTaskRunState::Queued);
+        assert!(stale.tasks.is_empty());
+        assert_eq!(
+            stale.metadata["unmaterialized_cook_admission"]["state"],
+            "blocked_runner_stale"
+        );
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert!(
+            !admission.allows_controller_replacement(),
+            "the unrelated unavailable runner remains fail-closed: {admission:?}"
+        );
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].run_id, unavailable_cook_id);
+        assert!(
+            !admission
+                .blockers
+                .iter()
+                .any(|blocker| blocker.run_id == stale_cook_id),
+            "the zero-task runner-skew admission must not deadlock its controller upgrade"
+        );
+        assert_eq!(
+            agent_task_lifecycle::exact_record(stale_cook_id)
+                .expect("unchanged stale Cook")
+                .state,
+            AgentTaskRunState::Queued
+        );
+    });
+}
+
+#[test]
 fn upgrade_admission_inspects_an_ambiguous_removed_runner_record_locally() {
     with_isolated_home(|_| {
         let cook_id = "concurrent-first-cook-run";
