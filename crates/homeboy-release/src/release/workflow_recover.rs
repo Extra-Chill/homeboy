@@ -637,6 +637,19 @@ where
     require_interrupted_release_lineage(path, &tag_name, version, &local_tag, head_commit)?;
 
     require_unpublished_github_release(&tag_name, github_release_exists(&tag_name))?;
+    let changelog_entries = if tag_version > source_version {
+        Some(super::planning_changelog::generate_changelog_entries(
+            component,
+            &input.component_id,
+            &ReleaseOptions {
+                dry_run: input.dry_run,
+                ..Default::default()
+            },
+            release_scope,
+        )?)
+    } else {
+        None
+    };
 
     let actions = vec![format!(
         "recreated release commit for {} on the current branch and replaced divergent tag {}",
@@ -653,7 +666,10 @@ where
 
     if tag_version > source_version {
         let bump = crate::release::version::bump_component_version_with_changelog(
-            component, version, None, None,
+            component,
+            version,
+            changelog_entries.as_ref(),
+            None,
         )?;
         if let Some(mismatches) =
             crate::release::executor::version_targets::collect_version_target_mismatches(
@@ -1343,7 +1359,7 @@ mod tests {
             std::fs::write(repo.path().join("VERSION"), "0.1.0\n").expect("write version");
             std::fs::write(
                 repo.path().join("CHANGELOG.md"),
-                "# Changelog\n\n## Unreleased\n\n- fix: recovered release\n",
+                "# Changelog\n\n## [0.1.0] - 2026-09-01\n\n- Previous release\n",
             )
             .expect("write changelog");
             git_in(repo.path(), &["add", "."]);
@@ -1409,6 +1425,9 @@ mod tests {
                 std::fs::read_to_string(repo.path().join("VERSION")).expect("read version"),
                 "0.1.1\n"
             );
+            assert!(std::fs::read_to_string(repo.path().join("CHANGELOG.md"))
+                .expect("read changelog")
+                .contains("## [0.1.1]"));
             git_in(repo.path(), &["fetch", "origin"]);
             let remote_main = git_in(repo.path(), &["rev-parse", "origin/main"]);
             let remote_tag = git_in(repo.path(), &["rev-parse", "v0.1.1^{commit}"]);
