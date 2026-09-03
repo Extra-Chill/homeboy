@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.41.0] - 2026-09-03
+
+### Added
+- publish additional package profiles
+
 ## [3.40.1] - 2026-09-02
 
 ### Fixed
