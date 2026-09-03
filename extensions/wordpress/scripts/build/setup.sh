@@ -635,12 +635,17 @@ verify_shared_agent_runtime_assets() {
     fi
 
     for dependency in \
-        "wp-codebox/lib/wp-codebox-runtime-selection.js" \
         "wp-codebox/scripts/lib/test-result-adapters.sh"; do
         if ! node "${resolver}" "${dependency}" >/dev/null; then
             missing=1
         fi
     done
+
+    # Runtime selection is WordPress-owned and ships in this extension's lib.
+    if [ ! -f "${script_dir}/../../lib/wp-codebox-runtime-selection.js" ]; then
+        echo "Error: WP Codebox runtime selection module missing from the WordPress extension payload." >&2
+        missing=1
+    fi
 
     if [ "${missing}" -ne 0 ]; then
         echo "Error: shared agent runtime assets are missing from this installation; WordPress test shards cannot bootstrap." >&2
