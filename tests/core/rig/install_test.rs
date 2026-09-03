@@ -3,8 +3,9 @@
 use crate::install::local_package_source_root_for_dependencies;
 use crate::{
     declared_id, default_materialize_source_root, discover_rigs, install, list, list_ids, load,
-    load_local_source, materialize_rig_spec, materialize_rig_spec_with_default_source_root,
-    read_source_metadata_in_root, read_stack_source_metadata_in_root, run_check, run_lint,
+    load_local_source, materialize_rig_resource, materialize_rig_spec,
+    materialize_rig_spec_with_default_source_root, read_source_metadata_in_root,
+    read_stack_source_metadata_in_root, run_check, run_lint, MATERIALIZED_RIG_RESOURCE_SCHEMA,
 };
 use homeboy_core::test_support::HomeGuard;
 use homeboy_core::ErrorCode;
@@ -185,6 +186,53 @@ mod materialization {
         assert_eq!(
             materialize_rig_spec_with_default_source_root(&rig).expect("materialize"),
             serde_json::json!({ "id": "example", "settings": { "inherited": true } })
+        );
+    }
+
+    #[test]
+    fn materialized_resource_resolves_inheritance_and_digests_canonical_json() {
+        let package = tempfile::tempdir().expect("package");
+        let template = package.path().join("template.json");
+        let first = package.path().join("first.json");
+        let reordered = package.path().join("reordered.json");
+        let changed = package.path().join("changed.json");
+        fs::write(
+            &template,
+            r#"{ "settings": { "inherited": true, "nested": { "a": 1, "b": 2 } } }"#,
+        )
+        .expect("template");
+        fs::write(
+            &first,
+            r#"{ "extends": "./template.json", "id": "example", "components": { "app": { "path": "./app", "branch": "main" } } }"#,
+        )
+        .expect("first rig");
+        fs::write(
+            &reordered,
+            r#"{ "components": { "app": { "branch": "main", "path": "./app" } }, "id": "example", "extends": "./template.json" }"#,
+        )
+        .expect("reordered rig");
+        fs::write(
+            &changed,
+            r#"{ "extends": "./template.json", "id": "example", "components": { "app": { "path": "./app", "branch": "next" } } }"#,
+        )
+        .expect("changed rig");
+
+        let first = materialize_rig_resource(&first, package.path()).expect("first resource");
+        let reordered =
+            materialize_rig_resource(&reordered, package.path()).expect("reordered resource");
+        let changed = materialize_rig_resource(&changed, package.path()).expect("changed resource");
+
+        assert_eq!(first.schema, MATERIALIZED_RIG_RESOURCE_SCHEMA);
+        assert_eq!(first.rig_id, "example");
+        assert_eq!(first.rig["settings"]["inherited"], true);
+        assert!(first.rig.get("extends").is_none());
+        assert_eq!(
+            first.materialized_rig_json_sha256, reordered.materialized_rig_json_sha256,
+            "object key order must not change the materialized rig digest"
+        );
+        assert_ne!(
+            first.materialized_rig_json_sha256, changed.materialized_rig_json_sha256,
+            "a changed materialized rig must have a different digest"
         );
     }
 

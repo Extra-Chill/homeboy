@@ -61,8 +61,10 @@ pub use artifact_index::{RigRunArtifactRef, RigRunFailedStepRef};
 pub(crate) use artifact_index::for_run as artifact_index_for_run;
 
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
+pub use homeboy_rig_contract::{MaterializedRigResource, MATERIALIZED_RIG_RESOURCE_SCHEMA};
 pub use install::{
-    default_materialize_source_root, discover_rigs, install, materialize_rig_spec,
+    default_materialize_source_root, discover_rigs, install, materialize_rig_resource,
+    materialize_rig_resource_with_default_source_root, materialize_rig_spec,
     materialize_rig_spec_with_default_source_root, read_source_metadata,
     read_source_metadata_in_root,
 };
