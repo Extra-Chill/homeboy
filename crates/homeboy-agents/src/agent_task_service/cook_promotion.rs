@@ -3112,6 +3112,8 @@ fn cook_finalization_options_with_stores_and_review_form(
             promotion.deterministic_gates.len()
         )
     };
+    let review_profile = resolve_review_profile(None, &path)?;
+    review_dossier.validate(&review_profile)?;
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
@@ -3149,7 +3151,7 @@ fn cook_finalization_options_with_stores_and_review_form(
         ai_used_for,
         review_dossier,
         composed_ai_model_disclosure,
-        review_profile: resolve_review_profile(None, &path)?,
+        review_profile,
         manual_finalization: false,
         expected_candidate_sha: None,
         verified_candidate_sha: None,
@@ -3750,10 +3752,9 @@ fn persist_supplied_recovery_review_form(
     promotion: &AgentTaskPromotionReport,
     options: &CookRequest,
 ) -> Result<()> {
-    if resolve_supplied_recovery_review_form(run_id, None)?.is_some() {
-        return Ok(());
-    }
-    agent_task_lifecycle::record_metadata_value(
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    lifecycle_store.compare_and_set_metadata_value(
         run_id,
         "recovery_review_form",
         serde_json::json!({
