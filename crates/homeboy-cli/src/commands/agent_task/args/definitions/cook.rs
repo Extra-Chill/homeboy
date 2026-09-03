@@ -1175,6 +1175,10 @@ pub struct AgentTaskCookArgs {
     /// compatibility default when the provider has not materialized a checkout.
     #[arg(long, value_name = "BRANCH")]
     pub base: Option<String>,
+    /// Immutable remote base observed by a Cook preview. This is emitted only
+    /// in replay argv so execution can reject a changed base contract.
+    #[arg(long = "base-sha", value_name = "SHA", hide = true)]
+    pub base_sha: Option<String>,
     /// Head branch to push and open the PR from. Defaults to the branch the
     /// destination worktree is already on.
     #[arg(long, value_name = "BRANCH")]

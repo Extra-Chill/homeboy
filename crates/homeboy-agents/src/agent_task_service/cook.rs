@@ -8034,8 +8034,7 @@ fn preflight_cook_workspace_base_ancestry(
         ),
         Some(target.display().to_string()),
         Some(vec![format!(
-            "Update the destination with `{}` and rerun Cook; provider execution has not started.",
-            format!("git merge --ff-only {resolved_base}")
+            "Merge `{resolved_base}` into the destination or rebase its commits onto it, resolve any conflicts, and rerun Cook; provider execution has not started."
         )]),
     );
     error.details["workspace_base_ancestry"] = serde_json::json!({

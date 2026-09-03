@@ -5068,6 +5068,18 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             diverged.details["workspace_base_ancestry"]["candidate_only_commits"],
             1
         );
+        let guidance = diverged.details["tried"]
+            .as_array()
+            .expect("structured diverged recovery guidance")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!guidance.contains("--ff-only"), "{guidance}");
+        assert!(
+            guidance.contains("Merge") && guidance.contains("rebase"),
+            "{guidance}"
+        );
     });
 }
 
