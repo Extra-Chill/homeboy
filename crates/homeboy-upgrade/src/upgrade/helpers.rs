@@ -633,6 +633,7 @@ fn run_controller_upgrade_with_operation(
                 services_pending_restart: Vec::new(),
                 operation_id: None,
             };
+            converge_resident_daemon_after_controller_reconciliation(&completion)?;
             if completion.superseded {
                 invalidate_superseded_evidence(&mut result);
             }
@@ -918,6 +919,7 @@ fn run_controller_upgrade_with_operation(
             &final_selection_guard,
             || restart_resident_services_after_swap(success, skip_services),
         );
+    converge_resident_daemon_after_controller_reconciliation(&completion)?;
 
     let runner_disposition = runner_convergence_disposition(
         runner_completion_is_skipped(skip_runners, upgrade_completed, completion_superseded),
@@ -2015,6 +2017,19 @@ fn restart_resident_services_after_reconciliation(
     } else {
         restart()
     }
+}
+
+/// A local daemon is controller-owned runtime state even though it is not a
+/// configured resident service. Do this after reconciliation so a contender
+/// cannot cause this invocation to rotate a daemon for a controller it did not
+/// promote.
+fn converge_resident_daemon_after_controller_reconciliation(
+    completion: &ControllerCompletionIdentity,
+) -> Result<bool> {
+    if !completion.superseded {
+        return homeboy_core::daemon::converge_current_build_idle_daemon();
+    }
+    Ok(false)
 }
 
 /// Surface declared resident services that still hold the old binary, with the
