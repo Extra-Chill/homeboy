@@ -2,7 +2,6 @@
 
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const wordpressArtifactAdapter = require('../lib/wp-codebox-artifacts');
 const {
   resolveWpCodeboxArtifactPath,
   resolveWpCodeboxManifestArtifactPath,
@@ -11,9 +10,7 @@ const {
   wpCodeboxArtifactManifestV1,
   wpCodeboxArtifactPath,
   wpCodeboxBrowserArtifacts,
-} = require('../../agent-runtimes/wp-codebox/lib/wp-codebox-contract-adapter');
-
-assert.equal(wordpressArtifactAdapter.resolveWpCodeboxArtifactPath, resolveWpCodeboxArtifactPath);
+} = require('../lib/wp-codebox-artifacts');
 
 const codeboxResult = {
   artifacts: {

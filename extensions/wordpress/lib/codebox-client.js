@@ -28,6 +28,14 @@ class CodeboxClient {
 		return resolveWpCodeboxIdentity({ ...this.options, ...options });
 	}
 
+	runtime(options = {}) {
+		const merged = { ...this.options, ...options };
+		const spawnSync = merged.spawnSync || (typeof merged.runPublicCli === 'function'
+			? (command, args) => merged.runPublicCli({ command, args, stdin: merged.stdin }, merged)
+			: undefined);
+		return resolveReadyWpCodeboxRuntime({ ...merged, ...(spawnSync ? { spawnSync } : {}) });
+	}
+
 	publicCliBin(options = {}) {
 		return this.identity({ ...this.options, ...options }).bin;
 	}
@@ -39,6 +47,8 @@ class CodeboxClient {
 
 	runPublicCliCommand(args, options = {}) {
 		const merged = { ...this.options, ...options };
+		// An injected runner owns its own invocation. Resolving runtime readiness
+		// here would add a probe the caller never asked for.
 		if (typeof merged.runPublicCli === 'function') {
 			const command = this.publicCliBin(merged);
 			return normalizeCliResult(merged.runPublicCli({ command, args, stdin: merged.stdin }, merged));
@@ -48,11 +58,9 @@ class CodeboxClient {
 			return normalizeCliResult(merged.runCli({ command, args, stdin: merged.stdin }, merged));
 		}
 
-		const runtime = resolveReadyWpCodeboxRuntime({
-			...merged,
-			wp_codebox_bin: merged.wp_codebox_bin || merged.wpCodeboxBin,
-		});
-		const invocation = runtime.invocation;
+		const invocation = merged.wpCli || merged.wp_cli
+			? { command: merged.wpCli || merged.wp_cli, args: ['wp-codebox'] }
+			: this.runtime(merged).invocation;
 		const result = spawnSync(invocation.command, [...invocation.args, ...args], {
 			input: merged.stdin,
 			encoding: 'utf8',

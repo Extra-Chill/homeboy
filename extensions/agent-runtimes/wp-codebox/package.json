@@ -4,15 +4,7 @@
   "private": true,
   "main": "index.js",
   "exports": {
-    ".": "./index.js",
-    "./codebox-artifact-contract": "./lib/codebox-artifact-contract.js",
-    "./codebox-runtime-profile": "./lib/codebox-runtime-profile.js",
-    "./wp-codebox-runtime-contract-source": "./lib/wp-codebox-runtime-contract-source.js",
-    "./wp-codebox-runtime-readiness": "./lib/wp-codebox-runtime-readiness.js",
-    "./wp-codebox-runtime-selection": "./lib/wp-codebox-runtime-selection.js"
-  },
-  "scripts": {
-    "test:wp-codebox-runtime-contract-source": "node ../../tests/wp-codebox-runtime-contract-source-smoke.mjs"
+    ".": "./index.js"
   },
   "engines": {
     "node": ">=18.12.0"

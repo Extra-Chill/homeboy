@@ -3,7 +3,7 @@
 const {
   normalizePreviewMaterializationEvidence,
   normalizePreviewMaterializationRequest,
-} = require('../../../runtime-agent-ci/lib/preview-materialization');
+} = require('../../runtime-agent-ci/lib/preview-materialization');
 const {
   runtimeContractSchemas,
 } = require('./wp-codebox-runtime-contract-source');

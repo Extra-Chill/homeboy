@@ -21,22 +21,15 @@ const DEFAULT_KILL_GRACE_MS = 5000;
 /**
  * Internal dependencies
  */
-const {
-	homeboySettings,
-	wpCodeboxCommand,
-} = require('./wp-codebox-resolver');
-const { resolveReadyWpCodeboxRuntime, selectWpCodeboxRuntime } = require('./wp-codebox-runtime-selection');
+const { createCodeboxClient } = require('./codebox-client');
+const { homeboySettings, wpCodeboxCommand } = require('./wp-codebox-resolver');
 
 function wpCodeboxBin(options = {}) {
-  const env = { ...process.env, ...(options.env || {}) };
-  const settings = { ...homeboySettings(env), ...(options.settings || {}) };
-  const selected = selectWpCodeboxRuntime({ ...options, env, settings }).selected.path;
-  if (!selected) throw new Error('WP Codebox binary is not configured. Set wp_codebox_bin or HOMEBOY_WP_CODEBOX_BIN.');
-  return selected;
+  return createCodeboxClient(options).publicCliBin();
 }
 
 function canonicalWpCodeboxRuntime(options = {}) {
-  return resolveReadyWpCodeboxRuntime(options);
+  return createCodeboxClient(options).runtime();
 }
 
 function recipeEventName(name, options = {}) {
@@ -373,8 +366,8 @@ module.exports = {
   recipeEventName,
   runWpCodeboxRecipe,
   canonicalWpCodeboxRuntime,
-  wpCodeboxPluginStateStep,
   homeboySettings,
+  wpCodeboxPluginStateStep,
   wpCodeboxBin,
   wpCodeboxCommand,
 };

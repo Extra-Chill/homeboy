@@ -16,12 +16,8 @@ function argValue(name) {
   return index >= 0 ? process.argv[index + 1] : '';
 }
 
-function hasArg(name) {
-  return process.argv.includes(name);
-}
-
 function usage() {
-  console.error('Usage: wp-codebox-apply-adapter.cjs (--preflight <preflight.json> | --bundle <artifact-dir> --approved-file <sandbox-path> | --request <apply-request.json>) --worktree <path> [--wp-cli <wp>] [--branch <branch>] [--patch-strip <n>] [--push] [--open-pr]');
+  console.error('Usage: wp-codebox-apply-adapter.cjs (--preflight <preflight.json> | --bundle <artifact-dir> --approved-file <sandbox-path> | --request <apply-request.json>) --worktree <path> [--wp-cli <wp>] [--patch-strip <n>]');
   process.exit(1);
 }
 
@@ -29,8 +25,6 @@ const requestPath = argValue('--request');
 const preflightPath = argValue('--preflight');
 const bundlePath = argValue('--bundle');
 const worktreePath = argValue('--worktree');
-const branch = argValue('--branch');
-const commitMessage = argValue('--commit-message');
 const patchStripValue = argValue('--patch-strip');
 const wpCli = argValue('--wp-cli');
 const approvedFiles = [];
@@ -53,14 +47,9 @@ try {
     preflight,
     bundlePath,
     worktreePath,
-    branch,
-    commitMessage,
     approvedFiles,
     wpCli,
     patchStrip: patchStripValue ? Number(patchStripValue) : undefined,
-    push: hasArg('--push'),
-    openPullRequest: hasArg('--open-pr'),
-    prBase: argValue('--base') || undefined,
   });
   console.log(JSON.stringify(result, null, 2));
 } catch (error) {

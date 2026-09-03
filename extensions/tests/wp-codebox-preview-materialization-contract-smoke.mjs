@@ -19,7 +19,7 @@ const {
 	codeboxPreviewEvidenceFromContainedSiteResult,
 	codeboxPreviewMaterializationAdapter,
 	codeboxPreviewOpenRequest,
-} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-preview-materialization-contract.js'));
+} = require(path.join(rootDir, 'wordpress', 'lib', 'wp-codebox-preview-materialization-contract.js'));
 
 const genericRequest = {
 	id: 'codebox-preview-1',
@@ -66,7 +66,7 @@ assert.equal(
 const boundaryTerms = /wp-site-generator|WPSG|site-generator|site generator|PLAYGROUND_PREVIEW|PLAYGROUND_URL/i;
 for (const relativePath of [
 	'runtime-agent-ci/lib/preview-materialization.js',
-	'agent-runtimes/wp-codebox/lib/codebox-preview-materialization-contract.js',
+	'wordpress/lib/wp-codebox-preview-materialization-contract.js',
 ]) {
 	assert.equal(boundaryTerms.test(fs.readFileSync(path.join(rootDir, relativePath), 'utf8')), false, `${relativePath} must remain generic.`);
 }

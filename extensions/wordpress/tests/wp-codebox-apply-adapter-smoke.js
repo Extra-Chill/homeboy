@@ -149,8 +149,6 @@ async function main() {
   const result = applyApprovedWpCodeboxArtifact({
     preflight,
     worktreePath: repo,
-    branch: 'feature/wp-codebox-apply-smoke',
-    commitMessage: 'Apply fixture wp-codebox artifact',
     patchStrip: 5,
   });
 
@@ -160,8 +158,7 @@ async function main() {
   assert.equal(result.applied, true);
   assert.deepEqual(result.files_changed, ['readme.txt']);
   assert.equal(result.metadata.adapter_id, 'homeboy/wp-codebox-apply-adapter/v1');
-  assert.equal(result.metadata.apply_phase.committed, true);
-  assert.equal(result.metadata.publish_phase.compatibility_behavior, true);
+  assert.equal(result.metadata.apply_phase.staged, true);
   assert.equal(result.artifacts[0].type, 'wp_codebox_patch');
   assert.equal(result.artifacts[0].approval_scope.scope, 'artifact');
   assert.equal(result.artifact_id, fixture.artifactId);
@@ -169,7 +166,7 @@ async function main() {
   assert.equal(result.content_digest, fixture.contentDigest);
   assert.deepEqual(result.applied_files, ['readme.txt']);
   assert.equal(fs.readFileSync(path.join(repo, 'readme.txt'), 'utf8'), 'after\n');
-  assert.equal(run('git', ['status', '--porcelain'], { cwd: repo }), '');
+  assert.equal(run('git', ['status', '--porcelain'], { cwd: repo }), 'M  readme.txt');
 
   assert.equal(
     verifyWpCodeboxPayload(preflight.payload).contentDigest,
@@ -199,19 +196,15 @@ async function main() {
     preflightPath,
     '--worktree',
     cliRepo,
-    '--branch',
-    'feature/wp-codebox-apply-cli-smoke',
     '--approved-file',
     '/wordpress/wp-content/plugins/fixture-plugin/readme.txt',
     '--patch-strip',
     '5',
-    '--commit-message',
-    'Apply fixture wp-codebox artifact through CLI',
   ]);
   const cliResult = JSON.parse(cliOutput);
   assert.equal(cliResult.success, true);
   assert.equal(cliResult.artifact_id, fixture.artifactId);
-  assert.equal(cliResult.branch, 'feature/wp-codebox-apply-cli-smoke');
+  assert.equal(cliResult.branch, 'feature/apply-cli-smoke');
   assert.deepEqual(cliResult.applied_files, ['readme.txt']);
   assert.equal(fs.readFileSync(path.join(cliRepo, 'readme.txt'), 'utf8'), 'after\n');
 
@@ -219,8 +212,6 @@ async function main() {
   const request = wpCodeboxApplyRequestFromBundle({
     preflight,
     worktreePath: requestRepo,
-    branch: 'feature/wp-codebox-apply-request-smoke',
-    commitMessage: 'Apply fixture wp-codebox artifact through ApplyRequest',
     patchStrip: 5,
   });
   const requestResult = applyApprovedWpCodeboxArtifact({ applyRequest: request });
@@ -232,8 +223,6 @@ async function main() {
   const requestPath = path.join(root, 'apply-request.json');
   writeJson(requestPath, wpCodeboxApplyRequestFromBundle({
     preflight,
-    branch: 'feature/wp-codebox-apply-request-cli-smoke',
-    commitMessage: 'Apply fixture wp-codebox artifact through ApplyRequest CLI',
     patchStrip: 5,
   }));
   const requestCliRepo = createRepo(root, 'feature/apply-request-cli-smoke');
@@ -281,8 +270,6 @@ async function main() {
   const delegatedResult = applyApprovedWpCodeboxArtifact({
     bundlePath: fixture.bundle,
     worktreePath: delegatedRepo,
-    branch: 'feature/wp-codebox-delegated-preflight-smoke',
-    commitMessage: 'Apply fixture wp-codebox artifact through delegated preflight',
     approvedFiles: ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt'],
     wpCli: fakeWpCli,
     patchStrip: 5,

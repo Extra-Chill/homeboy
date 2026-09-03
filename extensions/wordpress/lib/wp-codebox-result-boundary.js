@@ -3,7 +3,7 @@
 const {
   WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
   normalizeCodeboxPublicResultEnvelope,
-} = require('./codebox-artifact-contract');
+} = require('./wp-codebox-artifact-contract');
 
 function codeboxPublicResultEnvelope(result, options = {}) {
   return options.publicResultEnvelope || options.public_result_envelope || normalizeCodeboxPublicResultEnvelope(result, options);
