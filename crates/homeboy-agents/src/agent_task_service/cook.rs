@@ -40,6 +40,8 @@ use homeboy_core::{Error, Result};
 use homeboy_engine_primitives::shell::quote_arg;
 
 use super::cook_activity::{CookActivityProbe, CookProviderActivity};
+
+const COOK_BASE_OBJECT_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 use super::cook_baseline::materialize_follow_up_baseline;
 use super::cook_baseline::{
@@ -5332,6 +5334,12 @@ fn run_cook_spine(
             Value::String(options.identity.initial_run_id.clone());
         error
     })?;
+    if let (Some(workspace), Some(base_sha)) = (
+        options.workspace.source_worktree_path.as_deref(),
+        options.workspace.task_base_sha.as_deref(),
+    ) {
+        materialize_cook_base_object(workspace, base_sha)?;
+    }
     // Reject a known-invalid managed workspace before base capture reaches its
     // remote. Detached first handoffs have no local source path and remain
     // eligible for runner-owned materialization below.
@@ -7819,18 +7827,13 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     options: &CookRequest,
     adopted_dirty_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
-    // Explicit CWDs are caller-owned and must remain untouched. Resolve their
-    // declared ref into an isolated scheduler snapshot instead of treating the
-    // persisted pin as authority to converge the caller's checkout.
-    let base = if cook_uses_explicit_cwd_workspace(options) {
-        &options.finalization.base
-    } else {
-        options
-            .workspace
-            .task_base_sha
-            .as_deref()
-            .unwrap_or(&options.finalization.base)
-    };
+    // Explicit CWDs remain caller-owned and are never converged, but their
+    // ancestry must still use the immutable base admitted for this Cook.
+    let base = options
+        .workspace
+        .task_base_sha
+        .as_deref()
+        .unwrap_or(&options.finalization.base);
     let ignored_evidence = explicit_cook_evidence_paths(options, target);
     match preflight_cook_workspace_base_ancestry(
         target,
@@ -7839,6 +7842,23 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         adopted_dirty_candidate,
     ) {
         Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
+        Err(error)
+            if error.details["workspace_base_ancestry"]["direction"] == "behind"
+                && cook_uses_explicit_cwd_workspace(options) =>
+        {
+            let ancestry = &error.details["workspace_base_ancestry"];
+            Ok(Some(CookWorkspaceBaseValidation::Snapshot(
+                serde_json::json!({
+                    "schema": "homeboy/cook-workspace-base-snapshot/v1",
+                    "base": ancestry["base"],
+                    "resolved_base": ancestry["resolved_base"],
+                    "destination_head": ancestry["destination_head"],
+                    "base_only_commits": ancestry["base_only_commits"],
+                    "candidate_only_commits": ancestry["candidate_only_commits"],
+                    "mode": "isolated_attempt_snapshot",
+                }),
+            )))
+        }
         Err(error)
             if error.details["workspace_base_ancestry"]["direction"] == "behind"
                 && options.workspace.task_base_sha.is_some() =>
@@ -7906,9 +7926,7 @@ fn preflight_cook_workspace_base_ancestry(
     if !origin.status.success() {
         return Ok(None);
     }
-    let (declared_base, resolved_base) = if base.len() == 40
-        && base.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    let (declared_base, resolved_base) = if homeboy_core::git::is_full_object_id(base) {
         (
             base.to_string(),
             homeboy_core::git::run_git(
@@ -7989,7 +8007,7 @@ fn preflight_cook_workspace_base_ancestry(
         // A recipe-pinned base is controller authority to converge the managed
         // provider checkout. An unpinned declared ref instead authorizes an
         // isolated scheduler snapshot without mutating that checkout.
-        if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if homeboy_core::git::is_full_object_id(base) {
             let direction = "behind";
             let mut error = Error::validation_invalid_argument(
                 "base",
@@ -8357,6 +8375,49 @@ fn bind_materialized_cook_component_workspace(
 
 /// A deferred native lookup can prove absence only after Cook owns a durable
 /// identity. It then creates and records the native worktree lifecycle.
+fn materialize_cook_base_object(workspace: &Path, base_sha: &str) -> Result<()> {
+    if !homeboy_core::git::is_full_object_id(base_sha) {
+        return Err(Error::validation_invalid_argument(
+            "base-sha",
+            "Cook base pin must be a complete Git object ID",
+            Some(base_sha.to_string()),
+            None,
+        ));
+    }
+    if homeboy_core::git::output_optional_within(
+        workspace,
+        &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
+        COOK_BASE_OBJECT_FETCH_TIMEOUT,
+    )
+    .resolved()
+    .is_some()
+    {
+        return Ok(());
+    }
+    let remote = homeboy_core::git::resolve_default_remote(workspace);
+    homeboy_core::git::run_git_with_env_timeout(
+        workspace,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            &remote,
+            base_sha,
+        ],
+        "materialize pinned Cook base",
+        &[],
+        COOK_BASE_OBJECT_FETCH_TIMEOUT,
+    )?;
+    homeboy_core::git::run_git_with_env_timeout(
+        workspace,
+        &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
+        "verify pinned Cook base",
+        &[],
+        COOK_BASE_OBJECT_FETCH_TIMEOUT,
+    )?;
+    Ok(())
+}
+
 fn provision_pending_cook_workspace(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut CookRequest,
@@ -8435,6 +8496,9 @@ fn provision_pending_cook_workspace(
         &options.identity.initial_run_id,
         &options.identity.initial_plan,
     )?;
+    if homeboy_core::git::is_full_object_id(&create_intent.base) {
+        materialize_cook_base_object(Path::new(&create_intent.repo), &create_intent.base)?;
+    }
     homeboy_core::worktree_provider::ensure_worktree_provision(
         &create_intent,
         &homeboy_core::worktree_provider::WorktreeProvisionLifecycle {

@@ -20,6 +20,11 @@ use crate::engine::command as engine_command;
 /// below so a stuck repository degrades to a labelled partial instead.
 pub const DEFAULT_GIT_READ_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A complete Git object ID for either SHA-1 or SHA-256 repositories.
+pub fn is_full_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Outcome of a bounded read-only git probe.
 ///
 /// `Unresolved` and `TimedOut` are deliberately distinct: the first is a normal
@@ -217,6 +222,17 @@ pub fn short_head_revision(dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_object_ids_accept_sha1_and_sha256_only() {
+        assert!(is_full_object_id(&"a".repeat(40)));
+        assert!(is_full_object_id(&"b".repeat(64)));
+        assert!(!is_full_object_id(&"c".repeat(39)));
+        assert!(!is_full_object_id(&format!(
+            "{}^{{commit}}",
+            "d".repeat(40)
+        )));
+    }
     use std::process::Command;
 
     fn git(path: &Path, args: &[&str]) {

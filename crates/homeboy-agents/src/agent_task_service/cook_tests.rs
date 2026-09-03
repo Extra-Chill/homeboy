@@ -7276,17 +7276,6 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             .status()
             .expect("push base")
             .success());
-        let previewed_base = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&source)
-                .output()
-                .expect("resolve previewed base")
-                .stdout,
-        )
-        .expect("previewed base SHA is UTF-8")
-        .trim()
-        .to_string();
         let upstream = tempfile::tempdir().expect("upstream checkout");
         assert!(Command::new("git")
             .args([
@@ -7342,6 +7331,17 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         .expect("moving base SHA is UTF-8")
         .trim()
         .to_string();
+        assert_ne!(
+            Command::new("git")
+                .args(["rev-parse", "origin/main"])
+                .current_dir(&source)
+                .output()
+                .expect("resolve stale source tracking ref")
+                .stdout,
+            format!("{moving_base}\n").as_bytes(),
+            "the source lacks the previewed remote object before durable materialization"
+        );
+        let previewed_base = moving_base.clone();
         let cook_id = "native-provision";
         let run_id = "native-provision-run";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -7404,10 +7404,6 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         .expect("native destination SHA is UTF-8")
         .trim()
         .to_string();
-        assert_ne!(
-            destination_head, moving_base,
-            "remote advanced after preview"
-        );
         assert_eq!(destination_head, previewed_base);
 
         let record = homeboy_core::worktree::resolve_if_present(&options.workspace.to_worktree)

@@ -4007,10 +4007,8 @@ fn authoritative_cook_base_sha(output: &str, reference: &str) -> Option<String> 
     let [(sha, advertised_ref)] = advertised.as_slice() else {
         return None;
     };
-    (*advertised_ref == reference
-        && sha.len() == 40
-        && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    .then(|| (*sha).to_string())
+    (*advertised_ref == reference && homeboy::core::git::is_full_object_id(sha))
+        .then(|| (*sha).to_string())
 }
 
 fn authoritative_cook_base_probe(
@@ -4083,36 +4081,6 @@ fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::
         error.details["correction_argv"] = serde_json::json!(argv);
     }
     Err(error)
-}
-
-/// Execution materializes the previewed immutable object without moving any
-/// tracking ref. The service then uses this SHA rather than resolving the
-/// branch again after provider admission begins.
-fn materialize_cook_base_pin(
-    args: &AgentTaskCookArgs,
-    provision: &Value,
-) -> homeboy::core::Result<()> {
-    let Some(base_sha) = args.base_sha.as_deref() else {
-        return Ok(());
-    };
-    let Some(path) = provision.get("path").and_then(Value::as_str) else {
-        return Ok(());
-    };
-    let remote = homeboy::core::git::resolve_default_remote(Path::new(path));
-    let output = Command::new("git")
-        .args(["fetch", "--no-tags", &remote, base_sha])
-        .current_dir(path)
-        .output()
-        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(homeboy::core::Error::validation_invalid_argument(
-        "base-sha",
-        format!("could not materialize pinned Cook base {base_sha} from `{remote}`"),
-        Some(base_sha.to_string()),
-        None,
-    ))
 }
 
 /// Build the correction as typed argv first. The rendered shell command is a
@@ -5316,7 +5284,6 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
     let provision = provision_cook_destination(&args)?;
-    materialize_cook_base_pin(&args, &provision)?;
 
     let mut dispatch_args = resolved_dispatch_args_for_cook(&args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
