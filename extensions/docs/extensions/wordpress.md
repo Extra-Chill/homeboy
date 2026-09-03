@@ -95,20 +95,10 @@ name, runtime output file name, dispatch function, and artifact normalization.
 
 ## Audit Fanout Runtime Boundary
 
-Audit fanout extraction is split from runtime execution. Generic fanout planning
-and reconcile primitives live in `runtime-agent-ci/lib`; they group items,
-template opaque task requests, and match provider records back to groups. The exported
-`audit-fanout-runtime-provider` interface defines dispatch/apply operations
-without naming runtime package names, provider credentials, sandbox recipes, or
-provider task schemas.
-
-WP Codebox is the current runtime provider implementation for audit fanout. The
-quarantined `audit-wp-codebox-fanout` module and CLI map grouped audit findings
-to `wp-codebox/task-input/v1`, execute those requests through Codebox-owned task
-runner contracts, and normalize Codebox artifacts/outcomes back into fanout
-records. Keep new executor-neutral extraction behavior in
-`runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js`; keep Codebox request/session/artifact
-details inside the Codebox audit fanout lane.
+Generic fanout planning and reconcile primitives live in `runtime-agent-ci/lib`.
+The WordPress extension does not select or execute an agent runtime from its
+deterministic refactor hook. WP Codebox remains available through its direct
+sandbox, browser, preview, fuzz, WP-CLI, and artifact contracts.
 
 ## Product Adapter Boundaries
 

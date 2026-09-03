@@ -7,7 +7,6 @@ const {
   coreModuleCandidates,
   loadCanonicalRuntimeContractSourceSync,
 } = require('./wp-codebox-runtime-contract-source');
-const { runtimeOverlayProfileReadinessDiagnostics } = require('./runtime-overlay-profiles');
 
 const RUNTIME_READINESS_FAILURE_CLASS = 'codebox.preflight.runtime_readiness';
 const RUNTIME_CONTRACT_FAILURE_CLASS = 'codebox.preflight.runtime_contract_unavailable';
@@ -25,7 +24,6 @@ class WpCodeboxRuntimeReadinessError extends Error {
 function wpCodeboxRuntimeReadinessDiagnostics(taskInput = {}, options = {}) {
   return [
     ...runtimeContractReadinessDiagnostics(options),
-    ...runtimeOverlayProfileReadinessDiagnostics(taskInput.runtime_overlay_profiles || taskInput.runtimeOverlayProfiles),
     ...runtimeOverlayReadinessDiagnostics(taskInput, options),
   ];
 }

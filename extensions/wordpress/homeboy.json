@@ -32,7 +32,6 @@
     "test": [
       "node tests/wp-codebox-canonical-cli-adapters-smoke.mjs",
       "node tests/wp-codebox-bench-selection-smoke.mjs",
-      "node tests/wp-codebox-runner-readiness-smoke.mjs",
       "node tests/wp-codebox-phpunit-bounded-output-smoke.mjs",
       "bash scripts/build/inspect-wp-codebox-freshness-smoke.sh",
       "bash scripts/build/setup-wp-codebox-smoke.sh",
@@ -98,7 +97,6 @@
       "bash scripts/test/parse-wp-codebox-artifacts-smoke.sh",
       "bash scripts/test/test-inventory-smoke.sh",
       "bash scripts/validation/validate-playground-blueprint-smoke.sh",
-      "node tests/audit-fanout-runtime-adapter.test.js",
       "node tests/block-quality-smoke.js",
       "node tests/codebox-runtime-profile-smoke.js",
       "bash tests/component-env-detector-smoke.sh",
@@ -131,11 +129,9 @@
       "node tests/admin-page-scenarios-smoke.js",
       "node tests/agent-terminal-actions-smoke.js",
       "node tests/ajax-action-surface-smoke.js",
-      "node tests/audit-fanout-runtime-provider-smoke.js",
       "node tests/benchmark-matrix-report-smoke.js",
       "node tests/browser-request-coverage-smoke.js",
       "node tests/codebox-memory-report-smoke.js",
-      "node tests/codebox-provider-adapter-smoke.js",
       "node tests/core-fuzz-plan-boundary-smoke.js",
       "node tests/db-inventory-smoke.js",
       "bash tests/dependency-plugin-preflight-smoke.sh",
@@ -196,7 +192,6 @@
       "node tests/wp-codebox-recipe-helper-installed-layout-smoke.js",
       "node tests/wp-codebox-recipe-helper-smoke.js",
       "node tests/wp-codebox-resolver-smoke.js",
-      "node tests/wp-codebox-task-runner-smoke.js",
       "node tests/wp-codebox-visual-compare-smoke.js"
     ]
   }

@@ -29,7 +29,7 @@ const {
 const repoRoot = path.join(__dirname, '..', '..');
 const registry = runtimeRegistry({ repoRoot });
 
-assert.equal(registry['wp-codebox'].id, 'wp-codebox');
+assert.equal(registry['wp-codebox'], undefined);
 assert.equal(registry['local-shell'].id, 'local-shell');
 assert.equal(registry['fake-runtime'], undefined);
 assert.equal(registry['package'], undefined);
@@ -39,17 +39,8 @@ assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
 assert.equal(resolveRuntimeProvider(undefined, { repoRoot, registry }).id, 'local-shell');
 assert.throws(() => resolveRuntimeProvider('codebox', { repoRoot, registry }), /Unsupported agent_runtime: codebox/);
 assert.equal(normalizeRuntimeId('wp-codebox'), 'wp-codebox');
-assert.equal(resolveRuntimeProvider('wp-codebox', { repoRoot, registry }).id, 'wp-codebox');
+assert.throws(() => resolveRuntimeProvider('wp-codebox', { repoRoot, registry }), /Unsupported agent_runtime: wp-codebox/);
 assert.equal(resolveRuntimeProvider('local-shell', { repoRoot, registry }).executor.backend, 'local-shell');
-
-const wpCodeboxRuntime = resolveRuntimeProvider('wp-codebox', { repoRoot, registry });
-assert.equal(wpCodeboxRuntime.id, 'wp-codebox');
-assert.equal(wpCodeboxRuntime.executor.backend, 'wp-codebox');
-assert.equal(wpCodeboxRuntime.executor.path, path.join(repoRoot, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs'));
-assert.equal(wpCodeboxRuntime.executor.invocation.command, 'node');
-assert.deepEqual(wpCodeboxRuntime.executor.invocation.argv, [path.join(repoRoot, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs')]);
-assert.equal(wpCodeboxRuntime.executor.invocation.stdin, 'request_json');
-assert.equal(wpCodeboxRuntime.executor.invocation.stdout, 'outcome_json');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-registry-'));
 try {

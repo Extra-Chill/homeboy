@@ -89,43 +89,37 @@ assert.equal(loop.assertion.success_status, 'no_changes');
 assert.equal(loop.assertion.no_changes_allowed, true);
 
 const adapterLoop = runGenericAgentLoop({
-  plan: { ...plan, workload_id: 'codebox-loop', success_requires_pr: true },
+  plan: { ...plan, workload_id: 'adapter-loop', success_requires_pr: true },
   runtime: {
-    id: 'wp-codebox',
+    id: 'fixture-runtime',
     capabilities: ['structured_outcome'],
-    executor: { backend: 'wp-codebox', path: '/not-called' },
+    executor: { backend: 'fixture', path: '/not-called' },
     manifest: {
       agent_loop: {
         outcome_adapter: {
-          module: 'agent-runtimes/wp-codebox/lib/runtime-agent-outcome-adapter.js',
+          module: 'tests/fixtures/generic-agent-outcome-adapter.cjs',
           export: 'scenarioResultsFromOutcome',
         },
       },
     },
   },
   repoRoot,
-  validationPolicy: { scenario_id: 'codebox-loop', success_requires_pr: true },
+  validationPolicy: { scenario_id: 'adapter-loop', success_requires_pr: true },
   execute: () => ({
     schema: 'homeboy/agent-task-outcome/v1',
-    task_id: 'codebox-loop',
+    task_id: 'adapter-loop',
     status: 'succeeded',
     artifacts: [{ id: 'fixture-result', kind: 'typed-json', artifact_schema: 'example/fixture-result/v1' }],
     evidence_refs: [{ kind: 'pull_request', uri: 'https://github.com/example/project/pull/123', label: 'PR' }],
     metadata: {
-      codebox: {
-        raw: {
-          agent_runtime: {
-            result: {
-              scenarios: [{
-                id: 'codebox-loop',
-                metadata: {
-                  job_status: 'completed',
-                  success_status: 'pr_opened',
-                },
-              }],
-            },
+      fixture: {
+        scenarios: [{
+          id: 'adapter-loop',
+          metadata: {
+            job_status: 'completed',
+            success_status: 'pr_opened',
           },
-        },
+        }],
       },
     },
   }),

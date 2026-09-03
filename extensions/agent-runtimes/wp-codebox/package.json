@@ -6,27 +6,13 @@
   "exports": {
     ".": "./index.js",
     "./codebox-artifact-contract": "./lib/codebox-artifact-contract.js",
-    "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js",
-    "./codebox-run-agent-task-contract": "./lib/codebox-run-agent-task-contract.js",
-    "./runtime-agent-bundle-result": "./lib/runtime-agent-bundle-result.js",
     "./codebox-runtime-profile": "./lib/codebox-runtime-profile.js",
-    "./delegated-run-contract": "./lib/delegated-run-contract.js",
-    "./provider-credential-boundary": "./lib/provider-credential-boundary.js",
-    "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js",
-    "./wp-codebox-adapter-descriptor": "./lib/wp-codebox-adapter-descriptor.js",
-    "./wp-codebox-adapter-contract": "./lib/wp-codebox-adapter-contract.js",
     "./wp-codebox-runtime-contract-source": "./lib/wp-codebox-runtime-contract-source.js",
     "./wp-codebox-runtime-readiness": "./lib/wp-codebox-runtime-readiness.js",
     "./wp-codebox-runtime-selection": "./lib/wp-codebox-runtime-selection.js"
   },
-  "bin": {
-    "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"
-  },
   "scripts": {
-    "test:codebox-agent-task-executor-boundary": "node ../../wordpress/tests/codebox-agent-task-executor-boundary.test.js",
-    "test:wp-codebox-adapter-contract": "node ../../tests/wp-codebox-adapter-contract-smoke.mjs",
-    "test:wp-codebox-runtime-contract-source": "node ../../tests/wp-codebox-runtime-contract-source-smoke.mjs",
-    "test:codebox-agent-task-executor": "node ../../wordpress/tests/codebox-agent-task-executor-smoke.js"
+    "test:wp-codebox-runtime-contract-source": "node ../../tests/wp-codebox-runtime-contract-source-smoke.mjs"
   },
   "engines": {
     "node": ">=18.12.0"

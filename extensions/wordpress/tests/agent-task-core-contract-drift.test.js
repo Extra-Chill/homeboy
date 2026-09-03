@@ -51,15 +51,6 @@ const committedFixtureText = fs.readFileSync(FIXTURE_PATH, 'utf8');
 const contract = JSON.parse(committedFixtureText);
 const committedProviderContractText = fs.readFileSync(OUTPUT_PATH, 'utf8');
 const generatedProviderContract = JSON.parse(committedProviderContractText);
-const wpCodeboxManifest = JSON.parse(fs.readFileSync(path.join(
-  __dirname,
-  '..',
-  '..',
-  'agent-runtimes',
-  'wp-codebox',
-  'wp-codebox.json'
-), 'utf8'));
-const wpCodeboxProvider = wpCodeboxManifest.agent_task_executors[0];
 const providerFields = contract.provider_capability;
 
 assert.equal(contract.schema, 'homeboy/agent-task-core-contract/v1');
@@ -113,13 +104,6 @@ assert.deepEqual(agentTaskProviderContractFields(), {
   failure_classifications: providerFields.failure_classifications,
   redacted_metadata_keys: providerFields.redacted_metadata_keys,
 });
-assert.equal(wpCodeboxProvider.schema, providerFields.provider_schema);
-assert.equal(wpCodeboxProvider.request_schema, providerFields.request_schema);
-assert.equal(wpCodeboxProvider.outcome_schema, providerFields.outcome_schema);
-assert.deepEqual(wpCodeboxProvider.request_required_fields, providerFields.request_required_fields);
-assert.deepEqual(wpCodeboxProvider.outcome_statuses, providerFields.outcome_statuses);
-assert.deepEqual(wpCodeboxProvider.failure_classifications, AGENT_TASK_FAILURE_CLASSIFICATIONS);
-assert.deepEqual(wpCodeboxProvider.redacted_metadata_keys, providerFields.redacted_metadata_keys);
 
 // Strong anti-drift guarantee: the fixture is a generated artifact derived from
 // Homeboy core's published contract (`homeboy agent-task contract --format

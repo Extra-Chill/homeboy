@@ -96,13 +96,14 @@ fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const { runtimeContractManifest } = require(${JSON.stringify(fakeCodeboxCoreModule)});
 
-const command = process.argv[2];
+const commandOffset = process.argv[2] === 'codebox' ? 1 : 0;
+const command = process.argv[2 + commandOffset];
 const inputFileIndex = process.argv.indexOf('--input-file');
 if (process.argv.includes('--version')) {
   process.stdout.write('0.21.0');
   process.exit(0);
 }
-if (command === 'runtime' && process.argv[3] === 'descriptor' && process.argv.includes('--json')) {
+if (command === 'runtime' && process.argv[3 + commandOffset] === 'descriptor' && process.argv.includes('--json')) {
   process.stdout.write(JSON.stringify({
      schema: 'wp-codebox/runtime-descriptor/v1',
      readiness: { status: 'available', browserRuntime: { status: 'ready' } },
@@ -122,8 +123,8 @@ if (command === 'run-wordpress-workload' && process.argv.includes('--help')) {
 	process.stderr.write('production dispatch must not probe run-wordpress-workload help');
 	process.exit(2);
 }
-if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--format=json')) {
-	process.stderr.write('expected public run-fuzz-suite --input-file <file> --format=json invocation');
+if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || (!process.argv.includes('--format=json') && !process.argv.includes('--json'))) {
+	process.stderr.write('expected public run-fuzz-suite --input-file <file> JSON invocation');
 	process.exit(1);
 }
 
@@ -181,7 +182,6 @@ const cli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
-		HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH: 'legacy-codebox-bin',
 		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
 		HOMEBOY_WP_CODEBOX_CORE_MODULE: fakeCodeboxCoreModule,
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
@@ -238,7 +238,7 @@ assert.deepEqual(
 const observedRequest = JSON.parse(fs.readFileSync(observedRequestPath, 'utf8'));
 const observedArgv = JSON.parse(fs.readFileSync(observedArgvPath, 'utf8'));
 assert.equal(observedArgv[0], fakeCodeboxBin, 'the explicit external pin is executed, not replaced by a managed candidate');
-assert.deepEqual(observedArgv.slice(1, 3), ['run-fuzz-suite', '--input-file']);
+assert.deepEqual(observedArgv.slice(1, 4), ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file']);
 assert.deepEqual(observedArgv.slice(-2), ['--artifacts', artifactRoot]);
 assert.equal(observedRequest.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.schema, 'homeboy/wp-codebox-fuzz-execution/v1');

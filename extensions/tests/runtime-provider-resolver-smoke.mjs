@@ -18,7 +18,7 @@ const {
 const registry = runtimeRegistry({ repoRoot: rootDir });
 assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
 assert.ok(registry['local-shell'], 'local-shell is registered as the default runtime provider');
-assert.ok(registry['wp-codebox'], 'wp-codebox is registered as a selectable runtime provider');
+assert.equal(registry['wp-codebox'], undefined, 'wp-codebox is a runtime dependency, not an agent-task provider');
 assert.ok(registry.opencode, 'opencode is registered as a selectable runtime provider');
 
 const defaultRuntime = resolveRuntimeProvider(undefined, { repoRoot: rootDir, workspace });
@@ -29,63 +29,7 @@ assert.equal(defaultRuntime.source.manifest_path, path.join(rootDir, 'agent-runt
 assert.equal(defaultRuntime.executor.backend, 'local-shell');
 assert.equal(defaultRuntime.executor.path, path.join(rootDir, 'agent-runtimes/local-shell/scripts/agent/homeboy-local-shell-agent-task-executor.cjs'));
 
-const runtime = resolveRuntimeProvider('wp-codebox', {
-	repoRoot: rootDir,
-	workspace,
-	env: { AGENT_RUNTIME_REF: 'feature/runtime-ref' },
-});
-
-assert.equal(runtime.id, 'wp-codebox');
-assert.equal(runtime.checkout.repo, 'Automattic/wp-codebox');
-assert.equal(runtime.checkout.ref, 'feature/runtime-ref');
-assert.equal(runtime.checkout.target, '.ci/wp-codebox');
-assert.equal(runtime.checkout.targetPath, path.join(workspace, '.ci/wp-codebox'));
-assert.deepEqual(runtime.setupCommands, [{ command: 'npm', args: ['install'], cwd: '.ci/wp-codebox' }]);
-assert.deepEqual(runtime.buildCommands, [{ command: 'npm', args: ['run', 'build'], cwd: '.ci/wp-codebox' }]);
-assert.equal(runtime.paths.runtime_bin, 'wp-codebox');
-assert.equal(runtime.paths.runtime_core_module, '@automattic/wp-codebox-core');
-assert.equal(runtime.paths.runtime_component, '');
-assert.equal(runtime.executor.id, 'wordpress.codebox-agent-task-executor');
-assert.equal(runtime.executor.backend, 'wp-codebox');
-assert.equal(runtime.executor.path, path.join(rootDir, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs'));
-assert.equal(runtime.executor.capabilities.includes('agent_bundle_execution'), true);
-assert.deepEqual(runtime.executor.invocation.env_allowlist, [
-	'HOMEBOY_WP_CODEBOX_BIN',
-	'WP_CODEBOX_BIN',
-	'HOMEBOY_WP_CODEBOX_CORE_MODULE',
-	'WP_CODEBOX_CORE_MODULE',
-]);
-assert.deepEqual(runtime.executor.runtime_execution_contracts.bundle, {
-	ability_field: 'runtime_bundle_ability',
-	required_capabilities: ['agent_bundle_execution'],
-});
-
-const envRuntime = resolveRuntimeProvider('wp-codebox', {
-	repoRoot: rootDir,
-	workspace,
-	env: { HOMEBOY_WP_CODEBOX_BIN: '/opt/bin/wp-codebox' },
-});
-assert.equal(envRuntime.paths.runtime_bin, '/opt/bin/wp-codebox');
-
-const settingsRuntime = resolveRuntimeProvider('wp-codebox', {
-	repoRoot: rootDir,
-	workspace,
-	env: {
-		HOMEBOY_SETTINGS_JSON: JSON.stringify({
-			wp_codebox_bin: '/settings/wp-codebox',
-			wp_codebox_core_module: '/settings/wp-codebox-core/dist/index.js',
-		}),
-	},
-});
-assert.equal(settingsRuntime.paths.runtime_bin, '/settings/wp-codebox');
-assert.equal(settingsRuntime.paths.runtime_core_module, '/settings/wp-codebox-core/dist/index.js');
-
-const envRuntimeComponent = resolveRuntimeProvider('wp-codebox', {
-	repoRoot: rootDir,
-	workspace,
-	env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: '.runtime/wp-codebox-plugin' },
-});
-assert.equal(envRuntimeComponent.paths.runtime_component, path.join(workspace, '.runtime/wp-codebox-plugin'));
+assert.throws(() => resolveRuntimeProvider('wp-codebox', { repoRoot: rootDir, workspace }), /Unsupported agent_runtime: wp-codebox/);
 
 const opencodeRuntime = resolveRuntimeProvider('opencode', {
 	repoRoot: rootDir,

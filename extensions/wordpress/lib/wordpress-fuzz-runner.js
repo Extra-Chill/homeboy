@@ -285,15 +285,19 @@ function buildWordPressFuzzRunnerSummary({
 
 async function resolveCodeboxResult(context, options = {}) {
 	const runner = options.runFuzzSuite || options.runRuntimeTask || options.runTask;
-	const runtimeDescriptor = typeof runner === 'function' ? {} : await readWpCodeboxFuzzRuntimeDescriptor({ ...options, env: context.env });
+	const runtimeOptions = {
+		...options,
+		env: context.env,
+		wpCodeboxBin: options.wpCodeboxBin || options.wp_codebox_bin || context.env.wpCodeboxBin,
+	};
+	const runtimeDescriptor = typeof runner === 'function' ? {} : await readWpCodeboxFuzzRuntimeDescriptor(runtimeOptions);
 	const input = {
 		...context.wpCodeboxInput,
 		schema: runtimeDescriptor.runtimeContractManifest?.schemas?.wordpressRuntime?.fuzzSuite || context.wpCodeboxInput.schema,
 	};
 	return runWpCodeboxFuzzSuite({
-		...options,
+		...runtimeOptions,
 		...runtimeDescriptor,
-		env: context.env,
 		taskId: context.runId,
 		input,
 		provider: context.workload.provider,
