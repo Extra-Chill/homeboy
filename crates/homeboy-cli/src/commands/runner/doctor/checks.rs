@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::runner::controller_ancestry::{commits_are_ancestral, CommitAncestry};
 use types::{RunnerCheck, RunnerDoctorStatus, RunnerRepairAction, ToolProbe};
 
 pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
@@ -132,6 +133,24 @@ pub(crate) fn homeboy_version_skew_check(
     runner_id: &str,
     server_id: &str,
 ) -> Option<RunnerCheck> {
+    homeboy_version_skew_check_with(
+        local_version,
+        local_build_identity,
+        remote_build_identity,
+        runner_id,
+        server_id,
+        commits_are_ancestral,
+    )
+}
+
+pub(super) fn homeboy_version_skew_check_with(
+    local_version: &str,
+    local_build_identity: &str,
+    remote_build_identity: &str,
+    runner_id: &str,
+    server_id: &str,
+    mut ancestry: impl FnMut(&str, &str) -> CommitAncestry,
+) -> Option<RunnerCheck> {
     let local_version = local_version.trim();
     let local_build_identity = normalize_homeboy_build_identity(local_build_identity);
     let remote_build_identity = normalize_homeboy_build_identity(remote_build_identity);
@@ -154,30 +173,70 @@ pub(crate) fn homeboy_version_skew_check(
         "remote_version".to_string(),
         remote_build_identity.to_string(),
     );
-    let quoted_runner_id = shell::quote_arg(runner_id);
-    let refresh_ref = homeboy_product_identity::build_identity()
-        .git_commit
-        .unwrap_or_else(|| format!("v{local_version}"));
-    Some(
-        warning_with_details(
-            "homeboy.version_skew",
-            format!(
-                "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
-            ),
-            Some(format!(
-                "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
-            )),
-            details,
-        )
-        // Every argument in the sentence above is already known here. Carrying
-        // it typed as well is the difference between a fix a person retypes and
-        // one a repair loop can run: `refresh_ref` is the same value in both,
-        // pinned by `version_skew_action_and_prose_carry_the_same_ref`.
-        .with_action(RunnerRepairAction::RefreshHomeboy {
-            git_ref: Some(refresh_ref.clone()),
-            allow_downgrade: false,
-        }),
-    )
+    let controller_commit = build_identity_commit(local_build_identity);
+    let runner_commit = build_identity_commit(remote_build_identity);
+    let message = format!(
+        "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
+    );
+    match (controller_commit, runner_commit) {
+        (Some(controller), Some(runner))
+            if ancestry(controller, runner) == CommitAncestry::Ancestor =>
+        {
+            details.insert("direction".to_string(), "runner_ahead".to_string());
+            Some(warning_with_details(
+                "homeboy.version_skew",
+                message,
+                Some(format!(
+                    "Runner `{runner_id}` is ahead of this controller. Upgrade the controller, then rerun `homeboy runner doctor {runner_id}`; alternatively select a common newer published or source revision. Do not refresh the runner to the older controller revision. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
+                )),
+                details,
+            ))
+        }
+        (Some(controller), Some(runner))
+            if ancestry(runner, controller) == CommitAncestry::Ancestor =>
+        {
+            details.insert("direction".to_string(), "controller_ahead".to_string());
+            let quoted_runner_id = shell::quote_arg(runner_id);
+            let refresh_ref = homeboy_product_identity::build_identity()
+                .git_commit
+                .unwrap_or_else(|| format!("v{local_version}"));
+            Some(
+                warning_with_details(
+                    "homeboy.version_skew",
+                    message,
+                    Some(format!(
+                        "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
+                    )),
+                    details,
+                )
+                .with_action(RunnerRepairAction::RefreshHomeboy {
+                    git_ref: Some(refresh_ref),
+                    allow_downgrade: false,
+                }),
+            )
+        }
+        _ => {
+            details.insert(
+                "direction".to_string(),
+                "diverged_or_unverified".to_string(),
+            );
+            Some(warning_with_details(
+                "homeboy.version_skew",
+                message,
+                Some(format!(
+                    "Controller and runner commits are divergent or cannot be compared. Select a common published or source revision before refreshing runner `{runner_id}`; use `--allow-downgrade` only for an intentional rollback authorized by an operator. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
+                )),
+                details,
+            ))
+        }
+    }
+}
+
+fn build_identity_commit(identity: &str) -> Option<&str> {
+    let commit = identity.rsplit_once('+')?.1;
+    let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
+    (commit.len() >= 7 && commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(commit)
 }
 
 fn normalize_homeboy_build_identity(identity: &str) -> &str {

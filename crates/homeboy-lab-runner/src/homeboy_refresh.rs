@@ -419,6 +419,7 @@ pub fn plan_homeboy_binary_refresh(
                 &target_dir,
                 &binary_path,
                 options.allow_downgrade,
+                &[],
             );
             Ok(HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
@@ -438,7 +439,7 @@ pub fn plan_homeboy_binary_refresh(
 pub fn refresh_homeboy_binary(
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
-    let plan = plan_homeboy_binary_refresh(&options)?;
+    let mut plan = plan_homeboy_binary_refresh(&options)?;
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -482,6 +483,23 @@ pub fn refresh_homeboy_binary(
     // with a new observation that can include this recovery operation's records.
     let admission = reconciled_refresh_admission(&plan.runner_id)?;
     let connection_status = admission.status.clone();
+    if plan.mode == "materialize" {
+        let authorities = refresh_promotion_authorities(&plan.runner_id, &connection_status)?;
+        plan.script = materialize_script(
+            plan.source
+                .as_deref()
+                .expect("materialize plans have a source"),
+            plan.git_ref
+                .as_deref()
+                .expect("materialize plans have a ref"),
+            plan.target_dir
+                .as_deref()
+                .expect("materialize plans have a target directory"),
+            &plan.binary_path,
+            options.allow_downgrade,
+            &refresh_authority_commits(&authorities),
+        );
+    }
     let execution_route = refresh_execution_route(&runner, &admission)?;
     let diagnostic_ssh_bootstrap = execution_route.uses_diagnostic_ssh();
     let exec_options =
@@ -1865,6 +1883,17 @@ fn refresh_promotion_authorities(
     })
 }
 
+fn refresh_authority_commits(authorities: &RefreshPromotionAuthorities) -> Vec<&str> {
+    [
+        authorities.controller.as_deref(),
+        authorities.active_daemon.as_deref(),
+        authorities.configured_selected.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 fn validate_refresh_promotion<IsAncestor>(
     plan: &HomeboyBinaryRefreshPlan,
     candidate: &Value,
@@ -2452,6 +2481,7 @@ fn materialize_script(
     target_dir: &str,
     binary_path: &str,
     allow_downgrade: bool,
+    authority_commits: &[&str],
 ) -> String {
     let mut script = format!(
         "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n",
@@ -2460,6 +2490,15 @@ fn materialize_script(
         quote_path(target_dir),
         quote_path(binary_path),
         allow_downgrade,
+    );
+    let authority_commits = quote_path(&authority_commits.join(" "));
+    let downgrade_guard = format!(
+        "preflight=$(mktemp -d)\ntrap 'rm -rf \"$preflight\"' EXIT HUP INT TERM\ngit -C \"$preflight\" init --bare --quiet\nif ! git -C \"$preflight\" fetch --quiet \"$source\" \"$ref\"; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$preflight\" rev-parse --verify --quiet FETCH_HEAD^{{commit}})\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref did not resolve to a commit: $ref\" >&2\n  exit 1\nfi\nfor authority in {authority_commits}; do\n  if [ -z \"$authority\" ] || [ \"$authority\" = \"$target\" ]; then\n    continue\n  fi\n  if ! git -C \"$preflight\" fetch --quiet \"$source\" \"$authority\"; then\n    if [ \"$allow_downgrade\" != true ]; then\n      echo \"Cannot prove requested Homeboy ref is not a downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n      exit 1\n    fi\n    continue\n  fi\n  if git -C \"$preflight\" merge-base --is-ancestor \"$target\" \"$authority\"; then\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$authority\" >&2\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n    if [ \"$allow_downgrade\" != true ]; then\n      echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n      exit 1\n    fi\n  fi\ndone\nrm -rf \"$preflight\"\ntrap - EXIT HUP INT TERM\n"
+    );
+    script = script.replacen(
+        "mkdir -p \"$(dirname \"$dir\")\"",
+        &format!("{downgrade_guard}mkdir -p \"$(dirname \"$dir\")\""),
+        1,
     );
     script.push_str(
         r#"identity=$("$immutable_binary" self identity)
