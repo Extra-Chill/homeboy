@@ -13,6 +13,13 @@ set -euo pipefail
 # Output JSON shape (matches the homeboy release pipeline contract):
 #   [{"path": "build/<component>.zip", "type": "wordpress-zip", "platform": null}]
 #
+# When extensions.wordpress.additional_package_profiles declares one or more
+# {manifest, profile, artifact} entries, the primary ZIP is built unchanged,
+# then each additional package is built from the same release source and
+# production dependencies (build.sh with package_profile overridden per
+# entry), version-verified, and appended after the primary ZIP in declared
+# order.
+#
 # Env vars expected by the upstream pipeline:
 #   HOMEBOY_COMPONENT_ID   - component id (used by build.sh to name the ZIP)
 #   HOMEBOY_RUNTIME_*      - resolve-context helpers (set automatically)
@@ -122,6 +129,70 @@ if [[ -z "${COMPONENT_SLUG}" ]]; then
   exit 1
 fi
 
+# Additional release package profiles: optional profile variants published as
+# extra release assets alongside the primary ZIP. Declarations are validated
+# fail-closed before any build runs so a malformed or unsafe declaration can
+# never reach the build pipeline. Manifest/profile path resolution reuses the
+# existing fail-closed package_profile validation inside build.sh.
+ADDITIONAL_PROFILE_MANIFESTS=()
+ADDITIONAL_PROFILE_PROFILES=()
+ADDITIONAL_PROFILE_ARTIFACTS=()
+
+additional_profile_count=0
+if printf '%s' "${SETTINGS_JSON}" | jq -e 'has("additional_package_profiles") and .additional_package_profiles != null' >/dev/null 2>&1; then
+  if ! printf '%s' "${SETTINGS_JSON}" | jq -e '.additional_package_profiles | type == "array"' >/dev/null 2>&1; then
+    echo "Error: extensions.wordpress.additional_package_profiles must be an array of {manifest, profile, artifact} objects" >&2
+    exit 1
+  fi
+  additional_profile_count="$(printf '%s' "${SETTINGS_JSON}" | jq -r '.additional_package_profiles | length')"
+
+  for ((profile_index = 0; profile_index < additional_profile_count; profile_index++)); do
+    profile_entry="$(printf '%s' "${SETTINGS_JSON}" | jq -c ".additional_package_profiles[${profile_index}]")"
+    if [[ "$(printf '%s' "${profile_entry}" | jq -r 'type')" != "object" ]]; then
+      echo "Error: extensions.wordpress.additional_package_profiles entries must be objects with manifest, profile, and artifact (index ${profile_index})" >&2
+      exit 1
+    fi
+
+    if ! printf '%s' "${profile_entry}" | jq -e '(.manifest | type) == "string" and (.manifest | length > 0)' >/dev/null 2>&1; then
+      echo "Error: extensions.wordpress.additional_package_profiles manifest must be a non-empty string (index ${profile_index})" >&2
+      exit 1
+    fi
+    if ! printf '%s' "${profile_entry}" | jq -e '(.profile | type) == "string" and (.profile | length > 0)' >/dev/null 2>&1; then
+      echo "Error: extensions.wordpress.additional_package_profiles profile must be a non-empty string (index ${profile_index})" >&2
+      exit 1
+    fi
+    if ! printf '%s' "${profile_entry}" | jq -e '(.artifact | type) == "string" and (.artifact | length > 0)' >/dev/null 2>&1; then
+      echo "Error: extensions.wordpress.additional_package_profiles artifact must be a non-empty string (index ${profile_index})" >&2
+      exit 1
+    fi
+
+    profile_manifest="$(printf '%s' "${profile_entry}" | jq -r '.manifest')"
+    profile_name="$(printf '%s' "${profile_entry}" | jq -r '.profile')"
+    profile_artifact="$(printf '%s' "${profile_entry}" | jq -r '.artifact')"
+
+    if ! [[ "${profile_artifact}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$ ]]; then
+      echo "Error: additional package profile artifact names must be basename-only .zip names: ${profile_artifact}" >&2
+      exit 1
+    fi
+    if [[ "${profile_artifact}" == "${COMPONENT_SLUG}.zip" ]]; then
+      echo "Error: additional package profile artifact cannot replace the primary release artifact: ${profile_artifact}" >&2
+      exit 1
+    fi
+    if [[ ${#ADDITIONAL_PROFILE_ARTIFACTS[@]} -gt 0 ]]; then
+      for prior_artifact in "${ADDITIONAL_PROFILE_ARTIFACTS[@]}"; do
+        if [[ "${prior_artifact}" == "${profile_artifact}" ]]; then
+          echo "Error: additional package profile artifact names must be unique: ${profile_artifact}" >&2
+          exit 1
+        fi
+      done
+    fi
+
+    ADDITIONAL_PROFILE_MANIFESTS+=("${profile_manifest}")
+    ADDITIONAL_PROFILE_PROFILES+=("${profile_name}")
+    ADDITIONAL_PROFILE_ARTIFACTS+=("${profile_artifact}")
+  done
+fi
+
 echo "Building release ZIP for ${COMPONENT_SLUG}..." >&2
 
 # Run the standard build pipeline. build.sh produces build/${COMPONENT_SLUG}.zip
@@ -165,6 +236,56 @@ if [[ -n "${EXPECTED_VERSION}" ]]; then
   echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION}" >&2
 else
   echo "Warning: could not determine expected version; skipping artifact version verification" >&2
+fi
+
+# Build every declared additional package profile. build.sh always removes and
+# rewrites build/${COMPONENT_SLUG}.zip, so the verified primary ZIP is parked
+# outside the build tree until every additional package has been produced and
+# renamed to its declared release asset name.
+if [[ ${#ADDITIONAL_PROFILE_ARTIFACTS[@]} -gt 0 ]]; then
+  PRESERVE_DIR="$(mktemp -d -t homeboy-wp-release-primary.XXXXXX)"
+  restore_preserved_primary() {
+    if [[ -f "${PRESERVE_DIR}/${COMPONENT_SLUG}.zip" ]]; then
+      mv "${PRESERVE_DIR}/${COMPONENT_SLUG}.zip" "${ARTIFACT_PATH}" 2>/dev/null || true
+    fi
+    rm -rf "${PRESERVE_DIR}" 2>/dev/null || true
+  }
+  trap restore_preserved_primary EXIT
+  mv "${ARTIFACT_PATH}" "${PRESERVE_DIR}/${COMPONENT_SLUG}.zip"
+
+  for ((profile_index = 0; profile_index < ${#ADDITIONAL_PROFILE_ARTIFACTS[@]}; profile_index++)); do
+    profile_manifest="${ADDITIONAL_PROFILE_MANIFESTS[${profile_index}]}"
+    profile_name="${ADDITIONAL_PROFILE_PROFILES[${profile_index}]}"
+    profile_artifact="${ADDITIONAL_PROFILE_ARTIFACTS[${profile_index}]}"
+
+    echo "Building additional release package ${profile_artifact} (profile ${profile_name})..." >&2
+
+    # Reuse the same production build path (dependencies, profile staging,
+    # packaging) with package_profile overridden to this declaration; build.sh
+    # applies the existing fail-closed package_profile validation to the
+    # declared manifest and profile.
+    ADDITIONAL_SETTINGS_JSON="$(printf '%s' "${SETTINGS_JSON}" | jq -c \
+      --arg manifest "${profile_manifest}" \
+      --arg profile "${profile_name}" \
+      '.package_profile = {manifest: $manifest, profile: $profile}')"
+    HOMEBOY_SETTINGS_JSON="${ADDITIONAL_SETTINGS_JSON}" bash "${BUILD_SCRIPT}" >&2
+
+    if [[ ! -f "${ARTIFACT_PATH}" ]]; then
+      echo "Error: expected additional package profile ZIP at ${ARTIFACT_PATH} but none was produced" >&2
+      exit 1
+    fi
+    mv "${ARTIFACT_PATH}" "build/${profile_artifact}"
+
+    if [[ -n "${EXPECTED_VERSION}" ]]; then
+      bash "${SCRIPT_DIR}/verify-artifact-version.sh" "build/${profile_artifact}" "${EXPECTED_VERSION}" >/dev/null
+      echo "Verified build/${profile_artifact} contains version ${EXPECTED_VERSION}" >&2
+    else
+      echo "Warning: could not determine expected version; skipping ${profile_artifact} version verification" >&2
+    fi
+  done
+
+  restore_preserved_primary
+  trap - EXIT
 fi
 
 if [[ -n "${release_provenance_command}" ]]; then
@@ -215,9 +336,33 @@ if [[ -n "${release_provenance_command}" ]]; then
   mv "${sidecar_tmp}" "${sidecar_absolute_path}"
   echo "Prepared and sealed ${SIDECAR_PATH}" >&2
 
-  jq -cn --arg path "${ARTIFACT_PATH}" --arg sidecar "${SIDECAR_PATH}" \
-    '[{path: $path, type: "wordpress-zip", platform: null}, {path: $sidecar, type: "wordpress-provenance", platform: null}]'
+  RELEASE_ARTIFACTS_JSON="$(jq -cn --arg path "${ARTIFACT_PATH}" \
+    '[{path: $path, type: "wordpress-zip", platform: null}]')"
+
+  if [[ ${#ADDITIONAL_PROFILE_ARTIFACTS[@]} -gt 0 ]]; then
+    for ((profile_index = 0; profile_index < ${#ADDITIONAL_PROFILE_ARTIFACTS[@]}; profile_index++)); do
+      RELEASE_ARTIFACTS_JSON="$(printf '%s' "${RELEASE_ARTIFACTS_JSON}" | jq -c \
+        --arg path "build/${ADDITIONAL_PROFILE_ARTIFACTS[${profile_index}]}" \
+        '. + [{path: $path, type: "wordpress-zip", platform: null}]')"
+    done
+  fi
+
+  RELEASE_ARTIFACTS_JSON="$(printf '%s' "${RELEASE_ARTIFACTS_JSON}" | jq -c \
+    --arg sidecar "${SIDECAR_PATH}" \
+    '. + [{path: $sidecar, type: "wordpress-provenance", platform: null}]')"
+
+  printf '%s\n' "${RELEASE_ARTIFACTS_JSON}"
 else
-  jq -cn --arg path "${ARTIFACT_PATH}" \
-    '[{path: $path, type: "wordpress-zip", platform: null}]'
+  RELEASE_ARTIFACTS_JSON="$(jq -cn --arg path "${ARTIFACT_PATH}" \
+    '[{path: $path, type: "wordpress-zip", platform: null}]')"
+
+  if [[ ${#ADDITIONAL_PROFILE_ARTIFACTS[@]} -gt 0 ]]; then
+    for ((profile_index = 0; profile_index < ${#ADDITIONAL_PROFILE_ARTIFACTS[@]}; profile_index++)); do
+      RELEASE_ARTIFACTS_JSON="$(printf '%s' "${RELEASE_ARTIFACTS_JSON}" | jq -c \
+        --arg path "build/${ADDITIONAL_PROFILE_ARTIFACTS[${profile_index}]}" \
+        '. + [{path: $path, type: "wordpress-zip", platform: null}]')"
+    done
+  fi
+
+  printf '%s\n' "${RELEASE_ARTIFACTS_JSON}"
 fi

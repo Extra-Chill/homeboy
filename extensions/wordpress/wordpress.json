@@ -1508,6 +1508,13 @@
       "description": "Optional component-relative JSON manifest and named profile that selects exact production package files after dependency preparation. Empty object keeps default rsync staging. Set {\"manifest\":\"path.json\",\"profile\":\"name\"}. The named profile must provide selectors with type file or prefix and path, plus optional required_files. Manifest/profile names and all paths fail closed against absolute paths, traversal, malformed selectors, missing explicit files, and missing required files. Homeboy mandatory safety exclusions still apply."
     },
     {
+      "id": "additional_package_profiles",
+      "label": "Additional WordPress release package profiles",
+      "type": "array",
+      "default": [],
+      "description": "Additional package profiles published as extra release ZIP assets alongside the unchanged primary release ZIP. Each entry is {manifest, profile, artifact}: an existing package profile manifest/profile pair validated by the same fail-closed rules as package_profile, plus a basename-only .zip artifact name that must be unique across entries and cannot replace the primary ZIP. release.package builds the primary ZIP unchanged, then builds every additional profile through the same production dependency and profile-staging build path, verifies each ZIP contains the release version, and returns the primary ZIP followed by the additional assets in declared order. Malformed declarations, unsafe artifact names, and duplicates fail closed before any build runs."
+    },
+    {
       "id": "local_workspace_dependencies",
       "label": "Local workspace dependency overrides",
       "type": "array",

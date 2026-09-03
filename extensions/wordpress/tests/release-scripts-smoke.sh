@@ -4,6 +4,15 @@
 # Validates:
 #   - scripts/release/package.sh emits a single-line JSON array with the
 #     expected artifact shape when build/<slug>.zip exists.
+#   - scripts/release/package.sh builds declared additional_package_profiles
+#     through build.sh with package_profile overridden per entry, emits the
+#     primary ZIP followed by the additional assets in declared order, and
+#     version-verifies every emitted ZIP.
+#   - scripts/release/package.sh rejects malformed, unsafe, duplicate, and
+#     primary-colliding additional package profile declarations before any
+#     build runs.
+#   - scripts/release/package.sh keeps emitting exactly the primary ZIP when
+#     additional_package_profiles is not declared.
 #   - scripts/release/publish.sh refuses to run when HOMEBOY_SETTINGS_JSON is
 #     missing.
 #   - scripts/release/publish.sh refuses to run when the artifact ZIP is
@@ -142,6 +151,201 @@ elif ! echo "${invalid_settings_output}" | jq -e '.[0].path == "build/test-plugi
 else
   echo "OK: package.sh falls back safely for invalid HOMEBOY_SETTINGS_JSON"
 fi
+
+# ---------------------------------------------------------------------------
+# package.sh: additional_package_profiles build through build.sh with
+# package_profile overridden per entry and emit deterministic multi-artifact
+# JSON (primary ZIP first, then declared additional assets in order).
+# ---------------------------------------------------------------------------
+PROFILE_SCRIPT_DIR="$(mktemp -d -t homeboy-wp-release-profiles.XXXXXX)"
+trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${PACKAGE_SCRIPT_DIR}" "${PROFILE_SCRIPT_DIR}"' EXIT
+mkdir -p "${PROFILE_SCRIPT_DIR}/scripts/build" "${PROFILE_SCRIPT_DIR}/scripts/release"
+cat > "${PROFILE_SCRIPT_DIR}/scripts/build/build.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if ! printf '%s' "${HOMEBOY_SETTINGS_JSON:-}" | jq -e '.build_nested_packages == false' >/dev/null; then
+  echo "stub build did not receive build_nested_packages=false: ${HOMEBOY_SETTINGS_JSON:-}" >&2
+  exit 1
+fi
+printf '%s\n' "$(printf '%s' "${HOMEBOY_SETTINGS_JSON:-}" | jq -c '.package_profile // null')" >> "${HOMEBOY_PROFILE_LOG}"
+mkdir -p build
+rm -f "build/${HOMEBOY_COMPONENT_ID}.zip"
+python3 -c "
+import zipfile
+with zipfile.ZipFile('build/${HOMEBOY_COMPONENT_ID}.zip', 'w') as z:
+  z.writestr('${HOMEBOY_COMPONENT_ID}/${HOMEBOY_COMPONENT_ID}.php', '<?php\n/**\n * Plugin Name: Profile Plugin\n * Version: 1.0.0\n */')
+"
+echo "stub build" >&2
+STUB
+chmod +x "${PROFILE_SCRIPT_DIR}/scripts/build/build.sh"
+cp "${PACKAGE_SH}" "${PROFILE_SCRIPT_DIR}/scripts/release/package.sh"
+chmod +x "${PROFILE_SCRIPT_DIR}/scripts/release/package.sh"
+cp "${EXTENSION_PATH}/scripts/release/verify-artifact-version.sh" "${PROFILE_SCRIPT_DIR}/scripts/release/verify-artifact-version.sh"
+chmod +x "${PROFILE_SCRIPT_DIR}/scripts/release/verify-artifact-version.sh"
+
+PROFILE_DIR="$(mktemp -d -t homeboy-wp-release-profile-dir.XXXXXX)"
+trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${PACKAGE_SCRIPT_DIR}" "${PROFILE_SCRIPT_DIR}" "${PROFILE_DIR}"' EXIT
+cat > "${PROFILE_DIR}/homeboy.json" <<'JSON'
+{
+  "id": "profile-plugin",
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "build_nested_packages": false,
+        "package_profile": { "manifest": "package-manifest.json", "profile": "full" },
+        "additional_package_profiles": [
+          { "manifest": "package-manifest.json", "profile": "runtime", "artifact": "profile-plugin-runtime.zip" },
+          { "manifest": "package-manifest.json", "profile": "minimal", "artifact": "profile-plugin-minimal.zip" }
+        ]
+      }
+    }
+  }
+}
+JSON
+
+PROFILE_PAYLOAD='{"release":{"version":"1.0.0","component_id":"profile-plugin"}}'
+PROFILE_LOG="${PROFILE_DIR}/profile-invocations.log"
+
+set +e
+profile_out="$(
+  cd "${PROFILE_DIR}" && \
+  HOMEBOY_COMPONENT_ID=profile-plugin \
+  HOMEBOY_SETTINGS_JSON="${PROFILE_PAYLOAD}" \
+  HOMEBOY_PROFILE_LOG="${PROFILE_LOG}" \
+  "${PROFILE_SCRIPT_DIR}/scripts/release/package.sh" 2>"${PROFILE_DIR}/package.err"
+)"
+profile_status=$?
+set -e
+
+if [[ ${profile_status} -ne 0 ]]; then
+  echo "FAIL: package.sh (additional profiles) exited ${profile_status}; stderr: $(cat "${PROFILE_DIR}/package.err")" >&2
+  failures=$((failures + 1))
+elif ! echo "${profile_out}" | jq -e '
+    length == 3
+    and .[0].path == "build/profile-plugin.zip"
+    and .[1].path == "build/profile-plugin-runtime.zip"
+    and .[2].path == "build/profile-plugin-minimal.zip"
+    and all(.[]; .type == "wordpress-zip" and .platform == null)
+  ' >/dev/null 2>&1; then
+  echo "FAIL: package.sh additional-profile JSON wrong; got: ${profile_out}" >&2
+  failures=$((failures + 1))
+elif [[ ! -f "${PROFILE_DIR}/build/profile-plugin-runtime.zip" || ! -f "${PROFILE_DIR}/build/profile-plugin-minimal.zip" || ! -f "${PROFILE_DIR}/build/profile-plugin.zip" ]]; then
+  echo "FAIL: package.sh additional-profile run did not leave every artifact on disk" >&2
+  failures=$((failures + 1))
+elif [[ "$(wc -l < "${PROFILE_LOG}" | tr -d ' ')" != "3" ]] \
+  || ! sed -n '1p' "${PROFILE_LOG}" | jq -e '.profile == "full"' >/dev/null 2>&1 \
+  || ! sed -n '2p' "${PROFILE_LOG}" | jq -e '.profile == "runtime" and .manifest == "package-manifest.json"' >/dev/null 2>&1 \
+  || ! sed -n '3p' "${PROFILE_LOG}" | jq -e '.profile == "minimal" and .manifest == "package-manifest.json"' >/dev/null 2>&1; then
+  echo "FAIL: package.sh did not run build.sh once per profile with the right overrides; log: $(cat "${PROFILE_LOG}")" >&2
+  failures=$((failures + 1))
+elif ! grep -q "Verified build/profile-plugin.zip contains version 1.0.0" "${PROFILE_DIR}/package.err" \
+  || ! grep -q "Verified build/profile-plugin-runtime.zip contains version 1.0.0" "${PROFILE_DIR}/package.err" \
+  || ! grep -q "Verified build/profile-plugin-minimal.zip contains version 1.0.0" "${PROFILE_DIR}/package.err"; then
+  echo "FAIL: package.sh did not version-verify every emitted ZIP; stderr: $(cat "${PROFILE_DIR}/package.err")" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: package.sh emits primary plus declared additional profile ZIPs in order"
+fi
+
+# ---------------------------------------------------------------------------
+# package.sh: without additional_package_profiles the run stays exactly the
+# primary ZIP and build.sh runs exactly once.
+# ---------------------------------------------------------------------------
+DEFAULT_DIR="$(mktemp -d -t homeboy-wp-release-default.XXXXXX)"
+trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${PACKAGE_SCRIPT_DIR}" "${PROFILE_SCRIPT_DIR}" "${PROFILE_DIR}" "${DEFAULT_DIR}"' EXIT
+cat > "${DEFAULT_DIR}/homeboy.json" <<'JSON'
+{
+  "id": "profile-plugin",
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "build_nested_packages": false,
+        "package_profile": { "manifest": "package-manifest.json", "profile": "full" }
+      }
+    }
+  }
+}
+JSON
+
+DEFAULT_LOG="${DEFAULT_DIR}/profile-invocations.log"
+set +e
+default_out="$(
+  cd "${DEFAULT_DIR}" && \
+  HOMEBOY_COMPONENT_ID=profile-plugin \
+  HOMEBOY_SETTINGS_JSON="${PROFILE_PAYLOAD}" \
+  HOMEBOY_PROFILE_LOG="${DEFAULT_LOG}" \
+  "${PROFILE_SCRIPT_DIR}/scripts/release/package.sh" 2>/dev/null
+)"
+default_status=$?
+set -e
+
+if [[ ${default_status} -ne 0 ]]; then
+  echo "FAIL: package.sh (no additional profiles) exited ${default_status}" >&2
+  failures=$((failures + 1))
+elif ! echo "${default_out}" | jq -e 'length == 1 and .[0].path == "build/profile-plugin.zip" and .[0].type == "wordpress-zip"' >/dev/null 2>&1; then
+  echo "FAIL: package.sh default JSON not exactly the primary ZIP; got: ${default_out}" >&2
+  failures=$((failures + 1))
+elif [[ "$(wc -l < "${DEFAULT_LOG}" | tr -d ' ')" != "1" ]]; then
+  echo "FAIL: package.sh default run did not invoke build.sh exactly once; log: $(cat "${DEFAULT_LOG}")" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: package.sh without additional profiles emits exactly the primary ZIP"
+fi
+
+# ---------------------------------------------------------------------------
+# package.sh: malformed, unsafe, duplicate, and primary-colliding
+# additional_package_profiles declarations fail closed before any build runs.
+# ---------------------------------------------------------------------------
+rejection_cases="$(cat <<'CASES'
+not-an-array|{"manifest":"m"}|must be an array of {manifest, profile, artifact} objects
+entry-not-object|["nope"]|entries must be objects with manifest, profile, and artifact
+missing-profile|[{"manifest":"m.json","artifact":"a.zip"}]|profile must be a non-empty string
+non-string-manifest|[{"manifest":3,"profile":"p","artifact":"a.zip"}]|manifest must be a non-empty string
+empty-artifact|[{"manifest":"m.json","profile":"p","artifact":""}]|artifact must be a non-empty string
+path-like-artifact|[{"manifest":"m.json","profile":"p","artifact":"nested/evil.zip"}]|basename-only .zip names
+traversal-artifact|[{"manifest":"m.json","profile":"p","artifact":"../evil.zip"}]|basename-only .zip names
+non-zip-artifact|[{"manifest":"m.json","profile":"p","artifact":"evil.tar"}]|basename-only .zip names
+hidden-artifact|[{"manifest":"m.json","profile":"p","artifact":".hidden.zip"}]|basename-only .zip names
+primary-collision|[{"manifest":"m.json","profile":"p","artifact":"profile-plugin.zip"}]|cannot replace the primary release artifact
+duplicate-artifact|[{"manifest":"m.json","profile":"p","artifact":"dup.zip"},{"manifest":"m.json","profile":"p2","artifact":"dup.zip"}]|artifact names must be unique
+CASES
+)"
+
+while IFS='|' read -r case_name case_value case_grep; do
+  [[ -n "${case_name}" ]] || continue
+
+  REJECT_DIR="$(mktemp -d -t homeboy-wp-release-reject.XXXXXX)"
+  REJECT_LOG="${REJECT_DIR}/invocations.log"
+  jq -n --argjson value "${case_value}" \
+    '{extensions:{wordpress:{settings:{build_nested_packages:false, additional_package_profiles:$value}}}}' \
+    > "${REJECT_DIR}/homeboy.json"
+
+  set +e
+  reject_err="$(
+    cd "${REJECT_DIR}" && \
+    HOMEBOY_COMPONENT_ID=profile-plugin \
+    HOMEBOY_SETTINGS_JSON="${PROFILE_PAYLOAD}" \
+    HOMEBOY_PROFILE_LOG="${REJECT_LOG}" \
+    "${PROFILE_SCRIPT_DIR}/scripts/release/package.sh" 2>&1 >/dev/null
+  )"
+  reject_status=$?
+  set -e
+
+  if [[ ${reject_status} -eq 0 ]]; then
+    echo "FAIL: package.sh accepted additional profile declaration: ${case_name}" >&2
+    failures=$((failures + 1))
+  elif ! echo "${reject_err}" | grep -q "${case_grep}"; then
+    echo "FAIL: ${case_name} did not surface the expected error; got: ${reject_err}" >&2
+    failures=$((failures + 1))
+  elif [[ -e "${REJECT_LOG}" ]]; then
+    echo "FAIL: ${case_name} ran a build before validating declarations" >&2
+    failures=$((failures + 1))
+  else
+    echo "OK: package.sh rejects ${case_name}"
+  fi
+
+  rm -rf "${REJECT_DIR}"
+done <<< "${rejection_cases}"
 
 # ---------------------------------------------------------------------------
 # publish.sh: missing HOMEBOY_SETTINGS_JSON should fail loudly.
@@ -348,14 +552,42 @@ else
   echo "OK: publish.sh uses the untyped recovery ZIP"
 fi
 
-# publish.sh: multiple WordPress ZIP recovery artifacts must not silently
-# select one based on declaration order.
+# publish.sh: multiple WordPress ZIP artifacts select the canonical component
+# ZIP as primary, validate/upload every profile ZIP, and report them separately.
+ADDITIONAL_RECOVERY_ZIP="${RECOVERY_DIR}/recovered-plugin-html-site-import.zip"
+cp "${RECOVERY_ZIP}" "${ADDITIONAL_RECOVERY_ZIP}"
+set +e
+publish_out="$(
+  cd "${RECOVERY_DIR}" && \
+  PATH="${STUB_BIN_DIR}:${PATH}" \
+  GITHUB_REPOSITORY="example/recovered-plugin" \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${ADDITIONAL_RECOVERY_ZIP}"'","type":"wordpress-zip"},{"path":"'"${RECOVERY_ZIP}"'","artifact_type":"wordpress-zip"}]}}' \
+  "${PUBLISH_SH}" 2>&1
+)"
+publish_status=$?
+set -e
+
+if [[ ${publish_status} -ne 0 ]]; then
+  echo "FAIL: publish.sh rejected canonical primary plus additional ZIP: ${publish_out}" >&2
+  failures=$((failures + 1))
+elif ! echo "${publish_out}" | tail -1 | jq -e --arg primary "${RECOVERY_ZIP}" --arg additional "${ADDITIONAL_RECOVERY_ZIP}" '.artifact_path == $primary and .additional_artifact_paths == [$additional]' >/dev/null 2>&1; then
+  echo "FAIL: publish.sh did not distinguish primary and additional ZIPs: ${publish_out}" >&2
+  failures=$((failures + 1))
+elif ! echo "${publish_out}" | grep -q "${ADDITIONAL_RECOVERY_ZIP} --clobber --repo example/recovered-plugin"; then
+  echo "FAIL: publish.sh did not upload the additional ZIP: ${publish_out}" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: publish.sh uploads canonical primary plus additional profile ZIPs"
+fi
+
+# Multiple ZIPs without exactly one canonical component asset remain
+# ambiguous and must fail closed.
 set +e
 publish_err="$(
   cd "${RECOVERY_DIR}" && \
   PATH="${STUB_BIN_DIR}:${PATH}" \
   GITHUB_REPOSITORY="example/recovered-plugin" \
-  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${RECOVERY_ZIP}"'","type":"wordpress-zip"},{"path":"'"${RECOVERY_ZIP}"'","artifact_type":"wordpress-zip"}]}}' \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${ADDITIONAL_RECOVERY_ZIP}"'","type":"wordpress-zip"},{"path":"'"${ADDITIONAL_RECOVERY_ZIP}"'","artifact_type":"wordpress-zip"}]}}' \
   "${PUBLISH_SH}" 2>&1 >/dev/null
 )"
 publish_status=$?
@@ -364,11 +596,11 @@ set -e
 if [[ ${publish_status} -eq 0 ]]; then
   echo "FAIL: publish.sh accepted ambiguous recovery ZIP artifacts" >&2
   failures=$((failures + 1))
-elif ! echo "${publish_err}" | grep -q "multiple WordPress ZIP recovery artifacts"; then
+elif ! echo "${publish_err}" | grep -q "require exactly one canonical recovered-plugin.zip primary artifact"; then
   echo "FAIL: publish.sh did not surface the ambiguous-recovery error; got: ${publish_err}" >&2
   failures=$((failures + 1))
 else
-  echo "OK: publish.sh rejects ambiguous recovery ZIP artifacts"
+  echo "OK: publish.sh rejects multiple ZIPs without one canonical primary"
 fi
 
 # publish.sh: a matching recovery artifact needs a non-empty string path.

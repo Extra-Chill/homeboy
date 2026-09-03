@@ -382,6 +382,51 @@ current rsync behavior. The build writes a deterministic selected-file
 inventory plus the manifest and profile identity as
 `wordpress.package_profile` evidence.
 
+### Additional release package profiles
+
+A component that must preserve its full default package while also publishing
+narrower profile packages can declare additional release package profiles. The
+primary `package_profile` ZIP is built unchanged; each additional entry is
+built from the same release source and production dependencies and published as
+its own release asset:
+
+```json
+{
+	"extensions": {
+		"wordpress": {
+			"settings": {
+				"package_profile": {
+					"manifest": "package-manifest.json",
+					"profile": "full"
+				},
+				"additional_package_profiles": [
+					{
+						"manifest": "package-manifest.json",
+						"profile": "runtime",
+						"artifact": "my-plugin-runtime.zip"
+					}
+				]
+			}
+		}
+	}
+}
+```
+
+Each entry pairs an existing `{manifest, profile}` declaration with a release
+asset `artifact` name. Manifest and profile paths reuse the same fail-closed
+`package_profile` validation as the primary profile. Artifact names must be
+basename-only `.zip` names, unique across entries, and cannot replace the
+primary `build/<component-id>.zip` asset; path-like, traversal, non-ZIP, and
+duplicate names are rejected before any build runs, and malformed declarations
+fail closed.
+
+`release.package` builds the primary ZIP first, then rebuilds through the same
+production `build.sh` path once per entry with `package_profile` overridden to
+that entry. Every emitted ZIP is verified to contain the release version before
+it can reach the publish step. The artifact JSON lists the primary ZIP first,
+followed by each additional asset in declared order; components without this
+setting keep emitting exactly their existing primary ZIP.
+
 ### Release provenance preparation
 
 Components that need release-specific preparation or provenance can set
