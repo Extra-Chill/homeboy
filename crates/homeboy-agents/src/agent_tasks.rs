@@ -125,8 +125,7 @@ pub use super::agent_task_scheduler::{
 };
 
 pub use super::agent_tool_control_plane::{
-    dispatch_agent_tool_request, AgentToolControlPlaneDispatcher, AgentToolDispatchEvidence,
-    AgentToolDispatchOutcome, HomeboyAgentToolControlPlaneDispatcher,
+    dispatch_agent_tool_request, AgentToolDispatchEvidence, AgentToolDispatchOutcome,
     AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA,
 };
 

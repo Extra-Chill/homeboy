@@ -3,7 +3,6 @@ use std::io::Read;
 use clap::{Args, Subcommand};
 use homeboy::agents::agent_tasks::{
     dispatch_agent_tool_request, AgentToolPolicy, AgentToolRequest,
-    HomeboyAgentToolControlPlaneDispatcher,
 };
 use serde_json::Value;
 
@@ -47,8 +46,7 @@ fn dispatch_raw_result() -> Result<String, String> {
     let request: AgentToolRequest = serde_json::from_str(&stdin)
         .map_err(|error| format!("invalid agent tool request JSON: {error}"))?;
     let policy = policy_from_env()?;
-    let outcome =
-        dispatch_agent_tool_request(&policy, &request, &HomeboyAgentToolControlPlaneDispatcher); // homeboy-audit: allow-thin-command-adapter
+    let outcome = dispatch_agent_tool_request(&policy, &request); // homeboy-audit: allow-thin-command-adapter
 
     serde_json::to_string(&outcome.result)
         .map_err(|error| format!("failed to serialize agent tool result JSON: {error}"))
@@ -96,8 +94,7 @@ mod tests {
         let request: AgentToolRequest =
             serde_json::from_value(request_json("create_github_issue")).expect("request");
 
-        let outcome =
-            dispatch_agent_tool_request(&policy, &request, &HomeboyAgentToolControlPlaneDispatcher);
+        let outcome = dispatch_agent_tool_request(&policy, &request);
 
         assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
         assert_eq!(outcome.result.diagnostics[0].class, "agent_tool.disabled");
@@ -113,8 +110,7 @@ mod tests {
         let request: AgentToolRequest =
             serde_json::from_value(request_json("create_github_issue")).expect("request");
 
-        let outcome =
-            dispatch_agent_tool_request(&policy, &request, &HomeboyAgentToolControlPlaneDispatcher);
+        let outcome = dispatch_agent_tool_request(&policy, &request);
 
         assert_eq!(outcome.result.status, AgentToolResultStatus::Failed);
         assert_eq!(outcome.result.diagnostics[0].class, "agent_tool.validation");
