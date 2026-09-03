@@ -16,6 +16,15 @@ pub fn is_git_url(source: &str) -> bool {
         || source.ends_with(".git")
 }
 
+/// Whether a refresh source names an extant controller-local resource.
+///
+/// Keep this alongside the source transport classifier so admission and the
+/// lifecycle agree about which inputs are local rather than inferring product
+/// conventions from extension IDs or manifests.
+pub fn is_local_source(source: &str) -> bool {
+    !is_git_url(source) && Path::new(source).exists()
+}
+
 /// Check if a git-cloned extension has updates available.
 /// Runs `git fetch` then checks if HEAD is behind the remote tracking branch.
 /// Returns None for linked extensions or if check fails.

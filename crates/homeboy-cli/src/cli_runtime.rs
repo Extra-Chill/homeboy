@@ -2925,7 +2925,7 @@ fn preflight_hot_command_with_input(
         output_runtime::emit_json_result_for_identity(Err(err), output_file, 2, command_identity);
         return Some(2);
     }
-    if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
+    if let Some(hot_command) = resource_policy::hot_command_for_cli(cli) {
         if let Ok((resources, _)) = preflight() {
             let mut lab_readiness = if hot_command.lab_offload_supported {
                 crate::runner::lab_runner_readiness().ok()
@@ -4219,6 +4219,120 @@ mod tests {
                 ResourceAdmissionDecision::NotRequired
             );
         }
+    }
+
+    #[test]
+    fn local_extension_refresh_completes_without_hot_lab_admission() {
+        use crate::core::parsed_command_preflight::{
+            resolve_parsed_command_preflight, LabReadinessSnapshot, ParsedCommandPolicySnapshot,
+            ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
+        };
+
+        crate::test_support::with_isolated_home(|home| {
+            let source = home.path().join("portable-extension");
+            std::fs::create_dir_all(&source).expect("local extension source");
+            std::fs::write(
+                source.join("fixture.json"),
+                r#"{"name":"fixture extension","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            let args = vec![
+                "homeboy".to_string(),
+                "extension".to_string(),
+                "refresh".to_string(),
+                source.to_string_lossy().to_string(),
+                "--id".to_string(),
+                "fixture".to_string(),
+            ];
+            let cli = Cli::parse_from(&args);
+            let input = resource_policy::parsed_command_preflight_input(&cli, &args);
+
+            assert_eq!(
+                input.resource_admission,
+                crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Exempt
+            );
+            for routed_args in [
+                vec![
+                    "homeboy".to_string(),
+                    "--placement".to_string(),
+                    "lab".to_string(),
+                    "extension".to_string(),
+                    "refresh".to_string(),
+                    source.to_string_lossy().to_string(),
+                    "--id".to_string(),
+                    "fixture".to_string(),
+                ],
+                vec![
+                    "homeboy".to_string(),
+                    "extension".to_string(),
+                    "refresh".to_string(),
+                    "https://example.test/extensions.git".to_string(),
+                    "--id".to_string(),
+                    "fixture".to_string(),
+                ],
+            ] {
+                let routed_cli = Cli::parse_from(&routed_args);
+                assert!(matches!(
+                    resource_policy::parsed_command_preflight_input(&routed_cli, &routed_args)
+                        .resource_admission,
+                    crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Required { .. }
+                ));
+            }
+            let result = resolve_parsed_command_preflight(
+                args.clone(),
+                input,
+                ParsedCommandPolicySnapshot {
+                    resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                        pressure: ResourceHeat::Hot,
+                    },
+                    resource_policy: None,
+                    lab_readiness: Some(LabReadinessSnapshot {
+                        state: "stale".to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: vec!["stale Lab inventory".to_string()],
+                        remediation_commands: Vec::new(),
+                        repair_admitted_runner_ids: Vec::new(),
+                    }),
+                    selected_runner_id: None,
+                    generic_route: generic_route_policy_snapshot(&cli, None),
+                    deferred_pressure_refusal: false,
+                    runner_admitted: false,
+                    runner_incompatible: false,
+                    auto_local_capacity_fallback: false,
+                },
+            )
+            .expect("local refresh remains admitted with stale Lab inventory");
+            assert_eq!(
+                result.resource_admission,
+                ResourceAdmissionDecision::NotRequired
+            );
+            assert_eq!(
+                preflight_hot_command_with(
+                    &cli,
+                    None,
+                    &output::CommandIdentity::with_operation("extension", "refresh"),
+                    || -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput> {
+                        panic!("local refresh must not probe controller resources or Lab")
+                    },
+                ),
+                None
+            );
+
+            let Commands::Extension(extension) = cli.command else {
+                unreachable!("extension refresh parses as an extension command")
+            };
+            let (output, exit_code) = crate::commands::extension::run(extension)
+                .expect("local extension refresh completes after admission");
+            assert_eq!(exit_code, 0);
+            assert!(matches!(
+                output,
+                crate::commands::extension::ExtensionOutput::Refresh {
+                    extension_id,
+                    ..
+                } if extension_id == "fixture"
+            ));
+        });
     }
 
     #[test]
