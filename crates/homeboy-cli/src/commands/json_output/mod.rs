@@ -605,6 +605,9 @@ fn bounded_refresh_error_projection(
             "error": {
                 "code": error.code.as_str(),
                 "message": bounded_refresh_text(&error.message),
+                "details": {
+                    "_homeboy_actions": bounded_refresh_error_actions(error),
+                },
             },
             "artifacts": error.details.get("artifacts").cloned().unwrap_or_else(|| serde_json::json!({
                 "output": output_file,
@@ -614,6 +617,32 @@ fn bounded_refresh_error_projection(
         }),
         exit_code,
     )
+}
+
+/// Keep executable recovery actions in the bounded envelope without admitting
+/// arbitrary error detail or action evidence beyond the stdout budget.
+fn bounded_refresh_error_actions(error: &homeboy::core::Error) -> Vec<Value> {
+    error
+        .details
+        .get(homeboy::core::error::ACTIONS_DETAILS_KEY)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(4)
+        .filter_map(|action| {
+            let action = action.as_object()?;
+            Some(serde_json::json!({
+                "id": action.get("id")?.as_str().map(bounded_refresh_text),
+                "label": action.get("label")?.as_str().map(bounded_refresh_text),
+                "program": action.get("program")?.as_str().map(bounded_refresh_text),
+                "args": action.get("args").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str).take(16).map(bounded_refresh_text).collect::<Vec<_>>(),
+                "safety": action.get("safety")?.as_str().map(bounded_refresh_text),
+                "required_confirmations": action.get("required_confirmations").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str).take(4).map(bounded_refresh_text).collect::<Vec<_>>(),
+            }))
+        })
+        .collect()
 }
 
 /// Enforce the budget after command-envelope rendering, because lifted action
@@ -1408,6 +1437,13 @@ mod tests {
             "run_id": "run-1",
             "error_log": "homeboy://run/run-1/artifact/error-log-run-1",
         });
+        error.details["_homeboy_actions"] = serde_json::json!([{
+            "id": "inspect-runner-status",
+            "label": "inspect runner admission",
+            "program": "homeboy",
+            "args": ["runner", "status", "homeboy-lab"],
+            "safety": "read_only"
+        }]);
 
         let projection = bounded_refresh_error_projection(&error, 2, None);
         assert!(
@@ -1415,6 +1451,10 @@ mod tests {
                 <= MAX_REFRESH_PROJECTION_BYTES
         );
         assert_eq!(projection["artifacts"]["run_id"], "run-1");
+        assert_eq!(
+            projection["error"]["details"]["_homeboy_actions"][0]["program"],
+            "homeboy"
+        );
         assert!(!serde_json::to_string(&projection)
             .unwrap()
             .contains(&"x".repeat(512)));
