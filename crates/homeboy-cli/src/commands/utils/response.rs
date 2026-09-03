@@ -757,6 +757,9 @@ fn failure_diagnostics_for_data(
     if let Some(failure) = declared_failure(data) {
         return Some(declared_failure_diagnostics(exit_code, failure, "/failure"));
     }
+    if let Some(failure) = bounded_refresh_typed_error(data) {
+        return Some(declared_failure_diagnostics(exit_code, failure, "/error"));
+    }
     if let Some(failure) = unresolved_provider_workspace_failure(data) {
         return Some(declared_failure_diagnostics(
             exit_code,
@@ -924,7 +927,21 @@ struct DeclaredFailure {
 /// causal subprocess failures here; unrelated nested historical records are
 /// data and must not be attributed to this command invocation.
 fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
-    let object = data.get("failure")?.as_object()?;
+    declared_failure_object(data.get("failure")?.as_object()?)
+}
+
+/// The bounded refresh projection keeps a typed command error under `error`.
+/// Lift it only from that schema so arbitrary nested error records remain data.
+fn bounded_refresh_typed_error(data: &Value) -> Option<DeclaredFailure> {
+    if data.get("schema").and_then(Value::as_str)
+        != Some("homeboy/runner-refresh-homeboy-bounded-output/v1")
+    {
+        return None;
+    }
+    declared_failure_object(data.get("error")?.as_object()?)
+}
+
+fn declared_failure_object(object: &Map<String, Value>) -> Option<DeclaredFailure> {
     let message = ["message", "problem", "summary"]
         .into_iter()
         .find_map(|key| object.get(key).and_then(Value::as_str))
@@ -978,10 +995,18 @@ fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .take(4)
             .filter_map(|action| serde_json::from_value(action.clone()).ok())
-            .collect::<Vec<_>>()
-            .into_iter()
+            .chain(
+                details
+                    .get(ACTIONS_DETAILS_KEY)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|action| {
+                        serde_json::from_value::<ExecutableAction>(action.clone()).ok()
+                    })
+                    .map(CommandNextAction::from_action),
+            )
             .chain(failure_replay_action(&details))
             .take(4)
             .collect(),
@@ -2617,6 +2642,69 @@ mod tests {
             .as_str()
             .expect("summary")
             .contains("earlier attempt"));
+    }
+
+    #[test]
+    fn bounded_refresh_typed_errors_are_promoted_for_nonzero_exits() {
+        for (exit_code, code, message) in [
+            (
+                1,
+                "runner.policy_denied",
+                "runner rotation is blocked by the current admission policy",
+            ),
+            (
+                2,
+                "validation.invalid_argument",
+                "Invalid argument reconnect: runner cannot bootstrap over diagnostic SSH until its authoritative admission snapshot permits daemon rotation",
+            ),
+        ] {
+            let payload = json!({
+                "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+                "command": "runner.refresh_homeboy",
+                "exit_code": exit_code,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "details": {
+                        "argument": "reconnect",
+                        "_homeboy_actions": [{
+                            "id": "inspect-runner-status",
+                            "label": "inspect runner admission",
+                            "program": "homeboy",
+                            "args": ["runner", "status", "homeboy-lab"],
+                            "safety": "read_only"
+                        }]
+                    }
+                },
+                "artifacts": { "run_id": "refresh-run" },
+            });
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(payload.clone()),
+                exit_code,
+                &CommandIdentity::with_operation("runner", "refresh-homeboy"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["diagnostics"]["code"], code, "exit {exit_code}");
+            assert_eq!(value["summary"], message, "exit {exit_code}");
+            assert_eq!(
+                value["diagnostics"]["failure_digest"]["summary"],
+                message,
+                "exit {exit_code}"
+            );
+            assert_eq!(
+                value["diagnostics"]["details"]["source_pointer"],
+                "/error",
+                "exit {exit_code}"
+            );
+            assert_eq!(
+                value["next_actions"][0]["command"],
+                "homeboy runner status homeboy-lab",
+                "exit {exit_code}"
+            );
+            assert_eq!(value["data"], payload, "exit {exit_code} keeps all evidence");
+        }
     }
 
     #[test]
