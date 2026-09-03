@@ -11,8 +11,7 @@ const path = require('node:path');
 /**
  * Internal dependencies
  */
-const resolver = require('./wp-codebox-resolver');
-const { canonicalWpCodeboxRuntime } = require('./wp-codebox-recipe-helper');
+const { resolveReadyWpCodeboxRuntime, resolveWpCodeboxIdentity } = require('./wp-codebox-runtime-selection');
 
 const DEFAULT_PUBLIC_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
 
@@ -26,7 +25,7 @@ class CodeboxClient {
 	}
 
 	identity(options = {}) {
-		return resolver.resolveWpCodeboxIdentity({ ...this.options, ...options });
+		return resolveWpCodeboxIdentity({ ...this.options, ...options });
 	}
 
 	publicCliBin(options = {}) {
@@ -49,7 +48,7 @@ class CodeboxClient {
 			return normalizeCliResult(merged.runCli({ command, args, stdin: merged.stdin }, merged));
 		}
 
-		const runtime = canonicalWpCodeboxRuntime({
+		const runtime = resolveReadyWpCodeboxRuntime({
 			...merged,
 			wp_codebox_bin: merged.wp_codebox_bin || merged.wpCodeboxBin,
 		});

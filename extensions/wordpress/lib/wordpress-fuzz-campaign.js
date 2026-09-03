@@ -33,7 +33,7 @@ const {
 	wordpressFuzzPostprocessBinding,
 	wordpressFuzzPostprocessExpectedArtifacts,
 	wpCodeboxFuzzSuiteInput,
-	wpCodeboxFuzzSuiteTaskRequest,
+	wpCodeboxFuzzExecutionRequest,
 } = require('./wp-codebox-fuzz-run');
 const {
 	summarizeWordPressFuzzRuntimeWorkloadOperations,
@@ -65,11 +65,11 @@ async function runWordPressFuzzCampaign(input = {}, options = {}) {
 	const result = await runWpCodeboxFuzzSuite({
 		...(objectOrUndefined(options.execution) || objectOrUndefined(options.execute) || {}),
 		...(objectOrUndefined(input.execution) || objectOrUndefined(input.execute) || {}),
-		taskId: campaign.wp_codebox.task_request.task_id || campaign.wp_codebox.task_request.id || campaign.id,
+		taskId: campaign.wp_codebox.execution_request.task_id || campaign.id,
 		input: campaign.wp_codebox.input,
-		request: campaign.wp_codebox.task_request,
-		artifactDeclarations: campaign.wp_codebox.task_request.artifact_declarations,
-		expectedArtifacts: campaign.wp_codebox.task_request.expected_artifacts,
+		request: campaign.wp_codebox.execution_request,
+		artifactDeclarations: campaign.wp_codebox.execution_request.artifact_declarations,
+		expectedArtifacts: campaign.wp_codebox.execution_request.expected_artifacts,
 		runtimeId: input.runtime_id || input.runtimeId || options.runtime_id || options.runtimeId || 'wp-codebox',
 		runFuzzSuite: input.runFuzzSuite || options.runFuzzSuite || input.run_fuzz_suite || options.run_fuzz_suite,
 	});
@@ -201,7 +201,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 			postprocess_binding: production ? wordpressFuzzPostprocessBinding() : undefined,
 		},
 	});
-	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
+	const executionRequest = wpCodeboxFuzzExecutionRequest({
 		...(objectOrUndefined(options.taskRequest) || objectOrUndefined(options.task_request) || {}),
 		...(objectOrUndefined(input.task_request || input.taskRequest) || {}),
 		taskId: input.task_id || input.taskId || options.taskId || options.task_id || `${plan.id}-wp-codebox-fuzz-suite`,
@@ -221,7 +221,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 		wp_codebox: {
 			schema: WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 			input: suiteInput,
-			task_request: taskRequest,
+			execution_request: executionRequest,
 		},
 		aggregation_hooks: campaignAggregationHooks(),
 		metadata: {

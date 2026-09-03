@@ -59,16 +59,11 @@ function fuzzRunnerStdoutSummary(result = {}) {
 			schema: result.wp_codebox_input.schema,
 			metadata: result.wp_codebox_input.metadata,
 		} : undefined,
-		wp_codebox_task_request: result.wp_codebox_task_request ? {
-			executor: {
-				config: {
-					runtime_task: {
-						ability: result.wp_codebox_task_request.executor?.config?.runtime_task?.ability,
-						input: {
-							schema: result.wp_codebox_task_request.executor?.config?.runtime_task?.input?.schema,
-						},
-					},
-				},
+		wp_codebox_execution_request: result.wp_codebox_execution_request ? {
+			schema: result.wp_codebox_execution_request.schema,
+			ability: result.wp_codebox_execution_request.ability,
+			input: {
+				schema: result.wp_codebox_execution_request.input?.schema,
 			},
 		} : undefined,
 		wp_codebox_result: result.wp_codebox_result ? {

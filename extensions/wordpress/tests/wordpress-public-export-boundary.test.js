@@ -56,13 +56,12 @@ assert.equal(typeof wordpress.wpCodebox, 'object');
 assert.equal(typeof wordpress.wpCodebox.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.wpCodebox.runWpCodeboxRecipe, 'function');
 assert.equal(typeof wordpress.wpCodebox.buildWpCodeboxFuzzPlanRecipe, 'function');
-assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzSuiteTaskRequest, 'function');
-assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzRuntimeTaskRequest, 'function');
+assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzExecutionRequest, 'function');
 
 assert.equal(wordpress.resolveWpCodeboxArtifactPath, undefined);
 assert.equal(wordpress.runWpCodeboxRecipe, undefined);
 assert.equal(wordpress.buildWpCodeboxFuzzPlanRecipe, undefined);
-assert.equal(wordpress.wpCodeboxFuzzSuiteTaskRequest, undefined);
+assert.equal(wordpress.wpCodeboxFuzzExecutionRequest, undefined);
 assert.equal(wordpress.WP_CODEBOX_FUZZ_SUITE_SCHEMA, undefined);
 assert.equal(wordpress.applyApprovedWpCodeboxArtifact, undefined);
 assert.equal(wordpress.compareCodeboxMemoryResults, undefined);

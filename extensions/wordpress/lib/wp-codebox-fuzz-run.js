@@ -15,14 +15,9 @@ const {
 } = require('./wordpress-fuzz-schemas');
 
 const {
-	wordpressRuntimeTaskRequest,
-} = require('./wordpress-runtime-task-planner');
-const {
-	buildWordPressFuzzRuntimeTaskRequest,
 	fuzzHotspotSummaryFromObservationSet,
 	normalizeFuzzObservationSet,
 	normalizeFuzzHotspotSummary,
-	normalizeWordPressFuzzRuntimeTaskResult,
 } = require('./wordpress-fuzz-runtime-task');
 
 const {
@@ -955,22 +950,6 @@ function normalizeHomeboyFuzzCaseArtifacts(entry = {}, manifest = {}) {
 	return [...byName.values()];
 }
 
-function wpCodeboxFuzzSuiteTaskRequest(options = {}) {
-	const input = wpCodeboxFuzzSuiteInput(options.input || options.abilityInput || options.ability_input || options);
-	return wordpressRuntimeTaskRequest({
-		...options,
-		backend: options.backend || 'wp-codebox',
-		runtime: options.runtime || options.runtimeId || options.runtime_id || 'wp-codebox',
-		taskId: requiredString(options.taskId || options.task_id, 'taskId'),
-		ability: options.ability || wpCodeboxFuzzSuiteAbility(options),
-		abilityInput: input,
-		artifactDeclarations: options.artifactDeclarations || options.artifact_declarations || wpCodeboxFuzzArtifactDeclarationsForInput(input),
-		expectedArtifacts: options.expectedArtifacts || options.expected_artifacts || wpCodeboxFuzzExpectedArtifactsForInput(input),
-		goal: options.goal || options.instructions || 'Delegate WordPress fuzz execution to WP Codebox and return the declared fuzz artifacts.',
-		instructions: options.instructions || 'Delegate WordPress fuzz execution to WP Codebox and return the declared fuzz artifacts.',
-	});
-}
-
 function wpCodeboxFuzzArtifactDeclarationsForInput(input = {}) {
 	if (!suiteInputRequiresDisposableLifecycleArtifacts(input)) {
 		return DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS;
@@ -994,26 +973,6 @@ function suiteInputRequiresDisposableLifecycleArtifacts(input = {}) {
 		|| normalizeArray(input.cases).some((testCase) => fuzzCaseRequiresDisposableLifecycle(testCase, testCase));
 }
 
-function wpCodeboxFuzzRuntimeTaskRequest(options = {}) {
-	const providerRequest = wpCodeboxFuzzSuiteTaskRequest(options);
-	return buildWordPressFuzzRuntimeTaskRequest({
-		...options,
-		provider: { id: 'wp-codebox', name: 'WP Codebox' },
-		providerRequest,
-		input: providerRequest.executor?.config?.runtime_task?.input,
-		requirements: providerRequest.executor?.config?.runtime_requirements,
-		artifactDeclarations: providerRequest.artifact_declarations,
-		expectedArtifacts: providerRequest.expected_artifacts,
-		instructions: providerRequest.instructions,
-		providerMetadata: {
-			wp_codebox: stripUndefined({
-				ability: providerRequest.executor?.config?.runtime_task?.ability,
-				runtime: providerRequest.executor?.runtime,
-			}),
-		},
-	});
-}
-
 function wpCodeboxFuzzExecutionRequest(options = {}) {
 	const input = wpCodeboxFuzzSuiteInput(options.input || options.abilityInput || options.ability_input || options);
 	const taskId = requiredString(options.taskId || options.task_id || input.id, 'taskId');
@@ -1027,8 +986,8 @@ function wpCodeboxFuzzExecutionRequest(options = {}) {
 		command,
 		input,
 		runtime_requirements: objectOrUndefined(runtimeRequirements),
-		artifact_declarations: options.artifactDeclarations || options.artifact_declarations || DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS,
-		expected_artifacts: options.expectedArtifacts || options.expected_artifacts || DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS,
+		artifact_declarations: options.artifactDeclarations || options.artifact_declarations || wpCodeboxFuzzArtifactDeclarationsForInput(input),
+		expected_artifacts: options.expectedArtifacts || options.expected_artifacts || wpCodeboxFuzzExpectedArtifactsForInput(input),
 		instructions: options.instructions || 'Delegate WordPress fuzz execution to WP Codebox and return the declared fuzz artifacts.',
 		metadata: stripUndefined({
 			...(objectOrUndefined(options.metadata) || {}),
@@ -1221,16 +1180,15 @@ function isArtifactPostprocessCommand(value) {
 }
 
 async function runWpCodeboxFuzzSuite(options = {}) {
-	const runtimeRequest = wpCodeboxFuzzRuntimeTaskRequest(options);
 	const request = wpCodeboxFuzzExecutionRequest(options);
 	const runner = options.runFuzzSuite || options.runRuntimeTask || options.runTask;
 	if (typeof runner === 'function') {
 		const result = await runner(request, options);
-		return normalizeWpCodeboxFuzzSuiteResult(result, { request, runtimeRequest });
+		return normalizeWpCodeboxFuzzSuiteResult(result, { request });
 	}
 
 	const result = await runWpCodeboxPublicFuzzOperation({ ...options, request });
-	return normalizeWpCodeboxFuzzSuiteResult(result, { request, runtimeRequest });
+	return normalizeWpCodeboxFuzzSuiteResult(result, { request });
 }
 
 async function runWpCodeboxPublicFuzzOperation(options = {}) {
@@ -1981,15 +1939,6 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 		status = 'failed';
 	}
 	const failures = [...normalizeArray(source?.failures || source?.errors || source?.diagnostics), ...contractFailures];
-	const runtimeTaskResult = normalizeWordPressFuzzRuntimeTaskResult({
-		...source,
-		status,
-		artifacts,
-		failures,
-		hotspot_summary: hotspotSummary,
-		observation_set: observationSet,
-		provider_result: source,
-	}, { provider: 'wp-codebox', taskId: context.request?.task_id });
 	const observation = buildWordPressFuzzObservation({
 		source,
 		status,
@@ -2017,12 +1966,11 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 		wordpress_fuzz_result: normalizedResult,
 		artifacts,
 		failures,
-		runtime_task_result: runtimeTaskResult,
 		metadata: stripUndefined({
 			...(objectOrUndefined(source?.metadata) || {}),
 			suite: objectOrUndefined(source?.suite),
 			summary: objectOrUndefined(source?.summary),
-			runtime_task_request: objectOrUndefined(context.runtimeRequest),
+			direct_execution_request: objectOrUndefined(context.request),
 		}),
 	});
 }
@@ -3208,7 +3156,6 @@ module.exports = {
 	normalizeWpCodeboxFuzzArtifacts,
 	normalizeWpCodeboxDestructiveReadiness,
 	normalizeWpCodeboxFuzzSuiteResult,
-	normalizeWordPressFuzzRuntimeTaskResult,
 	wordpressFuzzPostprocessArtifactDeclarations,
 	wordpressFuzzPostprocessBinding,
 	wordpressFuzzPostprocessExpectedArtifacts,
@@ -3224,7 +3171,6 @@ module.exports = {
 	wpCodeboxFuzzSuiteCommand,
 	wpCodeboxFuzzSuiteResultSchema,
 	wpCodeboxFuzzSuiteSchema,
-	wpCodeboxFuzzRuntimeTaskRequest,
 	wpCodeboxRuntimeContractManifest,
 	wpCodeboxWordPressRuntimeContracts,
 	wpCodeboxWordPressWorkloadRunAbility,
@@ -3232,5 +3178,4 @@ module.exports = {
 	wpCodeboxWordPressWorkloadRunInput,
 	wpCodeboxWordPressWorkloadRunSchema,
 	wpCodeboxFuzzSuiteInput,
-	wpCodeboxFuzzSuiteTaskRequest,
 };

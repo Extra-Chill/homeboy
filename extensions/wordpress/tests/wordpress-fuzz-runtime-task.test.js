@@ -18,7 +18,7 @@ const {
 const {
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
 	runWpCodeboxFuzzSuite,
-	wpCodeboxFuzzRuntimeTaskRequest,
+	wpCodeboxFuzzExecutionRequest,
 } = require('../lib/wp-codebox-fuzz-run');
 const {
 	aggregateWordPressFuzzCoverage,
@@ -39,16 +39,14 @@ assert.equal(genericRequest.provider.id, 'example-provider');
 assert.equal(genericRequest.input.schema, 'example/fuzz-input/v1');
 assert.equal(genericRequest.provider_request.schema, 'example/provider-request/v1');
 
-const codeboxRuntimeRequest = wpCodeboxFuzzRuntimeTaskRequest({
+const codeboxRuntimeRequest = wpCodeboxFuzzExecutionRequest({
 	taskId: 'wp-codebox-runtime-task',
 	input: { id: 'suite-input', cases: [{ id: 'case-1' }] },
 });
-assert.equal(codeboxRuntimeRequest.schema, WORDPRESS_FUZZ_RUNTIME_TASK_REQUEST_SCHEMA);
-assert.equal(codeboxRuntimeRequest.provider.id, 'wp-codebox');
-assert.equal(codeboxRuntimeRequest.provider_request.executor.backend, 'wp-codebox');
+assert.equal(codeboxRuntimeRequest.schema, 'homeboy/wp-codebox-fuzz-execution/v1');
 assert.equal(codeboxRuntimeRequest.input.schema, 'wp-codebox/fuzz-suite/v1');
-assert.equal(codeboxRuntimeRequest.provider_request.schema, 'homeboy/agent-task-request/v1');
-assert.equal(codeboxRuntimeRequest.provider_metadata.wp_codebox.ability, 'wp-codebox/run-fuzz-suite');
+assert.equal(codeboxRuntimeRequest.ability, 'wp-codebox/run-fuzz-suite');
+assert.equal(codeboxRuntimeRequest.provider_request, undefined);
 
 const normalizedHotspots = normalizeFuzzHotspotSummary({
 	dimension: 'database',
@@ -156,9 +154,7 @@ Promise.all([
 		assert.equal(summary.schema, WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA);
 		assert.equal(summary.status, 'skipped');
 		assert.equal(summary.succeeded, false);
-		assert.equal(summary.runtime_task_result.schema, 'homeboy/fuzz-runtime-task-result/v1');
-		assert.equal(summary.runtime_task_result.provider.id, 'wp-codebox');
-		assert.equal(summary.runtime_task_result.status, 'skipped');
+		assert.equal(summary.runtime_task_result, undefined);
 		assert(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_missing_runtime_contract_manifest'));
 		assert.deepEqual(summary.metadata.preflight.required.commands, []);
 	}),
@@ -177,7 +173,7 @@ Promise.all([
 	}).then((summary) => {
 		assert.equal(summary.status, 'skipped');
 		assert.equal(summary.failures.length, 0);
-		assert.equal(summary.runtime_task_result.status, 'skipped');
+		assert.equal(summary.runtime_task_result, undefined);
 	}),
 
 	runWpCodeboxFuzzSuite({
@@ -197,8 +193,6 @@ Promise.all([
 		assert.equal(summary.artifacts.length, 2);
 		assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
 		assert.equal(summary.artifacts.some((artifact) => artifact.role === 'result_envelope'), true);
-		assert.equal(summary.runtime_task_result.artifacts.length, 2);
-		assert.equal(summary.runtime_task_result.artifacts[0].semantic_key, 'fuzz.report');
 	}),
 
 	runWpCodeboxFuzzSuite({
@@ -224,7 +218,6 @@ Promise.all([
 		assert.equal(summary.status, 'succeeded');
 		assert.equal(summary.hotspot_summary.schema, WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA);
 		assert.equal(summary.hotspot_summary.items[0].value, 42);
-		assert.equal(summary.runtime_task_result.hotspot_summary.items[0].metric, 'duration_ms');
 		const aggregate = aggregateWordPressFuzzCoverage({ artifacts: [summary.coverage], hotspot_summary: summary.hotspot_summary });
 		assert.equal(aggregate.hotspot_summary.items[0].metadata.operation_key, 'GET /wp/v2/posts');
 		assert.match(formatWordPressFuzzCoverageMarkdownReport(aggregate), /## Hotspots/);
@@ -294,7 +287,6 @@ Promise.all([
 		assert.equal(runtimeAccessArtifact.path, 'artifacts/runtime-access.json');
 		assert.equal(summary.coverage_gaps[0].id, 'external-http:blocked-request');
 		assert.equal(summary.hotspot_summary.items[0].metadata.operation_key, 'DELETE /wp/v2/posts/1');
-		assert.equal(summary.runtime_task_result.artifacts.some((artifact) => artifact.role === 'sandbox_isolation_proof'), true);
 	}),
 
 	runWpCodeboxFuzzSuite({

@@ -25,7 +25,7 @@ const {
 	homeboySettings,
 	wpCodeboxCommand,
 } = require('./wp-codebox-resolver');
-const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, selectWpCodeboxRuntime, wpCodeboxCommand: runtimeCommand } = require('./wp-codebox-runtime-selection');
+const { resolveReadyWpCodeboxRuntime, selectWpCodeboxRuntime } = require('./wp-codebox-runtime-selection');
 
 function wpCodeboxBin(options = {}) {
   const env = { ...process.env, ...(options.env || {}) };
@@ -36,18 +36,7 @@ function wpCodeboxBin(options = {}) {
 }
 
 function canonicalWpCodeboxRuntime(options = {}) {
-  const env = { ...process.env, ...(options.env || {}) };
-  const settings = { ...homeboySettings(env), ...(options.settings || {}) };
-  const runtime = preflightWpCodeboxRuntime({ ...options, env, settings });
-  if (!runtime.ready) {
-    throw new Error(`WP Codebox runtime preflight failed: ${runtime.reason}; required >=${runtime.required_version}, observed ${runtime.selected.version || 'unavailable'} at ${runtime.selected.path || 'no executable'}. Run ${runtime.remediation}.`);
-  }
-  const invocation = runtimeCommand(runtime.selected.path);
-  const command = preflightWpCodeboxCommand([invocation.command, ...invocation.args], { ...options, env, settings });
-  if (!command.ready) {
-    throw new Error(`WP Codebox command preflight failed: ${command.reason}; required >=${command.required_version}, observed ${command.selected.version || 'unavailable'} at ${command.selected.path || 'no executable'}. Run ${command.remediation}.`);
-  }
-  return { ...runtime, invocation };
+  return resolveReadyWpCodeboxRuntime(options);
 }
 
 function recipeEventName(name, options = {}) {
