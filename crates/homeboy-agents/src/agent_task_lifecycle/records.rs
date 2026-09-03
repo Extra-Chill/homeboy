@@ -418,6 +418,10 @@ pub struct AgentTaskCookIndex {
     /// bytes. Unlike `latest_run_id`, empty retries never replace this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_substantive_candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
+    /// Mission-level cancellation is durable authority over later Cook attempt
+    /// admission and completion projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_fence: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<AgentTaskCookIndexAttempt>,
 }

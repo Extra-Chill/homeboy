@@ -3944,6 +3944,7 @@ fn index_cook_attempts(cook_id: &str, first_run_id: &str, latest_run_id: &str) {
         cook_id: cook_id.to_string(),
         latest_run_id: latest_run_id.to_string(),
         latest_substantive_candidate: None,
+        cancellation_fence: None,
         attempts: [first_run_id, latest_run_id]
             .into_iter()
             .enumerate()

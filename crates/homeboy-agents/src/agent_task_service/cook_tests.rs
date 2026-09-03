@@ -13751,6 +13751,7 @@ fn legacy_substantive_candidate_selection_is_explicitly_incomplete_after_64_newe
                 cook_id: cook_id.to_string(),
                 latest_run_id: format!("{cook_id}-65"),
                 latest_substantive_candidate: None,
+                cancellation_fence: None,
                 attempts,
             },
         )
@@ -14221,6 +14222,7 @@ fn large_cook_index_selects_the_deterministic_top_64_window() {
                 cook_id: cook_id.to_string(),
                 latest_run_id: format!("{cook_id}-10000"),
                 latest_substantive_candidate: None,
+                cancellation_fence: None,
                 attempts,
             },
         )

@@ -1532,6 +1532,7 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
             cook_id: cook_id.clone(),
             latest_run_id: run_id.clone(),
             latest_substantive_candidate: None,
+            cancellation_fence: None,
             attempts: Vec::new(),
         }
     };

@@ -2859,7 +2859,21 @@ pub(crate) fn apply_aggregate_to_record(
     aggregate_path: String,
 ) {
     record.updated_at = Some(now_timestamp());
-    set_run_state(record, run_state_for_aggregate(aggregate));
+    let terminal_state = run_state_for_aggregate(aggregate);
+    if record.state != AgentTaskRunState::Cancelled {
+        // A controller failure is durable terminal evidence. Never project an
+        // aggregate as successful while that evidence remains attached.
+        set_run_state(
+            record,
+            if terminal_state == AgentTaskRunState::Succeeded
+                && record.metadata.get("cook_controller_failure").is_some()
+            {
+                AgentTaskRunState::Failed
+            } else {
+                terminal_state
+            },
+        );
+    }
     record.aggregate_path = Some(aggregate_path);
     record.totals = Some(aggregate.totals.clone());
     record.tasks = tasks_for_aggregate(plan, aggregate);

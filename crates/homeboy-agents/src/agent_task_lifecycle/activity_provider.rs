@@ -461,6 +461,7 @@ mod tests {
                     cook_id: cook_id.to_string(),
                     latest_run_id: attempt.clone(),
                     latest_substantive_candidate: None,
+                    cancellation_fence: None,
                     attempts: vec![crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
                         attempt: 1,
                         run_id: attempt.clone(),
@@ -499,6 +500,7 @@ mod tests {
                     cook_id: direct.clone(),
                     latest_run_id: other,
                     latest_substantive_candidate: None,
+                    cancellation_fence: None,
                     attempts: Vec::new(),
                 },
             )

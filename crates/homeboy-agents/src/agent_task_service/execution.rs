@@ -2119,6 +2119,7 @@ fn reserve_cook_retry_lifecycle(
     force: bool,
     preflight: &dyn Fn(&AgentTaskPlan) -> Result<()>,
 ) -> Result<CookRetryReservation> {
+    super::cook::ensure_cook_attempt_admitted(lifecycle_store, &retry.cook_id)?;
     let operation_key = format!("retry:{}:{}", retry.cook_id, retry.attempt);
     match agent_task_lifecycle::claim_cook_operation_in_store(
         lifecycle_store,
@@ -2240,6 +2241,7 @@ fn retryable_cook_attempt(
     let Some(cook_id) = source.metadata["cook_id"].as_str() else {
         return Ok(None);
     };
+    super::cook::ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
     let Some(source_attempt) = source.metadata["cook_attempt"].as_u64() else {
         return Ok(None);
     };
