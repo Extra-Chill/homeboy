@@ -566,6 +566,7 @@ fn materialize_plan_uses_clean_runner_cache() {
             "/runner/ws/homeboy-clean",
             "/runner/ws/homeboy-clean/target/release/homeboy",
             false,
+            &[],
         ),
         reconnect: false,
         followup_commands: refresh_followups("lab", false),
@@ -591,6 +592,7 @@ fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
         "/runner/ws/homeboy-clean",
         "/runner/ws/homeboy-clean/target/release/homeboy",
         false,
+        &["newer-authority"],
     );
     assert_eq!(
         script.matches("self identity").count(),
@@ -604,10 +606,22 @@ fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
         );
     }
 
-    assert!(script.contains("merge-base --is-ancestor \"$target\" \"$current\""));
-    assert!(script.contains("HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current"));
+    assert!(script.contains("for authority in 'newer-authority'; do"));
+    assert!(script.contains("HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$authority"));
     assert!(script.contains("--allow-downgrade only for an intentional rollback"));
     assert!(script.contains("checkout --quiet --force --detach \"$target\""));
+    assert!(
+        script
+            .find("for authority in 'newer-authority'; do")
+            .unwrap()
+            < script.find("git clone \"$source\" \"$dir\"").unwrap()
+    );
+    assert!(
+        script
+            .find("for authority in 'newer-authority'; do")
+            .unwrap()
+            < script.find("cargo build --release --bin homeboy").unwrap()
+    );
 }
 
 #[test]
@@ -618,6 +632,7 @@ fn materialize_plan_allows_an_explicit_git_ancestry_downgrade() {
         "/runner/ws/homeboy-clean",
         "/runner/ws/homeboy-clean/target/release/homeboy",
         true,
+        &["newer-authority"],
     );
 
     assert!(script.contains("allow_downgrade=true"));
@@ -1055,6 +1070,7 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
             target_dir.to_str().expect("target path"),
             binary_path.to_str().expect("binary path"),
             false,
+            &[],
         );
         let output = fixture_build_shell(&script)
             .output()
@@ -1172,6 +1188,7 @@ fn managed_slot_materialization_publishes_verified_select_authority() {
         build.to_str().expect("build path"),
         binary.to_str().expect("binary path"),
         false,
+        &[],
     );
     let mut materialize = fixture_build_shell(&script);
     materialize.env(
@@ -1658,6 +1675,7 @@ fn default_target_dir_is_ref_scoped() {
         &target_dir,
         &format!("{target_dir}/target/release/homeboy"),
         false,
+        &[],
     );
     assert!(script.contains("slot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\""));
     assert!(!script.contains("_homeboy_binaries/$binary_sha"));

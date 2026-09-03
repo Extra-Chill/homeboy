@@ -38,7 +38,7 @@ const PROBE: &str = "controller_git_ancestry";
 const MAX_DETAIL_CHARS: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CommitAncestry {
+pub(crate) enum CommitAncestry {
     Ancestor,
     NotAncestor,
     Unavailable,
@@ -49,7 +49,7 @@ pub(super) enum CommitAncestry {
 /// An unavailable probe remains distinct from a real "not an ancestor" answer:
 /// recovery guidance must not turn an unknown build relationship into a
 /// potentially downgrading controller refresh.
-pub(super) fn commits_are_ancestral(older: &str, newer: &str) -> CommitAncestry {
+pub(crate) fn commits_are_ancestral(older: &str, newer: &str) -> CommitAncestry {
     // `output()` captures both child streams. `status()` would inherit them and
     // print git's `fatal:` line straight past the structured envelope.
     ancestry_from_probe(
@@ -224,7 +224,7 @@ mod tests {
     fn the_probe_never_inherits_the_parent_streams() {
         let source = include_str!("controller_ancestry.rs");
         let start = source
-            .find("pub(super) fn commits_are_ancestral")
+            .find("pub(crate) fn commits_are_ancestral")
             .expect("probe entry point");
         let end = source[start..]
             .find("fn ancestry_from_probe")
