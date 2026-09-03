@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.41.2] - 2026-09-03
+
+### Fixed
+- report structured counts for declared JavaScript test runs
+
 ## [3.41.1] - 2026-09-03
 
 ### Fixed
