@@ -413,7 +413,10 @@ fn summarize_repos(
 /// Grouping is per repository because both budgets are per repository: one
 /// repository's build size must not decide another's retention.
 fn classify(versions: &mut [ReleaseArtifactVersion], options: &ReleaseArtifactCleanupOptions) {
-    let mut repos: Vec<String> = versions.iter().map(|version| version.repo.clone()).collect();
+    let mut repos: Vec<String> = versions
+        .iter()
+        .map(|version| version.repo.clone())
+        .collect();
     repos.sort();
     repos.dedup();
 

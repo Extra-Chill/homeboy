@@ -134,7 +134,10 @@ fn retention_budgets_are_scoped_to_one_repository() {
             .find(|entry| entry.repo == repo)
             .expect("repository rollup");
         assert_eq!(summary.version_count, 3);
-        assert_eq!(summary.candidate_count, 2, "{repo} keeps exactly its newest");
+        assert_eq!(
+            summary.candidate_count, 2,
+            "{repo} keeps exactly its newest"
+        );
     }
 }
 

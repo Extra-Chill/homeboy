@@ -5308,11 +5308,8 @@ mod tests {
             "a bare sweep must reach the category"
         );
         assert!(
-            !CleanupCategorySelection::new(
-                Vec::new(),
-                vec![CleanupCategoryArg::ReleaseArtifacts]
-            )
-            .includes(CleanupCategoryArg::ReleaseArtifacts),
+            !CleanupCategorySelection::new(Vec::new(), vec![CleanupCategoryArg::ReleaseArtifacts])
+                .includes(CleanupCategoryArg::ReleaseArtifacts),
             "an operator must still be able to exclude it"
         );
     }
