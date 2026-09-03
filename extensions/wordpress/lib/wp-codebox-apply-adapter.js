@@ -151,20 +151,12 @@ function wpCodeboxApplyRequestFromBundle(options) {
       ...(payload.artifact_id ? { artifactId: payload.artifact_id } : {}),
       preflight,
       ...(options.worktreePath ? { worktreePath: options.worktreePath } : {}),
-      ...(options.branch ? { branch: options.branch } : {}),
-      ...(options.commitMessage ? { commitMessage: options.commitMessage } : {}),
       ...(Number.isInteger(options.patchStrip) ? { patchStrip: options.patchStrip } : {}),
     },
     policy: {
       approved_files: approvedFiles,
       content_digest: payload.artifact_content_digest || payload.content_digest,
       patch_sha256: payload.patch_sha256,
-      publish: {
-        push: Boolean(options.push),
-        open_pull_request: Boolean(options.openPullRequest),
-        ...(options.prBase ? { base: options.prBase } : {}),
-        ...(options.remote ? { remote: options.remote } : {}),
-      },
     },
   };
 }
@@ -373,15 +365,6 @@ function applyApprovedWpCodeboxArtifact(input) {
   const applyInputs = payload.applyInputs || {};
   const applyPolicy = payload.applyPolicy || {};
   const worktreePath = ensureSafeWorktree(input.worktreePath || applyInputs.worktreePath, input);
-  const requestedBranch = input.branch || applyInputs.branch || '';
-
-  if (requestedBranch) {
-    if (!input.allowProtectedBranch && PROTECTED_BRANCHES.has(requestedBranch)) {
-      throw new Error(`refusing to apply artifact on protected branch ${requestedBranch}`);
-    }
-    run('git', ['checkout', '-B', requestedBranch], { cwd: worktreePath });
-  }
-
   const patchPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wp-codebox-patch-')), 'patch.diff');
   fs.writeFileSync(patchPath, verified.patch);
 
@@ -396,26 +379,7 @@ function applyApprovedWpCodeboxArtifact(input) {
     throw new Error('approved patch did not stage any files');
   }
 
-  const commitMessage = input.commitMessage || applyInputs.commitMessage || `Apply wp-codebox artifact ${verified.artifactId}`;
-  run('git', ['commit', '-m', commitMessage], { cwd: worktreePath });
-  const commit = run('git', ['rev-parse', 'HEAD'], { cwd: worktreePath });
   const branch = currentBranch(worktreePath);
-  let prUrl = input.prUrl || '';
-  const publishPolicy = applyPolicy.publish || {};
-  const shouldPush = input.push ?? publishPolicy.push;
-  const shouldOpenPullRequest = input.openPullRequest ?? publishPolicy.open_pull_request;
-
-  if (shouldPush) {
-    run('git', ['push', '-u', input.remote || publishPolicy.remote || 'origin', branch], { cwd: worktreePath });
-  }
-
-  if (shouldOpenPullRequest) {
-    const args = ['pr', 'create', '--fill'];
-    if (input.prBase || publishPolicy.base) {
-      args.push('--base', input.prBase || publishPolicy.base);
-    }
-    prUrl = run('gh', args, { cwd: worktreePath });
-  }
 
   const resultArtifact = payload.applyRequest?.artifact || wpCodeboxChangeArtifactFromPreflight(payload, {
     title: `Applied WP Codebox artifact ${verified.artifactId}`,
@@ -431,9 +395,6 @@ function applyApprovedWpCodeboxArtifact(input) {
     applied_files: appliedFiles,
     worktree: worktreePath,
     branch,
-    commit,
-    pr_url: prUrl,
-    pr_command: prUrl ? '' : 'gh pr create --fill',
   };
 
   return {
@@ -455,17 +416,9 @@ function applyApprovedWpCodeboxArtifact(input) {
         approved_files: verified.approvedFiles,
       },
       apply_phase: {
-        committed: true,
-        commit,
+        staged: true,
         branch,
         worktree: worktreePath,
-      },
-      publish_phase: {
-        compatibility_behavior: true,
-        pushed: Boolean(shouldPush),
-        pull_request_opened: Boolean(prUrl),
-        pr_url: prUrl,
-        pr_command: prUrl ? '' : 'gh pr create --fill',
       },
       legacy,
     },

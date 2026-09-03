@@ -4,28 +4,21 @@ const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const {
 	runtimeContractSchemas,
 } = require('./wp-codebox-runtime-contract-source');
-const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
+
+// The canonical envelope schema is owned by WP Codebox core. Resolve it on
+// first use so importing the WordPress extension does not require an installed
+// WP Codebox runtime.
+let runtimeContractSchemasCache;
+function artifactResultEnvelopeSchema() {
+	if (!runtimeContractSchemasCache) {
+		runtimeContractSchemasCache = runtimeContractSchemas();
+	}
+	return runtimeContractSchemasCache.artifact.resultEnvelope;
+}
 
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
-const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.artifact.resultEnvelope;
 const WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA = 'wp-codebox/case-artifact-index/v1';
 const WP_CODEBOX_RUNTIME_ACCESS_SCHEMA = 'wp-codebox/runtime-access/v1';
-
-const ARTIFACT_ROLE_FALLBACK_PATTERNS = [
-  ['patch', /patch|diff/i],
-  ['changed_files', /changed[-_ ]?files/i],
-  ['transcript', /transcript|conversation|messages/i],
-  ['typed_artifact', /typed[-_ ]?bundle[-_ ]?output|typed[-_ ]?artifact/i],
-  ['replay_bundle', /replay[-_ ]?bundle/i],
-  ['pull_request', /pull[-_ ]?request/i],
-  ['screenshot', /screenshot/i],
-  ['probe_result', /probe/i],
-  ['side_effects', /side[-_ ]?effects?/i],
-  ['preflight_evidence', /command[-_ ]?evidence|agent[-_ ]?task[-_ ]?input|homeboy-codebox-task-runner\.json/i],
-  ['command_log', /command[-_ ]?log/i],
-  ['runtime_log', /runtime[-_ ]?log|startup[-_ ]?log/i],
-  ['artifact_bundle', /artifact[-_ ]?bundle|artifact[-_ ]?directory|session[-_ ]?artifacts/i],
-];
 
 function normalizeTypedArtifactEntry(name, artifact, options = {}) {
   if (!plainObject(artifact)) {
@@ -371,7 +364,7 @@ function firstObject(...values) {
 }
 
 function normalizeArtifactResultEnvelope(envelope) {
-  if (!plainObject(envelope) || envelope.schema !== WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA) {
+  if (!plainObject(envelope) || envelope.schema !== artifactResultEnvelopeSchema()) {
     return null;
   }
   const artifactBundle = normalizeArtifactResultRef(envelope.artifactBundle || envelope.artifact_bundle);
@@ -389,7 +382,7 @@ function normalizeArtifactResultEnvelope(envelope) {
     ...(Array.isArray(envelope.transcript_refs) ? envelope.transcript_refs.map(normalizeArtifactResultRef) : []),
   ].filter(Boolean);
   return cleanObject({
-    schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+    schema: artifactResultEnvelopeSchema(),
     operation: envelope.operation,
     operation_schema: envelope.operation_schema,
     status: envelope.status,
@@ -423,7 +416,7 @@ function normalizeArtifactResultRef(ref) {
     sha256: ref.sha256 || digest.value,
     metadata: cleanObject({
       digest: plainObject(ref.digest) ? ref.digest : undefined,
-      source_schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+      source_schema: artifactResultEnvelopeSchema(),
     }),
   });
 }
@@ -646,24 +639,9 @@ function artifactPath(root, relativePath) {
 }
 
 function artifactRoleFromCodeboxArtifact(artifact = {}, roleAliases = {}) {
-  const labels = artifactLabels(artifact);
+  const labels = [artifact.role, artifact.kind, artifact.type].filter(Boolean).map(String);
   const explicitRole = roleFromAliases(labels, roleAliases);
-  if (explicitRole) {
-    return explicitRole;
-  }
-  if (!allowArtifactRoleFallbackCompatibility(roleAliases)) {
-    return 'artifact';
-  }
-  const fallbackLabel = labels.join(' ');
-  const fallback = ARTIFACT_ROLE_FALLBACK_PATTERNS.find(([, pattern]) => pattern.test(fallbackLabel));
-  return fallback?.[0] || 'artifact';
-}
-
-function allowArtifactRoleFallbackCompatibility(options = {}) {
-  return Boolean(
-    options.allowArtifactRoleFallbackCompatibility
-      || options.allow_artifact_role_fallback_compatibility
-  );
+  return explicitRole || artifact.role || artifact.kind || artifact.type || 'artifact';
 }
 
 function roleFromAliases(labels, roleAliases = {}) {
@@ -671,7 +649,6 @@ function roleFromAliases(labels, roleAliases = {}) {
   const aliasGroups = [
     roleAliases.artifact_roles,
     roleAliases.artifact_kinds,
-    roleAliases.artifact_filenames,
   ].filter(plainObject);
   for (const aliases of aliasGroups) {
     for (const [role, values] of Object.entries(aliases)) {
@@ -681,25 +658,6 @@ function roleFromAliases(labels, roleAliases = {}) {
     }
   }
   return '';
-}
-
-function artifactLabels(artifact = {}) {
-  return [
-    artifact.role,
-    artifact.kind,
-    artifact.type,
-    artifact.name,
-    artifact.id,
-    artifact.path,
-    artifact.url,
-    artifact.file,
-    artifact.directory,
-    basename(artifact.path || artifact.url || artifact.file || artifact.directory || ''),
-  ].filter(Boolean).map(String);
-}
-
-function basename(value) {
-  return String(value).split(/[\\/]/).filter(Boolean).pop() || '';
 }
 
 function normalizeLabel(value) {
@@ -722,11 +680,10 @@ function cleanObject(value) {
 module.exports = {
   TYPED_ARTIFACT_SCHEMA,
   WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA,
-  WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
   WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
   WP_CODEBOX_RUNTIME_ACCESS_SCHEMA,
+  artifactResultEnvelopeSchema,
   artifactResultEnvelopeFromCodeboxResult,
-  allowArtifactRoleFallbackCompatibility,
   artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
   artifactPath,
@@ -741,3 +698,9 @@ module.exports = {
   typedArtifactsFromCodeboxResult,
   typedArtifactFileRefs,
 };
+
+// Resolved from the canonical WP Codebox contract on first access.
+Object.defineProperty(module.exports, 'WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA', {
+  enumerable: true,
+  get: artifactResultEnvelopeSchema,
+});

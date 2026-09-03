@@ -16,6 +16,8 @@ const libRoot = path.join(wordpressRoot, 'lib');
 const allowedInternalFiles = new Set([
 	'codebox-client.js',
 	'wp-codebox-resolver.js',
+	'wp-codebox-runtime-contract-source.js',
+	'wp-codebox-runtime-readiness.js',
 ]);
 const legacyInternalPatterns = [
 	/@automattic\/wp-codebox-core/,

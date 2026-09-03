@@ -333,13 +333,18 @@ homeboy_wp_codebox_resolved_bin_path() {
 # of resolving a second candidate after a caller has selected one.
 homeboy_wp_codebox_preflight_command() {
     local script_dir
-    local resolver
     local selection_module
     local result
 
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    resolver="${script_dir}/agent-runtime-paths.cjs"
-    selection_module="$(node "${resolver}" "wp-codebox/lib/wp-codebox-runtime-selection.js")" || return 1
+    # Runtime selection is WordPress-owned and ships in this extension's own
+    # lib, so it resolves from the extension payload rather than the shared
+    # agent-runtime tree.
+    selection_module="${script_dir}/../../lib/wp-codebox-runtime-selection.js"
+    if [ ! -f "${selection_module}" ]; then
+        printf 'Error: WP Codebox runtime selection module missing at %s; the WordPress extension payload is incomplete.\n' "${selection_module}" >&2
+        return 1
+    fi
     result="$(node - "${selection_module}" "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" <<'NODE'
 const { preflightWpCodeboxCommand } = require(process.argv[2]);
 const result = preflightWpCodeboxCommand(process.argv.slice(3));

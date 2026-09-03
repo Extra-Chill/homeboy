@@ -52,11 +52,12 @@ assert.equal(campaign.coverage_manifest.schema, 'homeboy/wordpress-fuzz-coverage
 assert.equal(campaign.workload.schema, 'homeboy/fuzz-workload/v1');
 assert.equal(campaign.wp_codebox.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(campaign.wp_codebox.input.schema, 'wp-codebox/fuzz-suite/v1');
-assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.schema, 'wp-codebox/fuzz-suite/v1');
-assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].target.kind, 'runtime-action');
-assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].target.entrypoint, 'admin_page');
-assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].input.type, 'admin_page');
-assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].phases, undefined);
+assert.equal(campaign.wp_codebox.execution_request.schema, 'homeboy/wp-codebox-fuzz-execution/v1');
+assert.equal(campaign.wp_codebox.execution_request.input.schema, 'wp-codebox/fuzz-suite/v1');
+assert.equal(campaign.wp_codebox.execution_request.input.cases[0].target.kind, 'runtime-action');
+assert.equal(campaign.wp_codebox.execution_request.input.cases[0].target.entrypoint, 'admin_page');
+assert.equal(campaign.wp_codebox.execution_request.input.cases[0].input.type, 'admin_page');
+assert.equal(campaign.wp_codebox.execution_request.input.cases[0].phases, undefined);
 assert(campaign.wp_codebox.input.metadata.coverage_manifest.surfaces.length > 0);
 assert.equal(campaign.workload.metadata.runtime_operations.schema, 'homeboy/wordpress-fuzz-runtime-workload-operation-summary/v1');
 assert.equal(campaign.workload.metadata.runtime_operations.by_family.rest, 1);
@@ -140,7 +141,7 @@ const optInCampaign = compileWordPressFuzzCampaign({
 });
 assert.equal(optInCampaign.wp_codebox.input.metadata.fixture_plan.id, 'campaign-fixtures');
 assert.equal(optInCampaign.wp_codebox.input.metadata.rest_mutation_opt_ins.id, 'campaign-rest-opt-ins');
-assert.equal(optInCampaign.wp_codebox.task_request.executor.config.runtime_task.input.metadata.rest_mutation_opt_ins.entries.length, 3);
+assert.equal(optInCampaign.wp_codebox.execution_request.input.metadata.rest_mutation_opt_ins.entries.length, 3);
 
 const productionCampaign = compileWordPressFuzzCampaign({
 	id: 'production-campaign',
@@ -166,11 +167,11 @@ assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => a
 assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
 assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.codebox').name, 'wordpress-hotspots');
 assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.coverage.gap_report').name, 'wordpress-fuzz-gap-report');
-assert.equal(productionCampaign.wp_codebox.task_request.expected_artifacts.includes('wordpress-hotspots'), true);
-assert.equal(productionCampaign.wp_codebox.task_request.expected_artifacts.includes('homeboy-hotspot-summary'), true);
-assert.equal(productionCampaign.wp_codebox.task_request.expected_artifacts.includes('wordpress-fuzz-gap-report'), true);
-assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
-assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.codebox').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
-assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.coverage.gap_report').required, true);
+assert.equal(productionCampaign.wp_codebox.execution_request.expected_artifacts.includes('wordpress-hotspots'), true);
+assert.equal(productionCampaign.wp_codebox.execution_request.expected_artifacts.includes('homeboy-hotspot-summary'), true);
+assert.equal(productionCampaign.wp_codebox.execution_request.expected_artifacts.includes('wordpress-fuzz-gap-report'), true);
+assert.equal(productionCampaign.wp_codebox.execution_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
+assert.equal(productionCampaign.wp_codebox.execution_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.codebox').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
+assert.equal(productionCampaign.wp_codebox.execution_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.coverage.gap_report').required, true);
 
 console.log('wordpress fuzz campaign smoke passed');

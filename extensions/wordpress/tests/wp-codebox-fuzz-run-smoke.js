@@ -109,7 +109,13 @@ const normalizedResult = normalizeWpCodeboxFuzzSuiteResult({
   summary: { status: 'passed' },
   artifacts: [{ name: 'case_log', kind: 'json', path: 'case-log.json', schema: 'homeboy/wordpress-fuzz-case-log/v1' }],
   observations: [{ id: 'rest-posts', status: 'passed', metrics: { response_ms: 12 } }],
+}, {
+  request: {
+    schema: 'homeboy/wp-codebox-fuzz-execution/v1',
+    task_id: 'fuzz-smoke',
+    ability: 'wp-codebox/run-fuzz-suite',
+  },
 });
 assert.equal(normalizedResult.status, 'completed');
-assert.equal(normalizedResult.runtime_task_result.provider_result.observations[0].id, 'rest-posts');
-assert.equal(normalizedResult.runtime_task_result.provider_result.artifacts[0].name, 'case_log');
+assert.equal(normalizedResult.runtime_task_result, undefined);
+assert.equal(normalizedResult.metadata.direct_execution_request.schema, 'homeboy/wp-codebox-fuzz-execution/v1');

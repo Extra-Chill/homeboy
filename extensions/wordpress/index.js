@@ -75,6 +75,9 @@ module.exports = {
 		...require('./lib/wp-codebox-resolver'),
 		...require('./lib/wp-codebox-fuzz-plan'),
 		...require('./lib/wp-codebox-artifacts'),
+		// The canonical WP Codebox contract modules resolve an installed WP
+		// Codebox runtime, so they stay behind their own package export paths
+		// rather than loading whenever this extension is imported.
 		...require('./lib/wp-codebox-fuzz-run'),
 		buildWpCodeboxStaticVisualParityRecipe: staticVisualParity.buildWpCodeboxStaticVisualParityRecipe,
 		createWpCodeboxStaticVisualParityRuntimeProvider: staticVisualParity.createWpCodeboxStaticVisualParityRuntimeProvider,

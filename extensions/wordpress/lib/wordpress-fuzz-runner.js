@@ -19,8 +19,7 @@ const {
 	normalizeWpCodeboxFuzzSuiteResult,
 	runWpCodeboxFuzzSuite,
 	wpCodeboxFuzzSuiteInput,
-	wpCodeboxFuzzRuntimeTaskRequest,
-	wpCodeboxFuzzSuiteTaskRequest,
+	wpCodeboxFuzzExecutionRequest,
 } = require('./wp-codebox-fuzz-run');
 const { aggregateWordPressFuzzCoverage } = require('./wordpress-fuzz-coverage-aggregate');
 const {
@@ -168,15 +167,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
 	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, executionRequest: env.executionRequest, instructions, runtimeCapabilities, packageRoot });
 	const runtimeRequirements = wpCodeboxRuntimeRequirementsFromWorkload(workload, { env });
-	const runtimeTaskRequest = wpCodeboxFuzzRuntimeTaskRequest({
-		taskId: runId,
-		input: wpCodeboxInput,
-		provider: workload.provider,
-		runtimeId: workload.runtime_id || workload.runtimeId || 'wp-codebox',
-		runtimeRequirements,
-		instructions,
-	});
-	const taskRequest = runtimeTaskRequest.provider_request || wpCodeboxFuzzSuiteTaskRequest({
+	const executionRequest = wpCodeboxFuzzExecutionRequest({
 		taskId: runId,
 		input: wpCodeboxInput,
 		provider: workload.provider,
@@ -196,8 +187,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 		wpCodeboxInput,
 		packageRoot,
 		runtimeRequirements,
-		runtimeTaskRequest,
-		taskRequest,
+		executionRequest,
 	};
 }
 
@@ -247,14 +237,13 @@ function buildWordPressFuzzRunnerSummary({
 	runtimeCapabilities,
 	wpCodeboxInput,
 	runtimeRequirements,
-	runtimeTaskRequest,
-	taskRequest,
+	executionRequest,
 	codeboxResult,
 }) {
 	codeboxResult = withHomeboyRequiredFuzzArtifacts(codeboxResult, { workloadId });
 	const coverage = aggregateCoverage(workload, codeboxResult);
 	const status = normalizeRunnerStatus(codeboxResult, coverage);
-	const homeboyFuzzResultEnvelope = buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, workload, plan, codeboxResult, status, runtimeTaskRequest, taskRequest });
+	const homeboyFuzzResultEnvelope = buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, workload, plan, codeboxResult, status, executionRequest });
 	const homeboyFuzzCampaign = buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status, homeboyFuzzResultEnvelope });
 
 	return stripUndefined({
@@ -269,9 +258,7 @@ function buildWordPressFuzzRunnerSummary({
 		wp_codebox_input: wpCodeboxInput,
 		wordpress_fuzz_runtime_capabilities: runtimeCapabilities,
 		wp_codebox_runtime_requirements: runtimeRequirements,
-		wp_codebox_task_request: taskRequest,
-		fuzz_runtime_task_request: runtimeTaskRequest,
-		fuzz_runtime_task_result: codeboxResult.runtime_task_result,
+		wp_codebox_execution_request: executionRequest,
 		wp_codebox_result: codeboxResult,
 		observation: codeboxResult.observation,
 		coverage,
@@ -303,7 +290,7 @@ async function resolveCodeboxResult(context, options = {}) {
 		provider: context.workload.provider,
 		runtimeId: context.workload.runtime_id || context.workload.runtimeId || 'wp-codebox',
 		runtimeRequirements: context.runtimeRequirements,
-		instructions: context.taskRequest.instructions,
+		instructions: context.executionRequest.instructions,
 		...(typeof runner === 'function' ? { runFuzzSuite: runner } : {}),
 	});
 }
@@ -788,11 +775,11 @@ function reportedCodeboxArtifactRefs(codeboxResult = {}) {
 	return normalizeArray(codeboxResult.artifacts).filter((artifact) => objectOrUndefined(artifact) && artifact.payload === undefined);
 }
 
-function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, workload, plan, codeboxResult, status, runtimeTaskRequest, taskRequest }) {
+function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, workload, plan, codeboxResult, status, executionRequest }) {
 	const artifacts = normalizeArray(codeboxResult?.artifacts);
-	const requiredArtifacts = requiredFuzzArtifactStatuses({ artifacts, runtimeTaskRequest, taskRequest, workload });
+	const requiredArtifacts = requiredFuzzArtifactStatuses({ artifacts, executionRequest, workload });
 	const failures = normalizeArray(codeboxResult?.failures || codeboxResult?.metadata?.diagnostics || codeboxResult?.diagnostics);
-	const dispatchIdentity = fuzzDispatchIdentityPassthrough({ codeboxResult, runtimeTaskRequest, taskRequest, workload });
+	const dispatchIdentity = fuzzDispatchIdentityPassthrough({ codeboxResult, executionRequest, workload });
 	return stripUndefined({
 		schema: HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA,
 		version: HOMEBOY_FUZZ_CONTRACT_VERSION,
@@ -823,7 +810,7 @@ function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, 
 			required_artifacts: requiredArtifacts.length > 0 ? requiredArtifacts : undefined,
 			failures: failures.length > 0 ? failures : undefined,
 		}),
-		dispatch: fuzzDispatchIdentity({ codeboxResult, runtimeTaskRequest, taskRequest }),
+		dispatch: fuzzDispatchIdentity({ codeboxResult, executionRequest }),
 		dispatch_identity: dispatchIdentity,
 	});
 }
@@ -921,10 +908,9 @@ function dedupeFuzzArtifacts(artifacts = []) {
 	});
 }
 
-function requiredFuzzArtifactStatuses({ artifacts = [], runtimeTaskRequest = {}, taskRequest = {}, workload = {} } = {}) {
+function requiredFuzzArtifactStatuses({ artifacts = [], executionRequest = {}, workload = {} } = {}) {
 	const declarations = dedupeRequiredArtifactDeclarations([
-		...normalizeArray(runtimeTaskRequest.artifact_declarations),
-		...normalizeArray(taskRequest.artifact_declarations),
+		...normalizeArray(executionRequest.artifact_declarations),
 		...normalizeArray(workload?.artifacts?.expected),
 		...normalizeArray(workload?.artifacts?.required),
 		...normalizeArray(workload?.cases).flatMap((entry) => normalizeArray(entry?.artifacts).filter((artifact) => artifact?.required === true)),
@@ -976,43 +962,33 @@ function fuzzArtifactMatchesDeclaration(artifact = {}, declaration = {}) {
 	);
 }
 
-function fuzzDispatchIdentity({ codeboxResult = {}, runtimeTaskRequest = {}, taskRequest = {} } = {}) {
-	const runtimeTaskResult = objectOrUndefined(codeboxResult.runtime_task_result) || {};
-	const provider = runtimeTaskResult.provider || runtimeTaskRequest.provider;
-	const taskId = runtimeTaskResult.task_id || runtimeTaskRequest.task_id || taskRequest.task_id || codeboxResult.request_id;
-	if (!taskId && !provider?.id && !taskRequest.executor?.runtime) {
+function fuzzDispatchIdentity({ codeboxResult = {}, executionRequest = {} } = {}) {
+	const taskId = executionRequest.task_id || codeboxResult.request_id;
+	if (!taskId && !executionRequest.ability && !executionRequest.metadata?.runtime) {
 		return undefined;
 	}
 	return stripUndefined({
 		task_id: taskId,
-		provider: provider?.id || provider,
-		runtime: taskRequest.executor?.runtime || runtimeTaskRequest.provider_metadata?.wp_codebox?.runtime,
-		ability: taskRequest.executor?.config?.runtime_task?.ability || runtimeTaskRequest.provider_metadata?.wp_codebox?.ability,
+		provider: 'wp-codebox',
+		runtime: executionRequest.metadata?.runtime,
+		ability: executionRequest.ability,
 	});
 }
 
-function fuzzDispatchIdentityPassthrough({ codeboxResult = {}, runtimeTaskRequest = {}, taskRequest = {}, workload = {} } = {}) {
+function fuzzDispatchIdentityPassthrough({ codeboxResult = {}, executionRequest = {}, workload = {} } = {}) {
 	return firstObject(
 		codeboxResult.dispatch_identity,
 		codeboxResult.dispatchIdentity,
 		codeboxResult.metadata?.dispatch_identity,
 		codeboxResult.metadata?.dispatchIdentity,
-		runtimeTaskRequest.dispatch_identity,
-		runtimeTaskRequest.dispatchIdentity,
-		runtimeTaskRequest.metadata?.dispatch_identity,
-		runtimeTaskRequest.metadata?.dispatchIdentity,
-		runtimeTaskRequest.input?.dispatch_identity,
-		runtimeTaskRequest.input?.dispatchIdentity,
-		runtimeTaskRequest.input?.metadata?.dispatch_identity,
-		runtimeTaskRequest.input?.metadata?.dispatchIdentity,
-		taskRequest.dispatch_identity,
-		taskRequest.dispatchIdentity,
-		taskRequest.inputs?.dispatch_identity,
-		taskRequest.inputs?.dispatchIdentity,
-		taskRequest.executor?.config?.runtime_task?.input?.dispatch_identity,
-		taskRequest.executor?.config?.runtime_task?.input?.dispatchIdentity,
-		taskRequest.executor?.config?.runtime_task?.input?.metadata?.dispatch_identity,
-		taskRequest.executor?.config?.runtime_task?.input?.metadata?.dispatchIdentity,
+		executionRequest.dispatch_identity,
+		executionRequest.dispatchIdentity,
+		executionRequest.metadata?.dispatch_identity,
+		executionRequest.metadata?.dispatchIdentity,
+		executionRequest.input?.dispatch_identity,
+		executionRequest.input?.dispatchIdentity,
+		executionRequest.input?.metadata?.dispatch_identity,
+		executionRequest.input?.metadata?.dispatchIdentity,
 		workload.dispatch_identity,
 		workload.dispatchIdentity,
 		workload.metadata?.dispatch_identity,

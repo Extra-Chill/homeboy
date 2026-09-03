@@ -23,7 +23,7 @@ const {
 	normalizeWpCodeboxFuzzSuiteResult,
 	normalizeWpCodeboxDestructiveReadiness,
 	preflightWpCodeboxFuzzCapabilityContract,
-	wpCodeboxFuzzSuiteTaskRequest,
+	wpCodeboxFuzzExecutionRequest,
 } = require('../lib/wp-codebox-fuzz-run');
 const {
 	runWordPressFuzzRunnerResult,
@@ -75,7 +75,7 @@ const destructivePlan = {
 	}],
 };
 
-const destructiveRequest = wpCodeboxFuzzSuiteTaskRequest({
+const destructiveRequest = wpCodeboxFuzzExecutionRequest({
 	taskId: 'destructive-codebox-readiness-gate',
 	runtimeContractManifest,
 	input: {
@@ -191,7 +191,7 @@ assert.equal(passedPreflight.capabilities.capabilities.includes('sandbox-isolati
 assert.equal(passedPreflight.capabilities.capabilities.includes('external-side-effect-guardrail'), true);
 assert.equal(passedPreflight.capabilities.capabilities.includes('artifact-export'), true);
 assert.deepEqual(
-	destructiveRequest.executor.config.runtime_task.input.metadata.disposableSandboxBoundary,
+	destructiveRequest.input.metadata.disposableSandboxBoundary,
 	{ disposable: true, destructivePermission: true, teardown: 'discard', backend: 'wordpress-playground', environment: 'wordpress', hostAccess: 'declared-mounts-only' }
 );
 
@@ -230,7 +230,7 @@ assert.equal(passedDisposableArtifacts.failures.some((failure) => failure.code =
 
 assert.deepEqual(normalizeWpCodeboxDestructiveReadiness(completeReadiness, {
 	request: destructiveRequest,
-	suiteInput: destructiveRequest.executor.config.runtime_task.input,
+	suiteInput: destructiveRequest.input,
 	plan: destructivePlan,
 }).missing_primitives, undefined);
 

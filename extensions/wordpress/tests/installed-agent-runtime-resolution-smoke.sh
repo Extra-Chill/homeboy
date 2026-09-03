@@ -49,18 +49,20 @@ fixture_node() {
 # for contract constants), which is not what an installed-layout packaging test
 # should be gated on.
 for target in \
-    "wp-codebox/lib/wp-codebox-runtime-selection.js" \
+    "wp-codebox/lib/runtime-setup.cjs" \
     "opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs"; do
     resolved="$(fixture_node "${EXTENSION_DIR}/scripts/lib/agent-runtime-paths.cjs" "${target}" 2>&1)"
     expected="$(cd "$(dirname "${HOMEBOY_ROOT}")" && pwd -P)/$(basename "${HOMEBOY_ROOT}")/agent-runtimes/${target}"
     [ "$resolved" = "$expected" ] || fail "Expected installed resolution of ${target} to ${expected}, got: ${resolved}"
 done
 
-# Resolving a shim filename is insufficient: execute the copied runtime shim so
-# its dependency on the copied WordPress extension is proven after installation
-# in the sibling layout that failed before test inventory started in #2690 and
-# must remain the runtime path after the setup bootstrap fix in #2700.
-selection_module="$(fixture_node "${EXTENSION_DIR}/scripts/lib/agent-runtime-paths.cjs" "wp-codebox/lib/wp-codebox-runtime-selection.js" 2>&1)"
+# Resolving a filename is insufficient: execute the copied runtime-selection
+# module so its dependency on the copied WordPress extension is proven after
+# installation in the sibling layout that failed before test inventory started
+# in #2690 and must remain the runtime path after the setup bootstrap fix in
+# #2700. Runtime selection is WordPress-owned, so it loads from the installed
+# extension payload rather than the shared agent-runtime tree.
+selection_module="${EXTENSION_DIR}/lib/wp-codebox-runtime-selection.js"
 selection_output="$(fixture_node - "${selection_module}" <<'NODE' 2>&1
 const selection = require(process.argv[2]);
 if (typeof selection.preflightWpCodeboxCommand !== 'function') process.exit(1);

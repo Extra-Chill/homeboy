@@ -21,33 +21,15 @@ const DEFAULT_KILL_GRACE_MS = 5000;
 /**
  * Internal dependencies
  */
-const {
-	homeboySettings,
-	wpCodeboxCommand,
-} = require('./wp-codebox-resolver');
-const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, selectWpCodeboxRuntime, wpCodeboxCommand: runtimeCommand } = require('./wp-codebox-runtime-selection');
+const { createCodeboxClient } = require('./codebox-client');
+const { homeboySettings, wpCodeboxCommand } = require('./wp-codebox-resolver');
 
 function wpCodeboxBin(options = {}) {
-  const env = { ...process.env, ...(options.env || {}) };
-  const settings = { ...homeboySettings(env), ...(options.settings || {}) };
-  const selected = selectWpCodeboxRuntime({ ...options, env, settings }).selected.path;
-  if (!selected) throw new Error('WP Codebox binary is not configured. Set wp_codebox_bin or HOMEBOY_WP_CODEBOX_BIN.');
-  return selected;
+  return createCodeboxClient(options).publicCliBin();
 }
 
 function canonicalWpCodeboxRuntime(options = {}) {
-  const env = { ...process.env, ...(options.env || {}) };
-  const settings = { ...homeboySettings(env), ...(options.settings || {}) };
-  const runtime = preflightWpCodeboxRuntime({ ...options, env, settings });
-  if (!runtime.ready) {
-    throw new Error(`WP Codebox runtime preflight failed: ${runtime.reason}; required >=${runtime.required_version}, observed ${runtime.selected.version || 'unavailable'} at ${runtime.selected.path || 'no executable'}. Run ${runtime.remediation}.`);
-  }
-  const invocation = runtimeCommand(runtime.selected.path);
-  const command = preflightWpCodeboxCommand([invocation.command, ...invocation.args], { ...options, env, settings });
-  if (!command.ready) {
-    throw new Error(`WP Codebox command preflight failed: ${command.reason}; required >=${command.required_version}, observed ${command.selected.version || 'unavailable'} at ${command.selected.path || 'no executable'}. Run ${command.remediation}.`);
-  }
-  return { ...runtime, invocation };
+  return createCodeboxClient(options).runtime();
 }
 
 function recipeEventName(name, options = {}) {
@@ -384,8 +366,8 @@ module.exports = {
   recipeEventName,
   runWpCodeboxRecipe,
   canonicalWpCodeboxRuntime,
-  wpCodeboxPluginStateStep,
   homeboySettings,
+  wpCodeboxPluginStateStep,
   wpCodeboxBin,
   wpCodeboxCommand,
 };

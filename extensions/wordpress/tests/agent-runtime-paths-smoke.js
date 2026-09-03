@@ -78,9 +78,13 @@ assert.throws(
 	}
 );
 
-// The real checkout resolves the module the PHPUnit adapter needs.
-const selection = requireAgentRuntimeModule('wp-codebox/lib/wp-codebox-runtime-selection.js');
-assert.equal(typeof selection.preflightWpCodeboxCommand, 'function');
+// The real checkout resolves a shared runtime asset. WordPress-owned runtime
+// selection is not one: it ships in this extension's own lib.
+const runtimeSetup = requireAgentRuntimeModule('wp-codebox/lib/runtime-setup.cjs');
+assert.equal(typeof runtimeSetup.setupRuntime, 'function');
+
+const localSelection = require('../lib/wp-codebox-runtime-selection.js');
+assert.equal(typeof localSelection.preflightWpCodeboxCommand, 'function');
 
 fs.rmSync(root, { recursive: true, force: true });
 

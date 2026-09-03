@@ -37,16 +37,9 @@ for missing_sibling in "${GENERATION_ROOT}/extensions/wordpress" "${GENERATION_R
     fi
 done
 
-PREINSTALL_SHIM="${GENERATION_ROOT}/agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js"
-if node -e 'require(process.argv[1])' "${PREINSTALL_SHIM}" 2> "${TMPDIR}/preinstall-shim.err"; then
-    echo "Pre-install runtime shim unexpectedly resolved without a WordPress sibling" >&2
-    exit 1
-fi
-if ! grep -q 'requires the installed WordPress extension' "${TMPDIR}/preinstall-shim.err"; then
-    echo "Expected pre-install runtime shim failure to name the missing WordPress sibling" >&2
-    cat "${TMPDIR}/preinstall-shim.err" >&2
-    exit 1
-fi
+# Runtime selection is WordPress-owned and ships in the extension's own lib, so
+# no shared pre-install shim stands in for it. The sibling assertions above are
+# the remaining pre-install invariant.
 
 cat > "${EXTENSION_DIR}/scripts/build/persist-wp-codebox-overrides.mjs" <<'NODE'
 #!/usr/bin/env node

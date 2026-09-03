@@ -797,21 +797,9 @@ Callers provide the ability, ability input, backend/provider/runtime selection,
 fanout/concurrency metadata, expected artifacts, timeout, and optional DLA URL
 shorthand; Homeboy core only sees generic durable agent-task plans.
 
-`../agent-runtimes/wp-codebox` contains shared direct-runtime adapters for
-WP Codebox artifacts, readiness, selection, and public runtime contracts. It is
-not registered as a Homeboy agent-task provider.
-
-Reach that tree through `scripts/lib/agent-runtime-paths.cjs`, never through a
-fixed relative path. `agent-runtimes` is a shared asset declared in
-`homeboy-extension-root.json`, and Homeboy installs it at `<homeboy>/agent-runtimes`
-— a sibling of `<homeboy>/extensions`, one level further from this extension than
-a monorepo checkout puts it. A linked dev install hides the difference because
-Node resolves a symlinked script back to the checkout, so a hardcoded
-`../../../agent-runtimes/...` passes locally and fails on every copied install.
-The resolver probes both layouts and reports the probed paths plus a reinstall
-remediation when the shared tree is absent, and `scripts/build/setup.sh` verifies
-the runtime files this extension's entrypoints need so an incomplete payload
-fails at setup rather than at shard bootstrap.
+Direct WP Codebox integration lives in this extension: its client resolves,
+preflights, and invokes the public runtime CLI while consuming public runtime
+contracts and artifact references. It is not a Homeboy agent-task provider.
 
 WordPress fuzz runtime actions use
 `homeboy/wordpress-fuzz-runtime-workload-operation/v1` descriptors. Mapping those

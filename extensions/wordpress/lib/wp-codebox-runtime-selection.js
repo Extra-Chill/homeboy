@@ -375,6 +375,21 @@ function resolveWpCodeboxIdentity(options = {}) {
   return { bin: selection.path, invocation: wpCodeboxCommand(selection.path), selectionSource: selection.source };
 }
 
+function resolveReadyWpCodeboxRuntime(options = {}) {
+  const env = { ...process.env, ...(options.env || {}) };
+  const settings = { ...settingsFromEnv(env), ...(options.settings || {}) };
+  const runtime = preflightWpCodeboxRuntime({ ...options, env, settings });
+  if (!runtime.ready) {
+    throw new Error(`WP Codebox runtime preflight failed: ${runtime.reason}; required >=${runtime.required_version}, observed ${runtime.selected.version || 'unavailable'} at ${runtime.selected.path || 'no executable'}. Run ${runtime.remediation}.`);
+  }
+  const invocation = wpCodeboxCommand(runtime.selected.path);
+  const command = preflightWpCodeboxCommand([invocation.command, ...invocation.args], { ...options, env, settings });
+  if (!command.ready) {
+    throw new Error(`WP Codebox command preflight failed: ${command.reason}; required >=${command.required_version}, observed ${command.selected.version || 'unavailable'} at ${command.selected.path || 'no executable'}. Run ${command.remediation}.`);
+  }
+  return { ...runtime, invocation };
+}
+
 module.exports = {
   REQUIRED_WP_CODEBOX_VERSION,
   BROWSER_PREVIEW_SCHEMA,
@@ -387,7 +402,8 @@ module.exports = {
 	preflightWpCodeboxCommand,
 	preflightWpCodeboxRuntime,
 	probeWpCodeboxRuntimeDescriptor,
-  selectWpCodeboxRuntime,
+	selectWpCodeboxRuntime,
 	resolveWpCodeboxIdentity,
-  wpCodeboxCommand,
+	resolveReadyWpCodeboxRuntime,
+	wpCodeboxCommand,
 };

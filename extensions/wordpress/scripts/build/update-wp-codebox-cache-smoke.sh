@@ -218,7 +218,7 @@ set -e
 [ "$CONCURRENT_SHELL_STATUS" -ne 0 ] && [[ "$CONCURRENT_SHELL_OUTPUT" == *"cache is updating"* ]] || { echo "Shell resolver did not fail as updating: $CONCURRENT_SHELL_OUTPUT" >&2; exit 1; }
 node - "$(cd "${SCRIPT_DIR}/../.." && pwd)" "$(dirname "$CACHE_DIR")" "${STALE_PATH}" <<'NODE'
 const path = require('node:path');
-const { preflightWpCodeboxRuntime } = require(path.join(process.argv[2], '..', 'agent-runtimes/wp-codebox/lib/wp-codebox-runtime-selection.js'));
+const { preflightWpCodeboxRuntime } = require(path.join(process.argv[2], 'lib', 'wp-codebox-runtime-selection.js'));
 const result = preflightWpCodeboxRuntime({ env: { ...process.env, HOMEBOY_WP_CODEBOX_INSTALL_DIR: process.argv[3], PATH: `${process.argv[4]}:${process.env.PATH}` } });
 if (result.reason !== 'wp_codebox_managed_updating') process.exit(1);
 NODE

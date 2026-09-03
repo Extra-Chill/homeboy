@@ -11,7 +11,7 @@ process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= require('node:path').join(
 	'wp-codebox-core-runtime-contract.cjs'
 );
 
-const { codeboxRuntimeProfilePayload } = require('../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
+const { codeboxRuntimeProfilePayload } = require('../lib/wp-codebox-runtime-profile');
 
 const payload = codeboxRuntimeProfilePayload({
 	runtimeRequirements: {
