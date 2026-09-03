@@ -2,10 +2,10 @@ use super::super::dispatch::{
     compact_exec_command_run, raw_exec_command_run, render_compact_exec_output,
 };
 use super::super::exec::{
-    exec_with_hydration, exec_workspace_context, prepare_runner_exec_command,
-    prepare_runner_exec_env, prepare_runner_exec_secret_env_plan, read_bounded,
-    read_runner_exec_script, read_runner_exec_script_from_reader, should_print_handoff,
-    validate_runner_exec_invocation_shape, validate_runner_exec_public_env,
+    exec_with_hydration, exec_with_hydration_with_workspace_sync_timeout, exec_workspace_context,
+    prepare_runner_exec_command, prepare_runner_exec_env, prepare_runner_exec_secret_env_plan,
+    read_bounded, read_runner_exec_script, read_runner_exec_script_from_reader,
+    should_print_handoff, validate_runner_exec_invocation_shape, validate_runner_exec_public_env,
     RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 
@@ -145,7 +145,7 @@ fn synced_node_workload_receives_runner_extension_environment() {
             None,
             None,
             false,
-            None,
+            Some("synced-node-run".to_string()),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -162,6 +162,16 @@ fn synced_node_workload_receives_runner_extension_environment() {
 
         assert_eq!(code, 0, "{}", output.stderr);
         assert_eq!(output.stdout, "");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("synced-node-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(
+            run.cwd.as_deref(),
+            run.metadata_json["remote_workspace"].as_str(),
+            "the durable run must identify the materialized snapshot, not the configured root"
+        );
     });
 }
 
@@ -524,6 +534,235 @@ fn sync_workspace_exec_rejects_explicit_cwd() {
     assert!(err
         .to_string()
         .contains("--cwd and --sync-workspace are mutually exclusive"));
+}
+
+#[test]
+fn sync_workspace_failure_is_durably_attributed_before_runner_handoff() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        runner::create(
+            &format!(
+                r#"{{"id":"workspace-sync-failure","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let missing_workspace = runner_root.path().join("missing-workspace");
+
+        let error = exec_with_hydration(
+            "workspace-sync-failure",
+            None,
+            Some(missing_workspace.display().to_string()),
+            None,
+            false,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            Some("workspace-sync-failure-run".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+            vec!["pwd".to_string()],
+            Vec::new(),
+        )
+        .expect_err("missing workspace must fail before runner handoff");
+
+        assert!(error.message.contains("workspace sync path"));
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("workspace-sync-failure-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(run.metadata_json["runner_exec_phase"], "workspace_sync");
+        assert_eq!(
+            run.metadata_json["runner_pre_handoff_failure"]["phase"],
+            "workspace_sync"
+        );
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
+fn workspace_sync_timeout_terminalizes_stalled_workspace_before_handoff() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("source.txt"), "source").expect("workspace source");
+        runner::create(
+            &format!(
+                r#"{{"id":"bounded-workspace-sync","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let error = exec_with_hydration_with_workspace_sync_timeout(
+            "bounded-workspace-sync",
+            None,
+            Some(workspace.path().display().to_string()),
+            None,
+            false,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            Some("bounded-workspace-sync-run".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+            vec!["pwd".to_string()],
+            Vec::new(),
+            std::time::Duration::ZERO,
+        )
+        .expect_err("expired pre-command deadline must stop workspace sync");
+
+        assert_eq!(error.code.as_str(), "runner.lab_transport_failure");
+        assert_eq!(error.details["workspace_sync"]["timed_out"], true);
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("bounded-workspace-sync-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(run.metadata_json["runner_exec_phase"], "workspace_sync");
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
+fn hydration_failure_is_durably_attributed_before_runner_handoff() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("homeboy-deps.json"),
+            r#"{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[]}"#,
+        )
+        .expect("dependency manifest");
+        runner::create(
+            &format!(
+                r#"{{"id":"hydration-failure","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let error = exec_with_hydration(
+            "hydration-failure",
+            None,
+            Some(workspace.path().display().to_string()),
+            None,
+            true,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            Some("hydration-failure-run".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+            vec!["pwd".to_string()],
+            Vec::new(),
+        )
+        .expect_err("failed dependency hydration must fail before runner handoff");
+
+        assert!(!error.message.is_empty());
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("hydration-failure-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(
+            run.metadata_json["runner_pre_handoff_failure"]["phase"],
+            "dependency_hydration"
+        );
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
+fn hydration_prerequisite_failure_terminalizes_the_durable_run() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        runner::create(
+            &format!(
+                r#"{{"id":"hydration-prerequisite-failure","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let error = exec_with_hydration(
+            "hydration-prerequisite-failure",
+            None,
+            None,
+            None,
+            true,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            Some("hydration-prerequisite-failure-run".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+            vec!["pwd".to_string()],
+            Vec::new(),
+        )
+        .expect_err("hydration requires a synchronized workspace");
+
+        assert!(error.message.contains("--hydrate-deps requires"));
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("hydration-prerequisite-failure-run")
+            .expect("read run")
+            .expect("persisted run");
+        assert_eq!(run.status, "fail");
+        assert_eq!(
+            run.metadata_json["runner_exec_phase"],
+            "dependency_hydration"
+        );
+        assert!(run.metadata_json.get("runner_job_id").is_none());
+    });
 }
 
 #[test]

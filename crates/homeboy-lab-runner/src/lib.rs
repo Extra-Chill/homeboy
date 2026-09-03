@@ -461,8 +461,8 @@ pub use workspace::reap_run_workspace;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,
     prune_workspaces, pull_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
-    sync_workspace, update_workspace, verify_workspace_ref_hydration_source, workspace_snapshots,
-    ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
+    sync_workspace, sync_workspace_before, update_workspace, verify_workspace_ref_hydration_source,
+    workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,

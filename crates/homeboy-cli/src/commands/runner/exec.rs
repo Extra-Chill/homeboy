@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use homeboy::core::engine::shell;
 use homeboy::core::secret_env_plan::SecretEnvPlan;
@@ -39,6 +40,61 @@ pub(super) fn exec_with_hydration(
     raw: bool,
     command: Vec<String>,
     extension_env_providers: Vec<String>,
+) -> CmdResult<RunnerExecOutput> {
+    exec_with_hydration_with_workspace_sync_timeout(
+        runner_id,
+        cwd,
+        sync_workspace,
+        workspace_ref,
+        hydrate_deps,
+        project_id,
+        allow_diagnostic_ssh,
+        capture_patch,
+        require_paths,
+        script_file,
+        env,
+        secret_env,
+        secret_env_plan,
+        secret_env_plan_file,
+        dry_run,
+        run_id,
+        artifact_outputs,
+        artifact_dir_outputs,
+        summary_outputs,
+        read_only_artifact,
+        raw,
+        command,
+        extension_env_providers,
+        Duration::from_secs(240),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn exec_with_hydration_with_workspace_sync_timeout(
+    runner_id: &str,
+    cwd: Option<String>,
+    sync_workspace: Option<String>,
+    workspace_ref: Option<String>,
+    hydrate_deps: bool,
+    project_id: Option<String>,
+    allow_diagnostic_ssh: bool,
+    capture_patch: bool,
+    require_paths: Vec<String>,
+    script_file: Option<String>,
+    env: Vec<String>,
+    secret_env: Vec<String>,
+    secret_env_plan: Option<String>,
+    secret_env_plan_file: Option<String>,
+    dry_run: bool,
+    run_id: Option<String>,
+    artifact_outputs: Vec<String>,
+    artifact_dir_outputs: Vec<String>,
+    summary_outputs: Vec<String>,
+    read_only_artifact: bool,
+    raw: bool,
+    command: Vec<String>,
+    extension_env_providers: Vec<String>,
+    workspace_sync_timeout: Duration,
 ) -> CmdResult<RunnerExecOutput> {
     validate_runner_exec_invocation_shape(script_file.as_deref(), &command)?;
     let script = script_file
@@ -92,39 +148,10 @@ pub(super) fn exec_with_hydration(
 
     let validated_run_id =
         validate_runner_exec_run_id(persisted_runner_exec_run_id(run_id, has_declared_outputs))?;
-    let (cwd, source_snapshot, hydration_source) = exec_workspace_context(
-        runner_id,
-        cwd,
-        sync_workspace,
-        workspace_ref,
-        hydrate_deps,
-        false,
-    )?;
-    if hydrate_deps {
-        let local_path = hydration_source.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "hydrate_deps",
-                "--hydrate-deps requires --sync-workspace or --workspace-ref",
-                None,
-                None,
-            )
-        })?;
-        let remote_path = cwd.as_deref().ok_or_else(|| {
-            Error::internal_unexpected("synced runner workspace is missing its remote path")
-        })?;
-        homeboy_lab_runner::hydrate_runner_workspace_dependencies(
-            runner_id,
-            &local_path,
-            remote_path,
-        )?;
-    }
-    // One `runner exec` invocation is one unit of work over one installation.
-    // The eleven durable writes below used to open eleven independent ambient
-    // stores, so the run this command created and the run it finished were only
-    // the same row by coincidence of environment (#7505).
-    // Resolved only when there is a run to record against. `PathRoots` is
-    // fallible, and an invocation without `--run-id` writes nothing durable, so
-    // resolving unconditionally would fail commands that never needed a home.
+    let has_workspace_sync = sync_workspace.is_some();
+    // Workspace synchronization is controller-side work. Create its durable
+    // owner before it begins so a stalled transfer is visible and terminalized
+    // without claiming that a runner job was ever accepted.
     let lifecycle_store = validated_run_id
         .as_deref()
         .map(|_| {
@@ -132,6 +159,111 @@ pub(super) fn exec_with_hydration(
             )
         })
         .transpose()?;
+    if let (true, Some(run_id), Some(lifecycle_store)) = (
+        has_workspace_sync,
+        validated_run_id.as_deref(),
+        lifecycle_store.as_ref(),
+    ) {
+        let runner_config = runner::load(runner_id)?;
+        let remote_cwd = cwd
+            .as_deref()
+            .or(runner_config.workspace_root.as_deref())
+            .unwrap_or(".");
+        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run_in_store(
+            lifecycle_store,
+            run_id,
+            runner_id,
+            remote_cwd,
+            &prepared_command,
+        )?;
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
+            run_id,
+            "workspace_sync",
+        )?;
+    }
+    let deadline = has_workspace_sync.then(|| Instant::now() + workspace_sync_timeout);
+    let (cwd, source_snapshot, hydration_source) = exec_workspace_context_with_deadline(
+        runner_id,
+        cwd,
+        sync_workspace,
+        workspace_ref,
+        hydrate_deps,
+        false,
+        deadline,
+    )
+    .map_err(|error| {
+        if has_workspace_sync {
+            if let Some(run_id) = validated_run_id.as_deref() {
+                let _ =
+                    homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
+                        run_id,
+                        "workspace_sync",
+                        "workspace_sync",
+                        false,
+                        &error,
+                    );
+            }
+        }
+        error
+    })?;
+    if hydrate_deps {
+        if let (Some(run_id), Some(lifecycle_store)) =
+            (validated_run_id.as_deref(), lifecycle_store.as_ref())
+        {
+            if !has_workspace_sync {
+                let runner_config = runner::load(runner_id)?;
+                let remote_cwd = cwd
+                    .as_deref()
+                    .or(runner_config.workspace_root.as_deref())
+                    .unwrap_or(".");
+                homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run_in_store(
+                    lifecycle_store,
+                    run_id,
+                    runner_id,
+                    remote_cwd,
+                    &prepared_command,
+                )?;
+            }
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_pre_handoff_phase(
+                run_id,
+                "dependency_hydration",
+            )?;
+        }
+        (|| {
+            let local_path = hydration_source.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "hydrate_deps",
+                    "--hydrate-deps requires --sync-workspace or --workspace-ref",
+                    None,
+                    None,
+                )
+            })?;
+            let remote_path = cwd.as_deref().ok_or_else(|| {
+                Error::internal_unexpected("synced runner workspace is missing its remote path")
+            })?;
+            homeboy_lab_runner::hydrate_runner_workspace_dependencies(
+                runner_id,
+                &local_path,
+                remote_path,
+            )
+        })()
+        .map_err(|error| {
+            if let Some(run_id) = validated_run_id.as_deref() {
+                let _ =
+                    homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
+                        run_id,
+                        "dependency_hydration",
+                        "dependency_hydration",
+                        false,
+                        &error,
+                    );
+            }
+            error
+        })?;
+    }
+    // One `runner exec` invocation is one unit of work over one installation.
+    // The store was resolved before workspace synchronization, which can stall
+    // before a runner job exists; every later write addresses that same run.
     if let (Some(run_id), Some(lifecycle_store)) =
         (validated_run_id.as_deref(), lifecycle_store.as_ref())
     {
@@ -372,6 +504,26 @@ pub(super) fn exec_workspace_context(
     verify_hydration_source: bool,
     dry_run: bool,
 ) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>, Option<String>)> {
+    exec_workspace_context_with_deadline(
+        runner_id,
+        cwd,
+        sync_workspace,
+        workspace_ref,
+        verify_hydration_source,
+        dry_run,
+        None,
+    )
+}
+
+fn exec_workspace_context_with_deadline(
+    runner_id: &str,
+    cwd: Option<String>,
+    sync_workspace: Option<String>,
+    workspace_ref: Option<String>,
+    verify_hydration_source: bool,
+    dry_run: bool,
+    deadline: Option<Instant>,
+) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>, Option<String>)> {
     if let Some(workspace_ref) = workspace_ref {
         if cwd.is_some() || sync_workspace.is_some() {
             return Err(Error::validation_invalid_argument(
@@ -412,19 +564,21 @@ pub(super) fn exec_workspace_context(
         return Ok((None, None, Some(local_path)));
     }
 
-    let (synced, _) = runner::sync_workspace(
-        runner_id,
-        runner::RunnerWorkspaceSyncOptions {
-            path: local_path,
-            mode: runner::RunnerWorkspaceSyncMode::Snapshot,
-            controller_routed_git: false,
-            changed_since_base: None,
-            git_fetch_refs: Vec::new(),
-            snapshot_includes: Vec::new(),
-            allow_dirty_lab_workspace: false,
-            run_isolation_token: None,
-        },
-    )?;
+    let options = runner::RunnerWorkspaceSyncOptions {
+        path: local_path,
+        mode: runner::RunnerWorkspaceSyncMode::Snapshot,
+        controller_routed_git: false,
+        changed_since_base: None,
+        git_fetch_refs: Vec::new(),
+        snapshot_includes: Vec::new(),
+        allow_dirty_lab_workspace: false,
+        run_isolation_token: None,
+    };
+    let (synced, _) = (if let Some(deadline) = deadline {
+        runner::sync_workspace_before(runner_id, options, deadline)
+    } else {
+        runner::sync_workspace(runner_id, options)
+    })?;
     let mut source_snapshot = homeboy::core::source_snapshot::collect_local(
         runner_id,
         Path::new(&synced.local_path),
