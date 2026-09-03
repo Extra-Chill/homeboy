@@ -373,6 +373,52 @@ pub fn materialize_rig_spec_with_default_source_root(path: &Path) -> Result<serd
     materialize_rig_spec(path, &default_materialize_source_root(path))
 }
 
+/// Materialize a rig into the shared, versioned resource contract.
+pub fn materialize_rig_resource_with_default_source_root(
+    path: &Path,
+) -> Result<homeboy_rig_contract::MaterializedRigResource> {
+    materialize_rig_resource(path, &default_materialize_source_root(path))
+}
+
+/// Materialize a rig into the shared, versioned resource contract.
+///
+/// The digest is computed over canonical, inheritance-resolved rig JSON so
+/// object key order cannot affect the resource identity.
+pub fn materialize_rig_resource(
+    path: &Path,
+    source_root: &Path,
+) -> Result<homeboy_rig_contract::MaterializedRigResource> {
+    let rig = materialize_rig_spec(path, source_root)?;
+    let rig_id = rig
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "id",
+                "Materialized rig must declare a non-empty id",
+                Some(path.to_string_lossy().to_string()),
+                None,
+            )
+        })?
+        .to_string();
+    let canonical =
+        homeboy_engine_primitives::canonical_json::canonical_json_bytes(&rig).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("canonicalize materialized rig".into()),
+            )
+        })?;
+    let digest = format!("sha256:{:x}", Sha256::digest(canonical));
+
+    Ok(homeboy_rig_contract::MaterializedRigResource {
+        schema: homeboy_rig_contract::MATERIALIZED_RIG_RESOURCE_SCHEMA.to_string(),
+        rig_id,
+        materialized_rig_json_sha256: digest,
+        rig,
+    })
+}
+
 /// Read and normalize a rig spec, resolving its local `extends` chain.
 ///
 /// `source_root` bounds inherited template paths. The result contains neither

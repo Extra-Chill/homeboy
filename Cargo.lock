@@ -1240,6 +1240,7 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-paths",
  "homeboy-product-identity",
+ "homeboy-rig-contract",
  "homeboy-runner-contract",
  "homeboy-stack",
  "libc",
@@ -1248,6 +1249,14 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
+]
+
+[[package]]
+name = "homeboy-rig-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
