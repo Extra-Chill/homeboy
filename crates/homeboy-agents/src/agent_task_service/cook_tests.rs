@@ -702,7 +702,7 @@ fn malformed_continuation_does_not_head_of_line_block_run_next() {
             result.value.expect("eligible aggregate").plan_id,
             "run-next-after-malformed-continuation"
         );
-        assert!(queue.join("000-malformed.failed").is_file());
+        assert!(queue.join("000-malformed.malformed").is_file());
     });
 }
 
