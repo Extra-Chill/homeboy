@@ -34,8 +34,8 @@ use homeboy::runner::runners::{
 pub use homeboy_command_contract::cleanup::{
     runtime_tmp_commands, CleanupArgs, CleanupArtifactsArgs, CleanupArtifactsSortArg,
     CleanupCategoryArg, CleanupCommand, CleanupInventoryCategoryMetadata,
-    CleanupRetainedStorageArgs, CleanupWorktreesArgs, LEAKED_TEST_HOMES_METADATA,
-    RELEASE_ARTIFACTS_METADATA, RUNNER_DOWNLOADS_METADATA,
+    CleanupRetainedStorageArgs, LEAKED_TEST_HOMES_METADATA, RELEASE_ARTIFACTS_METADATA,
+    RUNNER_DOWNLOADS_METADATA,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -137,8 +137,7 @@ struct AutomaticRetentionControllerOutput {
 /// the scan limit; the newest release of every repository is structurally
 /// unreachable; and everything it can remove is a local copy of bytes already
 /// published to an immutable GitHub Release tag.
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 12] = [
-    CleanupCategoryArg::WorktreeProviders,
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 11] = [
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
     CleanupCategoryArg::OrphanedArtifactBytes,
