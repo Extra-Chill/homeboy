@@ -4281,6 +4281,38 @@ fn cancellation_wins_the_retry_pre_execution_failure_race() {
 }
 
 #[test]
+fn controller_failure_cannot_terminalize_a_successful_aggregate() {
+    with_isolated_home(|_| {
+        let run_id = "controller-failure-terminalization";
+        let plan = test_plan();
+        let lifecycle_store = test_lifecycle_store();
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        record_cook_controller_failure_in_store(
+            &lifecycle_store,
+            run_id,
+            &json!({ "code": "controller_failure", "message": "artifact mirror missing" }),
+        )
+        .expect("persist controller failure");
+        let mut record = lifecycle_store.read_record(run_id).expect("read record");
+
+        let terminal = record_aggregate_in_store(
+            &lifecycle_store,
+            &mut record,
+            &plan,
+            &succeeded_aggregate(&plan),
+        )
+        .expect("retain aggregate evidence");
+
+        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert!(terminal.aggregate_path.is_some());
+        assert_eq!(
+            terminal.metadata["cook_controller_failure"]["code"],
+            "controller_failure"
+        );
+    });
+}
+
+#[test]
 fn snapshot_fence_transition_preserves_cancelled_terminal_winner() {
     with_isolated_home(|_| {
         let run_id = "snapshot-fence-cancelled";

@@ -3830,6 +3830,7 @@ pub(crate) fn dispatch_cook_follow_up(
         // Refresh the durable execution attestation before this plan can be
         // persisted or handed to a local or detached provider.
         bind_dispatch_workspace_attestations(&mut follow_up_plan)?;
+        ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
         lifecycle_store.submit_plan_with_current_runtime(&follow_up_plan, &next_run_id)?;
         lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
         if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
@@ -3848,6 +3849,7 @@ pub(crate) fn dispatch_cook_follow_up(
             // this baseline-bound workspace contract, and so the run record the
             // claim is written onto exists.
             let operation_key = retry_dispatch_operation_key(&next_run_id);
+            ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
             match lifecycle_store.claim_cook_operation(
                 &next_run_id,
                 &operation_key,
@@ -3873,6 +3875,7 @@ pub(crate) fn dispatch_cook_follow_up(
                 | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
             }
         } else {
+            ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
             run_loaded_plan_with_derived_cook_baseline_in_store(
                 lifecycle_store,
                 follow_up_plan,
@@ -3908,6 +3911,27 @@ pub(crate) fn dispatch_cook_follow_up(
     remediation_category_usage.add(reservation);
     Ok(CookFollowUpDispatch::Dispatched {
         run_id: next_run_id,
+    })
+}
+
+pub(crate) fn ensure_cook_attempt_admitted(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<()> {
+    lifecycle_store.with_config_lock(|| {
+        if lifecycle_store
+            .read_cook_index(cook_id)
+            .ok()
+            .is_some_and(|index| index.cancellation_fence.is_some())
+        {
+            return Err(Error::validation_invalid_argument(
+                "cook_id",
+                "Cook mission was cancelled; retries and follow-ups are not admitted",
+                Some(cook_id.to_string()),
+                None,
+            ));
+        }
+        Ok(())
     })
 }
 

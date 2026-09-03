@@ -41,6 +41,23 @@ pub fn cancel_run_in_store(
     reason: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
     let requested_run_id = sanitize_run_id(run_id);
+    // The Cook index is the authority every later attempt registration shares.
+    // Fence it before resolving the current alias so a retry cannot become the
+    // new mission outcome between cancellation passes.
+    lifecycle_store.with_config_lock(|| {
+        lifecycle_store.update_cook_index(&requested_run_id, |index| {
+            if index.cancellation_fence.is_some() {
+                return false;
+            }
+            index.cancellation_fence = Some(json!({
+                "state": "cancelled",
+                "cancelled_at": now_timestamp(),
+                "reason": reason.unwrap_or("cancel requested"),
+            }));
+            true
+        })?;
+        Ok(())
+    })?;
     let mut resolved_run_id = resolve_run_id_in_store(lifecycle_store, &requested_run_id)?;
     // Index publication is independent from parent cancellation. Re-resolve
     // after each mutation until the Cook alias is stable, so every attempt that
@@ -1101,6 +1118,60 @@ mod tests {
                 homeboy_core::ErrorCode::ValidationInvalidArgument
             );
             assert!(!cook_index_exists(cook_id).expect("inspect absent Cook index"));
+        });
+    }
+
+    #[test]
+    fn cancellation_fence_preserves_candidate_evidence_and_rejects_retry_materialization() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-cancellation-fence";
+            let first_run_id = "cook-cancellation-fence-attempt-1";
+            let second_run_id = "cook-cancellation-fence-attempt-2";
+            let plan = AgentTaskPlan::new("cancellation-fence", Vec::new());
+            submit_plan(&plan, Some(first_run_id)).expect("submit first attempt");
+            record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, first_run_id)
+                .expect("index first attempt");
+            test_lifecycle_store()
+                .update_cook_index(cook_id, |index| {
+                    index.latest_substantive_candidate =
+                        Some(AgentTaskCookLatestSubstantiveCandidate {
+                            schema: "test".to_string(),
+                            run_id: first_run_id.to_string(),
+                            attempt: 1,
+                            task_id: "task".to_string(),
+                            artifact_id: "patch".to_string(),
+                            artifact_kind: "patch".to_string(),
+                            artifact_sha256: None,
+                            artifact_size_bytes: None,
+                            integrity: json!({}),
+                            promotion_provenance: None,
+                            destination_provenance: None,
+                            recorded_at: now_timestamp(),
+                        });
+                    true
+                })
+                .expect("persist retained candidate");
+
+            cancel_run(cook_id, Some("operator cancellation")).expect("cancel Cook mission");
+            submit_plan(&plan, Some(second_run_id)).expect("submit raced retry");
+            let error =
+                record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 2, second_run_id)
+                    .expect_err("cancelled mission rejects retry materialization");
+
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
+            let index = cook_index_in_store(&test_lifecycle_store(), cook_id).expect("Cook index");
+            assert_eq!(
+                index.cancellation_fence.as_ref().unwrap()["state"],
+                "cancelled"
+            );
+            assert_eq!(
+                index.latest_substantive_candidate.as_ref().unwrap().run_id,
+                first_run_id,
+                "cancellation retains earlier candidate evidence"
+            );
         });
     }
 

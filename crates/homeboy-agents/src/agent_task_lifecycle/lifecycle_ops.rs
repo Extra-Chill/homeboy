@@ -6726,6 +6726,18 @@ pub(crate) fn record_cook_attempt_locked_in_store(
         ));
     }
     let recorded_at = now_timestamp();
+    if lifecycle_store
+        .read_cook_index(&cook_id)
+        .ok()
+        .is_some_and(|index| index.cancellation_fence.is_some())
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            "Cook mission was cancelled before this attempt could materialize",
+            Some(cook_id),
+            None,
+        ));
+    }
     let metadata = record.ensure_metadata_object();
     metadata.insert("cook_id".to_string(), json!(&cook_id));
     metadata.insert("cook_attempt".to_string(), json!(attempt));
@@ -7034,6 +7046,7 @@ pub fn select_cook_candidate_from_attempts(
             cook_id: cook_id.to_string(),
             latest_run_id,
             latest_substantive_candidate: None,
+            cancellation_fence: None,
             attempts,
         },
         None,
@@ -7160,7 +7173,7 @@ pub(crate) fn update_cook_candidate_after_completion_in_store(
         return Ok(());
     };
     lifecycle_store.update_cook_index(cook_id, |index| {
-        replace_latest_substantive_candidate(index, candidate)
+        index.cancellation_fence.is_none() && replace_latest_substantive_candidate(index, candidate)
     })?;
     Ok(())
 }
