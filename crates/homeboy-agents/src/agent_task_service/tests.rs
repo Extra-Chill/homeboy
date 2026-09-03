@@ -877,6 +877,81 @@ fn service_persists_timed_out_run_record_and_evidence_refs() {
 }
 
 #[test]
+fn persisted_timeout_candidate_is_admitted_for_continuation() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        create_git_repo(workspace.path());
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.root = Some(workspace.path().display().to_string());
+        plan.tasks[0].limits.timeout_ms = Some(1);
+
+        let result = run_loaded_plan(
+            plan,
+            Some("service-timeout-candidate"),
+            Arc::new(TimeoutAfterWritingPatchExecutor),
+        )
+        .expect("timeout candidate run completed");
+        assert_eq!(result.exit_code, 0);
+
+        let lifecycle_store = test_lifecycle_store();
+        let aggregate = lifecycle_store
+            .read_aggregate("service-timeout-candidate")
+            .expect("persisted aggregate");
+        let outcome = aggregate.outcomes.first().expect("timeout outcome");
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        let artifact = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "patch")
+            .expect("persisted timeout patch");
+        for key in [
+            "run_id",
+            "task_id",
+            "producer_attempt",
+            "base_ref",
+            "provider_backend",
+            "repository_identity",
+            "workspace_identity",
+        ] {
+            assert!(
+                artifact.metadata.get(key).is_some_and(|value| {
+                    value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
+                }),
+                "persisted timeout patch is missing {key}: {:#?}",
+                artifact.metadata
+            );
+        }
+        assert_eq!(artifact.metadata["run_id"], "service-timeout-candidate");
+        assert_eq!(artifact.metadata["task_id"], outcome.task_id);
+
+        let source = serde_json::to_string(&aggregate).expect("serialize persisted aggregate");
+        let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
+            &crate::agent_task_promotion::AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some("service-timeout-candidate".to_string()),
+                source_path: Some(lifecycle_store.aggregate_path("service-timeout-candidate")),
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "timeout-continuation-target".to_string(),
+                task_id: Some(outcome.task_id.clone()),
+                artifact_id: Some(artifact.id.clone()),
+                dry_run: false,
+                gates: crate::agent_task_gate::VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &lifecycle_store
+                .open_observation_initialized()
+                .expect("observation store"),
+        )
+        .expect("persisted timeout candidate is eligible for cook continuation");
+        assert_eq!(admitted.id, artifact.id);
+    });
+}
+
+#[test]
 fn service_normalizes_resolved_component_worktree_plan() {
     let mut plan = test_plan();
     plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
@@ -3623,6 +3698,30 @@ impl AgentTaskExecutorAdapter for TimeoutExecutor {
                 message: "provider exceeded timeout_ms=50".to_string(),
                 data: serde_json::json!({ "timeout_ms": 50 }),
             }],
+            ..Default::default()
+        }
+    }
+}
+
+struct TimeoutAfterWritingPatchExecutor;
+
+impl AgentTaskExecutorAdapter for TimeoutAfterWritingPatchExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let workspace = request.workspace.root.expect("attempt workspace");
+        std::fs::write(
+            Path::new(&workspace).join("timeout-candidate.txt"),
+            "recovered after timeout\n",
+        )
+        .expect("write candidate");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        AgentTaskOutcome {
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("provider completed after its deadline".to_string()),
             ..Default::default()
         }
     }

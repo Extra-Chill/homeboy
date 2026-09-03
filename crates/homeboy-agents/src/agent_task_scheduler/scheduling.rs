@@ -762,10 +762,9 @@ impl AgentTaskScheduleSupport {
                             // longer race its writes to the isolated attempt workspace.
                             Self::reconcile_timeout_artifacts(
                                 &mut recovered,
-                                &task.request,
+                                &task,
                                 "deferred_cleanup",
                             );
-                            super::finalize_candidate_artifacts(&mut recovered, &task);
                         }
                         let cleanup = harvest.and_then(|_| {
                             task._attempt_workspace
@@ -843,11 +842,7 @@ impl AgentTaskScheduleSupport {
             }
 
             if outcome.status == AgentTaskOutcomeStatus::Timeout {
-                Self::reconcile_timeout_artifacts(
-                    &mut outcome,
-                    &running.request,
-                    "provider_timeout",
-                );
+                Self::reconcile_timeout_artifacts(&mut outcome, running, "provider_timeout");
             }
         }
         outcome
@@ -1124,10 +1119,10 @@ impl AgentTaskScheduleSupport {
 
     pub(super) fn reconcile_timeout_artifacts(
         outcome: &mut AgentTaskOutcome,
-        request: &AgentTaskRequest,
+        running: &RunningTask,
         timeout_kind: &str,
     ) {
-        let discovery = TimeoutArtifactDiscovery::discover(request);
+        let discovery = TimeoutArtifactDiscovery::discover(&running.request);
         let has_runtime_evidence = discovery.has_runtime_evidence();
         outcome.diagnostics.extend(discovery.diagnostics);
         if !has_runtime_evidence {
@@ -1152,12 +1147,17 @@ impl AgentTaskScheduleSupport {
         // Required-artifact validation runs before timeout discovery. Re-run its
         // materialization after merging late evidence so a captured patch cannot
         // coexist with a false missing-artifact diagnosis.
-        Self::normalize_required_typed_artifacts(outcome, request);
-        if missing_required_typed_artifacts(outcome, request).is_empty() {
+        Self::normalize_required_typed_artifacts(outcome, &running.request);
+        if missing_required_typed_artifacts(outcome, &running.request).is_empty() {
             outcome.diagnostics.retain(|diagnostic| {
                 diagnostic.class != "agent_task.required_typed_artifacts_missing"
             });
         }
+
+        // Timeout discovery can append a provider-generated patch after the
+        // ordinary completion finalization. Bind it before this outcome can be
+        // selected as a recoverable candidate or persisted for continuation.
+        super::finalize_candidate_artifacts(outcome, running);
 
         let actionable_patch = outcome.metadata.get("actionable").and_then(Value::as_bool)
             != Some(false)
