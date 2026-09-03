@@ -56,7 +56,7 @@ pub use crate::{
     runner_generation_inventory_for_session, runner_generation_job_owners_for_session,
     runner_homeboy_path_for_command, runner_job_cancel, runner_job_cancel_for_session,
     runner_job_log_snapshot, runner_job_log_snapshot_for_session, runner_readiness_repair_admitted,
-    status, statuses, statuses_indexed, sync_workspace, update_workspace,
+    status, statuses, statuses_indexed, sync_workspace, sync_workspace_before, update_workspace,
     verify_workspace_ref_hydration_source, workspace_snapshots, HomeboyBinaryRefreshArtifacts,
     HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
     HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyRefreshPhase,

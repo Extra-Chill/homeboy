@@ -9,7 +9,7 @@ use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::CmdResult;
 use super::broker::run_broker;
 use super::cli::{RunnerArgs, RunnerCommand};
-use super::exec::exec_with_hydration;
+use super::exec::exec_with_hydration_with_workspace_sync_timeout;
 use super::jobs::RunnerJobCommandOutput;
 use super::registry::{add, connect, enable, list, remove, set, show, RunnerAddInput};
 use super::types::{RecipeRunProvidersOutput, RunnerCommandOutput, RunnerEnvOutput, RunnerOutput};
@@ -269,6 +269,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -288,7 +289,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             json: _,
             raw,
             command,
-        } => map_execution(exec_with_hydration(
+        } => map_execution(exec_with_hydration_with_workspace_sync_timeout(
             &id,
             cwd,
             sync_workspace,
@@ -312,6 +313,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             raw,
             command,
             extension_env_providers,
+            workspace_sync_timeout,
         )),
         RunnerCommand::RecipeProviders => Ok((
             RunnerCommandOutput::RecipeRunProviders(Box::new(RecipeRunProvidersOutput {
@@ -401,6 +403,7 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -426,6 +429,7 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -450,6 +454,7 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -475,6 +480,7 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -499,6 +505,7 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -524,6 +531,7 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -566,6 +574,7 @@ fn run_json_exec(
     sync_workspace: Option<String>,
     workspace_ref: Option<String>,
     hydrate_deps: bool,
+    workspace_sync_timeout: std::time::Duration,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -585,7 +594,7 @@ fn run_json_exec(
     extension_env_providers: Vec<String>,
 ) -> CommandRun {
     let (stdout_result, exit_code) = crate::commands::utils::response::map_cmd_result_to_json(
-        exec_with_hydration(
+        exec_with_hydration_with_workspace_sync_timeout(
             &id,
             cwd,
             sync_workspace,
@@ -609,6 +618,7 @@ fn run_json_exec(
             false,
             command,
             extension_env_providers,
+            workspace_sync_timeout,
         )
         .map(|(output, exit_code)| {
             (
@@ -627,6 +637,7 @@ fn run_raw_exec(
     sync_workspace: Option<String>,
     workspace_ref: Option<String>,
     hydrate_deps: bool,
+    workspace_sync_timeout: std::time::Duration,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -645,7 +656,7 @@ fn run_raw_exec(
     command: Vec<String>,
     extension_env_providers: Vec<String>,
 ) -> CommandRun {
-    match exec_with_hydration(
+    match exec_with_hydration_with_workspace_sync_timeout(
         &id,
         cwd,
         sync_workspace,
@@ -669,6 +680,7 @@ fn run_raw_exec(
         true,
         command,
         extension_env_providers,
+        workspace_sync_timeout,
     ) {
         Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),
         Err(err) => {
@@ -688,6 +700,7 @@ fn run_compact_exec_json(
     sync_workspace: Option<String>,
     workspace_ref: Option<String>,
     hydrate_deps: bool,
+    workspace_sync_timeout: std::time::Duration,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -712,6 +725,7 @@ fn run_compact_exec_json(
         sync_workspace,
         workspace_ref,
         hydrate_deps,
+        workspace_sync_timeout,
         project,
         ssh,
         capture_patch,
@@ -749,6 +763,7 @@ pub(super) fn run_compact_exec(
     sync_workspace: Option<String>,
     workspace_ref: Option<String>,
     hydrate_deps: bool,
+    workspace_sync_timeout: std::time::Duration,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -767,7 +782,7 @@ pub(super) fn run_compact_exec(
     command: Vec<String>,
     extension_env_providers: Vec<String>,
 ) -> CommandRun {
-    match exec_with_hydration(
+    match exec_with_hydration_with_workspace_sync_timeout(
         &id,
         cwd,
         sync_workspace,
@@ -791,6 +806,7 @@ pub(super) fn run_compact_exec(
         false,
         command,
         extension_env_providers,
+        workspace_sync_timeout,
     ) {
         Ok((output, exit_code)) => compact_exec_command_run(output, exit_code),
         Err(err) => {
