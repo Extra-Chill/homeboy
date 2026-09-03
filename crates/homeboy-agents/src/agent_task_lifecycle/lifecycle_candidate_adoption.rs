@@ -19,7 +19,7 @@ use super::*;
 /// the caller held explicit roots, this would have reported a parent adoption
 /// assembled from another home's attempts (#7505).
 ///
-/// There is no ambient wrapper: `status_in_store` is the only caller, and the
+/// There is no ambient wrapper: `reconcile_status_in_store` is the only caller, and the
 /// store it hands down is the one its own caller injected.
 pub(crate) fn project_cook_alias_adoption_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -278,9 +278,8 @@ pub(crate) fn checkpoint_candidate_adoption_remediation_in_store(
     attempt.updated_at = now.clone();
     attempt.heartbeat_at = now;
     attempt.remediation_run_id = Some(remediation_run_id.to_string());
-    attempt.remediation_status_command = Some(format!(
-        "homeboy agent-task status {remediation_run_id} --full"
-    ));
+    attempt.remediation_status_command =
+        Some(format!("homeboy agent-task status {remediation_run_id}"));
     lifecycle_store.write_record(&record)?;
     Ok(())
 }
@@ -407,6 +406,7 @@ pub fn finish_candidate_adoption_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     error: Option<String>,
+    supersede_pre_execution_failure: bool,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let record = lifecycle_store.mutate_record(&run_id, |record| {
@@ -428,6 +428,12 @@ pub fn finish_candidate_adoption_in_store(
         }
         .to_string();
         attempt.phase = "terminal".to_string();
+        // Only a direct successful adoption replaces the failed attempt's
+        // execution result. A completed adoption can instead have dispatched
+        // remediation, whose successor remains authoritative.
+        if error.is_none() && supersede_pre_execution_failure {
+            set_run_state(record, AgentTaskRunState::Succeeded);
+        }
         record.updated_at = Some(now);
         true
     })?;
@@ -500,9 +506,23 @@ pub fn candidate_adoption_recovery_outcome(
             && record.metadata["handoff_acceptance"]["state"] == "expired"
             && record.metadata["handoff_acceptance"]["reason"] == EXPIRED_LAB_HANDOFF_REASON
     });
-    let failed_preacceptance = record.state == AgentTaskRunState::Failed
-        && record.metadata["phase"] == "lab_handoff_preacceptance"
-        && record.metadata["provider_executions_consumed"] == 0
+    let failure = &record.metadata["pre_execution_failure"];
+    let recovery_matches_failure =
+        match candidate_adoption_recovery_eligibility(&failure["candidate_adoption_recovery"]) {
+            Some(CandidateAdoptionRecoveryEligibility::PreProviderTransportFailure) => matches!(
+                failure["phase"].as_str(),
+                Some("lab_handoff_preacceptance" | "transport_dispatcher_prepare")
+            ),
+            Some(CandidateAdoptionRecoveryEligibility::DirtyDestinationFirstProviderAdmission) => {
+                failure["details"]["dirty_candidate_adoption"]["reason"]
+                    == "first_provider_admission"
+            }
+            None => false,
+        };
+    let eligible_failed_preexecution = matches!(
+        record.state,
+        AgentTaskRunState::Failed | AgentTaskRunState::Succeeded
+    ) && record.metadata["provider_executions_consumed"] == 0
         && record.provider_handles.is_empty()
         && no_runner_job_recorded(record)
         && record.lifecycle.external_runtime_ids.is_empty()
@@ -510,17 +530,22 @@ pub fn candidate_adoption_recovery_outcome(
             runtime.external_runtime_ids.is_empty()
                 && runtime.metadata["evidence_source"] == "canonical_executor_outcome"
         })
-        && record.metadata["pre_execution_failure"]["phase"] == "lab_handoff_preacceptance"
-        && is_pre_provider_transport_recovery(
-            &record.metadata["pre_execution_failure"]["candidate_adoption_recovery"],
-        );
-    (expired_handoff || failed_preacceptance).then(|| {
-        build_pre_execution_failure_outcome(
+        && recovery_matches_failure;
+    (expired_handoff || eligible_failed_preexecution).then(|| {
+        let phase = failure["phase"]
+            .as_str()
+            .unwrap_or("lab_handoff_preacceptance");
+        let mut outcome = build_pre_execution_failure_outcome(
             &record.run_id,
             task,
-            "lab_handoff_preacceptance",
+            phase,
             &Error::internal_unexpected(EXPIRED_LAB_HANDOFF_REASON.to_string()),
-        )
+        );
+        if eligible_failed_preexecution {
+            outcome.metadata["candidate_adoption_recovery"] =
+                failure["candidate_adoption_recovery"].clone();
+        }
+        outcome
     })
 }
 
@@ -535,23 +560,42 @@ fn no_runner_job_recorded(record: &AgentTaskRunRecord) -> bool {
 }
 
 /// Schema tag stamped on the pre-provider candidate-adoption recovery marker
-/// produced when a Lab handoff fails before any provider executes. It is the
+/// produced when an adoptable Cook admission fails before any provider executes. It is the
 /// single source of truth for that marker's identity across the adoption
 /// pipeline (recording, promotion eligibility, publication eligibility).
 pub(crate) const CANDIDATE_ADOPTION_RECOVERY_SCHEMA: &str =
     "homeboy/agent-task-candidate-adoption-recovery/v1";
 
-/// True when `recovery` is an authenticated pre-provider transport-failure
-/// recovery marker: the exact shape that authorizes adopting an externally
-/// prepared candidate whose original attempt never ran a provider.
+/// Parse the authenticated pre-provider recovery marker that authorizes
+/// adopting an externally prepared candidate whose original attempt never ran
+/// a provider.
 ///
 /// This is the *one* definition of that check. The adoption recovery pipeline
 /// validates the same marker at several independent boundaries (candidate
 /// source resolution, promotion eligibility, publication eligibility); routing
 /// them all through here keeps those boundaries from drifting apart — the drift
 /// that made this path regress repeatedly (issue #8983).
-pub(crate) fn is_pre_provider_transport_recovery(recovery: &Value) -> bool {
-    recovery["schema"] == CANDIDATE_ADOPTION_RECOVERY_SCHEMA
-        && recovery["reason"] == "pre_provider_transport_failure"
-        && recovery["provider_executions_consumed"] == 0
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CandidateAdoptionRecoveryEligibility {
+    PreProviderTransportFailure,
+    DirtyDestinationFirstProviderAdmission,
+}
+
+pub(crate) fn candidate_adoption_recovery_eligibility(
+    recovery: &Value,
+) -> Option<CandidateAdoptionRecoveryEligibility> {
+    if recovery["schema"] != CANDIDATE_ADOPTION_RECOVERY_SCHEMA
+        || recovery["provider_executions_consumed"] != 0
+    {
+        return None;
+    }
+    match recovery["reason"].as_str()? {
+        "pre_provider_transport_failure" => {
+            Some(CandidateAdoptionRecoveryEligibility::PreProviderTransportFailure)
+        }
+        "dirty_destination_first_provider_admission" => {
+            Some(CandidateAdoptionRecoveryEligibility::DirtyDestinationFirstProviderAdmission)
+        }
+        _ => None,
+    }
 }

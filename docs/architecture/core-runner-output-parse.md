@@ -42,7 +42,7 @@ Expressions support `+` and `-` over numeric literals and parsed field names.
 
 ## Initial wiring
 
-- `crates/homeboy-extension/src/test/parsing.rs` uses `output_parse` for text fallback parsing in
+- `crates/homeboy-core/src/extension/test/parsing.rs` uses `output_parse` for text fallback parsing in
   `parse_test_results_text()` / `parse_test_results_text_with_spec()`.
 - `crates/homeboy-cli/src/commands/test.rs` falls back from sidecar JSON to parsed stdout via this primitive.
 

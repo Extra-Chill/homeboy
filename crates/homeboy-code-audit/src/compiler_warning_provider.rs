@@ -3,10 +3,9 @@
 //!
 //! The `compiler_warnings` detector surfaces compiler/checker warnings (dead
 //! code, unused imports, unused variables) as audit findings. It gets those
-//! warnings by running extension-owned compiler-warning scripts. Audit used to
-//! do that by calling `homeboy_extension::{extensions_for_compiler_warning_contract,
-//! run_compiler_warning_contract_script}` directly, coupling `code_audit` to the
-//! extension script runner and its manifest types.
+//! warnings by running extension-owned compiler-warning capabilities through the
+//! Extension API. Audit used to call a compiler-specific extension facade
+//! directly, coupling `code_audit` to the script runner and manifest types.
 //!
 //! Instead, audit defines the slim view it needs (a root directory → a list of
 //! warnings) plus a provider trait; the extension layer registers an

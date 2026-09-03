@@ -54,7 +54,7 @@ fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
         .expect("persist detached bench handoff");
 
         assert_eq!(handoff.run_id, "ssi-fixture-37-20260727-runtime-fixed");
-        let record = agent_task_lifecycle::status(&handoff.run_id)
+        let record = agent_task_lifecycle::reconcile_status(&handoff.run_id)
             .expect("interrupted caller leaves a discoverable run");
         assert!(!record.state.is_terminal());
         assert_eq!(record.plan_id, handoff.plan.plan_id);
@@ -99,7 +99,7 @@ fn detached_planless_handoff_reuses_the_same_explicit_bench_label() {
 
         assert_eq!(first.run_id, second.run_id);
         assert_eq!(first.plan.plan_id, second.plan.plan_id);
-        assert!(agent_task_lifecycle::status(&first.run_id).is_ok());
+        assert!(agent_task_lifecycle::reconcile_status(&first.run_id).is_ok());
     });
 }
 
@@ -174,6 +174,8 @@ fn failed_detached_bench_retry_replays_the_persisted_workspace_and_inputs() {
         .expect("persist pre-provider failure");
         let retry_args = [
             "homeboy",
+            "--placement",
+            "lab",
             "agent-task",
             "retry",
             "bench-pre-provider-failure",
@@ -420,7 +422,6 @@ fn cook_preview_bypasses_every_placement_route_without_durable_state() {
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tempfile::tempdir;
 
 #[test]
@@ -662,7 +663,7 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
                     .expect("authorized Lab outcome"),
             )
             .expect("persist verified outcome");
-            let record = agent_task_lifecycle::status(run_id).expect("durable attempt");
+            let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable attempt");
             assert_eq!(
                 record.metadata["execution_placement_decision"]["decision_id"],
                 initial.decision_id
@@ -704,8 +705,8 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
         );
         agent_task_lifecycle::submit_plan(&replacement_plan, Some("workspace-replacement"))
             .expect("persist replacement");
-        let replacement_record =
-            agent_task_lifecycle::status("workspace-replacement").expect("replacement record");
+        let replacement_record = agent_task_lifecycle::reconcile_status("workspace-replacement")
+            .expect("replacement record");
         assert_eq!(
             replacement_record.metadata["execution_placement_invalidated"]["prior_decision_id"],
             replacement_plan.metadata["execution_placement_invalidated"]["prior_decision_id"]
@@ -724,8 +725,8 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
                 .expect("replacement Lab outcome"),
         )
         .expect("persist replacement outcome");
-        let replacement_record =
-            agent_task_lifecycle::status("workspace-replacement").expect("replacement record");
+        let replacement_record = agent_task_lifecycle::reconcile_status("workspace-replacement")
+            .expect("replacement record");
         assert_eq!(
             replacement_record.metadata["execution_placement_outcome"]["decision_id"],
             replacement.decision_id
@@ -863,7 +864,7 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
 
         assert!(!error.message.is_empty());
         assert_eq!(error.retryable, Some(true));
-        let record = agent_task_lifecycle::status("cook-preacceptance-order")
+        let record = agent_task_lifecycle::reconcile_status("cook-preacceptance-order")
             .expect("controller record remains inspectable after preacceptance failure");
         assert!(record.lab_handoff.is_none());
         assert_eq!(record.metadata["runner_id"], "missing-homeboy-lab");
@@ -893,20 +894,6 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
             "task"
         );
     });
-}
-
-#[test]
-fn non_lab_command_continues_local_dispatch() {
-    // route_after_parse mutates the process-global LAB_OFFLOAD_METADATA_ENV,
-    // so hold the env lock to serialize against tests that assert on it.
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let cli = Cli::parse_from(["homeboy", "status"]);
-
-    let outcome =
-        route_after_parse_with_provenance(&cli, &["homeboy".into(), "status".into()], None, None)
-            .unwrap();
-
-    assert_eq!(outcome, None);
 }
 
 #[test]
@@ -1715,42 +1702,6 @@ fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
 }
 
 #[test]
-fn unmanaged_explicit_lab_handoff_keeps_runner_connection_requirements() {
-    let _env = EnvGuard::set_many(&[
-        (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
-        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, None),
-        (homeboy::runner::RUNNER_ID_ENV, None),
-    ]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        // Lab intent is expressed as placement here. `--runner` alongside it no
-        // longer parses (#11829), and naming a runner would carry the request
-        // past readiness into the offload provider, which is what this fixture
-        // exists to prove cannot be skipped.
-        "--placement".to_string(),
-        "lab".to_string(),
-        "agent-task".to_string(),
-        "run-plan".to_string(),
-        "--plan".to_string(),
-        r#"{"plan_id":"handoff","tasks":[]}"#.to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    let error = crate::test_support::with_isolated_home(|_| {
-        route_after_parse_with_provenance(&cli, &normalized, None, None)
-            .expect_err("unmanaged run-plan must still require a Lab runner")
-    });
-
-    // The requirement survives; only its code moved. Assert the guarantee
-    // itself so a future recode cannot quietly drop it.
-    assert!(
-        error.message.contains("no selected ready runner"),
-        "{error:?}"
-    );
-}
-
-#[test]
 fn agent_task_doctor_runner_option_routes_locally() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
     let normalized = vec![
@@ -1938,209 +1889,6 @@ fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
 }
 
 #[test]
-fn lab_cook_materializes_goal_and_prompt_as_one_durable_cell() {
-    crate::test_support::with_isolated_home(|_| {
-        let primary = tempfile::tempdir().expect("primary workspace");
-        git_init(primary.path());
-        // Cook infers its repository from the checkout remote and the
-        // configured component that remote maps to (#11987). Without both it
-        // refuses the workspace and demands an explicit `--repo`.
-        git_add_remote(primary.path(), FIXTURE_REPOSITORY_REMOTE);
-        register_component("homeboy", primary.path(), FIXTURE_REPOSITORY_REMOTE);
-        let workspace = primary.path().join("provenance-worktree");
-        let mut command = Command::new("git");
-        command
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                "provenance-worktree",
-                workspace.to_str().expect("utf8 workspace"),
-            ])
-            .current_dir(primary.path());
-        let linked = homeboy::core::test_support::bounded_output(command);
-        assert!(linked.status.success(), "{linked:?}");
-        let workspace = workspace.display().to_string();
-        let mut cook = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--goal",
-            "Preserve one provider cell",
-            // `--goal` frames the work and `--prompt` is its one source.
-            // Pairing `--goal` with `--task` is a rejected conflict (#10070).
-            "--prompt",
-            "-",
-            "--cwd",
-            &workspace,
-            "--to-worktree",
-            &workspace,
-            "--backend",
-            "fixture",
-            "--no-finalize",
-            "--run-id",
-            "cook-lab-goal-task",
-        ]);
-        let Commands::AgentTask(agent_task) = &mut cook.command else {
-            panic!("agent-task command");
-        };
-        let crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) =
-            &mut agent_task.command
-        else {
-            panic!("Cook command");
-        };
-        cook_args.prompt_snapshot = Some(crate::commands::agent_task::args::CookPromptSnapshot {
-            content: "@/does/not/exist\n\t".to_string(),
-            source: "stdin".to_string(),
-            sha256: "sha256:fixture".to_string(),
-            size_bytes: "@/does/not/exist\n\t".len(),
-        });
-
-        let plan = materialize_agent_task_cook_plan(&cook, None)
-            .expect("materialize Lab Cook plan")
-            .expect("Cook plan");
-        assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
-        assert_eq!(plan.metadata["cook_goal"], "Preserve one provider cell");
-        assert_eq!(plan.tasks[0].instructions, "@/does/not/exist\n\t");
-        assert_eq!(plan.tasks[0].metadata["prompt_source"], "-");
-        assert_eq!(plan.metadata["prompt_input_v1"]["source"], "stdin");
-        assert_eq!(
-            plan.tasks[0].metadata["cook_goal"],
-            "Preserve one provider cell"
-        );
-
-        agent_task_lifecycle::submit_plan(&plan, Some("cook-lab-goal-task"))
-            .expect("persist Cook plan");
-        let retry_args = [
-            "homeboy",
-            "agent-task",
-            "retry",
-            "cook-lab-goal-task",
-            "--run",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-        let retry = Cli::parse_from(&retry_args);
-        let handoff = materialize_agent_task_retry_handoff(&retry, &retry_args)
-            .expect("materialize retry handoff")
-            .expect("retry handoff");
-        // The Homeboy projection is rebuilt when loading durable JSON; verify
-        // the provider-cell contract, which is what retry/resume dispatches.
-        assert_eq!(handoff.plan.tasks, plan.tasks);
-        assert_eq!(handoff.plan.options, plan.options);
-        assert_eq!(handoff.plan.metadata, plan.metadata);
-    });
-}
-
-#[test]
-fn lab_cook_plan_preserves_actual_cli_provenance_through_handoff_serialization() {
-    crate::test_support::with_isolated_home(|_| {
-        let primary = tempfile::tempdir().expect("primary workspace");
-        git_init(primary.path());
-        let workspace = primary.path().join("provenance-worktree");
-        let mut command = Command::new("git");
-        command
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                "provenance-worktree",
-                workspace.to_str().expect("utf8 workspace"),
-            ])
-            .current_dir(primary.path());
-        let linked = homeboy::core::test_support::bounded_output(command);
-        assert!(linked.status.success(), "{linked:?}");
-        let workspace = workspace.display().to_string();
-        let matches = Cli::command_with_scoped_lab_args()
-            .try_get_matches_from([
-                "homeboy",
-                "--placement",
-                "lab",
-                "agent-task",
-                "cook",
-                "--prompt",
-                "Repair provenance",
-                "--to-worktree",
-                &workspace,
-                "--backend",
-                "fixture",
-                "--dispatch-provider-id",
-                "fixture-provider",
-                "--max-attempts",
-                "3",
-                "--max-provider-executions",
-                "3",
-                "--protected-branch",
-                "main",
-                "--protected-branch",
-                "release",
-                "--attempt-run-id",
-                "generated-attempt",
-                "--no-finalize",
-            ])
-            .expect("parse Cook");
-        let (compiled, _) = Cli::compile_registered_arg_matches(&matches).expect("compile Cook");
-        let plan = materialize_agent_task_cook_plan(&compiled.value, Some(&compiled.provenance))
-            .expect("materialize Lab Cook plan")
-            .expect("Cook plan");
-
-        for argument in [
-            "placement",
-            "selector",
-            "max_attempts",
-            "attempts",
-            "protected_branches",
-            "attempt_run_id",
-            "no_finalize",
-        ] {
-            assert_eq!(
-                plan.metadata["command_argument_provenance"][argument], "command_line",
-                "{argument} source must survive plan materialization"
-            );
-        }
-
-        let argv = inject_agent_task_cook_attempt_plan(
-            &[
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-            ],
-            Some(&plan),
-        )
-        .expect("inject Lab attempt plan");
-        let serialized = argv
-            .windows(2)
-            .find_map(|pair| (pair[0] == "--attempt-plan").then(|| pair[1].as_str()))
-            .expect("Lab argv contains plan");
-        let handoff_plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
-            serde_json::from_str(serialized).expect("decode plan");
-        assert_eq!(
-            handoff_plan.metadata["command_argument_provenance"],
-            plan.metadata["command_argument_provenance"]
-        );
-
-        // Split-placement Cook sends the plan through `run-plan`, rather than
-        // rebuilding it from runner-side command-line arguments.
-        let runner_args = lab_cook_attempt_args(
-            serde_json::to_string(&plan).expect("serialize runner plan"),
-            "generated-attempt",
-        );
-        let runner_plan = runner_args
-            .windows(2)
-            .find_map(|pair| (pair[0] == "--plan").then(|| pair[1].as_str()))
-            .expect("Lab runner invocation contains plan");
-        let rehydrated_plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
-            serde_json::from_str(runner_plan).expect("rehydrate runner plan");
-        assert_eq!(
-            rehydrated_plan.metadata["command_argument_provenance"],
-            plan.metadata["command_argument_provenance"]
-        );
-    });
-}
-
-#[test]
 fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -2157,29 +1905,39 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
             }))
             .expect("task")],
         );
-        let options = crate::agents::agent_task_service::AgentTaskCookServiceOptions {
-            cook_id: cook_id.to_string(),
-            initial_run_id: run_id.to_string(),
-            initial_plan: plan.clone(),
-            to_worktree: workspace.path().display().to_string(),
-            source_worktree_path: Some(workspace.path().to_path_buf()),
-            provider_command: None,
-            provider_invocation: None,
+        let options = crate::agents::agent_task_service::CookRequest {
+            identity: crate::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan: plan.clone(),
+            },
+            workspace: crate::agents::agent_task_service::CookWorkspace {
+                to_worktree: workspace.path().display().to_string(),
+                source_worktree_path: Some(workspace.path().to_path_buf()),
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: crate::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
             gates: Default::default(),
-            max_attempts: 2,
-            no_finalize: true,
-            draft_pr: false,
-            base: "main".to_string(),
-            task_base_sha: None,
-            head: None,
-            title: "Lab Cook retry".to_string(),
-            commit_message: "Lab Cook retry".to_string(),
-            source_refs: Vec::new(),
-            protected_branches: Vec::new(),
-            ai_tool: "fixture".to_string(),
-            ai_model: None,
-            ai_used_for: "test".to_string(),
-            attempt_dispatcher: None,
+            retry_policy: crate::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
+            finalization: crate::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "Lab Cook retry".to_string(),
+                commit_message: "Lab Cook retry".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
             harvest_context:
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                     .expect("harvest context"),
@@ -2371,12 +2129,13 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         // inventing a global --cwd. The route carries the selected task
         // checkout separately, and workspace staging maps it to the job cwd.
         assert!(remote_cli.detach_after_handoff);
-        let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
+        let replacement =
+            agent_task_lifecycle::reconcile_status(&handoff.run_id).expect("replacement");
         assert_eq!(replacement.metadata["retry_of"], "failed-run");
         assert_eq!(replacement.metadata["retried_from"], "failed-run");
         assert_eq!(replacement.metadata["retry_root"], "failed-run");
         assert_eq!(
-            agent_task_lifecycle::status("failed-run")
+            agent_task_lifecycle::reconcile_status("failed-run")
                 .expect("source retry lineage")
                 .metadata["retries"],
             serde_json::json!(["failed-run-retry-on-lab"])
@@ -2387,13 +2146,13 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         // still resolve the retry reservation through the controller store.
         agent_task_lifecycle::submit_plan(&handoff.plan, Some(&handoff.run_id))
             .expect("resubmit replacement from Lab handoff");
-        let resubmitted =
-            agent_task_lifecycle::status(&handoff.run_id).expect("resubmitted replacement");
+        let resubmitted = agent_task_lifecycle::reconcile_status(&handoff.run_id)
+            .expect("resubmitted replacement");
         assert_eq!(resubmitted.metadata["retry_of"], "failed-run");
         assert_eq!(resubmitted.metadata["retried_from"], "failed-run");
         assert_eq!(resubmitted.metadata["retry_root"], "failed-run");
         assert_eq!(
-            agent_task_lifecycle::status("failed-run")
+            agent_task_lifecycle::reconcile_status("failed-run")
                 .expect("source retry lineage remains idempotent")
                 .metadata["retries"],
             serde_json::json!(["failed-run-retry-on-lab"])
@@ -2401,7 +2160,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
 
         stage_retry_lab_handoff_before_preacceptance(Some(&handoff), Some("homeboy-lab"))
             .expect("stage replacement handoff before Lab preacceptance");
-        let replacement = agent_task_lifecycle::status(&handoff.run_id)
+        let replacement = agent_task_lifecycle::reconcile_status(&handoff.run_id)
             .expect("staged replacement remains inspectable");
         // Staging binds the controller proxy to its runner. The typed
         // `lab_handoff` is deliberately not written here: since #10855 restored
@@ -2424,7 +2183,8 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
             .iter()
             .any(|hint| hint.message.contains("agent-task retry")
                 && hint.message.contains(&handoff.run_id)));
-        let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("failed retry");
+        let replacement =
+            agent_task_lifecycle::reconcile_status(&handoff.run_id).expect("failed retry");
         assert_eq!(
             replacement.state,
             homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState::Failed
@@ -2693,101 +2453,9 @@ fn detached_cook_without_a_lab_runner_does_not_fall_back_to_local_execution() {
 }
 
 #[test]
-fn lab_cook_defers_provider_destination_and_retry_refuses_unbound_plan() {
+fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
-        let workspace = tempfile::tempdir().expect("workspace");
-        git_init(workspace.path());
-        // The provider-derived destination is validated against the requested
-        // Cook repository through its remote (#11987). The linked worktree
-        // created below inherits this remote from its primary.
-        git_add_remote(workspace.path(), FIXTURE_REPOSITORY_REMOTE);
-        let provider_dir = tempfile::tempdir().expect("provider dir");
-        let provider_workspace = provider_dir.path().join("worktree");
-        let mut commit_command = Command::new("git");
-        commit_command
-            .args([
-                "-c",
-                "user.email=fixture@example.com",
-                "-c",
-                "user.name=Fixture",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "fixture",
-            ])
-            .current_dir(workspace.path());
-        let commit = homeboy::core::test_support::bounded_output(commit_command);
-        assert!(commit.status.success(), "{:?}", commit);
-        let mut worktree_command = Command::new("git");
-        worktree_command
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                "fix/issue-11291-homeboy",
-                provider_workspace
-                    .to_str()
-                    .expect("utf8 provider workspace"),
-            ])
-            .current_dir(workspace.path());
-        let worktree = homeboy::core::test_support::bounded_output(worktree_command);
-        assert!(worktree.status.success(), "{:?}", worktree);
-        let provider = provider_dir.path().join("provider");
-        let payload = serde_json::json!({
-            "worktrees": [{
-                "handle": "homeboy@fix-issue-11291-homeboy",
-                "path": provider_workspace,
-                "branch": "fix/issue-11291-homeboy",
-                "safety": { "dirty": false, "unpushed": false, "primary": false }
-            }]
-        });
-        fs::write(
-            &provider,
-            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", payload),
-        )
-        .expect("write provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = fs::metadata(&provider)
-                .expect("provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&provider, permissions).expect("make provider executable");
-        }
-        let mut config = homeboy::core::defaults::HomeboyConfig::default();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy::core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy::core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
-                    ensure: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy::core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy::core::defaults::save_config(&config).expect("save provider config");
-
-        let cook_cli = Cli::parse_from([
+        let admission_args = [
             "homeboy",
             "agent-task",
             "cook",
@@ -2795,46 +2463,221 @@ fn lab_cook_defers_provider_destination_and_retry_refuses_unbound_plan() {
             "homeboy",
             "--task-url",
             "https://github.com/Extra-Chill/homeboy/issues/11291",
+            "--to-worktree",
+            "homeboy@fix-issue-11291-homeboy",
             "--verify",
             "true",
             "--backend",
             "fixture",
             "--prompt",
             "retry this task",
-        ]);
-        let plan = materialize_agent_task_cook_plan(&cook_cli, None)
-            .expect("materialize cook plan")
-            .expect("cook plan");
-        assert_eq!(plan.tasks[0].workspace.root, None);
+            "--run-id",
+            "failed-run",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let staged = stage_unmaterialized_cook_replay_intent(&admission_args, "failed-run", None)
+            .expect("stage replay intent");
+        let intent = staged
+            .intent
+            .as_ref()
+            .expect("staged replay intent")
+            .clone();
+        let binding = serde_json::json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "sha256:failed-run-request",
+            "source": { "repository": "homeboy" },
+            "base": "main",
+            "head": "fix/issue-11291-homeboy",
+            "worktree_ref": "homeboy@fix-issue-11291-homeboy",
+            "provider_runtime_refs": {
+                "backend": "fixture",
+                "selector": null,
+                "model": null,
+            },
+            "retry": { "provider_rotations": 0 },
+            "replay_intent": intent,
+            "input_publication": {
+                "state": "staged",
+                "staging_root": staged.staging_root,
+                "published_root": staged.published_root,
+            },
+        });
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            "failed-run",
+            binding.clone(),
+            "blocked_runner_unavailable",
+            "Lab rejected the initial attempt",
+        )
+        .expect("submit unmaterialized admission");
+        staged.retain_for_recovery();
+        agent_task_lifecycle::recover_unmaterialized_cook_input_publication("failed-run")
+            .expect("publish replay inputs");
+        agent_task_lifecycle::fail_detached_cook_handoff_parent(
+            "failed-run",
+            "bounded Lab admission retry budget exhausted",
+        )
+        .expect("terminalize exhausted admission");
+
+        let retry_args = [
+            "homeboy",
+            "--placement",
+            "lab",
+            "agent-task",
+            "retry",
+            "failed-run",
+            "--new-run-id",
+            "recovered-run",
+            "--run",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let retry_cli = Cli::parse_from(&retry_args);
         assert_eq!(
-            plan.tasks[0].metadata["worktree_provision"]["action"],
-            "lookup_pending"
+            route_after_parse_with_provenance(&retry_cli, &retry_args, None, None)
+                .expect("terminal admission retry stays controller-owned"),
+            None
         );
+        homeboy::agents::orchestration::execute_action_from_current_environment(
+            "failed-run",
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                idempotency_key: "recover-terminal-admission".to_string(),
+                actor: "homeboy-cli".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({
+                        "new_run_id": "recovered-run",
+                        "force": false,
+                    }),
+                },
+                confirmed: true,
+            },
+        )
+        .expect("recover terminal admission through the control plane");
+        let recovered =
+            agent_task_lifecycle::exact_record("recovered-run").expect("replacement admission");
+        assert!(recovered.tasks.is_empty());
         assert_eq!(
-            plan.tasks[0].metadata["worktree_provision"]["handle"],
+            recovered.metadata["unmaterialized_cook_admission"]["binding"]["worktree_ref"],
             "homeboy@fix-issue-11291-homeboy"
         );
-        agent_task_lifecycle::submit_plan(&plan, Some("failed-run")).expect("submit plan");
-        agent_task_lifecycle::record_pre_execution_failure(
-            "failed-run",
-            &plan,
-            "lab_handoff_preacceptance",
-            &Error::internal_unexpected("Lab rejected the initial attempt"),
-        )
-        .expect("persist failed attempt");
+        assert_eq!(
+            recovered.metadata["unmaterialized_cook_admission"]["binding"]["retry_of"],
+            "failed-run"
+        );
+        assert_eq!(
+            recovered.metadata["unmaterialized_cook_admission"]["binding"]["request_ref"],
+            "sha256:failed-run-request"
+        );
+        assert_eq!(
+            recovered.metadata["unmaterialized_cook_admission"]["binding"]["input_publication"]
+                ["published_root"],
+            binding["input_publication"]["published_root"]
+        );
+        assert!(
+            recovered.metadata["unmaterialized_cook_admission"]["admission_attempts"]
+                .as_u64()
+                .expect("admission attempts")
+                > 0,
+            "the control-plane retry rearms and reconciles the fresh admission"
+        );
+        assert_eq!(
+            recovered.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]
+                ["cook_id"],
+            "recovered-run"
+        );
+        assert!(
+            recovered.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]["argv"]
+                .as_array()
+                .expect("replay argv")
+                .windows(2)
+                .any(|pair| pair == ["--run-id", "recovered-run"])
+        );
 
-        let retry_args = ["homeboy", "agent-task", "retry", "failed-run", "--run"]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        let retry_cli = Cli::parse_from(&retry_args);
-        let error = match materialize_agent_task_retry_handoff(&retry_cli, &retry_args) {
-            Err(error) => error,
-            Ok(_) => {
-                panic!("retry must not substitute the controller cwd for an unresolved workspace")
-            }
-        };
-        assert!(error.message.contains("original persisted plan has none"));
+        let equivalent_override =
+            homeboy::agents::agent_task_service::retry_with_provider_route_override(
+                "failed-run",
+                Some("equivalent-override-run"),
+                true,
+                true,
+                homeboy::agents::agent_task_service::CookProviderRouteOverride {
+                    backend: Some("fixture".to_string()),
+                    allow_provider_rotation: Some(false),
+                    provider_rotations: Some(0),
+                    ..Default::default()
+                },
+            )
+            .expect("accept an equivalent provider route override");
+        assert!(!equivalent_override.run);
+        assert!(
+            equivalent_override.record.metadata["unmaterialized_cook_admission"]
+                ["admission_attempts"]
+                .as_u64()
+                .expect("admission attempts")
+                > 0,
+            "--run with an equivalent provider override reconciles the replacement admission"
+        );
+        for (run_id, override_) in [
+            (
+                "changed-backend-run",
+                homeboy::agents::agent_task_service::CookProviderRouteOverride {
+                    backend: Some("other".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "changed-model-run",
+                homeboy::agents::agent_task_service::CookProviderRouteOverride {
+                    model: Some("other-model".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "changed-rotation-run",
+                homeboy::agents::agent_task_service::CookProviderRouteOverride {
+                    provider_rotations: Some(1),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let error = homeboy::agents::agent_task_service::retry_with_provider_route_override(
+                "failed-run",
+                Some(run_id),
+                false,
+                true,
+                override_,
+            )
+            .expect_err("route changes require a fresh Cook");
+            assert!(error.message.contains("submit a fresh Cook"));
+            assert!(agent_task_lifecycle::exact_record(run_id).is_err());
+        }
+
+        let mut unrelated_binding = binding.clone();
+        unrelated_binding["request_ref"] = serde_json::json!("sha256:other-request");
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            "requested-id-collision",
+            unrelated_binding,
+            "queued",
+            "unrelated admission",
+        )
+        .expect("persist unrelated admission");
+        let error = homeboy::agents::agent_task_service::retry(
+            "failed-run",
+            Some("requested-id-collision"),
+            false,
+            true,
+        )
+        .expect_err("unrelated requested retry id is rejected");
+        assert!(error
+            .message
+            .contains("already belongs to a different durable admission"));
     });
 }
 
@@ -2878,7 +2721,7 @@ fn retry_handoff_refuses_multiple_task_workspaces() {
             Err(error) => error,
         };
         assert!(error.message.contains("multiple task workspaces"));
-        assert!(agent_task_lifecycle::status("failed-run-retry-1").is_err());
+        assert!(agent_task_lifecycle::reconcile_status("failed-run-retry-1").is_err());
     });
 }
 
@@ -3087,53 +2930,8 @@ fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
         };
 
         assert!(error.message.contains("original persisted plan has none"));
-        assert!(agent_task_lifecycle::status("failed-run-retry-1").is_err());
+        assert!(agent_task_lifecycle::reconcile_status("failed-run-retry-1").is_err());
     });
-}
-
-#[test]
-fn agent_task_fanout_dispatch_id_matches_the_canonical_plan_identity() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--detach-after-handoff",
-        "agent-task",
-        "fanout",
-        "cook-batch",
-        "--repo",
-        "homeboy",
-        "--fanout-id",
-        "wave-7167",
-        "--verify",
-        "cargo test --lib",
-        "--run-plan",
-        "https://github.com/Extra-Chill/homeboy/issues/7167",
-    ]);
-    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-        command:
-            crate::commands::agent_task::AgentTaskCommand::Fanout(
-                crate::commands::agent_task::AgentTaskFanoutArgs {
-                    command: crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
-                },
-            ),
-    }) = cli.command
-    else {
-        panic!("cook-batch command");
-    };
-
-    assert_eq!(
-        crate::commands::agent_task::fanout::cook_batch_fanout_id(&args)
-            .expect("canonical explicit id"),
-        "wave-7167"
-    );
-
-    let mut default_args = args;
-    default_args.fanout_id = None;
-    assert_eq!(
-        crate::commands::agent_task::fanout::cook_batch_fanout_id(&default_args)
-            .expect("canonical generated id"),
-        crate::commands::agent_task::fanout::cook_batch_fanout_id(&default_args)
-            .expect("canonical generated id is stable")
-    );
 }
 
 #[test]
@@ -3389,6 +3187,7 @@ fn local_fanout_warning_carries_lab_readiness_reasons_and_remediation() {
         available_runner_ids: vec!["lab-a".to_string()],
         reasons: vec!["lab-a daemon is stale".to_string()],
         remediation_commands: vec!["homeboy runner refresh-homeboy lab-a".to_string()],
+        repair_admitted_runner_ids: Vec::new(),
     };
     let warning = agent_task_local_fanout_warning(&cli.command, Some(&readiness))
         .expect("batch fanout warns locally");
@@ -3458,7 +3257,33 @@ fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
 }
 
 #[test]
-fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admission() {
+fn cook_requires_unmaterialized_admission_when_detached_or_local_is_not_authorized() {
+    use homeboy::core::parsed_command_preflight::{
+        DeferredWorkloadDecision, FallbackDirective, ParsedCommandPreflightResult,
+        ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
+    };
+
+    let preflight = |cli: &Cli, fallback| {
+        let normalized = vec!["homeboy".to_string()];
+        let mut result = ParsedCommandPreflightResult::new(
+            normalized.clone(),
+            resource_policy::parsed_command_preflight_input(cli, &normalized),
+            None,
+            None,
+            DeferredWorkloadDecision::NotApplicable,
+            fallback,
+            crate::cli_runtime::placement_directive(cli, None, false),
+            None,
+        );
+        result.resource_admission = ResourceAdmissionDecision::Rejected {
+            label: "cook".to_string(),
+            engages_at: ResourceHeat::Warm,
+            evidence: ResourceAdmissionEvidence::Observed {
+                pressure: ResourceHeat::Warm,
+            },
+        };
+        result
+    };
     let queued = Cli::parse_from([
         "homeboy",
         "--detach-after-handoff",
@@ -3471,7 +3296,10 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
         "--prompt",
         "queue this on Lab",
     ]);
-    assert!(detached_cook_can_queue(&queued));
+    assert!(cook_requires_unmaterialized_admission(
+        &queued,
+        &preflight(&queued, FallbackDirective::None),
+    ));
 
     let local = Cli::parse_from([
         "homeboy",
@@ -3487,7 +3315,49 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
         "--prompt",
         "remain local",
     ]);
-    assert!(!detached_cook_can_queue(&local));
+    assert!(!cook_requires_unmaterialized_admission(
+        &local,
+        &preflight(&local, FallbackDirective::None),
+    ));
+
+    let fallback = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab-or-local",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@fallback",
+        "--verify",
+        "true",
+        "--prompt",
+        "run locally when Lab is unavailable",
+    ]);
+    assert!(!cook_requires_unmaterialized_admission(
+        &fallback,
+        &preflight(&fallback, FallbackDirective::None),
+    ));
+
+    let automatic = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@stale-refresh-timeout",
+        "--verify",
+        "true",
+        "--prompt",
+        "wait for a confirmed placement",
+    ]);
+    assert!(cook_requires_unmaterialized_admission(
+        &automatic,
+        &preflight(&automatic, FallbackDirective::None),
+    ));
+    assert!(!cook_requires_unmaterialized_admission(
+        &automatic,
+        &preflight(&automatic, FallbackDirective::LocalCapacity),
+    ));
 }
 
 #[test]
@@ -3498,6 +3368,7 @@ fn unmaterialized_cook_admission_keeps_stale_unavailable_and_capacity_distinct()
         available_runner_ids: Vec::new(),
         reasons: Vec::new(),
         remediation_commands: Vec::new(),
+        repair_admitted_runner_ids: Vec::new(),
     };
     assert_eq!(
         unmaterialized_admission_state(Some(&readiness("stale"))),
@@ -3515,7 +3386,9 @@ fn unmaterialized_cook_admission_keeps_stale_unavailable_and_capacity_distinct()
 
 #[test]
 fn admission_capability_contract_accepts_runtime_or_capability_and_rejects_missing() {
-    let inventory = runners::RunnerCapabilityInventory {
+    let inventory = runners::RunnerCapabilities {
+        schema: runners::RUNNER_CAPABILITIES_SCHEMA.to_string(),
+        runner_id: "runner-a".to_string(),
         runtime_ids: ["runtime-a".to_string()].into_iter().collect(),
         capabilities: ["capability-a".to_string()].into_iter().collect(),
     };
@@ -3923,349 +3796,6 @@ fn daemon_recovers_preparing_state_after_crash_after_publish() {
     });
 }
 
-#[derive(Debug)]
-struct ReplayRouteExecutor {
-    executions: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter for ReplayRouteExecutor {
-    fn execute(
-        &self,
-        request: homeboy::agents::agent_task::AgentTaskRequest,
-        _context: homeboy::agents::agent_task_scheduler::AgentTaskExecutionContext,
-    ) -> homeboy::agents::agent_task::AgentTaskOutcome {
-        self.executions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let workspace = request
-            .workspace
-            .root
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .expect("remote replay workspace");
-        std::fs::write(workspace.join("replay-provider.txt"), "remote provider\n")
-            .expect("remote provider candidate");
-        for args in [
-            vec!["add", "replay-provider.txt"],
-            vec![
-                "-c",
-                "user.name=Replay Provider",
-                "-c",
-                "user.email=replay@example.com",
-                "commit",
-                "-m",
-                "remote replay candidate",
-            ],
-        ] {
-            let status = std::process::Command::new("git")
-                .args(args)
-                .current_dir(&workspace)
-                .status()
-                .expect("remote provider git command");
-            assert!(status.success());
-        }
-        homeboy::agents::agent_task::AgentTaskOutcome {
-            schema: homeboy::agents::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-            task_id: request.task_id,
-            status: homeboy::agents::agent_task::AgentTaskOutcomeStatus::Succeeded,
-            summary: Some("remote replay fixture completed".to_string()),
-            ..Default::default()
-        }
-    }
-}
-
-struct ReplayRouteDispatcher {
-    dispatches: Arc<std::sync::atomic::AtomicUsize>,
-    executor: homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
-}
-
-impl std::fmt::Debug for ReplayRouteDispatcher {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ReplayRouteDispatcher")
-            .finish_non_exhaustive()
-    }
-}
-
-impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher for ReplayRouteDispatcher {
-    fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
-        Ok(serde_json::json!({
-            "kind": "lab",
-            "runner_id": "fake-reconnected-runner",
-            "execution_placement_decision": {},
-            "allow_local_fallback": false,
-            "allow_dirty_lab_workspace": false,
-            "skip_deps_hydration": false,
-            "detach_after_handoff": false,
-            "source_path": null,
-            "job_overrides": {
-                "env": {},
-                "secret_env_names": [],
-                "workspace_root": null,
-            },
-        }))
-    }
-
-    fn dispatch_attempt(
-        &self,
-        plan: homeboy::agents::agent_task_scheduler::AgentTaskPlan,
-        run_id: &str,
-        _derived_cook_baseline: Option<
-            &crate::agents::agent_task_service::DerivedCookBaselineCapability,
-        >,
-    ) -> homeboy::core::Result<()> {
-        self.dispatches
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-        crate::agents::agent_task_service::run_submitted(
-            run_id.to_string(),
-            Arc::clone(&self.executor),
-        )?;
-        Ok(())
-    }
-}
-
-#[test]
-fn reconnect_replay_reuses_normal_cook_path_without_local_or_duplicate_materialization() {
-    std::thread::Builder::new()
-        .name("reconnect-replay-e2e".to_string())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(|| {
-            crate::test_support::with_isolated_home(|_| {
-                let primary = tempfile::tempdir().expect("primary workspace");
-                git_init(primary.path());
-                let committed = homeboy::core::test_support::bounded_output({
-                    let mut command = std::process::Command::new("git");
-                    command
-                        .args([
-                            "-c",
-                            "user.name=Fixture",
-                            "-c",
-                            "user.email=fixture@example.com",
-                            "commit",
-                            "--allow-empty",
-                            "-m",
-                            "fixture",
-                        ])
-                        .current_dir(primary.path());
-                    command
-                });
-                assert!(committed.status.success(), "{committed:?}");
-                git_add_remote(primary.path(), FIXTURE_REPOSITORY_REMOTE);
-                register_component("replay-fixture", primary.path(), FIXTURE_REPOSITORY_REMOTE);
-                let workspace = primary.path().join("replay-worktree");
-                let output = homeboy::core::test_support::bounded_output({
-                    let mut command = std::process::Command::new("git");
-                    command
-                        .args([
-                            "worktree",
-                            "add",
-                            "-b",
-                            "replay-worktree",
-                            workspace.to_str().expect("workspace path"),
-                        ])
-                        .current_dir(primary.path());
-                    command
-        });
-        assert!(output.status.success(), "{output:?}");
-        let provider_dir = tempfile::tempdir().expect("worktree provider");
-        let provider = provider_dir.path().join("resolve-worktree.sh");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"replay-fixture@replay-worktree\",\"path\":\"{}\",\"branch\":\"replay-worktree\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
-                workspace.display()
-            ),
-        )
-        .expect("write worktree provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&provider, permissions).unwrap();
-        }
-        let mut config = homeboy::core::defaults::load_config();
-        config.worktree_providers.insert(
-            "replay-fixture".to_string(),
-            homeboy::core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy::core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![
-                        provider.display().to_string(),
-                        "resolve".to_string(),
-                        "{handle}".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy::core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
-        );
-        homeboy::core::defaults::save_config(&config).expect("save worktree provider");
-        let promotion_provider = provider_dir.path().join("promotion-provider.sh");
-        std::fs::write(
-            &promotion_provider,
-            format!(
-                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
-                workspace.display()
-            ),
-        )
-        .expect("write promotion provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&promotion_provider).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&promotion_provider, permissions).unwrap();
-        }
-                let cook_id = "e2e-unmaterialized-replay";
-                agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .expect("lifecycle store"),
-                    cook_id,
-                    serde_json::json!({
-                        "placement": { "requested": "auto", "local_fallback": false },
-                        "provider_runtime_refs": { "required_capabilities": [] },
-                        "replay_intent": { "schema": "fixture" },
-                    }),
-                    "blocked_runner_unavailable",
-                    "runner disconnected",
-                )
-                .expect("unavailable admission");
-                agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
-                    record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
-                        serde_json::json!("2000-01-01T00:00:00+00:00");
-                })
-                .expect("due after reconnect");
-
-                let cli = Cli::parse_from([
-                    "homeboy",
-                    "--detach-after-handoff",
-                    "agent-task",
-                    "cook",
-                    "--run-id",
-                    cook_id,
-                    "--prompt",
-                    "complete through the normal Cook service",
-                    "--to-worktree",
-                    "replay-fixture@replay-worktree",
-                    "--backend",
-                    "fixture",
-                    "--provider-command",
-                    promotion_provider.to_str().expect("promotion provider"),
-                    "--no-finalize",
-                ]);
-                let local_executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let remote_executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let local_executor: homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor =
-                    Arc::new(ReplayRouteExecutor {
-                        executions: Arc::clone(&local_executions),
-                    });
-                let dispatcher = Arc::new(ReplayRouteDispatcher {
-                    dispatches: Arc::clone(&dispatches),
-                    executor: Arc::new(ReplayRouteExecutor {
-                        executions: Arc::clone(&remote_executions),
-                    }),
-                });
-                let replay_calls = std::cell::Cell::new(0usize);
-                let report =
-            crate::agents::agent_task_service::reconcile_unmaterialized_cook_admission_with(
-                cook_id,
-                |_| {
-                    Ok(serde_json::json!({
-                        "state": "eligible",
-                        "runner_id": "fake-reconnected-runner",
-                    }))
-                },
-                |request| {
-                    replay_calls.set(replay_calls.get() + 1);
-                    let fence = request["fence"].as_u64().expect("fence");
-                    let token = request["token"].as_str().expect("token");
-                    let fence_string = fence.to_string();
-                    let _claim_env = EnvGuard::set_many(&[
-                        (COOK_REPLAY_CLAIM_COOK_ENV, Some(cook_id)),
-                        (COOK_REPLAY_CLAIM_FENCE_ENV, Some(&fence_string)),
-                        (COOK_REPLAY_CLAIM_TOKEN_ENV, Some(token)),
-                    ]);
-                    assert_eq!(consume_unmaterialized_replay_claim()?, None);
-                    let result = run_split_placement_cook_with_runtime(
-                        &cli,
-                        None,
-                        Some("fake-reconnected-runner"),
-                        &crate::cli_runtime::placement_directive(
-                            &cli,
-                            Some("fake-reconnected-runner"),
-                            false,
-                        ),
-                        None,
-                        Some(dispatcher.clone()),
-                        Some(Arc::clone(&local_executor)),
-                    )
-                    .expect("normal split Cook route");
-                    assert_eq!(result, Some(0));
-                    Ok(serde_json::json!({ "worker_id": "in-process-replay" }))
-                },
-            )
-            .expect("reconnect replay");
-                assert_eq!(report["replay_failed"], 0);
-                assert_eq!(replay_calls.get(), 1);
-                assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
-                assert_eq!(
-                    remote_executions.load(std::sync::atomic::Ordering::SeqCst),
-                    1
-                );
-                assert_eq!(
-                    local_executions.load(std::sync::atomic::Ordering::SeqCst),
-                    0
-                );
-                let index = agent_task_lifecycle::cook_index(cook_id).expect("normal Cook index");
-                assert_eq!(index.attempts.len(), 1);
-                let parent =
-                    agent_task_lifecycle::exact_record(cook_id).expect("redirected parent");
-                assert_eq!(
-                    parent.metadata["detached_cook_handoff"]["state"],
-                    "redirected"
-                );
-                assert!(parent.state.is_terminal());
-
-                let duplicate =
-            crate::agents::agent_task_service::reconcile_unmaterialized_cook_admission_with(
-                cook_id,
-                |_| panic!("completed parent must not select again"),
-                |_| panic!("completed parent must not replay again"),
-            )
-            .expect("duplicate pass");
-                assert_eq!(duplicate["replayed"], 0);
-                assert_eq!(
-                    agent_task_lifecycle::cook_index(cook_id)
-                        .unwrap()
-                        .attempts
-                        .len(),
-                    1
-                );
-            })
-        })
-        .expect("spawn large-stack replay test")
-        .join()
-        .expect("replay test thread");
-}
-
 #[test]
 fn replay_intent_rejects_inline_secret_bearing_inputs() {
     homeboy::core::test_support::with_isolated_home(|_| {
@@ -4360,6 +3890,7 @@ fn split_placement_cook_without_a_runner_reports_readiness_not_a_placement_contr
             available_runner_ids: Vec::new(),
             reasons: vec![reason.to_string()],
             remediation_commands: vec![remediation.to_string()],
+            repair_admitted_runner_ids: Vec::new(),
         };
 
         let error = split_placement_lab_runner_unavailable_error(

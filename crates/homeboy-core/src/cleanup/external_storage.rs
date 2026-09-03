@@ -75,7 +75,7 @@ pub struct ExternalStorageEvidence {
 pub fn cleanup_external_storage_from_extensions(
     options: ExternalStorageCleanupOptions,
 ) -> Result<ExternalStorageCleanupOutput> {
-    let providers = crate::extension_store::load_all_extensions()?
+    let providers = crate::extension::catalog::load_all_extensions()?
         .into_iter()
         .flat_map(|extension| extension.external_storage_retention.providers)
         .collect::<Vec<_>>();
@@ -758,7 +758,9 @@ mod tests {
         let pressured = HashSet::from(["root".to_string()]);
         assert_eq!(
             plan(&inventory, &pressured, 7, 20, 10, "generation")
-                .iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["old", "young"],
             "reserve pressure bypasses age only; live, referenced, credential, and pinned resources remain protected",
         );

@@ -6,8 +6,9 @@
 //! linking `~/.config/homeboy/rigs/<id>.json` to the package spec.
 
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension::lifecycle;
+use homeboy_core::extension::lifecycle::is_git_url;
 use homeboy_core::{git, paths};
-use homeboy_extension as extension;
 use homeboy_stack::stack;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1004,7 +1005,7 @@ fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {
         .and_then(|id| id.as_str())
         .filter(|id| !id.is_empty())
         .unwrap_or(&rig.id);
-    let existing_id = extension::slugify_id(existing_id)?;
+    let existing_id = lifecycle::slugify_id(existing_id)?;
     if existing_id == rig.id {
         return Ok(());
     }
@@ -1124,7 +1125,7 @@ pub fn read_stack_source_metadata_in_root(
 }
 
 pub(crate) fn prepare_source(config_root: &Path, source: &str) -> Result<PreparedSource> {
-    if extension::is_git_url(source) || source.contains(".git//") {
+    if is_git_url(source) || source.contains(".git//") {
         prepare_git_source(config_root, source)
     } else {
         prepare_local_source(source)
@@ -1136,9 +1137,9 @@ fn prepare_git_source(config_root: &Path, source: &str) -> Result<PreparedSource
     let trimmed = root_source.trim_end_matches('/').trim_end_matches(".git");
     let parts = trimmed.rsplit(['/', ':']).take(2).collect::<Vec<_>>();
     let package_id = if parts.len() == 2 {
-        extension::slugify_id(&format!("{}-{}", parts[1], parts[0]))?
+        lifecycle::slugify_id(&format!("{}-{}", parts[1], parts[0]))?
     } else {
-        extension::slugify_id(parts.first().copied().unwrap_or(trimmed))?
+        lifecycle::slugify_id(parts.first().copied().unwrap_or(trimmed))?
     };
     let package_path = paths::rig_package_in_root(config_root, &package_id);
     if package_path.exists() {

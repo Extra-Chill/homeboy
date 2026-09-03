@@ -341,7 +341,7 @@ pub(crate) fn generate_duplicate_function_fixes(
         };
 
         let manifest = if use_extract_shared {
-            homeboy_extension::find_extension_for_file_ext(ext, "refactor")
+            crate::move_items::find_refactor_extension_for_extension(root, ext)
         } else {
             None
         };
@@ -391,7 +391,8 @@ pub(crate) fn generate_duplicate_function_fixes(
             "project_root": root.to_string_lossy(),
         });
 
-        let Some(result_val) = homeboy_extension::run_refactor_script(&manifest, &extract_cmd)
+        let Some(result_val) =
+            crate::refactor_provider::invoke_refactor_value(&manifest, root, ext, extract_cmd)
         else {
             generate_simple_duplicate_fixes(group, root, module_surfaces, fixes, skipped);
             continue;
@@ -657,7 +658,7 @@ fn generate_simple_duplicate_fixes(
             }
         };
 
-        let items = parse_items_for_dedup(ext, &content, remove_file);
+        let items = parse_items_for_dedup(root, ext, &content, remove_file);
         let Some(items) = items else {
             skip_file(
                 skipped,

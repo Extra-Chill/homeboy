@@ -478,6 +478,138 @@ fn stale_cleanup_lock_from_exited_owner_is_reclaimed() {
     drop(reclaimed);
 }
 
+/// The exact production shape from #14221: a lock left behind by a category
+/// timeout, whose owner PID is gone but whose 300s lease is still in the
+/// future. Reclaim must not wait the lease out — the owner is dead, so nothing
+/// will ever release the lock or renew the lease.
+///
+/// Before the fix this needed BOTH lease expiry and a dead identity, and the
+/// acquirer only retries for ~2s against a 300s lease, so the reclaim branch
+/// was unreachable and every invocation leaked another dead-owner lock.
+#[test]
+fn cleanup_lock_from_exited_owner_is_reclaimed_while_its_lease_is_still_live() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "runtime-temp.cleanup")
+            .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    let mut owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(&owner_path).expect("owner record")).expect("owner json");
+    owner.pid = exited_pid();
+    owner.linux_starttime_ticks = None;
+    owner.process_start_identity = None;
+    // Heartbeated moments ago, so the lease has almost its full 300s left.
+    owner.heartbeat_unix_ms = super::super::cleanup_support::unix_time_ms();
+    owner.lease_deadline_unix_ms = owner
+        .heartbeat_unix_ms
+        .saturating_add(CLEANUP_LOCK_STALE_AFTER.as_millis() as u64);
+    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+        .expect("dead owner with a live lease");
+    std::mem::forget(first);
+
+    let reclaimed = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        root.path(),
+        "test.reclaimer",
+        CLEANUP_LOCK_ATTEMPTS,
+        CLEANUP_LOCK_STALE_AFTER,
+    )
+    .expect("a dead owner must be reclaimed without waiting out its lease");
+    drop(reclaimed);
+}
+
+/// The self-perpetuating half of #14221: each leaked lock must not block the
+/// next invocation. Two successive acquisitions, each abandoning a dead-owner
+/// lock, must both succeed.
+#[test]
+fn successive_leaked_dead_owner_locks_do_not_block_later_cleanups() {
+    let root = tempfile::tempdir().expect("tempdir");
+    for _ in 0..3 {
+        let lock = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+            root.path(),
+            "runtime-temp.cleanup",
+            CLEANUP_LOCK_ATTEMPTS,
+            CLEANUP_LOCK_STALE_AFTER,
+        )
+        .expect("each invocation reclaims the previous leaked lock");
+        let owner_path = lock.path.join(CLEANUP_LOCK_OWNER_FILE);
+        let mut owner: RuntimeTempCleanupLockOwner =
+            serde_json::from_slice(&fs::read(&owner_path).expect("owner")).expect("owner json");
+        // Simulate the SIGKILL at the category wall: the owner process is gone
+        // and no destructor ran, so the directory is still on disk.
+        owner.pid = exited_pid();
+        owner.linux_starttime_ticks = None;
+        owner.process_start_identity = None;
+        super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+            .expect("dead owner");
+        std::mem::forget(lock);
+    }
+    assert!(root.path().join(CLEANUP_LOCK_DIR).exists());
+}
+
+/// A live owner is still protected. The relaxed reclaim must not let a
+/// contender steal a lock whose recorded process is genuinely running.
+#[test]
+fn live_owner_is_not_reclaimed_by_the_relaxed_staleness_rule() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "runtime-temp.cleanup")
+            .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    let mut owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(&owner_path).expect("owner")).expect("owner json");
+    // Lease long expired, but this process is demonstrably alive.
+    owner.heartbeat_unix_ms = 0;
+    owner.lease_deadline_unix_ms = 0;
+    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+        .expect("expired lease, live owner");
+
+    let error = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        root.path(),
+        "test.contender",
+        2,
+        Duration::from_secs(0),
+    )
+    .expect_err("a live owner keeps its lock even with an expired lease");
+    assert!(error.message.contains("timed out acquiring"));
+    assert!(owner_path.exists(), "live owner's lock must survive");
+    drop(first);
+}
+
+/// The lock is released when the sweep stops on its wall-clock budget, which
+/// is the path the category timeout now takes instead of being SIGKILLed.
+#[test]
+fn budget_truncated_sweep_releases_its_cleanup_lock_and_resumes() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    for index in 0..4 {
+        let path = failed_run(&format!("homeboy-run-budget-{index}"), 64);
+        assert!(path.exists());
+    }
+
+    let mut options = bounded_options(true, None);
+    options.older_than_days = 0;
+    // Already spent: the sweep must stop at the first entry boundary.
+    options.deadline = Some(std::time::Instant::now());
+    let output = cleanup_runtime_tmp_bounded(options).expect("budget-truncated sweep returns");
+
+    assert!(
+        output.has_more,
+        "a truncated sweep must report that work remains"
+    );
+    assert!(
+        !root.path().join(CLEANUP_LOCK_DIR).exists(),
+        "the cleanup lock must not survive a budget-truncated sweep"
+    );
+
+    // And the next invocation, with budget, still makes progress.
+    options.deadline = None;
+    let resumed = cleanup_runtime_tmp_bounded(options).expect("resumed sweep");
+    assert!(resumed.removed_count > 0);
+    assert!(!root.path().join(CLEANUP_LOCK_DIR).exists());
+    env::remove_var(runtime_tmpdir_env());
+}
+
 fn exited_pid() -> u32 {
     let mut child = std::process::Command::new("true")
         .spawn()

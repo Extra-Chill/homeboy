@@ -102,7 +102,7 @@ pub fn execute_resolved_dependency_actions<E: DependencyActionExecutor>(
                 .child_runs
                 .iter()
                 .find(|child| child.task_id == downstream_id)
-                .and_then(|child| crate::agent_task_lifecycle::status(&child.run_id).ok())
+                .and_then(|child| crate::agent_task_lifecycle::reconcile_status(&child.run_id).ok())
                 .and_then(|record| record.metadata.get("cook_finalization").cloned())
                 .and_then(|value| {
                     value["pr_url"]
@@ -532,14 +532,14 @@ mod tests {
             "resume",
         )
         .unwrap();
-        let first = crate::agent_task_lifecycle::persisted_status("dependent-run").unwrap();
+        let first = crate::agent_task_lifecycle::status("dependent-run").unwrap();
         crate::agent_task_lifecycle::invalidate_cook_finalization_for_dependency(
             "dependent-run",
             "a".repeat(40).as_str(),
             "resume",
         )
         .unwrap();
-        let second = crate::agent_task_lifecycle::persisted_status("dependent-run").unwrap();
+        let second = crate::agent_task_lifecycle::status("dependent-run").unwrap();
 
         assert_eq!(second.updated_at, first.updated_at);
         assert_eq!(

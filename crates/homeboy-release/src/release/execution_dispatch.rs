@@ -1,17 +1,17 @@
+use super::context::ReleaseExtension;
 use crate::release::executor;
 use crate::release::types::{ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus};
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
-use homeboy_extension::ExtensionManifest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
 pub(super) struct ReleaseExecutionContext<'a> {
     pub(super) component: &'a Component,
-    pub(super) extensions: &'a [ExtensionManifest],
+    pub(super) extensions: &'a [ReleaseExtension],
     pub(super) component_id: &'a str,
     pub(super) options: &'a ReleaseOptions,
     /// Homeboy roots resolved once for the whole plan by
@@ -1046,13 +1046,14 @@ mod tests {
         release_step_is_plan_only, release_step_is_show_stopper,
         release_step_unexpected_dirty_files, tracked_dirty_snapshot, ReleaseExecutionContext,
     };
+    use crate::release::context::ReleaseExtension;
     use crate::release::types::{
         ReleaseOptions, ReleasePipelineOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, VersionTarget};
     use homeboy_core::deps::{DependencyCommandResult, DependencyInstallResult};
     use homeboy_core::plan::PlanStep;
-    use homeboy_extension::ExtensionManifest;
+    use homeboy_extension_contract::ExtensionManifest;
 
     #[test]
     fn test_release_step_is_plan_only() {
@@ -1114,14 +1115,15 @@ mod tests {
             }))
             .expect("extension manifest");
             extension.id = "registry".to_string();
-            homeboy_extension::save_manifest(&extension).expect("save extension manifest");
+            homeboy_core::extension::catalog::save_manifest(&extension)
+                .expect("save extension manifest");
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: component_path.path().to_string_lossy().to_string(),
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![extension];
+            let extensions = vec![ReleaseExtension::from_manifest(&extension)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1166,7 +1168,8 @@ mod tests {
                  printf '[{{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}}]'",
                 counter = counter.display(),
             ));
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
 
             let component = Component {
                 id: "fixture".to_string(),
@@ -1174,7 +1177,7 @@ mod tests {
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1230,7 +1233,8 @@ mod tests {
                 "printf '9.9.9\n' > VERSION; printf artifact > fixture.zip; \
                  printf '[{\"path\":\"fixture.zip\",\"type\":\"archive\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: repo.path().to_string_lossy().to_string(),
@@ -1240,7 +1244,7 @@ mod tests {
                 skip_build_validation: true,
                 ..ReleaseOptions::default()
             };
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1292,14 +1296,15 @@ mod tests {
                  printf package > fixture-1.2.3.tgz; \
                  printf '[{\"path\":\"fixture-1.2.3.tgz\",\"type\":\"archive\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: repo.path().to_string_lossy().to_string(),
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1357,14 +1362,15 @@ mod tests {
                 "mkdir -p build; printf diagnostic > build/output; \
                  printf partial > fixture-1.2.3.tgz; printf failed >&2; exit 1",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: repo.path().to_string_lossy().to_string(),
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1397,8 +1403,9 @@ mod tests {
                  printf partial > fixture-1.2.3.tgz; \
                  printf '[{\"path\":\"fixture-1.2.3.tgz\",\"type\":\"archive\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("replace package extension");
-            let recovery_extensions = vec![package];
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("replace package extension");
+            let recovery_extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut recovery = ReleaseExecutionContext {
                 component: &component,
                 extensions: &recovery_extensions,
@@ -1447,7 +1454,8 @@ mod tests {
             let package = package_extension(
                 "mkdir -p build/stage; cp plugin.php build/stage/plugin.php; (cd build && zip -q fixture.zip stage/plugin.php); printf '[{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
 
             let component = Component {
                 id: "fixture".to_string(),
@@ -1455,7 +1463,7 @@ mod tests {
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1983,7 +1991,7 @@ mod tests {
     fn extension_declared_release_preflight_executes_action() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
-            let mut extension: homeboy_extension::ExtensionManifest =
+            let mut extension: homeboy_extension_contract::ExtensionManifest =
                 serde_json::from_value(serde_json::json!({
                     "name": "Registry",
                     "version": "1.0.0",
@@ -2002,7 +2010,7 @@ mod tests {
                 }))
                 .expect("extension manifest");
             extension.id = "registry".to_string();
-            homeboy_extension::save_manifest(&extension).expect("save extension");
+            homeboy_core::extension::catalog::save_manifest(&extension).expect("save extension");
 
             let component = Component {
                 id: "fixture".to_string(),
@@ -2010,7 +2018,7 @@ mod tests {
                 ..Default::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![extension];
+            let extensions = vec![ReleaseExtension::from_manifest(&extension)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,

@@ -16,7 +16,7 @@ use homeboy::core::observation::{
     ObservationStore, RunStatus,
 };
 use homeboy::rig;
-use homeboy_extension::trace as extension_trace;
+use homeboy_core::extension::trace as extension_trace;
 
 use super::observations::{self, record_trace_artifacts};
 use super::{

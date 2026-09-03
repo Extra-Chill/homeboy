@@ -238,17 +238,15 @@ pub fn report(
         ));
     }
 
-    let workspace_writable = (!scoped)
-        .then(|| probes::remote_path_writable(client, &workspace_root))
-        .unwrap_or(false);
-    if !scoped {
-        checks.push(checks::path_writable_check(
-            "workspace.writable",
-            workspace_writable,
-            Path::new(&workspace_root),
-            "Make the remote workspace root writable by the runner user",
-        ));
-    }
+    // A Lab repair must not report success for a runner that cannot accept a
+    // workspace. Keep this lightweight check in the otherwise bounded scope.
+    let workspace_writable = probes::remote_path_writable(client, &workspace_root);
+    checks.push(checks::path_writable_check(
+        "workspace.writable",
+        workspace_writable,
+        Path::new(&workspace_root),
+        "Make the remote workspace root writable by the runner user",
+    ));
 
     let artifact_store_available = (!scoped)
         .then(|| probes::remote_artifact_store_available(client, &artifact_root))

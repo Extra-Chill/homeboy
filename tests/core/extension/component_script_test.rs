@@ -7,12 +7,12 @@ use std::process::Command;
 use crate::commands::test::{run as run_test, TestArgs};
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use homeboy_core::engine::run_dir::RunDir;
-use homeboy_core::test_support::with_isolated_home;
-use homeboy_extension::component_script::{
+use homeboy_core::extension::component_script::{
     run_component_scripts, run_component_scripts_with_env, run_component_scripts_with_run_dir,
     source_path,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_core::test_support::{with_isolated_home, GitFixture};
+use homeboy_extension_contract::ExtensionCapability;
 
 fn test_command_args(root: &Path) -> TestArgs {
     TestArgs::for_test("fixture", root)
@@ -25,6 +25,7 @@ fn write_component_script(root: &Path, name: &str, body: &str) {
 }
 
 fn init_git_repo(root: &Path) {
+    let git = GitFixture::new(root);
     for args in [
         vec!["init", "-q"],
         vec!["config", "user.email", "tests@example.com"],
@@ -32,11 +33,7 @@ fn init_git_repo(root: &Path) {
         vec!["add", "."],
         vec!["commit", "-q", "-m", "fixture"],
     ] {
-        let output = Command::new("git")
-            .args(&args)
-            .current_dir(root)
-            .output()
-            .expect("git fixture command should start");
+        let output = git.execute(&args);
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",
@@ -152,17 +149,10 @@ fn homeboy_manifest_seeds_an_isolated_warm_cargo_target_per_checkout() {
         assert!(output.status.success(), "git worktree add failed");
         fs::write(primary.path().join("README"), "divergent fixture\n")
             .expect("change primary checkout");
-        let output = Command::new("git")
-            .args(["add", "README"])
-            .current_dir(primary.path())
-            .output()
-            .expect("stage divergent fixture");
+        let git = GitFixture::new(primary.path());
+        let output = git.execute(&["add", "README"]);
         assert!(output.status.success());
-        let output = Command::new("git")
-            .args(["commit", "-qm", "diverge primary checkout"])
-            .current_dir(primary.path())
-            .output()
-            .expect("commit divergent fixture");
+        let output = git.execute(&["commit", "-qm", "diverge primary checkout"]);
         assert!(output.status.success());
 
         // The primary checkout "compiles" first, writing a build artifact
@@ -926,7 +916,7 @@ fn extension_policy_with_evidence_allows_a_neutral_no_test_scope() {
         assert_eq!(output.status, "skipped");
         assert_eq!(
             output.phase.expect("phase").status,
-            homeboy_extension::PhaseStatus::Skipped
+            homeboy_extension_contract::PhaseStatus::Skipped
         );
     });
 }

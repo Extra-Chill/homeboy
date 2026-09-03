@@ -13,12 +13,85 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
+use crate::controller_pin_reference::{ControllerPinProtectionReason, ReferencedControllerPin};
 use crate::{build_identity, paths, Error, Result};
+
+/// One classification recorded against a controller runtime identity.
+///
+/// Eligibility is *derived* from this set rather than tracked beside it. Every
+/// variant answers a single exhaustively-matched question — does this
+/// classification forbid removing the identity — so a newly added reason cannot
+/// leave a stale `eligible: true` behind the way `within_age_window` did
+/// (#14222): the report advertised 143 MB of reclaimable space that no `--apply`
+/// could ever free, because the pinned path cleared `eligible` and the age/size
+/// budget path did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ControllerRuntimeRetentionReason {
+    /// The identity backs the active admission generation.
+    ProtectedByActiveGeneration,
+    /// A durable record is genuinely in flight (`Queued` or `Running`).
+    ProtectedInFlight,
+    /// A mutating lifecycle action remains available inside the window.
+    ProtectedByPendingMutation,
+    /// The configured age and size budget still protects the identity.
+    WithinAgeWindow,
+    /// This sweep exhausted its removal limit before reaching the identity.
+    /// Another bounded pass can still reclaim it, but this one cannot, so it is
+    /// not advertised as reclaimable now.
+    CleanupLimitReached,
+    /// Disposition, not retention: nothing protects the identity and this sweep
+    /// will remove it (or would, in a dry run).
+    Reclaimable,
+}
+
+impl ControllerRuntimeRetentionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProtectedByActiveGeneration => "protected_by_active_generation",
+            Self::ProtectedInFlight => ControllerPinProtectionReason::ProtectedInFlight.as_str(),
+            Self::ProtectedByPendingMutation => {
+                ControllerPinProtectionReason::ProtectedByPendingMutation.as_str()
+            }
+            Self::WithinAgeWindow => "within_age_window",
+            Self::CleanupLimitReached => "cleanup_limit_reached",
+            Self::Reclaimable => "reclaimable",
+        }
+    }
+
+    /// Whether this classification forbids removing the identity.
+    ///
+    /// This match is deliberately exhaustive: adding a variant without deciding
+    /// its retention force is a compile error, not a silent inconsistency
+    /// between `eligible` and `retention_reasons`.
+    pub const fn retains(self) -> bool {
+        match self {
+            Self::ProtectedByActiveGeneration
+            | Self::ProtectedInFlight
+            | Self::ProtectedByPendingMutation
+            | Self::WithinAgeWindow
+            | Self::CleanupLimitReached => true,
+            Self::Reclaimable => false,
+        }
+    }
+}
+
+impl From<ControllerPinProtectionReason> for ControllerRuntimeRetentionReason {
+    fn from(reason: ControllerPinProtectionReason) -> Self {
+        match reason {
+            ControllerPinProtectionReason::ProtectedInFlight => Self::ProtectedInFlight,
+            ControllerPinProtectionReason::ProtectedByPendingMutation => {
+                Self::ProtectedByPendingMutation
+            }
+        }
+    }
+}
 
 pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE";
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_USE_ENV: &str = "HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV";
 /// Names the executable [`TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV`]'s fixture is
 /// copied from.
 ///
@@ -30,8 +103,6 @@ pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_SOURCE_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE";
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) const TEST_CONTROLLER_RUNTIME_STORE_ENV: &str = "HOMEBOY_TEST_CONTROLLER_RUNTIME_STORE";
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_IDENTITY_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY";
@@ -256,9 +327,10 @@ struct ExecutableFileIdentity {
 
 /// Report-only retention inventory for immutable controller runtime pins.
 ///
-/// No current cleanup command deletes controller runtime pins. This report is
-/// intentionally the eligibility primitive for a future narrowly-scoped pruner;
-/// callers must retain every path in `retained` and may consider only `eligible`.
+/// `eligible` is the projection of [`ControllerRuntimeSnapshot::eligible`] onto
+/// pin paths, never an independent computation: a path is advertised only when
+/// the identity that owns it carries no retaining reason. Callers must retain
+/// every path in `retained`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerRuntimeRetentionReport {
     pub retained: Vec<PathBuf>,
@@ -266,15 +338,70 @@ pub struct ControllerRuntimeRetentionReport {
     pub snapshots: Vec<ControllerRuntimeSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// One controller runtime identity and every retention decision made about it.
+///
+/// The recorded reasons are the single source of truth. `eligible` is derived
+/// from them rather than stored beside them, so no code path can record a
+/// retention reason and leave a contradictory `eligible: true` behind (#14222).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerRuntimeSnapshot {
     pub identity: String,
     pub path: PathBuf,
     pub size_bytes: u64,
     pub age_seconds: u64,
     pub pins: Vec<PathBuf>,
-    pub retention_reasons: Vec<String>,
-    pub eligible: bool,
+    reasons: Vec<ControllerRuntimeRetentionReason>,
+}
+
+impl ControllerRuntimeSnapshot {
+    /// Every classification recorded against this identity, in decision order.
+    pub fn reasons(&self) -> &[ControllerRuntimeRetentionReason] {
+        &self.reasons
+    }
+
+    /// The recorded classifications rendered for operator-facing output.
+    pub fn retention_reasons(&self) -> Vec<String> {
+        self.reasons
+            .iter()
+            .map(|reason| reason.as_str().to_string())
+            .collect()
+    }
+
+    /// Whether cleanup may remove this identity.
+    ///
+    /// Derived, never stored: a single retaining reason is enough to disqualify
+    /// the identity, and `reclaimable` is a disposition rather than a guard.
+    pub fn eligible(&self) -> bool {
+        !self
+            .reasons
+            .iter()
+            .any(|reason| ControllerRuntimeRetentionReason::retains(*reason))
+    }
+
+    fn record(&mut self, reason: ControllerRuntimeRetentionReason) {
+        self.reasons.push(reason);
+    }
+}
+
+impl serde::Serialize for ControllerRuntimeSnapshot {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("ControllerRuntimeSnapshot", 7)?;
+        state.serialize_field("identity", &self.identity)?;
+        state.serialize_field("path", &self.path)?;
+        state.serialize_field("size_bytes", &self.size_bytes)?;
+        state.serialize_field("age_seconds", &self.age_seconds)?;
+        state.serialize_field("pins", &self.pins)?;
+        state.serialize_field("retention_reasons", &self.retention_reasons())?;
+        // Serialized from the same derivation callers read, so the evidence an
+        // operator inspects cannot disagree with the decision cleanup made.
+        state.serialize_field("eligible", &self.eligible())?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,10 +476,40 @@ pub struct ControllerRuntimePruneResult {
     pub snapshots: Vec<ControllerRuntimeSnapshot>,
 }
 
+impl ControllerRuntimePruneResult {
+    /// Identities this sweep either removed or would remove under `--apply`.
+    ///
+    /// Reported rather than recomputed by callers, so advertised reclaim always
+    /// matches achievable reclaim. Cleanup surfaced 143 MB of "candidates" no
+    /// `--apply` could ever free while an operator was at 95% disk because the
+    /// CLI derived its own count from a stale `eligible` flag (#14222).
+    pub fn candidates(&self) -> impl Iterator<Item = &ControllerRuntimeSnapshot> {
+        self.snapshots.iter().filter(|snapshot| {
+            snapshot.eligible()
+                || snapshot
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::Reclaimable)
+        })
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.candidates().count()
+    }
+
+    /// Bytes the candidates account for. Under `--apply` this equals
+    /// `reclaimed_bytes`; in a dry run it is the reclaim an apply would achieve.
+    pub fn candidate_bytes(&self) -> u64 {
+        self.candidates()
+            .map(|snapshot| snapshot.size_bytes)
+            .fold(0, u64::saturating_add)
+    }
+}
+
 /// Discover pin references through the durable lifecycle store and classify the
-/// content-addressed pins currently present on disk. Queued, running, and
-/// recoverable partial records retain their pins because lifecycle recovery can
-/// still operate on them. The active admission generation is retained as well.
+/// content-addressed pins currently present on disk. Records that still have a
+/// mutating lifecycle action inside the retention window, and in-flight runs,
+/// retain their pins. The active admission generation is retained separately
+/// and unconditionally.
 pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
     let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
     retention_report_with_references_at(&runtime_root()?, &referenced, SystemTime::now())
@@ -365,6 +522,7 @@ pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
 pub fn protected_executables() -> Result<Vec<PathBuf>> {
     let mut protected: BTreeSet<_> = crate::controller_pin_reference::referenced_controller_pins()?
         .into_iter()
+        .map(|pin| pin.path)
         .collect();
     let active = runtime_root()?.join(ACTIVE_GENERATION_FILE);
     if active.exists() {
@@ -392,17 +550,24 @@ pub fn protected_executables() -> Result<Vec<PathBuf>> {
 
 fn retention_report_with_references_at(
     root: &Path,
-    referenced: &[PathBuf],
+    referenced: &[ReferencedControllerPin],
     now: SystemTime,
 ) -> Result<ControllerRuntimeRetentionReport> {
     let mut retained = BTreeSet::new();
-
-    for path in referenced {
-        if content_addressed_pin_path(&root, path) {
-            retained.insert(path.clone());
+    let mut referenced_reasons = BTreeMap::new();
+    for pin in referenced {
+        if content_addressed_pin_path(root, &pin.path) {
+            retained.insert(pin.path.clone());
+            referenced_reasons
+                .entry(pin.path.clone())
+                .and_modify(|existing: &mut ControllerPinProtectionReason| {
+                    *existing = (*existing).max(pin.reason);
+                })
+                .or_insert(pin.reason);
         }
     }
 
+    let mut active_generation_pins = BTreeSet::new();
     let active = root.join(ACTIVE_GENERATION_FILE);
     if active.exists() {
         let value = fs::read_to_string(&active).map_err(|error| {
@@ -422,16 +587,16 @@ fn retention_report_with_references_at(
             .pointer("/originating/pinned_executable")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .filter(|path| content_addressed_pin_path(&root, path))
+            .filter(|path| content_addressed_pin_path(root, path))
         {
-            retained.insert(path);
+            retained.insert(path.clone());
+            active_generation_pins.insert(path);
         }
     }
 
-    let pins = discover_pin_paths(&root)?;
-    let eligible = pins.difference(&retained).cloned().collect();
+    let pins = discover_pin_paths(root)?;
     let mut snapshots = Vec::new();
-    for entry in fs::read_dir(&root).map_err(|error| {
+    for entry in fs::read_dir(root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("list controller runtime identities".to_string()),
@@ -460,8 +625,20 @@ fn retention_report_with_references_at(
             continue;
         }
         let mut reasons = Vec::new();
-        if identity_pins.iter().any(|pin| retained.contains(pin)) {
-            reasons.push("pinned_by_active_or_resumable_run_or_current_generation".to_string());
+        if identity_pins
+            .iter()
+            .any(|pin| active_generation_pins.contains(pin))
+        {
+            reasons.push(ControllerRuntimeRetentionReason::ProtectedByActiveGeneration);
+        }
+        let mut pin_reasons = BTreeSet::new();
+        for pin in &identity_pins {
+            if let Some(reason) = referenced_reasons.get(pin) {
+                pin_reasons.insert(*reason);
+            }
+        }
+        for reason in pin_reasons.iter().rev() {
+            reasons.push(ControllerRuntimeRetentionReason::from(*reason));
         }
         let modified = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
@@ -476,23 +653,36 @@ fn retention_report_with_references_at(
             size_bytes: path_size(&path),
             age_seconds,
             pins: identity_pins,
-            eligible: reasons.is_empty(),
-            retention_reasons: reasons,
+            reasons,
             path,
         });
     }
     snapshots.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(ControllerRuntimeRetentionReport {
         retained: retained.into_iter().collect(),
-        eligible,
+        // Projected from the snapshots rather than computed independently, so a
+        // path can never be advertised as eligible while its owning identity
+        // records a reason that retains it.
+        eligible: eligible_pins(&snapshots),
         snapshots,
     })
 }
 
-/// Remove only content-addressed pins not referenced by a nonterminal durable
-/// record or the active generation, and only those the configured retention
-/// window no longer protects. The caller chooses mutation explicitly, and may
-/// opt out of the window explicitly through the overrides.
+/// Every pin belonging to an identity nothing currently retains.
+fn eligible_pins(snapshots: &[ControllerRuntimeSnapshot]) -> Vec<PathBuf> {
+    snapshots
+        .iter()
+        .filter(|snapshot| snapshot.eligible())
+        .flat_map(|snapshot| snapshot.pins.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Remove only content-addressed pins not protected by an in-flight or
+/// pending-mutation record or the active generation, and only those the
+/// configured retention window no longer protects. The caller chooses mutation
+/// explicitly, and may opt out of the window explicitly through the overrides.
 pub fn prune_pins(
     apply: bool,
     overrides: ControllerRuntimeRetentionOverrides,
@@ -527,7 +717,7 @@ pub fn cleanup_in_root(
     let mut candidates = report
         .snapshots
         .iter_mut()
-        .filter(|snapshot| snapshot.eligible)
+        .filter(|snapshot| snapshot.eligible())
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
@@ -542,17 +732,16 @@ pub fn cleanup_in_root(
         let expired = snapshot.age_seconds >= options.min_age.as_secs();
         let pressured = total > options.max_total_bytes;
         if !(expired || pressured) {
-            snapshot
-                .retention_reasons
-                .push("within_age_and_size_budget".to_string());
+            // Recording the reason is what clears eligibility; the two cannot
+            // drift because `eligible` is derived from exactly this set.
+            snapshot.record(ControllerRuntimeRetentionReason::WithinAgeWindow);
             continue;
         }
         if removed.len() >= options.limit {
-            snapshot
-                .retention_reasons
-                .push("cleanup_limit_reached".to_string());
+            snapshot.record(ControllerRuntimeRetentionReason::CleanupLimitReached);
             continue;
         }
+        snapshot.record(ControllerRuntimeRetentionReason::Reclaimable);
         if options.apply {
             // Rename first: an interrupted cleanup leaves a non-discoverable
             // tombstone rather than a partially materialized identity.
@@ -575,11 +764,16 @@ pub fn cleanup_in_root(
             total = total.saturating_sub(snapshot.size_bytes);
         }
     }
+    // Re-projected after the budget pass, not carried from the pre-pass report:
+    // the window and limit decisions above are themselves retention reasons, so
+    // an identity this sweep declined to remove must stop being advertised as a
+    // candidate (#14222). Removed pins are gone from disk and drop out too.
     let removed_set = removed.iter().collect::<BTreeSet<_>>();
-    report.eligible.retain(|path| !removed_set.contains(path));
+    let mut eligible = eligible_pins(&report.snapshots);
+    eligible.retain(|path| !removed_set.contains(path));
     Ok(ControllerRuntimePruneResult {
         retained: report.retained,
-        eligible: report.eligible,
+        eligible,
         removed,
         removed_identities,
         reclaimed_bytes,
@@ -749,13 +943,14 @@ impl Drop for AdmissionLock {
 /// `pin_current` under an already-resolved runtime root.
 pub fn pin_current_in_root(root: &Path) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    pin_current_unlocked()
+    pin_current_unlocked(root)
 }
 
-fn pin_current_unlocked() -> Result<Value> {
+fn pin_current_unlocked(root: &Path) -> Result<Value> {
     let identity = build_identity::current();
     let executable = current_executable()?;
-    pin_executable_with_source(
+    pin_executable_with_source_in_root(
+        root,
         &executable,
         &identity.display,
         build_source_provenance(&identity),
@@ -798,22 +993,30 @@ pub fn pin_current_queued_in_root(
             return Err(error);
         }
     };
-    let runtime = pin_current_unlocked()?;
+    let runtime = pin_current_unlocked(root)?;
     drop(lock);
     Ok(runtime)
 }
 
 fn current_executable() -> Result<PathBuf> {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
-        let executable = PathBuf::from(executable);
-        // The fixture is materialized here, on first read, instead of when the
-        // hermetic home was built: only the handful of readers of this contract
-        // need its bytes, and the copy is of a multi-hundred-megabyte binary.
-        crate::test_support::ensure_test_controller_fixture(&executable);
-        return Ok(executable);
+    #[cfg(test)]
+    {
+        return Ok(crate::test_support::controller_runtime_test_executable());
     }
 
+    #[cfg(all(not(test), feature = "test-support"))]
+    {
+        if std::env::var_os(TEST_CONTROLLER_RUNTIME_USE_ENV).is_some() {
+            if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
+                let executable = PathBuf::from(executable);
+                crate::test_support::ensure_test_controller_fixture(&executable);
+                return Ok(executable);
+            }
+        }
+        return Ok(crate::test_support::controller_runtime_test_executable());
+    }
+
+    #[cfg(all(not(test), not(feature = "test-support")))]
     std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -825,12 +1028,22 @@ fn current_executable() -> Result<PathBuf> {
 /// Seal a verified executable for a command-scoped controller continuation.
 /// The returned pin is content-addressed, executable, and self-identifying.
 pub fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
-    pin_executable_with_source(executable, identity, unavailable_source_provenance())
+    pin_executable_with_source_in_root(
+        &runtime_root()?,
+        executable,
+        identity,
+        unavailable_source_provenance(),
+    )
 }
 
-fn pin_executable_with_source(executable: &Path, identity: &str, source: Value) -> Result<Value> {
+fn pin_executable_with_source_in_root(
+    root: &Path,
+    executable: &Path,
+    identity: &str,
+    source: Value,
+) -> Result<Value> {
     let digest = controller_executable_digest(executable)?;
-    let pinned_path = pinned_path(identity, &digest)?;
+    let pinned_path = pinned_path_in_root(root, identity, &digest);
     publish_pin(executable, &pinned_path, &digest)?;
 
     let runtime = runtime_pin(identity, executable, &pinned_path, &digest, source);
@@ -902,7 +1115,8 @@ pub fn materialize_source_commit(source: &str, commit: &str, identity: &str) -> 
             None,
         ));
     }
-    pin_executable_with_source(
+    pin_executable_with_source_in_root(
+        &runtime_root()?,
         &target.target_dir().join("release/homeboy"),
         identity,
         json!({
@@ -941,8 +1155,7 @@ fn runtime_pin(
 /// controller's selection.
 /// Ambient admission entry points, retained for this module's own tests only.
 ///
-/// These resolve the runtime root from process-global state. That is the exact
-/// split `tests/nextest_shard_parallelism_test.rs` recorded: a test holding a
+/// These resolve the runtime root from process-global state. A test holding a
 /// `HermeticTestContext` store while production code beneath it read the
 /// admission lease out of the real `$HOME`, so one test observed another's
 /// `controller_admission.owner`. `HermeticTestContext` does not mutate the
@@ -1010,7 +1223,7 @@ pub fn admit_current_for_with_cancellation_check_in_root(
             return Err(error);
         }
     };
-    let runtime = pin_current_unlocked()?;
+    let runtime = pin_current_unlocked(root)?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     validate_pin(&runtime)?;
     heartbeat_admission_owner(&lock_path, request_id, Some(&runtime))?;
@@ -1034,11 +1247,7 @@ pub fn admission_status(request_id: &str) -> Result<Value> {
 /// admitting siblings do not. The projection below resolves nothing but the
 /// admission queue beneath `runtime_root`, so a rooted status can never report
 /// this installation's queue position against another installation's owner.
-/// `pin_current`, `admit_current_for`, `activate_installed_generation`,
-/// `migrate_legacy_pin`, and `recover_pin` all also publish into the
-/// content-addressed pin store, which is deliberately process-global (#7505);
-/// rooting only their queue half is exactly the split this campaign forbids.
-/// Nothing here touches that store.
+/// Unlike mutation, this projection does not publish pin bytes.
 pub fn admission_status_at(runtime_root: &Path, request_id: &str) -> Result<Value> {
     fs::create_dir_all(runtime_root).map_err(|error| {
         Error::internal_io(
@@ -1124,7 +1333,12 @@ pub fn activate_installed_generation(executable: &Path) -> Result<Value> {
 pub fn activate_installed_generation_in_root(root: &Path, executable: &Path) -> Result<Value> {
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let _lock = acquire_admission_lock(&lock_path)?;
-    let runtime = pin_executable(executable, &activated_executable_identity(executable)?)?;
+    let runtime = pin_executable_with_source_in_root(
+        root,
+        executable,
+        &activated_executable_identity(executable)?,
+        unavailable_source_provenance(),
+    )?;
     validate_pin(&runtime)?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     Ok(runtime)
@@ -1153,31 +1367,62 @@ pub fn pinned_executable_for_mutation(
 }
 
 pub fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result<()> {
+    let Some(runtime) = metadata.get(CONTROLLER_RUNTIME_METADATA_KEY) else {
+        return Ok(());
+    };
+    let originating = runtime
+        .pointer("/originating/build_identity")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if originating.is_empty() || originating == current_identity {
+        return pinned_executable_for_mutation(metadata, current_identity).map(|_| ());
+    }
+    let pinned = runtime
+        .pointer("/originating/pinned_executable")
+        .and_then(Value::as_str)
+        .unwrap_or("<pinned-controller-runtime>");
+    if !Path::new(pinned).exists() {
+        return Err(mutation_identity_mismatch(
+            originating,
+            current_identity,
+            vec![
+                "Republish the reclaimed pin from a verified artifact or the recorded source revision (`homeboy agent-task runtime-recover --artifact` or `--source`) before mutating this run"
+                    .to_string(),
+            ],
+        ));
+    }
     let Some(pinned) = pinned_executable_for_mutation(metadata, current_identity)? else {
         return Ok(());
     };
-    let originating = metadata
-        .get(CONTROLLER_RUNTIME_METADATA_KEY)
-        .and_then(|runtime| runtime.pointer("/originating/build_identity"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    Err(Error::validation_invalid_argument(
+    Err(mutation_identity_mismatch(
+        originating,
+        current_identity,
+        vec![format!(
+            "Run the lifecycle mutation through the pinned compatible runtime: {} <original homeboy arguments>",
+            pinned.display()
+        )],
+    ))
+}
+
+fn mutation_identity_mismatch(
+    originating: &str,
+    current_identity: &str,
+    tried: Vec<String>,
+) -> Error {
+    Error::validation_invalid_argument(
         "controller_runtime",
         format!(
             "durable run was created by controller runtime `{originating}`, but this command is `{current_identity}`"
         ),
         Some(current_identity.to_string()),
-        Some(vec![format!(
-            "Run the lifecycle mutation through the pinned compatible runtime: {} <original homeboy arguments>",
-            pinned.display()
-        )]),
-    ))
+        Some(tried),
+    )
 }
 
 /// `migrate_legacy_pin` under an already-resolved runtime root.
 pub fn migrate_legacy_pin_in_root(root: &Path, runtime: &Value) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    migrate_legacy_pin_unlocked(runtime)
+    migrate_legacy_pin_unlocked(root, runtime)
 }
 
 /// [`migrate_legacy_pin_and_persist`] under an already-resolved runtime root.
@@ -1187,14 +1432,14 @@ pub fn migrate_legacy_pin_and_persist_in_root(
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
     let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
-    let migrated = migrate_legacy_pin_unlocked(runtime)?;
+    let migrated = migrate_legacy_pin_unlocked(runtime_root, runtime)?;
     if &migrated != runtime {
         persist(&migrated)?;
     }
     Ok(migrated)
 }
 
-fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
+fn migrate_legacy_pin_unlocked(root: &Path, runtime: &Value) -> Result<Value> {
     let identity =
         required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
     let current = required_runtime_string(
@@ -1210,7 +1455,7 @@ fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
         verify_executable(current, "legacy controller runtime")?;
         verify_self_status_identity(current, identity)?;
         let digest = executable_digest(current)?;
-        let destination = pinned_path(identity, &digest)?;
+        let destination = pinned_path_in_root(root, identity, &digest);
         publish_pin(current, &destination, &digest)?;
 
         let mut migrated = runtime.clone();
@@ -1227,7 +1472,7 @@ fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
     }
 
     let digest = required_runtime_string(runtime, "/originating/sha256", "content digest")?;
-    let destination = pinned_path(identity, digest)?;
+    let destination = pinned_path_in_root(root, identity, digest);
     if current == destination {
         validate_pin(runtime)?;
         return Ok(runtime.clone());
@@ -1255,7 +1500,7 @@ pub fn recover_pin_in_root(
     source: Option<&Path>,
 ) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    recover_pin_unlocked(runtime, artifact, source)
+    recover_pin_unlocked(root, runtime, artifact, source)
 }
 
 /// Publish a recovered pin and persist its durable reference under one
@@ -1278,12 +1523,13 @@ pub fn recover_pin_and_persist_in_root(
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
     let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
-    let recovered = recover_pin_unlocked(runtime, artifact, source)?;
+    let recovered = recover_pin_unlocked(runtime_root, runtime, artifact, source)?;
     persist(&recovered)?;
     Ok(recovered)
 }
 
 fn recover_pin_unlocked(
+    root: &Path,
     runtime: &Value,
     artifact: Option<&Path>,
     source: Option<&Path>,
@@ -1294,7 +1540,7 @@ fn recover_pin_unlocked(
     // Recovery never repairs an existing path in place. A corrupted canonical
     // path can still be referenced by another durable record, so this record
     // receives a distinct immutable snapshot after the artifact is verified.
-    let destination = recovered_pinned_path(identity, expected)?;
+    let destination = recovered_pinned_path_in_root(root, identity, expected);
     if let Some(artifact) = artifact {
         verify_artifact(artifact, expected, identity)?;
         publish_pin(artifact, &destination, expected)?;
@@ -2834,36 +3080,28 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
     }
 }
 
+#[cfg(test)]
 fn pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(controller_runtime_store_root()?
-        .join("controller-runtimes")
-        .join(format!(
-            "{}-{}",
-            paths::sanitize_path_segment(identity),
-            digest
-        ))
-        .join("homeboy"))
+    Ok(pinned_path_in_root(&runtime_root()?, identity, digest))
 }
 
-fn recovered_pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(controller_runtime_store_root()?
-        .join("controller-runtimes")
-        .join(format!(
-            "{}-{}",
-            paths::sanitize_path_segment(identity),
-            digest
-        ))
-        .join(format!("recovery-{}", uuid::Uuid::new_v4()))
-        .join("homeboy"))
+fn pinned_path_in_root(root: &Path, identity: &str, digest: &str) -> PathBuf {
+    root.join(format!(
+        "{}-{}",
+        paths::sanitize_path_segment(identity),
+        digest
+    ))
+    .join("homeboy")
 }
 
-fn controller_runtime_store_root() -> Result<PathBuf> {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(path) = std::env::var_os(TEST_CONTROLLER_RUNTIME_STORE_ENV) {
-        return Ok(PathBuf::from(path));
-    }
-
-    paths::homeboy_data()
+fn recovered_pinned_path_in_root(root: &Path, identity: &str, digest: &str) -> PathBuf {
+    root.join(format!(
+        "{}-{}",
+        paths::sanitize_path_segment(identity),
+        digest
+    ))
+    .join(format!("recovery-{}", uuid::Uuid::new_v4()))
+    .join("homeboy")
 }
 
 fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Result<()> {
@@ -4087,6 +4325,29 @@ mod tests {
     }
 
     #[test]
+    fn identity_mismatch_against_a_reclaimed_pin_names_the_recovery_route() {
+        let metadata = json!({
+            "controller_runtime": {
+                "originating": {
+                    "build_identity": "homeboy 1.0.0+origin",
+                    "pinned_executable": "/missing/reclaimed-homeboy",
+                    "sha256": "00",
+                }
+            }
+        });
+
+        let error = validate_for_mutation(&metadata, "homeboy 1.0.0+replacement")
+            .expect_err("replacement runtime must not mutate the originating lifecycle");
+
+        assert!(error.message.contains("homeboy 1.0.0+origin"));
+        assert!(error.message.contains("homeboy 1.0.0+replacement"));
+        let hint = error.details["tried"][0].as_str().expect("recovery hint");
+        assert!(hint.contains("verified artifact") || hint.contains("recorded source revision"));
+        assert!(hint.contains("runtime-recover"));
+        assert!(!hint.contains("Run the lifecycle mutation through the pinned compatible runtime"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn identity_mismatch_resolves_the_verified_pinned_executable() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
@@ -4235,8 +4496,9 @@ mod tests {
     #[test]
     fn pin_current_uses_the_explicit_test_controller_fixture() {
         crate::test_support::with_isolated_home(|_| {
+            let explicit = tempfile::tempdir().expect("explicit runtime root");
             let runtime =
-                pin_current_in_root(&test_runtime_root()).expect("pin explicit controller fixture");
+                pin_current_in_root(explicit.path()).expect("pin explicit controller fixture");
             let source = runtime
                 .pointer("/originating/executable")
                 .and_then(Value::as_str)
@@ -4256,6 +4518,7 @@ mod tests {
                 source,
                 std::env::current_exe().expect("current test executable")
             );
+            assert!(pinned.starts_with(explicit.path()));
             assert_eq!(
                 executable_identity(&pinned, None).expect("fixture identity"),
                 build_identity::current().display
@@ -4397,19 +4660,21 @@ mod tests {
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
                 .expect("pinned candidate");
+            let calls_after_pin =
+                TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             validate_pin(&runtime).expect("first fixture identity validation");
             validate_pin(&runtime).expect("second fixture identity validation");
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "source and sealed candidate avoid additional full reads"
+                calls_after_pin,
+                "repeated validation avoids additional full reads"
             );
 
             chmod_until_observable(&candidate, 0o700);
             validate_pin(&runtime).expect("chmod preserves valid candidate bytes");
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                2,
+                calls_after_pin + 1,
                 "chmod invalidates metadata identity and performs one rehash"
             );
 
@@ -4420,7 +4685,7 @@ mod tests {
             );
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                3,
+                calls_after_pin + 2,
                 "content mutation misses the cache and rehashes before failing"
             );
 
@@ -4439,7 +4704,7 @@ mod tests {
             );
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                4,
+                calls_after_pin + 3,
                 "replacement misses the cache and rehashes before failing"
             );
         });
@@ -4865,14 +5130,21 @@ mod tests {
                 limit: 10,
             })
             .expect("inventory");
+            assert!(inventory.snapshots.iter().any(|snapshot| snapshot
+                .pins
+                .contains(&current_pin)
+                && !snapshot.eligible()
+                && snapshot
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::ProtectedByActiveGeneration)));
             assert!(inventory
                 .snapshots
                 .iter()
-                .any(|snapshot| snapshot.pins.contains(&current_pin) && !snapshot.eligible));
-            assert!(inventory
-                .snapshots
-                .iter()
-                .any(|snapshot| snapshot.pins.contains(&stale_pin) && snapshot.eligible));
+                .any(|snapshot| snapshot.pins.contains(&stale_pin)
+                    && snapshot.eligible()
+                    && snapshot
+                        .reasons()
+                        .contains(&ControllerRuntimeRetentionReason::Reclaimable)));
             let applied = cleanup(ControllerRuntimeCleanupOptions {
                 apply: true,
                 min_age: Duration::from_secs(u64::MAX),
@@ -4883,6 +5155,74 @@ mod tests {
             assert!(applied.removed.contains(&stale_pin));
             assert!(current_pin.exists());
             assert!(!stale_pin.exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_report_names_in_flight_pending_mutation_and_active_generation() {
+        crate::test_support::with_isolated_home(|_| {
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            let current = temporary.path().join("current");
+            let in_flight = temporary.path().join("in-flight");
+            let pending = temporary.path().join("pending");
+            let current_digest = fake_controller(&current, "homeboy test+current", "current");
+            let in_flight_digest =
+                fake_controller(&in_flight, "homeboy test+in-flight", "in-flight");
+            let pending_digest = fake_controller(&pending, "homeboy test+pending", "pending");
+            let current_pin =
+                pinned_path("homeboy test+current", &current_digest).expect("current path");
+            let in_flight_pin =
+                pinned_path("homeboy test+in-flight", &in_flight_digest).expect("in-flight path");
+            let pending_pin =
+                pinned_path("homeboy test+pending", &pending_digest).expect("pending path");
+            publish_pin(&current, &current_pin, &current_digest).expect("publish current");
+            publish_pin(&in_flight, &in_flight_pin, &in_flight_digest).expect("publish in-flight");
+            publish_pin(&pending, &pending_pin, &pending_digest).expect("publish pending");
+            write_active_generation(
+                &runtime_root().expect("root").join(ACTIVE_GENERATION_FILE),
+                &json!({ "originating": { "pinned_executable": current_pin } }),
+            )
+            .expect("activate current");
+
+            let report = retention_report_with_references_at(
+                &runtime_root().expect("root"),
+                &[
+                    ReferencedControllerPin {
+                        path: in_flight_pin.clone(),
+                        reason: ControllerPinProtectionReason::ProtectedInFlight,
+                    },
+                    ReferencedControllerPin {
+                        path: pending_pin.clone(),
+                        reason: ControllerPinProtectionReason::ProtectedByPendingMutation,
+                    },
+                ],
+                SystemTime::now(),
+            )
+            .expect("report");
+
+            let snapshot_for = |pin: &PathBuf| {
+                report
+                    .snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.pins.contains(pin))
+                    .expect("snapshot")
+            };
+            assert_eq!(
+                snapshot_for(&current_pin).reasons(),
+                [ControllerRuntimeRetentionReason::ProtectedByActiveGeneration]
+            );
+            assert!(!snapshot_for(&current_pin).eligible());
+            assert_eq!(
+                snapshot_for(&in_flight_pin).reasons(),
+                [ControllerRuntimeRetentionReason::ProtectedInFlight]
+            );
+            assert!(!snapshot_for(&in_flight_pin).eligible());
+            assert_eq!(
+                snapshot_for(&pending_pin).reasons(),
+                [ControllerRuntimeRetentionReason::ProtectedByPendingMutation]
+            );
+            assert!(!snapshot_for(&pending_pin).eligible());
         });
     }
 
@@ -4964,11 +5304,21 @@ mod tests {
             let pin = pinned_path("homeboy test+stale", &digest).expect("stale path");
             publish_pin(&stale, &pin, &digest).expect("publish stale");
 
-            // Unreferenced, so eligible — but still inside the operator's
-            // configured age and size budget, so it must survive.
+            // Unreferenced, but still inside the operator's configured age and
+            // size budget, so it must survive — and must not be advertised as
+            // reclaimable, because no apply under this policy can free it.
             let planned = prune_pins(false, ControllerRuntimeRetentionOverrides::default())
                 .expect("plan inside configured window");
-            assert!(planned.eligible.contains(&pin));
+            assert!(!planned.eligible.contains(&pin));
+            assert_eq!(planned.candidate_count(), 0);
+            assert_eq!(planned.candidate_bytes(), 0);
+            assert!(planned.snapshots.iter().any(|snapshot| {
+                snapshot.pins.contains(&pin)
+                    && !snapshot.eligible()
+                    && snapshot
+                        .reasons()
+                        .contains(&ControllerRuntimeRetentionReason::WithinAgeWindow)
+            }));
             let applied = prune_pins(true, ControllerRuntimeRetentionOverrides::default())
                 .expect("apply inside configured window");
             assert!(applied.removed.is_empty());
@@ -4984,6 +5334,226 @@ mod tests {
             .expect("explicit policy-free purge");
             assert!(purged.removed.contains(&pin));
             assert!(!pin.exists());
+        });
+    }
+
+    /// Every reason that names a protection must clear eligibility.
+    ///
+    /// The expectations are spelled out literally rather than derived from
+    /// [`ControllerRuntimeRetentionReason::retains`], so weakening that function
+    /// fails here instead of silently redefining what the test asserts. This is
+    /// the exact defect: `within_age_window` recorded a retention reason while
+    /// leaving `eligible: true`, so cleanup advertised a 143 MB candidate it
+    /// could never remove (#14222).
+    #[test]
+    fn no_retention_reason_can_coexist_with_eligibility() {
+        // `Reclaimable` is a disposition, not a guard, so it alone leaves the
+        // identity eligible. Every other reason must forbid removal.
+        let expectations = [
+            (
+                ControllerRuntimeRetentionReason::ProtectedByActiveGeneration,
+                false,
+            ),
+            (ControllerRuntimeRetentionReason::ProtectedInFlight, false),
+            (
+                ControllerRuntimeRetentionReason::ProtectedByPendingMutation,
+                false,
+            ),
+            (ControllerRuntimeRetentionReason::WithinAgeWindow, false),
+            (ControllerRuntimeRetentionReason::CleanupLimitReached, false),
+            (ControllerRuntimeRetentionReason::Reclaimable, true),
+        ];
+
+        for (reason, expected_eligible) in expectations {
+            let mut snapshot = ControllerRuntimeSnapshot {
+                identity: "identity".to_string(),
+                path: PathBuf::from("/runtime/identity"),
+                size_bytes: 142_542_592,
+                age_seconds: 2_362_162,
+                pins: vec![PathBuf::from("/runtime/identity/homeboy")],
+                reasons: Vec::new(),
+            };
+            assert!(
+                snapshot.eligible(),
+                "an unclassified identity starts eligible"
+            );
+
+            snapshot.record(reason);
+            assert_eq!(
+                snapshot.eligible(),
+                expected_eligible,
+                "`{}` must decide eligibility, never contradict it",
+                reason.as_str()
+            );
+            assert!(
+                snapshot
+                    .retention_reasons()
+                    .contains(&reason.as_str().to_string()),
+                "the reason must remain visible to operators"
+            );
+        }
+
+        // A protection paired with the reclaimable disposition must still win,
+        // so ordering between the two passes cannot resurrect the bug.
+        let mut contested = ControllerRuntimeSnapshot {
+            identity: "identity".to_string(),
+            path: PathBuf::from("/runtime/identity"),
+            size_bytes: 1,
+            age_seconds: 1,
+            pins: vec![PathBuf::from("/runtime/identity/homeboy")],
+            reasons: Vec::new(),
+        };
+        contested.record(ControllerRuntimeRetentionReason::Reclaimable);
+        contested.record(ControllerRuntimeRetentionReason::WithinAgeWindow);
+        assert!(!contested.eligible());
+    }
+
+    /// The serialized evidence an operator reads must agree with the decision
+    /// cleanup made. The bug was visible precisely because a snapshot rendered
+    /// `eligible: true` beside `retention_reasons: ["within_age_window"]`.
+    #[test]
+    fn serialized_snapshot_eligibility_never_contradicts_its_reasons() {
+        let mut snapshot = ControllerRuntimeSnapshot {
+            identity: "identity".to_string(),
+            path: PathBuf::from("/runtime/identity"),
+            size_bytes: 142_542_592,
+            age_seconds: 2_362_162,
+            pins: vec![PathBuf::from("/runtime/identity/homeboy")],
+            reasons: Vec::new(),
+        };
+        snapshot.record(ControllerRuntimeRetentionReason::WithinAgeWindow);
+
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(value["eligible"], json!(false));
+        assert_eq!(value["retention_reasons"], json!(["within_age_window"]));
+    }
+
+    /// The pinned path and the budget path must agree, because the asymmetry
+    /// between them *was* the defect: pinned cleared `eligible`, budget did not.
+    #[cfg(unix)]
+    #[test]
+    fn retained_identities_are_never_counted_as_candidates_on_either_path() {
+        crate::test_support::with_isolated_home(|_| {
+            // Nothing is expired and nothing is over budget, so the budget path
+            // must retain the unreferenced identity, and the active generation
+            // must retain the pinned one.
+            save_retention_config(crate::defaults::RetentionConfig {
+                controller_runtime_days: 3_650,
+                controller_runtime_max_bytes: u64::MAX,
+                limit: 10,
+                ..crate::defaults::RetentionConfig::default()
+            });
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            let current = temporary.path().join("current");
+            let stale = temporary.path().join("stale");
+            let current_digest = fake_controller(&current, "homeboy test+current", "current");
+            let stale_digest = fake_controller(&stale, "homeboy test+stale", "stale");
+            let current_pin =
+                pinned_path("homeboy test+current", &current_digest).expect("current path");
+            let stale_pin = pinned_path("homeboy test+stale", &stale_digest).expect("stale path");
+            publish_pin(&current, &current_pin, &current_digest).expect("publish current");
+            publish_pin(&stale, &stale_pin, &stale_digest).expect("publish stale");
+            write_active_generation(
+                &runtime_root().expect("root").join(ACTIVE_GENERATION_FILE),
+                &json!({ "originating": { "pinned_executable": current_pin } }),
+            )
+            .expect("activate current");
+
+            for apply in [false, true] {
+                let result = prune_pins(apply, ControllerRuntimeRetentionOverrides::default())
+                    .expect("prune inside the configured window");
+
+                // Advertised reclaim must equal achievable reclaim: zero.
+                assert_eq!(result.candidate_count(), 0, "apply={apply}");
+                assert_eq!(result.candidate_bytes(), 0, "apply={apply}");
+                assert!(result.eligible.is_empty(), "apply={apply}");
+                assert!(result.removed.is_empty(), "apply={apply}");
+                assert_eq!(result.reclaimed_bytes, 0, "apply={apply}");
+
+                for snapshot in &result.snapshots {
+                    assert!(
+                        !snapshot.eligible(),
+                        "{} was retained yet advertised as eligible",
+                        snapshot.identity
+                    );
+                    assert!(
+                        !snapshot.reasons().is_empty(),
+                        "{} was retained without naming a reason",
+                        snapshot.identity
+                    );
+                }
+
+                let budget = result
+                    .snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.pins.contains(&stale_pin))
+                    .expect("budget-retained snapshot");
+                assert!(budget
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::WithinAgeWindow));
+
+                let pinned = result
+                    .snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.pins.contains(&current_pin))
+                    .expect("pin-retained snapshot");
+                assert!(pinned
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::ProtectedByActiveGeneration));
+            }
+
+            assert!(current_pin.exists());
+            assert!(stale_pin.exists());
+        });
+    }
+
+    /// An identity the limit deferred is not reclaimable *by this sweep*, so it
+    /// must not inflate the reclaim this sweep advertises.
+    #[cfg(unix)]
+    #[test]
+    fn limit_deferred_identities_are_retained_and_not_advertised() {
+        crate::test_support::with_isolated_home(|_| {
+            save_retention_config(crate::defaults::RetentionConfig {
+                controller_runtime_days: 0,
+                controller_runtime_max_bytes: u64::MAX,
+                limit: 1,
+                ..crate::defaults::RetentionConfig::default()
+            });
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            for index in 0..3 {
+                let artifact = temporary.path().join(format!("stale-{index}"));
+                let identity = format!("homeboy test+stale-{index}");
+                let digest = fake_controller(&artifact, &identity, &format!("stale {index}"));
+                let pin = pinned_path(&identity, &digest).expect("stale path");
+                publish_pin(&artifact, &pin, &digest).expect("publish stale");
+            }
+
+            let applied = prune_pins(true, ControllerRuntimeRetentionOverrides::default())
+                .expect("apply configured limit");
+
+            // One removal happened; the two the limit deferred are retained and
+            // excluded from the advertised reclaim.
+            assert_eq!(applied.removed_identities.len(), 1);
+            assert_eq!(applied.candidate_count(), 1);
+            assert_eq!(applied.reclaimed_bytes, applied.candidate_bytes());
+
+            let deferred = applied
+                .snapshots
+                .iter()
+                .filter(|snapshot| {
+                    snapshot
+                        .reasons()
+                        .contains(&ControllerRuntimeRetentionReason::CleanupLimitReached)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(deferred.len(), 2);
+            for snapshot in deferred {
+                assert!(!snapshot.eligible());
+                assert!(!applied
+                    .eligible
+                    .iter()
+                    .any(|path| snapshot.pins.contains(path)));
+            }
         });
     }
 

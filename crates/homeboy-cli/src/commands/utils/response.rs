@@ -647,7 +647,17 @@ fn envelope_for_data(
         operation: identity.operation.clone(),
         success,
         exit_code,
-        status: status_for_result(Some(&data), exit_code),
+        status: if exit_code == 0
+            && matches!(
+                (identity.command.as_str(), identity.operation.as_deref()),
+                ("agent-task", Some("fanout resume"))
+            ) {
+            // Resume can successfully reconcile a batch whose durable subject
+            // remains failed; retain that subject outcome below instead.
+            "succeeded".to_string()
+        } else {
+            status_for_result(Some(&data), exit_code)
+        },
         subject_state,
         run,
         refs,
@@ -673,6 +683,10 @@ fn subject_state_for_identity(identity: &CommandIdentity, data: &Value) -> Optio
     match (identity.command.as_str(), identity.operation.as_deref()) {
         ("agent-task", Some("status")) => data
             .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ("agent-task", Some("fanout resume")) => data
+            .get("status")
             .and_then(Value::as_str)
             .map(str::to_string),
         _ => None,
@@ -729,17 +743,346 @@ fn failure_diagnostics_for_data(
     if exit_code == 0 {
         return None;
     }
+
+    if let Some(diagnostics) = upgrade_runner_convergence_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
+
+    let specialized_digest = release_failure_digest(data)
+        .or_else(|| cook_batch_failure_digest(data))
+        .or_else(|| formatting_failure_digest(data));
+    if let Some(failure_digest) = specialized_digest {
+        return Some(command_failed_diagnostics(exit_code, failure_digest));
+    }
+    if let Some(failure) = declared_failure(data) {
+        return Some(declared_failure_diagnostics(exit_code, failure, "/failure"));
+    }
+    if let Some(failure) = unresolved_provider_workspace_failure(data) {
+        return Some(declared_failure_diagnostics(
+            exit_code,
+            failure,
+            "/resolved/workspace",
+        ));
+    }
+
     let failure_digest = failure_digest_for_data(data).or_else(|| {
         run.as_ref()
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
-    failure_digest.map(|failure_digest| CommandDiagnostics {
+    failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+fn declared_failure_diagnostics(
+    exit_code: i32,
+    failure: DeclaredFailure,
+    source_pointer: &str,
+) -> CommandDiagnostics {
+    let mut details = failure.details;
+    details.insert("exit_code".to_string(), Value::from(exit_code));
+    details.insert(
+        "source_pointer".to_string(),
+        Value::String(source_pointer.to_string()),
+    );
+    let failure_digest = CommandFailureDigest {
+        summary: failure.message.clone(),
+        stdout_tail: failure.stdout_tail,
+        stderr_tail: failure.stderr_tail,
+        artifact_refs: Vec::new(),
+        next_actions: failure.next_actions,
+        retryable: failure.retryable,
+    };
+    CommandDiagnostics {
+        code: failure.code,
+        message: failure.message,
+        details: Value::Object(details),
+        hints: None,
+        retryable: failure.retryable,
+        failure_digest: Some(failure_digest),
+    }
+}
+
+fn upgrade_runner_convergence_diagnostics(
+    exit_code: i32,
+    data: &Value,
+) -> Option<CommandDiagnostics> {
+    if !is_partial_upgrade_outcome(data) {
+        return None;
+    }
+
+    let message = data
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("Controller installation succeeded, but configured runners did not converge")
+        .to_string();
+    let runners = data
+        .get("runners_updated")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            data.get("runners_skipped")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter(|runner| {
+            runner.get("success").and_then(Value::as_bool) == Some(false)
+                || data.get("new_version").and_then(Value::as_str).is_some_and(
+                    |controller_version| {
+                        runner.get("new_version").and_then(Value::as_str)
+                            != Some(controller_version)
+                    },
+                )
+        })
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_actions = runners
+        .iter()
+        .flat_map(|runner| {
+            let runner_id = runner
+                .get("runner_id")
+                .and_then(Value::as_str)
+                .unwrap_or("runner");
+            runner
+                .get("recovery_commands")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(move |command| {
+                    CommandNextAction::new(format!("repair {runner_id}"), command)
+                        .with_kind(CommandNextActionKind::Repair)
+                })
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    let details = serde_json::json!({
+        "exit_code": exit_code,
+        "source_pointer": "/runner_convergence",
+        "outcome": data.get("outcome"),
+        "operation_id": data.get("operation_id"),
+        "controller": data.get("controller"),
+        "runners": data.get("runners"),
+        "runner_convergence": data.get("runner_convergence"),
+        "runner_failures": runners,
+    });
+    let failure_digest = CommandFailureDigest {
+        summary: message.clone(),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
+        retryable: Some(true),
+    };
+    Some(CommandDiagnostics {
+        code: "upgrade.runner_convergence_partial".to_string(),
+        message,
+        details,
+        hints: None,
+        retryable: Some(true),
+        failure_digest: Some(failure_digest),
+    })
+}
+
+fn is_partial_upgrade_outcome(data: &Value) -> bool {
+    data.get("command").and_then(Value::as_str) == Some("upgrade")
+        && data.get("partial").and_then(Value::as_bool) == Some(true)
+        && data.get("runner_convergence").and_then(Value::as_str) == Some("partial")
+        && matches!(
+            data.pointer("/controller/status").and_then(Value::as_str),
+            Some("updated" | "unchanged")
+        )
+}
+
+fn command_failed_diagnostics(
+    exit_code: i32,
+    failure_digest: CommandFailureDigest,
+) -> CommandDiagnostics {
+    CommandDiagnostics {
         code: "command.failed".to_string(),
         message: failure_digest.summary.clone(),
         details: serde_json::json!({ "exit_code": exit_code }),
         hints: None,
         retryable: failure_digest.retryable,
         failure_digest: Some(failure_digest),
+    }
+}
+
+struct DeclaredFailure {
+    code: String,
+    message: String,
+    details: Map<String, Value>,
+    stdout_tail: Option<String>,
+    stderr_tail: Option<String>,
+    next_actions: Vec<CommandNextAction>,
+    retryable: Option<bool>,
+}
+
+/// Lift only the payload's declared current failure. Producer layers promote
+/// causal subprocess failures here; unrelated nested historical records are
+/// data and must not be attributed to this command invocation.
+fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
+    let object = data.get("failure")?.as_object()?;
+    let message = ["message", "problem", "summary"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(Value::as_str))
+        .or_else(|| object.get("error").and_then(Value::as_str))?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+
+    let local_details = object.get("details").and_then(Value::as_object);
+    let detail_value = object
+        .get("details")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(object.clone()));
+    let details = bounded_failure_detail(&detail_value)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let stream_tail = |key: &str| {
+        local_details
+            .and_then(|value| value.get(key))
+            .or_else(|| object.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .map(tail_text)
+    };
+    let retryable = object
+        .get("retryable")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            local_details
+                .and_then(|details| details.get("retryable"))
+                .and_then(Value::as_bool)
+        });
+
+    Some(DeclaredFailure {
+        code: object
+            .get("code")
+            .or_else(|| object.get("kind"))
+            .or_else(|| object.get("class"))
+            .and_then(Value::as_str)
+            .filter(|code| !code.trim().is_empty())
+            .map(|code| bounded_text(code.trim(), 128))
+            .unwrap_or_else(|| "command.failed".to_string()),
+        message: bounded_text(message, 1_000),
+        stdout_tail: stream_tail("stdout_tail").or_else(|| stream_tail("stdout")),
+        stderr_tail: stream_tail("stderr_tail").or_else(|| stream_tail("stderr")),
+        next_actions: object
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(4)
+            .filter_map(|action| serde_json::from_value(action.clone()).ok())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(failure_replay_action(&details))
+            .take(4)
+            .collect(),
+        details,
+        retryable,
+    })
+}
+
+/// An unresolved provider is the current failure only in the Cook preview
+/// envelope. Other nested workspace records can be historical observations.
+fn unresolved_provider_workspace_failure(data: &Value) -> Option<DeclaredFailure> {
+    if data.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-cook-preview/v1") {
+        return None;
+    }
+    let workspace = data.pointer("/resolved/workspace")?.as_object()?;
+    if workspace.get("action").and_then(Value::as_str) != Some("unresolved_provider") {
+        return None;
+    }
+    let message = workspace.get("reason").and_then(Value::as_str)?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let mut details = workspace
+        .get("details")
+        .map(bounded_failure_detail)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(remediation) = workspace
+        .get("remediation")
+        .filter(|value| !value.is_null())
+    {
+        details.insert(
+            "remediation".to_string(),
+            bounded_failure_detail(remediation),
+        );
+    }
+    if let Some(provider_id) = workspace
+        .get("provider_id")
+        .filter(|value| !value.is_null())
+    {
+        details.insert(
+            "provider_id".to_string(),
+            bounded_failure_detail(provider_id),
+        );
+    }
+    let next_actions = failure_replay_action(&details).into_iter().collect();
+    Some(DeclaredFailure {
+        code: "worktree.provider_unresolved".to_string(),
+        message: bounded_text(message, 1_000),
+        stdout_tail: None,
+        stderr_tail: None,
+        next_actions,
+        details,
+        retryable: None,
+    })
+}
+
+fn bounded_failure_detail(value: &Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(bounded_text(value, 1_000)),
+        Value::Array(items) => {
+            Value::Array(items.iter().take(4).map(bounded_failure_detail).collect())
+        }
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .take(8)
+                .map(|(key, value)| (key.clone(), bounded_failure_detail(value)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
+fn failure_replay_action(details: &Map<String, Value>) -> Option<CommandNextAction> {
+    let command = details
+        .get("refresh_command")
+        .and_then(Value::as_str)
+        .or_else(|| details.get("replay_command").and_then(Value::as_str))
+        .or_else(|| details.get("recovery_command").and_then(Value::as_str))
+        .or_else(|| {
+            details
+                .get("worktree_provider_replay_command")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            details
+                .get("remediation")
+                .and_then(Value::as_object)
+                .and_then(|remediation| {
+                    remediation
+                        .get("command")
+                        .or_else(|| remediation.get("replay_command"))
+                        .and_then(Value::as_str)
+                })
+        })
+        .map(str::trim)
+        .filter(|command| !command.is_empty());
+    command.map(|command| {
+        CommandNextAction::new("replay the failed operation", command)
+            .with_kind(CommandNextActionKind::Repair)
     })
 }
 
@@ -777,15 +1120,6 @@ fn actions_for_error(err: &Error) -> Vec<CommandNextAction> {
 }
 
 fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
-    if let Some(digest) = release_failure_digest(data) {
-        return Some(digest);
-    }
-    if let Some(digest) = cook_batch_failure_digest(data) {
-        return Some(digest);
-    }
-    if let Some(digest) = formatting_failure_digest(data) {
-        return Some(digest);
-    }
     let failure = data.get("failure").and_then(Value::as_object);
     let summary = failure
         .and_then(|failure| string_at_object(failure, "summary"))
@@ -817,10 +1151,13 @@ fn cook_batch_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
     if data.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-cook-batch/v1") {
         return None;
     }
-    if data.get("status").and_then(Value::as_str) != Some("blocked") {
-        return None;
+    let status = data.get("status").and_then(Value::as_str)?;
+    let primary = data
+        .get("primary_failure")
+        .filter(|value| value.is_object())?;
+    if status != "blocked" {
+        return cook_batch_child_failure_digest(status, data, primary);
     }
-    let primary = data.get("primary_failure")?;
     let phase = primary
         .get("phase")
         .and_then(Value::as_str)
@@ -850,6 +1187,58 @@ fn cook_batch_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
     Some(CommandFailureDigest {
         summary: format!(
             "cook-batch blocked in {phase} on worktree {handle} ({blocked_rows} blocked row(s)): {}",
+            bounded_text(cause, 1000)
+        ),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
+        retryable: None,
+    })
+}
+
+fn cook_batch_child_failure_digest(
+    status: &str,
+    data: &Value,
+    primary: &Value,
+) -> Option<CommandFailureDigest> {
+    if !matches!(status, "failed" | "partial_failure") {
+        return None;
+    }
+    let phase = primary
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("child_execution");
+    let classification = primary
+        .get("classification")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let cause = primary
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("child cooks failed without a reported reason");
+    let affected = primary
+        .get("affected_child_count")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            data.pointer("/causal_failures/total")
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(1);
+    let next_actions = primary
+        .get("next_action")
+        .and_then(Value::as_str)
+        .or_else(|| primary.pointer("/recovery/command").and_then(Value::as_str))
+        .map(|command| {
+            vec![
+                CommandNextAction::new("repair the shared child failure", command)
+                    .with_kind(CommandNextActionKind::Repair),
+            ]
+        })
+        .unwrap_or_default();
+    Some(CommandFailureDigest {
+        summary: format!(
+            "cook-batch {status} in {phase} classification={classification} ({affected} child(ren)): {}",
             bounded_text(cause, 1000)
         ),
         stdout_tail: None,
@@ -1263,6 +1652,9 @@ fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
             return payload_status
                 .expect("matched canonical status")
                 .to_string();
+        }
+        if data.is_some_and(is_partial_upgrade_outcome) {
+            return "partial_failure".to_string();
         }
         return "failed".to_string();
     }
@@ -1698,6 +2090,96 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_runner_partial_retains_typed_public_diagnostics() {
+        let payload = json!({
+            "command": "upgrade",
+            "partial": true,
+            "outcome": "controller_updated_runner_failed",
+            "operation_id": "upgrade-123",
+            "new_version": "0.304.0",
+            "runner_convergence": "partial",
+            "message": "PARTIAL: controller upgraded, but 1 selected runner did not converge",
+            "controller": {
+                "status": "updated",
+                "summary": "controller installation completed"
+            },
+            "runners": {
+                "status": "partial",
+                "summary": "0 converged, 1 require repair"
+            },
+            "runners_updated": [{
+                "runner_id": "stale-success",
+                "success": true,
+                "new_version": "0.301.2",
+                "recovery_commands": ["homeboy upgrade --upgrade-runner stale-success"]
+            }, {
+                "runner_id": "aligned-success",
+                "success": true,
+                "new_version": "0.304.0",
+                "recovery_commands": ["must-not-appear"]
+            }],
+            "runners_skipped": [{
+                "runner_id": "homeboy-lab",
+                "success": false,
+                "detail": "runner unavailable",
+                "recovery_commands": [
+                    "homeboy upgrade --force --upgrade-runner homeboy-lab"
+                ]
+            }]
+        });
+        let envelope = cli_response_for_json_result_for_command(&Ok(payload), 1, "upgrade", None);
+        let value = serde_json::to_value(envelope).expect("serialize envelope");
+
+        assert_eq!(value["status"], "partial_failure");
+        assert_eq!(
+            value["diagnostics"]["code"],
+            "upgrade.runner_convergence_partial"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["outcome"],
+            "controller_updated_runner_failed"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["operation_id"],
+            "upgrade-123"
+        );
+        let actions = value["next_actions"].as_array().expect("next actions");
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy upgrade --upgrade-runner stale-success"
+        }));
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy upgrade --force --upgrade-runner homeboy-lab"
+        }));
+        assert!(actions
+            .iter()
+            .all(|action| action["command"] != "must-not-appear"));
+        assert_eq!(value["data"]["runner_convergence"], "partial");
+        assert_eq!(
+            value["diagnostics"]["details"]["runner_failures"][0]["runner_id"],
+            "stale-success"
+        );
+        assert!(value["diagnostics"]["details"]["runner_failures"]
+            .as_array()
+            .expect("runner failures")
+            .iter()
+            .all(|runner| runner["runner_id"] != "aligned-success"));
+    }
+
+    #[test]
+    fn upgrade_preflight_failure_is_not_misclassified_as_partial_installation() {
+        let payload = json!({
+            "command": "upgrade",
+            "partial": true,
+            "outcome": "extension_preflight_failed",
+            "controller": { "status": "extension_preflight_failed" },
+            "runner_convergence": null
+        });
+
+        assert_eq!(status_for_result(Some(&payload), 1), "failed");
+        assert!(upgrade_runner_convergence_diagnostics(1, &payload).is_none());
+    }
+
+    #[test]
     fn runtime_inventory_fingerprint_matches_python_json_for_unicode_and_controls() {
         let tests = vec![
             homeboy_extension_contract::test_results::TestRuntimeIdentity {
@@ -1918,6 +2400,245 @@ mod tests {
             value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
             "homeboy workspace worktrees add homeboy@fix-a"
         );
+    }
+
+    #[test]
+    fn failed_cook_batch_names_its_shared_child_root_cause() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "homeboy/agent-task-cook-batch/v1",
+                "fanout_id": "issue-wave",
+                "status": "failed",
+                "primary_failure": {
+                    "phase": "committed_harvest_preflight",
+                    "classification": "agent_task.committed_harvest_dirty_workspace",
+                    "reason": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes",
+                    "affected_child_count": 3,
+                    "next_action": "homeboy agent-task cook-continue cook-1",
+                },
+                "causal_failures": { "total": 3, "returned": 3, "omitted": 0, "unique_causes": 1 },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "fanout cook-batch"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], false);
+        let summary = value["summary"].as_str().expect("named cause");
+        assert!(
+            summary.contains("committed_harvest_preflight"),
+            "got: {summary}"
+        );
+        assert!(
+            summary.contains("agent_task.committed_harvest_dirty_workspace"),
+            "got: {summary}"
+        );
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
+            "homeboy agent-task cook-continue cook-1"
+        );
+    }
+
+    #[test]
+    fn cook_preview_lifts_declared_typed_provider_failure() {
+        let provider_failure = json!({
+            "schema": "fixture/worktree-provider-error/v1",
+            "status": "error",
+            "code": "freshness_refresh_required",
+            "message": "workspace freshness must be refreshed before planning",
+            "refresh_command": "workspace-provider refresh example@fix-13848",
+            "remediation": ["refresh provider state, then replay planning"],
+            "stderr": "provider freshness probe timed out",
+            "evidence": "x".repeat(600),
+        });
+        let provider_stderr = serde_json::to_string(&provider_failure).expect("provider failure");
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "failure": {
+                "code": "freshness_refresh_required",
+                "message": "workspace freshness must be refreshed before planning",
+                "details": {
+                    "refresh_command": "workspace-provider refresh example@fix-13848",
+                    "remediation": ["refresh provider state, then replay planning"],
+                },
+                "stderr_tail": "provider freshness probe timed out",
+            },
+            "resolved": {
+                "worktree": "example@fix-13848",
+                "workspace": {
+                    "action": "unresolved_provider",
+                    "disposition": "unresolved",
+                    "kind": "provider",
+                    "handle": "example@fix-13848",
+                    "provider_id": "fixture",
+                    "reason": "worktree provider plan command failed with exit code 1",
+                    "details": {
+                        "field": "to_worktree",
+                        "problem": "worktree provider plan command failed with exit code 1",
+                        "worktree_provider_phase": "worktree_provider_plan",
+                        "worktree_provider_replay_command": "workspace-provider plan example@fix-13848",
+                        "command_evidence": {
+                            "command": "workspace-provider plan example@fix-13848",
+                            "exit_code": 1,
+                            "stdout": provider_stderr,
+                            "stderr": "provider plan failed",
+                        },
+                    },
+                },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--preview"],
+        });
+        assert!(provider_stderr.len() > 512, "exercise compact projection");
+        let mut compact_payload = payload.clone();
+        crate::commands::agent_task::status::project_operator_output(&mut compact_payload);
+        assert_eq!(
+            compact_payload, payload,
+            "typed failure evidence is retained"
+        );
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(compact_payload),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "freshness_refresh_required");
+        assert_eq!(
+            value["summary"],
+            "workspace freshness must be refreshed before planning"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["refresh_command"],
+            "workspace-provider refresh example@fix-13848"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["remediation"],
+            json!(["refresh provider state, then replay planning"])
+        );
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["stderr_tail"],
+            "provider freshness probe timed out"
+        );
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "workspace-provider refresh example@fix-13848"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["source_pointer"],
+            "/failure"
+        );
+        assert_eq!(
+            value["data"]["resolved"]["workspace"]["details"]["field"],
+            "to_worktree"
+        );
+        assert_eq!(
+            value["data"]["resolved"]["workspace"]["details"]["worktree_provider_phase"],
+            "worktree_provider_plan"
+        );
+        assert_eq!(
+            value["data"]["resolved"]["workspace"]["details"]["worktree_provider_replay_command"],
+            "workspace-provider plan example@fix-13848"
+        );
+        assert_eq!(value["data"], payload, "nested evidence remains lossless");
+    }
+
+    #[test]
+    fn cook_preview_lifts_unresolved_provider_workspace_reason_without_failure() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "failure": null,
+            "resolved": {
+                "workspace": {
+                    "action": "unresolved_provider",
+                    "disposition": "unresolved",
+                    "provider_id": "fixture",
+                    "reason": "Component not found",
+                    "remediation": ["Register the component, then replay the provider plan."],
+                    "details": {
+                        "id": "example-repository",
+                        "field": "repository",
+                        "worktree_provider_phase": "worktree_provider_plan",
+                        "worktree_provider_replay_command": "workspace-provider plan example-repository",
+                    },
+                },
+            },
+        });
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(payload.clone()),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "worktree.provider_unresolved");
+        assert_eq!(value["summary"], "Component not found");
+        assert_eq!(
+            value["diagnostics"]["details"]["remediation"],
+            json!(["Register the component, then replay the provider plan."])
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["source_pointer"],
+            "/resolved/workspace"
+        );
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "workspace-provider plan example-repository"
+        );
+        assert_eq!(value["data"], payload, "nested evidence remains lossless");
+    }
+
+    #[test]
+    fn historical_nested_errors_are_not_attributed_to_the_current_exit() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "fixture/history/v1",
+                "history": [{
+                    "status": "failed",
+                    "error": {
+                        "code": "historical.provider_failure",
+                        "message": "an earlier attempt failed",
+                    },
+                }],
+                "resolved": { "status": "blocked" },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "command.failed");
+        assert!(!value["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("earlier attempt"));
+    }
+
+    #[test]
+    fn truly_causeless_nonzero_result_keeps_generic_failure() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "homeboy/agent-task-cook-preview/v1",
+                "mutates": false,
+                "resolved": { "worktree": "example@fix-13848" },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "command.failed");
+        assert_eq!(
+            value["summary"],
+            "agent-task cook exited 1 without reporting a failure cause"
+        );
+        assert!(value["diagnostics"].get("failure_digest").is_none());
     }
 
     /// #13702: `success: false` is never emitted without a named cause. A

@@ -4,6 +4,7 @@
 //! `--runner` guidance surfaced when operators misuse the top-level flag.
 
 use homeboy::core::observation::ObservationStore;
+use homeboy::core::paths::PathRoots;
 use homeboy::core::Error;
 
 use super::types::{
@@ -23,8 +24,11 @@ impl RunsArgs {
     pub(crate) fn show_summary_eligible(&self) -> bool {
         match &self.command {
             RunsCommand::Show {
-                json, presentation, ..
-            } => !presentation.json_or_legacy(*json),
+                json,
+                presentation,
+                field,
+                ..
+            } => field.is_empty() && !presentation.json_or_legacy(*json),
             _ => false,
         }
     }
@@ -183,7 +187,8 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     // observation store is opened exactly once here and handed to the handlers
     // below. Each of those used to open its own, which made a single command
     // several independently-resolved stores (#7505).
-    let store = ObservationStore::open_initialized()?;
+    let roots = PathRoots::from_environment()?;
+    let store = ObservationStore::open_initialized_in_roots(&roots)?;
     match args.command {
         RunsCommand::List(args) => handlers::list_runs(&store, args, "runs.list"),
         RunsCommand::Distribution(args) => {
@@ -235,7 +240,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         }
         RunsCommand::Env { run_id } => handlers::env(&store, &run_id),
         RunsCommand::Artifacts(args) => handlers::artifacts_from_args(&store, args),
-        RunsCommand::Artifact(args) => handlers::artifact_command(args),
+        RunsCommand::Artifact(args) => handlers::artifact_command(&store, args),
         RunsCommand::Findings(args) => findings::findings(&store, args),
         RunsCommand::Finding { finding_id } => findings::finding(&store, &finding_id),
         RunsCommand::LatestFinding(args) => findings::latest_finding(args),
@@ -243,7 +248,9 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Import(args) => super::bundle::import_runs(&store, args),
         RunsCommand::Query(args) => query::runs_query(&store, args),
         RunsCommand::Refs(args) => refs::runs_refs(&store, args),
-        RunsCommand::Resources(args) => resources::runs_resources(args),
+        RunsCommand::Resources(args) => {
+            resources::runs_resources_in_store(&store, roots.config(), args)
+        }
         RunsCommand::Drift(args) => drift::runs_drift(&store, args),
         RunsCommand::LoopSync(args) => loop_sync::loop_sync(args),
         RunsCommand::Report(args) => {
@@ -259,7 +266,8 @@ pub(crate) fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
 
 pub(crate) fn run_markdown(args: RunsArgs) -> CmdResult<String> {
     // Same boundary rule as `run`: one invocation, one store (#7505).
-    let store = ObservationStore::open_initialized()?;
+    let roots = PathRoots::from_environment()?;
+    let store = ObservationStore::open_initialized_in_roots(&roots)?;
     match args.command {
         RunsCommand::Compare(args) => compare::run_markdown(&store, args),
         RunsCommand::Report(args) => report::run_markdown(args),

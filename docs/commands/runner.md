@@ -27,12 +27,6 @@ homeboy daemon recover-missing-child-identity --lease-id <expected-lease> \
   --child-pid <child-pid> --child-starttime-ticks <child-starttime-ticks>
 ```
 
-The released `homeboy daemon adopt-orphan --recover-missing-child-identity`
-and `--confirm-untracked-child-dead <job-id>` flags are accepted only as paired
-migration aliases. They return this exact remediation and never terminalize
-work. Runner connection recovery should surface the exact daemon command rather
-than retrying those aliases.
-
 ### `lifecycle`
 
 Inspect runner workspace lifecycle and finalization readiness.
@@ -404,12 +398,12 @@ homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /run
 ```
 
 Plans a runner-backed refresh loop before dispatching matrix-style work, without
-executing the workload. It composes the existing runner/workspace/run artifact
-primitives into one envelope: a `RunnerExecutionEnvelope`, a handoff describing
-workspace mapping and Homeboy binary provenance (controller CLI vs. runner
-configured binary vs. active daemon, with version/build drift diagnostics),
-declared evidence/artifact paths, and the ordered `next_commands` to verify the
-runner, sync the workspace, run the refresh, and inspect the produced evidence.
+executing the workload. Its `RunnerExecutionEnvelope` owns typed dispatch,
+workspace mapping, secret and lifecycle policy, and declared artifacts. The v2
+handoff contains only the planned execution record and Homeboy binary provenance
+(controller CLI vs. runner configured binary vs. active daemon, with
+version/build drift diagnostics). Ordered `next_commands` verify the runner,
+sync the workspace, run the refresh, and inspect the produced evidence.
 Source and fixture paths passed with `--source`/`--fixture` must exist before the
 plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
 
@@ -433,14 +427,8 @@ homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid 
 homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 
-`--confirm-pid-dead`, `--confirm-no-daemon-owner`, and
-`--confirm-control-plane-lost` are deprecated no-ops on both surfaces; the runner
-proves each fact itself before mutating anything. See the deprecation table in
-[daemon.md](daemon.md). They remain accepted for one release, so released
-runbooks and composed repair commands keep working, but supplying one *without*
-its recovery mode is refused — a confirmation selects no recovery on its own.
-`--recorded-pid` and `--recorded-endpoint` are **not** confirmations: once a
-runner's state record is gone it cannot recompute them, so they stay required.
+`--recorded-pid` and `--recorded-endpoint` stay required because once a runner's
+state record is gone it cannot recompute them.
 `--confirm-untracked-child-dead <job-id>` also stays required where it applies —
 it names an exact job with no recorded child PID, which is evidence homeboy does
 not have.

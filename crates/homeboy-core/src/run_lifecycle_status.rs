@@ -159,7 +159,7 @@ impl From<&CookStatus> for RunLifecycleStatus {
             // --- terminal, unsuccessful, not an invitation to retry ---
             // Finalization ran and produced nothing. Nothing failed, but the
             // Cook did not succeed either, and re-running it changes nothing.
-            CookStatus::NoChanges => Self::PartialFailure,
+            CookStatus::NoChanges | CookStatus::NoCandidate => Self::PartialFailure,
             // A candidate exists and can still be recovered. This matches the
             // `AgentTaskRunState::CandidateRecoverable ->
             // RunExecutionState::CandidateRecoverable` projection rather than
@@ -205,7 +205,7 @@ impl From<&CookStatus> for RunLifecycleStatus {
 
             // --- terminal, declared by an operator or a budget ---
             CookStatus::Cancelled => Self::Cancelled,
-            CookStatus::TimedOut => Self::TimedOut,
+            CookStatus::TimedOut | CookStatus::ReviewFormTimeout => Self::TimedOut,
 
             // A status this binary cannot read carries no verdict. Callers read
             // terminality from the declared `CookDisposition` instead.
@@ -287,6 +287,7 @@ mod tests {
             CookStatus::DraftPublished,
             CookStatus::GreenNoFinalize,
             CookStatus::IntentionalNoChange,
+            CookStatus::NoCandidate,
             CookStatus::NoChanges,
             CookStatus::NoOpGateFailed,
             CookStatus::GateFailed,
@@ -296,6 +297,7 @@ mod tests {
             CookStatus::Blocked,
             CookStatus::Cancelled,
             CookStatus::TimedOut,
+            CookStatus::ReviewFormTimeout,
             CookStatus::RetriesExhausted,
             CookStatus::ExecutionBudgetExhausted,
             CookStatus::PolicyFailure,
@@ -319,6 +321,7 @@ mod tests {
                 CookStatus::DraftPublished => RunLifecycleStatus::Succeeded,
                 CookStatus::GreenNoFinalize => RunLifecycleStatus::Succeeded,
                 CookStatus::IntentionalNoChange => RunLifecycleStatus::Succeeded,
+                CookStatus::NoCandidate => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoChanges => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoOpGateFailed => RunLifecycleStatus::Failed,
                 CookStatus::GateFailed => RunLifecycleStatus::Failed,
@@ -328,6 +331,7 @@ mod tests {
                 CookStatus::Blocked => RunLifecycleStatus::PartialFailure,
                 CookStatus::Cancelled => RunLifecycleStatus::Cancelled,
                 CookStatus::TimedOut => RunLifecycleStatus::TimedOut,
+                CookStatus::ReviewFormTimeout => RunLifecycleStatus::TimedOut,
                 CookStatus::RetriesExhausted => RunLifecycleStatus::PartialFailure,
                 CookStatus::ExecutionBudgetExhausted => RunLifecycleStatus::PartialFailure,
                 CookStatus::PolicyFailure => RunLifecycleStatus::PartialFailure,
@@ -404,6 +408,7 @@ mod tests {
             CookStatus::Blocked,
             CookStatus::Cancelled,
             CookStatus::NoChanges,
+            CookStatus::NoCandidate,
         ] {
             let projected = RunLifecycleStatus::from(&status);
             assert!(projected.is_terminal(), "{status} must be terminal");

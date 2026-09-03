@@ -80,6 +80,27 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
     validate_runner_job_snapshot(record, snapshot)?;
     let mut reconciled = record.clone();
     reconciled.record_runner_reachable();
+    // Typed terminal evidence is authoritative even when a daemon restart left
+    // the denormalized job row queued/running. Consume it before that stale row
+    // can refresh the controller heartbeat and resurrect the Cook.
+    if let Some(event) = terminal_runner_lifecycle_event(&reconciled, snapshot)? {
+        project_terminal_runner_lifecycle_event_in_store(
+            lifecycle_store,
+            &mut reconciled,
+            snapshot,
+            &event,
+        )?;
+        *record = reconciled;
+        return Ok(());
+    }
+    if project_terminal_runner_pre_provider_failure_in_store(
+        lifecycle_store,
+        &mut reconciled,
+        &snapshot.events,
+    )? {
+        *record = reconciled;
+        return Ok(());
+    }
     match snapshot.job.status {
         homeboy_core::api_jobs::JobStatus::Queued | homeboy_core::api_jobs::JobStatus::Running => {
             reconciled.updated_at = Some(now_timestamp());
@@ -133,17 +154,8 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
         homeboy_core::api_jobs::JobStatus::Succeeded
         | homeboy_core::api_jobs::JobStatus::Failed
         | homeboy_core::api_jobs::JobStatus::Cancelled => {
-            if let Some(event) = terminal_runner_lifecycle_event(&reconciled, snapshot)? {
-                project_terminal_runner_lifecycle_event_in_store(
-                    lifecycle_store,
-                    &mut reconciled,
-                    snapshot,
-                    &event,
-                )?;
-            } else {
-                record_pending_runner_synchronization(&mut reconciled, snapshot);
-                lifecycle_store.write_record(&reconciled)?;
-            }
+            record_pending_runner_synchronization(&mut reconciled, snapshot);
+            lifecycle_store.write_record(&reconciled)?;
         }
     }
     *record = reconciled;
@@ -412,14 +424,6 @@ pub(crate) fn project_persisted_terminal_runner_events_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
 ) -> Result<bool> {
-    let terminal_status = record
-        .metadata
-        .get("runner_job_status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| matches!(status, "succeeded" | "failed" | "cancelled"));
-    if !terminal_status {
-        return Ok(false);
-    }
     let Some(runner_job_id) = record.runner_job_id() else {
         return Ok(false);
     };
@@ -448,31 +452,160 @@ pub(crate) fn project_persisted_terminal_runner_events_in_store(
     .or_else(|| {
         crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(Some(&events))
     });
-    let Some(event) = event else {
-        return Ok(false);
-    };
-    validate_terminal_child_event_identity(record, &event)?;
-    let aggregate = projected_runner_aggregate(record, &event.aggregate);
-    if lifecycle_store.read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
+    if let Some(event) = event {
+        validate_terminal_child_event_identity(record, &event)?;
+        let aggregate = projected_runner_aggregate(record, &event.aggregate);
+        if lifecycle_store.read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
+            return Ok(false);
+        }
+        let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
+        let aggregate_path = lifecycle_store
+            .aggregate_path(&record.run_id)
+            .display()
+            .to_string();
+        apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
+        record_verified_lab_placement_outcome(record)?;
+        record.ensure_metadata_object().insert(
+            "terminal_transport_recovery".to_string(),
+            json!("persisted_runner_job_events"),
+        );
+        lifecycle_store.write_aggregate_and_record(record, &aggregate)?;
+        crate::agent_task_lifecycle::record_terminal_artifact_projection_in_store(
+            lifecycle_store,
+            record,
+            &aggregate,
+        )?;
+        return Ok(true);
+    }
+
+    project_terminal_runner_pre_provider_failure_in_store(lifecycle_store, record, &events)
+}
+
+const RUNNER_PRE_PROVIDER_FAILURE_PHASE: &str = "lab_runner_job_pre_provider";
+
+fn project_terminal_runner_pre_provider_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    events: &[homeboy_core::api_jobs::JobEvent],
+) -> Result<bool> {
+    if record.state.is_terminal() {
         return Ok(false);
     }
-    let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
-    let aggregate_path = lifecycle_store
-        .aggregate_path(&record.run_id)
-        .display()
-        .to_string();
-    apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
-    record_verified_lab_placement_outcome(record)?;
-    record.ensure_metadata_object().insert(
-        "terminal_transport_recovery".to_string(),
-        json!("persisted_runner_job_events"),
-    );
-    lifecycle_store.write_aggregate_and_record(record, &aggregate)?;
-    crate::agent_task_lifecycle::record_terminal_artifact_projection_in_store(
+    let Some(event) = events.iter().rev().find(|event| {
+        event.kind == homeboy_core::api_jobs::JobEventKind::Error
+            && event
+                .data
+                .as_ref()
+                .and_then(|data| data.get("phase"))
+                .and_then(Value::as_str)
+                == Some("local_child_worker_failed_before_child_identity")
+            && event.job_id.to_string() == record.runner_job_id().unwrap_or_default()
+    }) else {
+        return Ok(false);
+    };
+    if record
+        .metadata
+        .pointer("/runner_result_synchronization/source")
+        .and_then(Value::as_str)
+        == Some("typed_runner_job_error")
+        && record
+            .metadata
+            .pointer("/runner_result_synchronization/event_sequence")
+            .and_then(Value::as_u64)
+            == Some(event.sequence)
+    {
+        // The event has already been consumed. Report it handled so the caller
+        // does not fall through and re-project the stale queued/running row.
+        return Ok(true);
+    }
+    let data = event.data.as_ref().expect("typed runner error has data");
+    let reported_code = data
+        .get("error_code")
+        .or_else(|| data.get("code"))
+        .and_then(Value::as_str)
+        .filter(|code| !code.trim().is_empty())
+        .unwrap_or("internal.unexpected");
+    let message = data
+        .get("error")
+        .and_then(Value::as_str)
+        .or(event.message.as_deref())
+        .unwrap_or("Lab runner job failed before provider execution");
+    let mut error = Error::new(
+        ErrorCode::InternalUnexpected,
+        homeboy_core::redaction::redact_string(message),
+        json!({
+            "field": reported_code,
+            "child_reported_error_code": reported_code,
+            "child_command_result": {
+                "schema": "homeboy/runner-job-terminal-error/v1",
+                "runner_job_event_sequence": event.sequence,
+                "runner_job_error": homeboy_core::redaction::redact_json(data),
+            },
+        }),
+    )
+    .with_retryable(true)
+    .with_hint(format!(
+        "Retry safely: homeboy agent-task retry {} --run",
+        record.run_id
+    ));
+    error.details["pre_execution_phase"] = json!(RUNNER_PRE_PROVIDER_FAILURE_PHASE);
+
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+    let mut failed = crate::agent_task_lifecycle::record_pre_execution_failure_in_store(
         lifecycle_store,
-        record,
-        &aggregate,
+        &record.run_id,
+        &plan,
+        RUNNER_PRE_PROVIDER_FAILURE_PHASE,
+        &error,
     )?;
+    record_runner_job_terminal_metadata(
+        &mut failed,
+        homeboy_core::api_jobs::JobStatus::Failed,
+        events,
+    );
+    let terminalized = failed.state.is_terminal();
+    let run_id = failed.run_id.clone();
+    let metadata = failed.ensure_metadata_object();
+    metadata.insert(
+        "runner_result_synchronization".to_string(),
+        json!({
+            "state": if terminalized { "projected" } else { "candidate_preserved" },
+            "runner_job_status": "failed",
+            "source": "typed_runner_job_error",
+            "event_sequence": event.sequence,
+        }),
+    );
+    if !terminalized {
+        lifecycle_store.write_record(&failed)?;
+        *record = failed;
+        return Ok(true);
+    }
+    metadata.insert(
+        "phase".to_string(),
+        json!(RUNNER_PRE_PROVIDER_FAILURE_PHASE),
+    );
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("runner job failed before provider execution"),
+    );
+    metadata.insert("provider_state".to_string(), json!("failed"));
+    metadata.insert(
+        "terminal_transport_recovery".to_string(),
+        json!("persisted_runner_job_error"),
+    );
+    metadata.insert(
+        "managed_recovery".to_string(),
+        json!({
+            "action": "agent_task_retry",
+            "command": format!("homeboy agent-task retry {run_id} --run"),
+            "reason": RUNNER_PRE_PROVIDER_FAILURE_PHASE,
+        }),
+    );
+    if let Some(handoff) = metadata.get_mut("runner_handoff") {
+        handoff["state"] = json!("terminal");
+    }
+    lifecycle_store.write_record(&failed)?;
+    *record = failed;
     Ok(true)
 }
 

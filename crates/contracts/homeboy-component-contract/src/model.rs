@@ -151,10 +151,9 @@ pub struct Component {
     pub changelog_next_section_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog_next_section_aliases: Option<Vec<String>>,
-    /// Lifecycle hooks: event name -> list of shell commands.
-    /// Events: `pre:version:bump`, `post:version:bump`, `post:release`, `post:deploy`
+    /// Lifecycle hooks keyed by an event Homeboy actually emits.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub hooks: HashMap<String, Vec<String>>,
+    pub hooks: HashMap<homeboy_extension_contract::HookEvent, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -397,6 +396,13 @@ impl Component {
         &self,
         capability: homeboy_extension_contract::ExtensionCapability,
     ) -> &[String] {
+        // Audit reference setup is extension-owned: it resolves the extension's
+        // own dependency directories, so there is no component-level
+        // `scripts.audit` override to fall back to.
+        if capability == homeboy_extension_contract::ExtensionCapability::Audit {
+            return &[];
+        }
+
         if let Some(scripts) = self.scripts.as_ref() {
             let commands = match capability {
                 homeboy_extension_contract::ExtensionCapability::Lint => &scripts.lint,
@@ -406,6 +412,9 @@ impl Component {
                 homeboy_extension_contract::ExtensionCapability::Fuzz => &scripts.fuzz,
                 homeboy_extension_contract::ExtensionCapability::Trace => &scripts.trace,
                 homeboy_extension_contract::ExtensionCapability::Deps => &scripts.deps,
+                homeboy_extension_contract::ExtensionCapability::Audit => unreachable!(
+                    "Audit returns early: no component-level scripts.audit override exists"
+                ),
             };
             if !commands.is_empty() {
                 return commands;

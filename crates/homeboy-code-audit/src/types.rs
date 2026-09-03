@@ -4,6 +4,7 @@
 //! re-export in the module root.
 
 use std::collections::HashSet;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use super::fingerprint;
@@ -262,18 +263,83 @@ pub(crate) fn time_audit_detector<T>(
 ) -> T {
     if enabled {
         eprintln!("[audit] Running {id}...");
+        emit_detector_progress(id, "running", 0.0);
         let started = std::time::Instant::now();
-        let value = run();
+        let value = run_with_detector_heartbeat(id, started, run);
         let elapsed = started.elapsed();
         eprintln!(
             "[audit] Completed {id} in {:.0}ms",
             elapsed.as_secs_f64() * 1000.0
         );
+        emit_detector_progress(id, "completed", elapsed.as_secs_f64() * 1000.0);
         timing.push_ok(id, elapsed);
         value
     } else {
         timing.push_skipped(id);
         skipped()
+    }
+}
+
+/// Keep the active detector visible while its synchronous work runs. The audit
+/// cannot safely cancel arbitrary detector code, so this heartbeat is an
+/// operator-facing liveness signal rather than a timeout mechanism.
+fn run_with_detector_heartbeat<T>(
+    id: &str,
+    started: std::time::Instant,
+    run: impl FnOnce() -> T,
+) -> T {
+    let (completed, wait_for_completion) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let heartbeat = scope.spawn(move || loop {
+            match wait_for_completion.recv_timeout(Duration::from_secs(15)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => emit_detector_progress(
+                    id,
+                    "heartbeat",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                ),
+            }
+        });
+        let value = run();
+        let _ = completed.send(());
+        heartbeat.join().expect("detector heartbeat must not panic");
+        value
+    })
+}
+
+/// Emit detector lifecycle events even when stderr is not interactive, so CI
+/// and a foreground review client can distinguish active work from a stall.
+fn emit_detector_progress(id: &str, status: &str, elapsed_ms: f64) {
+    eprintln!(
+        "HOMEBOY_PROGRESS {}",
+        detector_progress(id, status, elapsed_ms)
+    );
+}
+
+fn detector_progress(id: &str, status: &str, elapsed_ms: f64) -> serde_json::Value {
+    serde_json::json!({
+        "phase": "audit_detectors",
+        "current": id,
+        "status": status,
+        "elapsed_ms": elapsed_ms,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detector_progress;
+
+    #[test]
+    fn detector_progress_names_the_active_detector_and_state() {
+        assert_eq!(
+            detector_progress("detector.structural", "completed", 12.5),
+            serde_json::json!({
+                "phase": "audit_detectors",
+                "current": "detector.structural",
+                "status": "completed",
+                "elapsed_ms": 12.5,
+            })
+        );
     }
 }
 

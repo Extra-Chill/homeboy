@@ -25,8 +25,8 @@ use super::types::{
     FuzzRunnerContract, FuzzValidateArgs, FuzzWorkloadOutput,
 };
 use super::workloads::{
-    fuzz_workloads, resolve_component_id, resolve_fuzz_context, resolve_profile_workload_id,
-    rig_component_for_fuzz, select_workload, FuzzRigContext,
+    build_target_inventory, fuzz_workloads, resolve_component_id, resolve_fuzz_context,
+    resolve_profile_workload_id, rig_component_for_fuzz, select_workload, FuzzRigContext,
 };
 use super::{run_contract, run_discover, FuzzArgs};
 use crate::cli_surface::{Cli, Commands};
@@ -46,7 +46,7 @@ use homeboy::fuzz::{
 };
 use homeboy::rig::RigSpec;
 use homeboy::test_support::with_isolated_home;
-use homeboy_extension::FuzzConfig;
+use homeboy_extension_contract::fuzz_config::FuzzConfig;
 use std::fs;
 use std::path::{Path, PathBuf};
 

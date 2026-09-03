@@ -315,6 +315,13 @@ pub(crate) struct PreparedPayloadCollection {
     entries: HashMap<String, PreparedPayloadEntry>,
 }
 
+/// Owns reusable artifacts for the complete deployment fanout.
+#[derive(Default)]
+pub(crate) struct DeploymentArtifactStore {
+    pub(crate) payloads: PreparedPayloadCollection,
+    pub(crate) release_artifacts: ReleaseArtifactStore,
+}
+
 struct PreparedPayloadEntry {
     payload: PreparedComponentPayload,
 }
@@ -404,7 +411,8 @@ fn prepare_payload(
     let mut generated_source_artifact = None;
     if release_artifact.is_none() && !request.config.skip_build {
         let cleanup = GeneratedSourceArtifactCleanup::new(&component)?;
-        let (build_exit_code, build_error) = homeboy_extension::build::build_component(&component);
+        let (build_exit_code, build_error) =
+            homeboy_core::extension::build::build_component(&component);
         if let Some(message) = build_error {
             let mut error = Error::validation_invalid_argument(
                 "build",
@@ -549,7 +557,7 @@ fn copy_prepared_artifact(source: &Path) -> Result<(PathBuf, PreparedArtifactCle
 
 fn artifact_path(component: &Component) -> Result<PathBuf> {
     let artifact = artifact_pattern(component)?;
-    homeboy_extension::build::resolve_artifact_path_from_root(
+    homeboy_core::extension::build::resolve_artifact_path_from_root(
         &artifact,
         Some(Path::new(&component.local_path)),
     )
@@ -675,6 +683,7 @@ impl DeployConfig {
             tagged: request.config.tagged,
             prepared_artifact: None,
             resume_run_id: None,
+            max_concurrency: 1,
             target: None,
         }
     }
@@ -778,9 +787,12 @@ mod tests {
                 "fixture".to_string(),
                 homeboy_core::project::ProjectComponentOverrides {
                     remote_path: Some("plugins/one".to_string()),
-                    hooks: [("post:deploy".to_string(), vec!["one".to_string()])]
-                        .into_iter()
-                        .collect(),
+                    hooks: [(
+                        homeboy_extension_contract::HookEvent::PostDeploy,
+                        vec!["one".to_string()],
+                    )]
+                    .into_iter()
+                    .collect(),
                     ..Default::default()
                 },
             )]

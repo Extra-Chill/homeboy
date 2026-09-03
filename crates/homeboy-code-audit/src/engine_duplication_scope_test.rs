@@ -3,14 +3,14 @@
 //! Wired into `engine.rs` via
 //! `#[cfg(test)] #[path = ...] mod engine_duplication_scope_test`.
 //!
-//! WHY THIS EXISTS: #12587 added `detect_duplicates_scoped` /
-//! `detect_duplicate_groups_scoped` and proved their EQUIVALENCE against the
-//! unscoped functions, in `duplication/tests.rs`. Nothing called them, so the
+//! WHY THIS EXISTS: #12587 added scope-seeded exact duplicate analysis and
+//! proved its EQUIVALENCE against unscoped analysis in `duplication/tests.rs`.
+//! Nothing called it, so the
 //! whole optimization was dormant and every one of those equivalence tests kept
 //! passing. Equivalence tests cannot see a missing call site.
 //!
 //! So these tests assert the WIRING instead: that `run_duplication_family`
-//! actually threads its `scoped_fingerprints` argument into those two passes, and
+//! actually threads its `scoped_fingerprints` argument into that pass, and
 //! that the five passes without a scoped variant still consume the full corpus.
 //! Together with #12587's equivalence proofs that is the whole risk surface of
 //! the wiring slice.
@@ -104,7 +104,7 @@ fn files(items: &[findings::Finding]) -> Vec<&str> {
 }
 
 #[test]
-fn changed_scope_seeds_the_exact_duplicate_passes_from_the_scoped_subset() {
+fn changed_scope_seeds_exact_duplicate_analysis_from_the_scoped_subset() {
     let owned = corpus();
     let all: Vec<&fingerprint::FileFingerprint> = owned.iter().collect();
     // The engine builds its subset by filtering `all_fingerprints`, so the
@@ -144,7 +144,7 @@ fn changed_scope_seeds_the_exact_duplicate_passes_from_the_scoped_subset() {
     assert_eq!(
         group_names,
         vec!["compute_alpha"],
-        "groups pass must be seeded from the scoped subset too"
+        "fixer groups must come from the same scoped analysis"
     );
     // Expansion still walked the full corpus: the counterpart is out of scope.
     assert_eq!(
@@ -201,8 +201,7 @@ fn unscoped_mode_passes_the_full_corpus_as_its_own_seed() {
 
     // What `audit_internal` does when `scoped_fingerprints` is `None`:
     // `per_file_fingerprints` IS `all_fingerprints`, which is the same `(all, all)`
-    // delegation the unscoped `detect_duplicates` / `detect_duplicate_groups`
-    // perform, so nothing is narrowed.
+    // delegation an unscoped exact analysis performs, so nothing is narrowed.
     let unit = run(&all, &all);
 
     assert_eq!(
@@ -237,7 +236,6 @@ fn span_order_is_pass_order_regardless_of_the_seed() {
 
     let expected = vec![
         "detector.duplication.exact",
-        "detector.duplication.groups",
         "detector.duplication.intra_method",
         "detector.duplication.near_duplicate",
         "detector.duplication.cross_name_duplicate",

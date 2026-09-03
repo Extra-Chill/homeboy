@@ -92,7 +92,7 @@ fn providers_output_declares_the_scope_it_observed() {
 
         // Additive only: the pre-existing `scope` object keeps its meaning for
         // callers that already parse this output.
-        assert_eq!(value["schema"], "homeboy/agent-task-providers/v1");
+        assert_eq!(value["schema"], "homeboy/agent-task-providers/v2");
         assert_eq!(value["scope"]["filtered"], false);
         assert!(value["providers"].is_array());
     });
@@ -113,8 +113,8 @@ fn contract_output_exports_core_agent_task_metadata() {
         "homeboy/agent-task-plan-validation/v1"
     );
     assert_eq!(
-        value["schemas"]["lifecycle_action_eligibility"],
-        "homeboy/agent-task-lifecycle-action-eligibility/v1"
+        value["schemas"]["control_plane_action_eligibility"],
+        "homeboy/control-plane-action-eligibility/v1"
     );
     assert_eq!(
         value["schemas"]["artifact_declaration"],

@@ -7,16 +7,17 @@ use homeboy::core::observation::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
     merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
 };
-use homeboy_extension::test as extension_test;
-use homeboy_extension::test::{
+use homeboy_core::extension::test as extension_test;
+use homeboy_core::extension::test::{
     build_test_summary, detect_test_drift, parse_test_failures_from_text,
     parse_test_results_failures_file, parse_test_results_file, parse_test_results_text, report,
     run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_engine_primitives::test_execution::suite_timeout_from_env;
 #[cfg(test)]
 use homeboy_extension_contract::test_results::TestInventoryRejection;
+use homeboy_extension_contract::ExtensionCapability;
 use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -210,6 +211,9 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 
 pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     validate_differential_args(&args)?;
+    // Resolve inherited policy once so every execution path and its report use
+    // the same validated deadline.
+    let test_execution_plan = suite_timeout_from_env();
     let source_ctx = resolve_source_context(
         &args.comp,
         &args.setting_args,
@@ -241,6 +245,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             &source_ctx.source_path,
             source_ctx.component_id.clone(),
             args.json_summary,
+            test_execution_plan.clone(),
             Some(runner.run_dir()),
             observation.as_ref().map(|observation| &observation.active),
         );
@@ -256,7 +261,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             |observation, error| finish_test_observation_error(Some(observation), error),
         )?;
 
-        let (mut output, exit_code) = report::from_main_workflow(workflow);
+        let (mut output, exit_code) = report::from_main_workflow(workflow, &test_execution_plan);
         attach_test_actionable(&mut output, run_id);
         return Ok((output, exit_code));
     }
@@ -342,6 +347,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
                 .chain(extension_test::portable_env(&ctx.component)?.public_env)
                 .collect(),
             passthrough_args: passthrough_args.clone(),
+            test_execution_plan: test_execution_plan.clone(),
         },
         runner.run_dir(),
     );
@@ -380,6 +386,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     let (mut output, exit_code) = report::from_main_workflow_with_ci_context(
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
+        &test_execution_plan,
     );
     let exit_code = apply_differential_verdict(
         &mut output,
@@ -392,6 +399,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
         ci_job.as_ref(),
         &settings,
         &settings_json,
+        &test_execution_plan,
     )?;
     attach_test_actionable(&mut output, run_id);
     Ok((output, exit_code))
@@ -455,6 +463,7 @@ fn apply_differential_verdict(
     ci_job: Option<&CiResolvedJob>,
     settings: &[(String, String)],
     settings_json: &[(String, Value)],
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy::core::Result<i32> {
     if !args.differential {
         return Ok(candidate_exit_code);
@@ -529,6 +538,7 @@ fn apply_differential_verdict(
             ci_job,
             settings,
             settings_json,
+            test_execution_plan,
         )?;
         cache.store(&key, &measurement, chrono::Utc::now().to_rfc3339())?;
         cache.prune_superseded(&key)?;
@@ -625,6 +635,7 @@ fn run_differential_baseline(
     ci_job: Option<&CiResolvedJob>,
     settings: &[(String, String)],
     settings_json: &[(String, Value)],
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy::core::Result<extension_test::TestMeasurement> {
     let source_root = PathBuf::from(git::get_git_root(&source_path.to_string_lossy())?);
     let component_prefix = git::get_component_path_prefix(&source_path.to_string_lossy());
@@ -663,10 +674,11 @@ fn run_differential_baseline(
                 .chain(extension_test::portable_env(&baseline_component)?.public_env)
                 .collect(),
             passthrough_args: passthrough_args.to_vec(),
+            test_execution_plan: test_execution_plan.clone(),
         },
         &run_dir,
     );
-    let (output, _) = report::from_main_workflow(workflow?);
+    let (output, _) = report::from_main_workflow(workflow?, test_execution_plan);
     run_dir.cleanup();
     Ok(extension_test::measurement_from_test_output(&output))
 }
@@ -751,7 +763,6 @@ fn test_runner_ci_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
 
     for key in [
         "GITHUB_ACTIONS",
-        "RELEASE_BLOCKING_COMMANDS",
         "HOMEBOY_TEST_INVENTORY_ONLY",
         "HOMEBOY_TEST_INVENTORY_FILE",
         "HOMEBOY_TEST_SHARD_MANIFEST",
@@ -1527,7 +1538,7 @@ mod tests {
     use homeboy::core::component::Component;
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
     use homeboy::refactor::{build_test_refactor_request, TestSourceOptions};
-    use homeboy_extension::test::{TestAnalysisInput, TestCounts, TestFailure};
+    use homeboy_core::extension::test::{TestAnalysisInput, TestCounts, TestFailure};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2042,7 +2053,7 @@ mod tests {
                 test_scope: None,
                 summary: None,
                 raw_output: None,
-                extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+                extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
                     name: "provider-test".to_string(),
                     duration_ms: 1,
                     status: Some("failed".to_string()),
@@ -2282,7 +2293,7 @@ mod tests {
                 start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
                     .expect("observation");
             let run_id = observation.active.run_id().to_string();
-            let timing = homeboy_extension::ExtensionPhaseTiming {
+            let timing = homeboy_audit_contract::ExtensionPhaseTiming {
                 name: "provider-test".to_string(),
                 duration_ms: 1,
                 status: Some("failed".to_string()),
@@ -2469,7 +2480,7 @@ mod tests {
                     test_scope: None,
                     summary: None,
                     raw_output: None,
-                    extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+                    extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
                         name: "provider-test".to_string(),
                         duration_ms: 1,
                         status: Some("completed".to_string()),
@@ -2550,7 +2561,7 @@ mod tests {
                 stdout_limit_bytes: 0,
                 stderr_limit_bytes: 0,
             }),
-            extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+            extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
                 name: "provider".to_string(),
                 duration_ms: 0,
                 status: None,

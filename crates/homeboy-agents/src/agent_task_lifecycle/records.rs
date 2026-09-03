@@ -1,12 +1,10 @@
 use super::*;
 
 use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
+use homeboy_runner_contract::{WorkspaceClaim, WorkspaceIdentity, WorkspaceOwnerLease};
 
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
-    pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v2";
-    pub(crate) const EVENT: &str = "homeboy/agent-task-event/v1";
-    pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v1";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
     pub(crate) const COOK_INDEX: &str = "homeboy/agent-task-cook-index/v1";
 }
@@ -141,13 +139,13 @@ pub struct AgentTaskRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<AgentTaskAcceptanceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    pub workspace_identity: Option<WorkspaceIdentity>,
     #[serde(default)]
     pub workspace_lifecycle_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_claim: Option<homeboy_core::workspace_claim::WorkspaceClaim>,
+    pub workspace_claim: Option<WorkspaceClaim>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -343,13 +341,13 @@ pub struct AgentTaskLabHandoff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expired_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    pub workspace_identity: Option<WorkspaceIdentity>,
     #[serde(default)]
     pub workspace_lifecycle_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_claim: Option<homeboy_core::workspace_claim::WorkspaceClaim>,
+    pub workspace_claim: Option<WorkspaceClaim>,
 }
 
 /// An immutable runner repair emitted by Lab admission before provider work.
@@ -520,6 +518,50 @@ impl AgentTaskRunRecord {
     ///   candidate), i.e. a terminal state other than a bare `Failed`/`Cancelled`.
     pub(crate) fn has_recorded_provider_progress(&self) -> bool {
         !self.provider_handles.is_empty() || self.has_candidate_terminal_state()
+    }
+
+    /// Whether runner placement was recorded without any execution ever taking
+    /// ownership or producing durable work. A leftover `runner_job_id` is not
+    /// ownership once the runner's live-job view is authoritatively idle.
+    pub(crate) fn is_ownerless_zero_artifact_queued_runner_record(&self) -> bool {
+        let now = chrono::Utc::now();
+        self.state == AgentTaskRunState::Queued
+            && self.runner_id().is_some()
+            && self.runner_job_id().is_some()
+            && self.lab_handoff.is_none()
+            && self.local_owner_liveness() == LocalOwnerLiveness::Absent
+            && !self.has_planned_runner_execution()
+            && !super::has_live_pending_runner_submission_intent(self, now)
+            && !self.has_live_pending_local_cook_supervisor(now)
+            && self.aggregate_path.is_none()
+            && self.totals.is_none()
+            && self.artifact_refs.is_empty()
+            && self.provider_handles.is_empty()
+            && self.latest_executor_evidence.is_none()
+            && self.candidate_adoption.is_none()
+            && self.lifecycle.external_runtime_ids.is_empty()
+            && self
+                .lifecycle
+                .provider_runtime
+                .iter()
+                .all(|runtime| runtime.external_runtime_ids.is_empty())
+            && self
+                .metadata
+                .get("provider_executions")
+                .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
+            && self
+                .metadata
+                .get("provider_executions_consumed")
+                .is_none_or(|value| value.as_u64() == Some(0))
+    }
+
+    /// Ownerless queued runner residue whose runner has already proved zero live
+    /// jobs. Runner-generation reconcile cannot mutate this durable record.
+    pub(crate) fn is_locally_reconcilable_after_runner_idle(&self) -> bool {
+        self.is_ownerless_zero_artifact_queued_runner_record()
+            && self.runner_id().is_some_and(|runner_id| {
+                super::runner_live_job_authority(runner_id) == super::RunnerLiveJobAuthority::Idle
+            })
     }
 
     /// A terminal state that carries a produced candidate (success or a
@@ -915,7 +957,7 @@ impl AgentTaskRunRecord {
                 self.metadata
                     .pointer("/cook_progress/phase")
                     .and_then(Value::as_str),
-                Some("worktree_provider_lookup" | "worktree_provider_ensure")
+                Some("worktree_provider_lookup" | "worktree_provider_ensure" | "provider_start")
             )
     }
 
@@ -1650,79 +1692,6 @@ pub struct AgentTaskRunProviderHandle {
     pub state: Option<AgentTaskState>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskRunLog {
-    pub schema: String,
-    pub run_id: String,
-    /// The canonical consumer event stream. v1 exposed the same information
-    /// twice as `events` and `normalized_events`.
-    pub events: Vec<AgentTaskEventEnvelope>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub raw_events: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskEventEnvelope {
-    pub schema: String,
-    pub run_id: String,
-    pub task_id: String,
-    pub sequence: u64,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub status: AgentTaskState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heartbeat_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub progress: Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<AgentTaskArtifactRef>,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskRunStatus {
-    pub schema: String,
-    pub run_id: String,
-    pub plan_id: String,
-    pub state: AgentTaskRunState,
-    pub submitted_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
-    pub totals: AgentTaskAggregateTotals,
-    pub latest_event_cursor: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<AgentTaskArtifactRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub normalized_events: Vec<AgentTaskEventEnvelope>,
-    pub action_eligibility: super::AgentTaskLifecycleActionEligibilityReport,
-    /// Additive projection for multi-candidate Cook runs. Older consumers retain
-    /// the existing status fields and omit this when the plan has one task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate: Option<AgentTaskCandidateStatus>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskCandidateStatus {
-    pub policy: crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_task_id: Option<String>,
-    pub candidates: Vec<AgentTaskRunTask>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline_timeout_ms: Option<u64>,
-    pub cancellation_supervision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub promotion_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

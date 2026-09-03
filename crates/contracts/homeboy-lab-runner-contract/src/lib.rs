@@ -1,11 +1,10 @@
-//! Shared runner contract: behavior-free types and env-var constants that both
-//! `homeboy-core` and the optional `homeboy-runner` feature crate depend on.
+//! Lab routing and handoff contracts used by `homeboy-core` and
+//! the optional `homeboy-runner` feature crate.
 //!
 //! Runner is an optional Lab-offload feature; core must not depend on runner
-//! *behavior*. But some core code legitimately needs to name runner *concepts*
-//! (e.g. the runner kind, or the env-var markers used when an exec crosses a
-//! remote-runner boundary). Those plain-data contracts live here so core can
-//! reference them without a `core -> runner` edge.
+//! *behavior*. Generic runner concepts are canonical in
+//! `homeboy-runner-contract`; this crate owns only Lab-specific policy and
+//! handoff contracts.
 //!
 //! Two single-type crates were folded in here for the same reason they existed
 //! separately — both are behavior-free runner contracts below core, and both
@@ -32,140 +31,10 @@ pub use provider_source_types::AgentTaskProviderRunnerSource;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use homeboy_runner_contract::{
+    RunnerCapabilityPreflight, RunnerRequiredTool, RunnerWorkspaceSyncMode,
+};
 use serde::{Deserialize, Serialize};
-
-/// The kind of runner backing a homeboy runner definition.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerKind {
-    Local,
-    Ssh,
-}
-
-/// Which side of a runner exchange owns a lifecycle resource.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerLifecycleOwner {
-    Controller,
-    Runner,
-    Broker,
-    Local,
-}
-
-impl RunnerLifecycleOwner {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Controller => "controller",
-            Self::Runner => "runner",
-            Self::Broker => "broker",
-            Self::Local => "local",
-        }
-    }
-}
-
-/// File + byte counts for a workspace sync.
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
-pub struct ByteFileCounts {
-    pub files: usize,
-    pub bytes: u64,
-}
-
-/// A lease describing a runner's materialized workspace.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerWorkspaceLease {
-    pub runner_id: String,
-    pub local_path: String,
-    pub remote_path: String,
-    pub sync_mode: String,
-    pub materialized: bool,
-    pub lifecycle_owner: RunnerLifecycleOwner,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_dirty: Option<bool>,
-}
-
-/// A summary of a runner's current workspace materialization.
-#[derive(Debug, Clone, Serialize)]
-pub struct RunnerWorkspaceCurrentSummary {
-    pub local_path: String,
-    pub remote_path: String,
-    pub sync_mode: RunnerWorkspaceSyncMode,
-    pub materialized: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_dirty: Option<bool>,
-    /// Commit SHA of the synthetic git checkout created for a `snapshot-git`
-    /// sync, so write-capable agent-task dispatches can trace the dirty
-    /// controller-side worktree back to the synthetic commit that carries it
-    /// into the runner workspace. `None` for plain `snapshot`/`git` syncs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_tree: Option<String>,
-}
-
-/// A reference to an artifact produced by a runner job. Plain data describing
-/// where/how to fetch the artifact; behavior-free so core can name it without a
-/// core -> runner edge.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerArtifactRef {
-    pub artifact_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transport: Option<String>,
-}
-
-/// How a runner workspace is synced before a job runs.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerWorkspaceSyncMode {
-    #[default]
-    Snapshot,
-    /// Deliberate exception to `rename_all`: this mode's wire string is
-    /// `snapshot-git`, the spelling every durable consumer already uses —
-    /// on-disk runner-workspace metadata (`.homeboy/runner-workspace.json`),
-    /// the materialization-mode allowlists that verify Lab provenance, and
-    /// the CLI surface. Renaming the variant or its serde attribute must
-    /// move `as_str` with it, or
-    /// `runner_workspace_sync_mode_matches_its_serialized_form` fails.
-    #[serde(rename = "snapshot-git")]
-    SnapshotGit,
-    Git,
-}
-
-impl RunnerWorkspaceSyncMode {
-    /// This mode as its own canonical wire string — the value `serde`
-    /// produces, pinned to it by
-    /// `runner_workspace_sync_mode_matches_its_serialized_form`. Replaced
-    /// `label`, which restated the same strings by hand with nothing tying
-    /// them to the serde attributes (#13400).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Snapshot => "snapshot",
-            Self::SnapshotGit => "snapshot-git",
-            Self::Git => "git",
-        }
-    }
-}
 
 /// Options controlling how a runner workspace is synced before a job runs.
 #[derive(Debug, Clone, Default)]
@@ -187,92 +56,6 @@ pub struct RunnerWorkspaceSyncOptions {
     /// execution supplies this token; callers that explicitly opt into a stable
     /// identity must reject an already-owned path before materialization.
     pub run_isolation_token: Option<String>,
-}
-
-/// Set while a hosted exec runs inside a runner (as opposed to the local host).
-pub const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
-
-/// Private process marker added only while a runner exec crosses a remote
-/// runner boundary. Intentionally absent from CLI parsing and argv.
-pub const RUNNER_PLACEMENT_RESOLVED_ENV: &str = "HOMEBOY_RUNNER_PLACEMENT_RESOLVED";
-
-/// Identifies the runner an exec is bound to.
-pub const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
-
-/// Whether an env-var name is an internal runner control marker (not a
-/// user-facing variable). Contract-level classification, so it lives here and
-/// core can call it without a core -> runner edge.
-pub fn is_internal_control_env(name: &str) -> bool {
-    name == RUNNER_PLACEMENT_RESOLVED_ENV
-}
-
-/// A tool that must be present on a runner for a capability to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RunnerRequiredTool {
-    id: String,
-}
-
-impl RunnerRequiredTool {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into() }
-    }
-
-    pub fn homeboy() -> Self {
-        Self::new("homeboy")
-    }
-
-    pub fn git() -> Self {
-        Self::new("git")
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-}
-
-/// A tool + command capability requirement probed on a runner.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RunnerToolCapabilityRequirement {
-    pub tool: String,
-    pub command: String,
-    pub env: Vec<String>,
-    pub capabilities: Vec<String>,
-}
-
-/// Extension-owned command that proves a runner toolchain is usable.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RunnerToolchainReadinessProbe {
-    pub extension_id: String,
-    pub id: String,
-    pub program: String,
-    pub args: Vec<String>,
-    pub repair_command: Option<String>,
-    pub diagnostic_env: Vec<String>,
-}
-
-/// A resolved set of capability requirements to preflight before running a
-/// command on a runner.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RunnerCapabilityPreflight {
-    pub command: String,
-    pub required_tools: Vec<RunnerRequiredTool>,
-    pub required_commands: Vec<String>,
-    pub required_tool_capabilities: Vec<RunnerToolCapabilityRequirement>,
-    pub required_toolchain_probes: Vec<RunnerToolchainReadinessProbe>,
-    pub required_components: Vec<String>,
-    pub required_env: Vec<String>,
-    pub timeout: Option<std::time::Duration>,
-}
-
-impl RunnerCapabilityPreflight {
-    pub fn is_empty(&self) -> bool {
-        self.required_tools.is_empty()
-            && self.required_commands.is_empty()
-            && self.required_tool_capabilities.is_empty()
-            && self.required_toolchain_probes.is_empty()
-            && self.required_components.is_empty()
-            && self.required_env.is_empty()
-    }
 }
 
 /// A lab runner capability prepared from a contract, ready to preflight.
@@ -331,231 +114,6 @@ pub enum LabRunnerGateDecision {
     },
 }
 
-/// Resource-usage metrics captured while a runner child process ran. Pure serde
-/// data (no runner behavior) so it can live in the contract and be embedded in
-/// core job records (`api_jobs`) without a core -> runner edge.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerResourceMetrics {
-    pub duration_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_user_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_system_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peak_rss_bytes: Option<u64>,
-    pub sample_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_process_count_peak: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_guard: Option<RunnerResourceGuardLimits>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guard_violation: Option<RunnerResourceGuardViolation>,
-    pub source: String,
-}
-
-/// The resource-guard limits in force for a runner child process.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerResourceGuardLimits {
-    pub rss_limit_bytes: u64,
-    pub process_count_limit: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_count_limit_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_process_count_limit: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_count_limit_ceiling: Option<u64>,
-    pub concurrency: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_capacity_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_headroom_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregate_rss_budget_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_rss_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregate_rss_bytes: Option<u64>,
-    pub rss_limit_source: String,
-}
-
-/// A resource-guard violation that terminated or flagged a runner child.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerResourceGuardViolation {
-    pub reason: String,
-    pub message: String,
-    pub rss_bytes: u64,
-    pub rss_limit_bytes: u64,
-    pub process_count: u64,
-    pub process_count_limit: u64,
-}
-
-/// Artifact references produced by a runner mutation (patch, file bundle,
-/// operation log). Pure serde data embedded in core job records.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerMutationArtifacts {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patch_ref: Option<RunnerArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_bundle_ref: Option<RunnerArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_log_ref: Option<RunnerArtifactRef>,
-}
-
-impl RunnerMutationArtifacts {
-    pub fn is_empty(&self) -> bool {
-        self.patch_ref.is_none()
-            && self.file_bundle_ref.is_none()
-            && self.operation_log_ref.is_none()
-    }
-}
-
-/// How a runner session is tunneled. Pure serde data (with small label helpers)
-/// so the core daemon can build/persist sessions without a core -> runner edge.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerTunnelMode {
-    DirectSsh,
-    Reverse,
-}
-
-impl RunnerTunnelMode {
-    /// This mode rendered for humans — `direct SSH`, `reverse-connected`.
-    ///
-    /// A different vocabulary, not a different format of
-    /// [`RunnerTunnelMode::metadata_value`]: this is prose for operator-facing
-    /// output, and it is deliberately not the wire string. Merging the two
-    /// would put a space and a hyphen into persisted metadata that
-    /// `#[serde(rename_all = "snake_case")]` spells `direct_ssh`, with no
-    /// compile error to catch it.
-    pub fn label(&self) -> &'static str {
-        self.labels().0
-    }
-
-    /// This mode as its own canonical wire string — the value `serde` already
-    /// produces, pinned to it by
-    /// `runner_tunnel_mode_metadata_value_matches_its_serialized_form`.
-    ///
-    /// Unlike [`RunnerTunnelMode::label`], this is a hand-written restatement
-    /// of the derived form, so it can drift silently on a variant rename or a
-    /// serde attribute change (#13400). The pin is what stops that.
-    pub fn metadata_value(&self) -> &'static str {
-        self.labels().1
-    }
-
-    fn labels(&self) -> (&'static str, &'static str) {
-        match self {
-            RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
-            RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
-        }
-    }
-}
-
-fn default_tunnel_mode() -> RunnerTunnelMode {
-    RunnerTunnelMode::DirectSsh
-}
-
-/// Which side owns a runner session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionRole {
-    Controller,
-    Runner,
-}
-
-fn default_session_role() -> RunnerSessionRole {
-    RunnerSessionRole::Controller
-}
-
-/// The connectivity state of a runner session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionState {
-    Connected,
-    Disconnected,
-    Recorded,
-}
-
-/// Kernel-derived identity for one local tunnel process instance. This survives
-/// controller restart so a recycled PID is never signaled from durable state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "platform", rename_all = "snake_case")]
-pub enum RunnerTunnelProcessStartIdentity {
-    Linux {
-        starttime_ticks: u64,
-    },
-    Macos {
-        start_seconds: u64,
-        start_microseconds: u64,
-    },
-}
-
-/// A controller-owned reverse forward that exposes a controller-local proxy to
-/// a direct SSH runner. The URL is safe to pass to a runner process: it points
-/// at the runner loopback listener and never carries controller credentials.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerProxyForward {
-    pub runner_url: String,
-    pub tunnel_pid: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
-}
-
-/// A persisted runner session record. Pure serde data so the core daemon's
-/// `/runner/sessions` endpoints can build and persist sessions without a
-/// core -> runner edge. `leaseless_recovery_evidence` is carried as opaque JSON
-/// (the runner layer owns its typed `RunnerLeaselessRecoveryEvidence`); the
-/// daemon never populates it, so the JSON roundtrips identically.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerSession {
-    pub runner_id: String,
-    #[serde(default = "default_tunnel_mode")]
-    pub mode: RunnerTunnelMode,
-    #[serde(default = "default_session_role")]
-    pub role: RunnerSessionRole,
-    pub server_id: Option<String>,
-    #[serde(default)]
-    pub controller_id: Option<String>,
-    #[serde(default)]
-    pub broker_url: Option<String>,
-    #[serde(default)]
-    pub remote_daemon_address: Option<String>,
-    #[serde(default)]
-    pub local_port: Option<u16>,
-    #[serde(default)]
-    pub local_url: Option<String>,
-    pub tunnel_pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
-    /// Optional controller proxy exposure owned with this direct SSH session.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_forward: Option<RunnerProxyForward>,
-    pub remote_daemon_pid: Option<u32>,
-    #[serde(default)]
-    pub remote_daemon_lease_id: Option<String>,
-    pub homeboy_version: String,
-    #[serde(default)]
-    pub homeboy_build_identity: Option<String>,
-    pub connected_at: String,
-    #[serde(default)]
-    pub worker_identity: Option<String>,
-    #[serde(default)]
-    pub worker_pid: Option<u32>,
-    #[serde(default)]
-    pub last_seen_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leaseless_recovery_evidence: Option<serde_json::Value>,
-}
-
-impl RunnerSession {
-    /// Which side owns this session's lifecycle, derived from its role.
-    pub fn lifecycle_owner(&self) -> RunnerLifecycleOwner {
-        match self.role {
-            RunnerSessionRole::Controller => RunnerLifecycleOwner::Controller,
-            RunnerSessionRole::Runner => RunnerLifecycleOwner::Runner,
-        }
-    }
-}
-
 /// A versioned Lab contract required by a controller or advertised by an
 /// executing runner/daemon. Versions are explicit compatibility declarations,
 /// not inferred from a Homeboy semver or commit relationship.
@@ -612,8 +170,7 @@ pub const fn unleased_candidate_reconciliation_supported() -> bool {
 /// recovery contracts negotiated only when a controller must repair a remote
 /// daemon, not admission requirements every ordinary handoff needs. A runner
 /// that omits them can still execute work; controllers that need the recovery
-/// path fall back to scraping the long-option help text when the typed list is
-/// absent. Keep these names protocol-focused.
+/// path require the typed capability. Keep these names protocol-focused.
 pub fn daemon_recovery_capabilities() -> Vec<LabCapabilityVersion> {
     let mut capabilities = vec![
         DAEMON_RECOVERY_LEASELESS_CAPABILITY,
@@ -632,68 +189,16 @@ pub fn daemon_recovery_capabilities() -> Vec<LabCapabilityVersion> {
         .collect()
 }
 
-/// The bare long options rendered by a clap help `Options:` heading.
-///
-/// This is the last-resort contract for daemon-recovery negotiation against a
-/// remote that does not advertise the typed [`LabCapabilityVersion`] list. It
-/// only accepts an option whose trailing tokens are all value placeholders, so
-/// a `/// doc comment` rendering prose after the flag name silently removes it
-/// from the advertised contract. Kept here (rather than in the runner crate)
-/// so the CLI crate can assert the same predicate against real rendered help.
-pub fn declared_long_options(help: &str) -> std::collections::BTreeSet<&str> {
-    let mut options = std::collections::BTreeSet::new();
-    let mut in_options = false;
-    for line in help.lines() {
-        let trimmed = line.trim();
-        if line == trimmed && trimmed.ends_with(':') {
-            in_options = trimmed.eq_ignore_ascii_case("options:");
-            continue;
-        }
-        if !in_options || line == trimmed {
-            continue;
-        }
-        let mut tokens = trimmed.split_whitespace();
-        let Some(option) = tokens.next() else {
-            continue;
-        };
-        let option = option.trim_end_matches(',');
-        if option.starts_with("--") && tokens.all(is_option_value_placeholder) {
-            options.insert(option);
-        }
-    }
-    options
-}
-
-/// Whether a clap help token is a value placeholder (`<NAME>` or `[<NAME>]`).
-pub fn is_option_value_placeholder(token: &str) -> bool {
-    (token.starts_with('<') && token.ends_with('>'))
-        || (token.starts_with("[<") && token.ends_with(">]"))
-}
-
 /// Decide whether a remote daemon advertises a recovery capability.
-///
-/// `advertised` is the typed capability list parsed from the remote's
-/// self-identity report. `None` means the remote is an older binary that never
-/// advertised the field, so the caller's `scrape` (long-option help text) is
-/// consulted. `Some(list)` is authoritative: the scrape is never executed.
-///
-/// The three daemon-recovery negotiations each call this with their own
-/// capability id and their own scrape closure, so the decision is defined once
-/// instead of copied at every site.
-pub fn daemon_recovery_capability_negotiated<Scrape>(
+pub fn daemon_recovery_capability_advertised(
     advertised: Option<&[LabCapabilityVersion]>,
     capability_id: &str,
-    scrape: Scrape,
-) -> std::result::Result<bool, String>
-where
-    Scrape: FnOnce() -> std::result::Result<bool, String>,
-{
-    match advertised {
-        Some(capabilities) => Ok(capabilities
+) -> bool {
+    advertised.is_some_and(|capabilities| {
+        capabilities
             .iter()
-            .any(|capability| capability.id == capability_id)),
-        None => scrape(),
-    }
+            .any(|capability| capability.id == capability_id)
+    })
 }
 
 /// Immutable runtime provenance supplied by a controller, runner command, or
@@ -902,62 +407,6 @@ fn advertised_capability_versions(
 }
 
 #[cfg(test)]
-mod runner_workspace_sync_mode_tests {
-    use super::RunnerWorkspaceSyncMode;
-
-    /// `as_str` must stay the value `serde` produces. It replaced `label`,
-    /// which drifted from the derived serde form: it returned
-    /// `"snapshot-git"` while `#[serde(rename_all = "snake_case")]`
-    /// serialized `SnapshotGit` as `"snapshot_git"`, a spelling every
-    /// materialization-mode allowlist rejects (#13400). The variant now
-    /// carries an explicit rename and this pin fails if either side moves.
-    #[test]
-    fn runner_workspace_sync_mode_matches_its_serialized_form() {
-        for mode in [
-            RunnerWorkspaceSyncMode::Snapshot,
-            RunnerWorkspaceSyncMode::SnapshotGit,
-            RunnerWorkspaceSyncMode::Git,
-        ] {
-            assert_eq!(
-                serde_json::to_value(mode).expect("serialize"),
-                serde_json::json!(mode.as_str()),
-                "{mode:?}"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod runner_tunnel_mode_label_tests {
-    use super::RunnerTunnelMode;
-
-    /// `metadata_value` restates what `#[serde(rename_all = "snake_case")]`
-    /// already produces. It agrees today, which is exactly the state
-    /// `RunnerWorkspaceSyncMode` was in before it drifted — nothing tied the
-    /// copy to its source. This is that tie (#13400).
-    #[test]
-    fn runner_tunnel_mode_metadata_value_matches_its_serialized_form() {
-        for mode in [RunnerTunnelMode::DirectSsh, RunnerTunnelMode::Reverse] {
-            assert_eq!(
-                serde_json::to_value(&mode).expect("serialize"),
-                serde_json::json!(mode.metadata_value()),
-                "{mode:?}"
-            );
-        }
-    }
-
-    /// `label` is a different vocabulary, not a different format, and merging
-    /// it into `metadata_value` would push prose into persisted metadata
-    /// through a string assignment with no compile error. It fails here
-    /// instead.
-    #[test]
-    fn the_operator_facing_vocabulary_stays_prose() {
-        assert_eq!(RunnerTunnelMode::DirectSsh.label(), "direct SSH");
-        assert_eq!(RunnerTunnelMode::Reverse.label(), "reverse-connected");
-    }
-}
-
-#[cfg(test)]
 mod capability_handshake_tests {
     use super::*;
 
@@ -1085,84 +534,22 @@ mod daemon_recovery_capability_tests {
     }
 
     #[test]
-    fn declared_long_options_accepts_only_bare_value_placeholders() {
-        let options = declared_long_options(
-            "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n    --addr <ADDR>\n",
-        );
-        assert!(options.contains("--confirm-no-daemon-owner"));
-        assert!(options.contains("--replacement-operation-id"));
-        assert!(options.contains("--addr"));
-
-        let prose =
-            declared_long_options("Options:\n    --confirm-no-daemon-owner after inspection\n");
-        assert!(!prose.contains("--confirm-no-daemon-owner"));
-        assert!(prose.is_empty());
-
-        let examples = declared_long_options("Examples:\n    --confirm-no-daemon-owner\n");
-        assert!(examples.is_empty());
-
-        let lowercase = declared_long_options("options:\n    --confirm-no-daemon-owner\n");
-        assert!(lowercase.contains("--confirm-no-daemon-owner"));
-    }
-
-    #[test]
-    fn is_option_value_placeholder_matches_only_value_shaped_tokens() {
-        assert!(is_option_value_placeholder("<ID>"));
-        assert!(is_option_value_placeholder("[<ID>]"));
-        assert!(!is_option_value_placeholder("ID"));
-        assert!(!is_option_value_placeholder("after inspection"));
-    }
-
-    #[test]
-    fn typed_capability_advertisement_is_authoritative_and_skips_the_scrape() {
+    fn recovery_capability_requires_typed_advertisement() {
         let advertised: [LabCapabilityVersion; 1] = [LabCapabilityVersion {
             id: DAEMON_RECOVERY_LEASELESS_CAPABILITY.to_string(),
             version: 1,
         }];
-        let mut scraped = false;
-        let negotiated = daemon_recovery_capability_negotiated(
+        assert!(daemon_recovery_capability_advertised(
             Some(advertised.as_slice()),
             DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            || {
-                scraped = true;
-                Ok(false)
-            },
-        );
-        assert_eq!(negotiated, Ok(true));
-        assert!(!scraped, "the typed list must replace the help scrape");
-    }
-
-    #[test]
-    fn typed_advertisement_missing_the_capability_is_an_authoritative_no() {
-        let advertised: [LabCapabilityVersion; 1] = [LabCapabilityVersion {
-            id: DAEMON_RECOVERY_STATE_LOSS_CAPABILITY.to_string(),
-            version: 1,
-        }];
-        let mut scraped = false;
-        let negotiated = daemon_recovery_capability_negotiated(
+        ));
+        assert!(!daemon_recovery_capability_advertised(
             Some(advertised.as_slice()),
-            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            || {
-                scraped = true;
-                Ok(true)
-            },
-        );
-        assert_eq!(negotiated, Ok(false));
-        assert!(!scraped, "a typed no must not be overridden by the scrape");
-    }
-
-    #[test]
-    fn absent_advertisement_falls_back_to_the_scrape() {
-        let mut scraped = false;
-        let negotiated = daemon_recovery_capability_negotiated::<_>(
+            DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
+        ));
+        assert!(!daemon_recovery_capability_advertised(
             None,
             DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            || {
-                scraped = true;
-                Ok(true)
-            },
-        );
-        assert_eq!(negotiated, Ok(true));
-        assert!(scraped, "an older binary must fall back to the help scrape");
+        ));
     }
 }

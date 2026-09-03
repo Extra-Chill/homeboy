@@ -121,7 +121,7 @@ fn refresh_locked_in_root(
 
     let source_stage = store.join(format!("source-{}-{}", runtime_id, nonce()));
     remove_if_exists(&source_stage, "clean runtime refresh source")?;
-    let (source_root, source_revision) = if crate::extension_update_check::is_git_url(source) {
+    let (source_root, source_revision) = if crate::extension::lifecycle::is_git_url(source) {
         git::clone_repo_at_ref(source, &source_stage, revision)?;
         (
             source_stage.as_path(),
@@ -207,8 +207,17 @@ fn refresh_locked_in_root(
 /// Snapshot root-manifest runtime assets into a new generation. Linked extension
 /// installs call this instead of writing through the stable runtime boundary.
 pub fn refresh_shared_assets(source_root: &Path) -> Result<()> {
+    refresh_shared_assets_with_revision(source_root, None)
+}
+
+/// [`refresh_shared_assets`] with explicit source revision evidence supplied by
+/// the extension lifecycle when its durable snapshot no longer has `.git`.
+pub fn refresh_shared_assets_with_revision(
+    source_root: &Path,
+    revision: Option<&str>,
+) -> Result<()> {
     let config_root = paths::homeboy()?;
-    refresh_shared_assets_in_root(&config_root, source_root)
+    refresh_shared_assets_in_root_with_revision(&config_root, source_root, revision)
 }
 
 /// [`refresh_shared_assets`] against an explicitly injected config root.
@@ -216,12 +225,24 @@ pub fn refresh_shared_assets(source_root: &Path) -> Result<()> {
 /// As with [`refresh_in_root`], the lock and the generation store are taken
 /// under one resolution rather than two.
 pub fn refresh_shared_assets_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
+    refresh_shared_assets_in_root_with_revision(config_root, source_root, None)
+}
+
+fn refresh_shared_assets_in_root_with_revision(
+    config_root: &Path,
+    source_root: &Path,
+    revision: Option<&str>,
+) -> Result<()> {
     config::with_config_lock_at(config_root, || {
-        refresh_shared_assets_locked_in_root(config_root, source_root)
+        refresh_shared_assets_locked_in_root(config_root, source_root, revision)
     })
 }
 
-fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
+fn refresh_shared_assets_locked_in_root(
+    config_root: &Path,
+    source_root: &Path,
+    revision: Option<&str>,
+) -> Result<()> {
     let store = config_root.join(GENERATIONS);
     fs::create_dir_all(store.join("staging")).map_err(io("prepare runtime generation store"))?;
     recover(&store)?;
@@ -234,6 +255,10 @@ fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) 
     remove_if_exists(&stage, "clean linked runtime generation stage")?;
     seed_generation(config_root, &store, &stage)?;
     materialize_all_declared_runtime_assets(&source_root, &stage)?;
+    let source_revision = revision
+        .map(str::to_string)
+        .or_else(|| git::short_head_revision(&source_root));
+    write_shared_runtime_revisions(&stage, source_revision.as_deref())?;
     sync_tree(&stage)?;
     write_journal(
         &store,
@@ -262,6 +287,27 @@ fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) 
     sync_dir(&store)
 }
 
+fn write_shared_runtime_revisions(stage: &Path, revision: Option<&str>) -> Result<()> {
+    let Some(revision) = revision.filter(|revision| !revision.trim().is_empty()) else {
+        return Ok(());
+    };
+    let runtimes = stage.join("agent-runtimes");
+    let Ok(entries) = fs::read_dir(runtimes) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(io("read staged runtime package"))?;
+        if entry.path().is_dir() {
+            write_synced(
+                &entry.path().join(".source-revision"),
+                revision.as_bytes(),
+                "write shared runtime source revision",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn seed_generation(config_root: &Path, store: &Path, stage: &Path) -> Result<()> {
     if let Some(current) = active_current_generation(store)? {
         reject_symlink_tree(&current)?;
@@ -277,7 +323,7 @@ fn seed_legacy_generation(config_root: &Path, stage: &Path) -> Result<()> {
     // The shared-asset loop below already joins `config_root`; resolving the
     // legacy runtime directory ambiently would seed a generation from one
     // installation's runtimes and another's shared assets.
-    let legacy = paths::legacy_agent_runtimes_in_root(config_root);
+    let legacy = config_root.join("agent-runtimes");
     if legacy.is_dir() {
         reject_symlink_tree_except_root(&legacy)?;
         copy_regular_tree(
@@ -674,9 +720,9 @@ fn switch_current(store: &Path, generation: &str) -> Result<()> {
 fn ensure_stable_runtime_boundary(config_root: &Path) -> Result<()> {
     // Derived from the injected root, never re-resolved: the backup and
     // temporary siblings below are already `config_root`-relative, so an
-    // ambient `legacy_agent_runtimes()` here would rename a boundary in one
+    // ambient `agent_runtimes()` here would rename a boundary in one
     // installation into a backup name recorded in another.
-    let boundary = paths::legacy_agent_runtimes_in_root(config_root);
+    let boundary = paths::agent_runtimes_in_root(config_root);
     let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
     if fs::read_link(&boundary).ok().as_deref() == Some(expected.as_path()) {
         return Ok(());
@@ -808,7 +854,7 @@ fn recover_boundary_migration(config_root: &Path) -> Result<()> {
     // this recovery already runs against one specific installation. Resolving
     // the boundary ambiently could restore a backup recorded here over an
     // unrelated installation's live boundary.
-    let boundary = paths::legacy_agent_runtimes_in_root(config_root);
+    let boundary = paths::agent_runtimes_in_root(config_root);
     let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
 
     if fs::read_link(&boundary).ok().as_deref() != Some(expected.as_path()) {
@@ -1062,7 +1108,7 @@ mod tests {
             let result =
                 refresh("opencode", &staged_source.path().to_string_lossy(), None).unwrap();
             fs::remove_dir_all(staged_source.path()).unwrap();
-            let documented = paths::legacy_agent_runtimes().unwrap();
+            let documented = paths::agent_runtimes().unwrap();
             assert_eq!(result.path, documented.join("opencode"));
             assert_eq!(
                 fs::read_link(&documented).unwrap(),
@@ -1093,7 +1139,7 @@ mod tests {
             CRASH_AFTER_BOUNDARY_BOOTSTRAP.store(true, Ordering::SeqCst);
             assert!(refresh("neutral", &source.path().to_string_lossy(), None).is_err());
 
-            let boundary = paths::legacy_agent_runtimes().unwrap();
+            let boundary = paths::agent_runtimes().unwrap();
             let current = active_current_generation(&root.join(GENERATIONS))
                 .unwrap()
                 .unwrap();
@@ -1125,7 +1171,7 @@ mod tests {
             CRASH_AFTER_BOUNDARY_BACKUP_RENAME.store(true, Ordering::SeqCst);
             assert!(refresh("neutral", &source.path().to_string_lossy(), None).is_err());
 
-            let boundary = paths::legacy_agent_runtimes().unwrap();
+            let boundary = paths::agent_runtimes().unwrap();
             assert!(fs::symlink_metadata(&boundary).is_err());
             let current = active_current_generation(&store).unwrap().unwrap();
             assert_eq!(
@@ -1256,7 +1302,7 @@ mod tests {
             package(linked.path(), "legacy", "linked");
             let source = tempfile::tempdir().unwrap();
             package(source.path(), "neutral", "new");
-            let legacy = paths::legacy_agent_runtimes().unwrap();
+            let legacy = paths::agent_runtimes().unwrap();
             fs::create_dir_all(legacy.parent().unwrap()).unwrap();
             symlink(linked.path().join("agent-runtimes"), &legacy).unwrap();
 

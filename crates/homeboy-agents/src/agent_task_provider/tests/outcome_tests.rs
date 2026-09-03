@@ -435,7 +435,7 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
 }
 
 #[test]
-fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_checkout() {
+fn revision_bound_no_change_verdict_without_patch_accepts_review_only_for_clean_checkout() {
     let workspace = tempfile::tempdir().expect("workspace");
     let artifacts = tempfile::tempdir().expect("artifact root");
     for args in [
@@ -474,9 +474,7 @@ fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_ch
     .expect("UTF-8 revision")
     .trim()
     .to_string();
-    let empty_patch_path = artifacts.path().join("review.patch");
     let transcript_path = artifacts.path().join("review.md");
-    fs::write(&empty_patch_path, "").expect("empty patch");
     fs::write(&transcript_path, "No findings.\n".repeat(1024)).expect("large transcript");
     let provenance = AgentTaskArtifactsPathProvenance {
         owner: "homeboy".to_string(),
@@ -486,8 +484,6 @@ fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_ch
         task_id: "review".to_string(),
         attempt: 1,
     };
-    let mut patch = fixture_artifact("patch", "patch", &empty_patch_path, Some("text/x-patch"));
-    patch.size_bytes = None;
     let mut transcript = fixture_artifact(
         "transcript",
         "transcript",
@@ -507,7 +503,7 @@ fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_ch
     }));
     outcome.status = AgentTaskOutcomeStatus::Succeeded;
     outcome.failure_classification = None;
-    outcome.artifacts = vec![patch, transcript];
+    outcome.artifacts = vec![transcript];
 
     normalize_homeboy_local_artifact_sizes(
         &mut outcome,
@@ -517,6 +513,7 @@ fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_ch
     );
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(outcome.metadata["intentional_no_change_verified"], true);
     assert!(outcome
         .summary
         .as_deref()
@@ -531,6 +528,10 @@ fn revision_bound_no_change_verdict_accepts_substantive_review_only_for_clean_ch
         Some(workspace.path()),
     );
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert!(outcome
+        .metadata
+        .get("intentional_no_change_verified")
+        .is_none());
     assert!(outcome
         .summary
         .as_deref()
@@ -714,12 +715,12 @@ fn opencode_account_block_maps_to_rotatable_provider_classification() {
 
     assert_eq!(
         outcome.failure_classification,
-        Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+        Some(AgentTaskFailureClassification::ProviderBillingBlocked)
     );
     assert!(outcome
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.class == "provider.account_blocked"));
+        .any(|diagnostic| diagnostic.class == "provider.capacity_rejected"));
 }
 
 #[test]

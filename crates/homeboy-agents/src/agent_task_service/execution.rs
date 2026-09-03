@@ -14,9 +14,7 @@ use crate::agent_task::{
     AgentTaskFailureClassification, AgentTaskOutcomeStatus, AgentTaskRequest,
     AgentTaskWorkspaceMode,
 };
-use crate::agent_task_lifecycle::{
-    self, AgentTaskRunArtifacts, AgentTaskRunLog, AgentTaskRunRecord, AgentTaskRunStatus,
-};
+use crate::agent_task_lifecycle::{self, AgentTaskRunArtifacts, AgentTaskRunRecord};
 use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
 };
@@ -26,7 +24,7 @@ use crate::agent_task_scheduler::{
 };
 use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
-use homeboy_core::{config, worktree, worktree_provider, Error, Result};
+use homeboy_core::{config, worktree, Error, Result};
 
 pub const AGENT_TASK_PLAN_VALIDATION_SCHEMA: &str = "homeboy/agent-task-plan-validation/v1";
 
@@ -113,15 +111,38 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
     let plan = match read_plan(spec) {
         Ok(plan) => plan,
         Err(error) => {
-            return invalid_plan_report(None, AgentTaskPlanValidationKind::InvalidInput, error)
+            return invalid_plan_report(None, AgentTaskPlanValidationKind::InvalidInput, error);
         }
     };
     let plan_id = Some(plan.plan_id.clone());
     if let Err(error) = validate_plan_structure(&plan) {
         return invalid_plan_report(plan_id, AgentTaskPlanValidationKind::InvalidInput, error);
     }
-    let mut plan = plan;
+    let plan = plan;
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &plan,
+        &catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let classifications = error.details["route_evidence"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|route| route["classification"].as_str())
+                .collect::<Vec<_>>();
+            let kind = if classifications.contains(&"capability") {
+                AgentTaskPlanValidationKind::UnavailableCapability
+            } else if classifications.contains(&"capacity") {
+                AgentTaskPlanValidationKind::TemporaryCapacity
+            } else {
+                AgentTaskPlanValidationKind::MissingReadiness
+            };
+            return invalid_plan_report(plan_id, kind, error);
+        }
+    };
     if let Err(error) = validate_plan_provider_capabilities(&plan, &catalog) {
         return invalid_plan_report(
             plan_id,
@@ -129,7 +150,6 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             error,
         );
     }
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
     for (kind, result) in [
         (
             AgentTaskPlanValidationKind::UnavailableCapability,
@@ -155,21 +175,6 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             return invalid_plan_report(plan_id, kind, error);
         }
     }
-    if let Err(error) =
-        crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-            &plan,
-            catalog.providers(),
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        )
-    {
-        let kind = if error.retryable == Some(true) {
-            AgentTaskPlanValidationKind::TemporaryCapacity
-        } else {
-            AgentTaskPlanValidationKind::MissingReadiness
-        };
-        return invalid_plan_report(plan_id, kind, error);
-    }
-
     AgentTaskPlanValidationReport {
         schema: AGENT_TASK_PLAN_VALIDATION_SCHEMA.to_string(),
         valid: true,
@@ -662,6 +667,16 @@ pub fn run_submitted_with_timeout(
     timeout_ms: Option<u64>,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    run_submitted_with_timeout_and_catalog(run_id, timeout_ms, executor, &catalog)
+}
+
+pub(crate) fn run_submitted_with_timeout_and_catalog(
+    run_id: String,
+    timeout_ms: Option<u64>,
+    executor: SharedAgentTaskExecutor,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
@@ -678,7 +693,32 @@ pub fn run_submitted_with_timeout(
     if let Some(timeout_ms) = timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
-    prepare_plan_for_execution(&mut plan, Some(&run_id))?;
+    if let Err(error) = preflight_plan_provider_eligibility_with_catalog(&mut plan, catalog) {
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "admit_plan_provider_dispatchability",
+            &error,
+        )?;
+        return Err(error);
+    }
+    // Admission chooses a concrete provider route and advances its durable
+    // cursor. Persist that exact plan before Running so execution never derives
+    // a second route from the submitted rotation chain.
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+    if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "prepare_plan_for_execution",
+            &error,
+        )?;
+        return Err(error);
+    }
+    // Preparation enriches the admitted plan with its materialized workspace
+    // and runner-secret contract. Persist that final form before Running so the
+    // scheduler executes exactly the durable plan reviewers can inspect.
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
     let harvest_context =
         match crate::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
             Ok(context) => context,
@@ -744,7 +784,7 @@ pub fn run_next_with_cook_dispatcher(
         scoped_run_ids,
         |record, plan| {
             validate_queued_cook_identity(record)?;
-            preflight_queued_plan_provider_eligibility(plan)
+            preflight_plan_provider_eligibility(plan)
         },
     )
 }
@@ -757,7 +797,7 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
     scoped_run_ids: Option<&HashSet<String>>,
-    queue_preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+    queue_preflight: impl Fn(&AgentTaskRunRecord, &mut AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskRunNextResult> {
     let mut skipped = Vec::new();
     let mut inspected = 0;
@@ -921,10 +961,13 @@ fn consume_claimed_continuation(
         claim,
         |recipe| dispatcher(recipe),
         |options| {
-            super::run_cook(super::cook::CookContext {
-                store: Some(&store),
-                ..super::cook::CookContext::new(options, executor.clone())
-            })
+            let lifecycle_store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            super::CookService::run(
+                options,
+                super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
+                super::CookMode::Resume,
+            )
             .map(|result| result.exit_code)
         },
     )?;
@@ -983,7 +1026,7 @@ fn continuation_skip(
     });
     AgentTaskRunNextSkip {
         remediation: format!(
-            "inspect retained diagnostics with: homeboy agent-task status <run-id> --exact --full"
+            "inspect retained diagnostics with: homeboy agent-task diagnose {run_id} --full"
         ),
         run_id,
         submitted_at,
@@ -1056,7 +1099,7 @@ pub fn terminal_transport_recovery_required(run_id: &str) -> bool {
 /// Return durable terminal evidence instead of attempting to transition a
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -1104,7 +1147,30 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, |plan| {
+    let mut retry =
+        retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, |plan| {
+            if plan.metadata.get("generic_lab_command_replay").is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "generic_lab_command_replay",
+                    "generic Lab replay requires controller workspace preflight",
+                    Some(plan.plan_id.clone()),
+                    None,
+                ));
+            }
+            Ok(())
+        })?;
+    reconcile_unmaterialized_cook_retry(&mut retry, run)?;
+    Ok(retry)
+}
+
+/// Reserve a new Cook attempt with an explicit operator-approved provider
+/// timeout increase. Unlike the generic run-time override, this is persisted in
+/// the append-only Cook recipe before the provider can be dispatched.
+pub fn retry_with_timeout_override(
+    run_id: &str,
+    timeout_ms: u64,
+) -> Result<AgentTaskRetryServiceResult> {
+    retry_with_preflight_and_timeout(run_id, None, false, false, Some(timeout_ms), None, |plan| {
         if plan.metadata.get("generic_lab_command_replay").is_some() {
             return Err(Error::validation_invalid_argument(
                 "generic_lab_command_replay",
@@ -1117,24 +1183,70 @@ pub fn retry(
     })
 }
 
-/// Reserve a new Cook attempt with an explicit operator-approved provider
-/// timeout increase. Unlike the generic run-time override, this is persisted in
-/// the append-only Cook recipe before the provider can be dispatched.
-pub fn retry_with_timeout_override(
+/// An explicit, operator-authorized provider-route change for a new Cook
+/// attempt. The original recipe remains the authority for every non-route input.
+#[derive(Debug, Clone, Default)]
+pub struct CookProviderRouteOverride {
+    pub backend: Option<String>,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+    pub allow_provider_rotation: Option<bool>,
+    pub provider_rotations: Option<u32>,
+}
+
+impl CookProviderRouteOverride {
+    pub fn is_empty(&self) -> bool {
+        self.backend.is_none()
+            && self.selector.is_none()
+            && self.model.is_none()
+            && self.allow_provider_rotation.is_none()
+            && self.provider_rotations.is_none()
+    }
+}
+
+pub fn retry_with_provider_route_override(
     run_id: &str,
-    timeout_ms: u64,
+    new_run_id: Option<&str>,
+    run: bool,
+    force: bool,
+    route_override: CookProviderRouteOverride,
 ) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight_and_timeout(run_id, None, false, false, Some(timeout_ms), |plan| {
-        if plan.metadata.get("generic_lab_command_replay").is_some() {
-            return Err(Error::validation_invalid_argument(
-                "generic_lab_command_replay",
-                "generic Lab replay requires controller workspace preflight",
-                Some(plan.plan_id.clone()),
-                None,
-            ));
-        }
-        Ok(())
-    })
+    if route_override.is_empty() {
+        return retry(run_id, new_run_id, run, force);
+    }
+    let mut retry = retry_with_preflight_and_timeout(
+        run_id,
+        new_run_id,
+        run,
+        force,
+        None,
+        Some(&route_override),
+        |plan| {
+            if plan.metadata.get("generic_lab_command_replay").is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "generic_lab_command_replay",
+                    "generic Lab replay requires controller workspace preflight",
+                    Some(plan.plan_id.clone()),
+                    None,
+                ));
+            }
+            Ok(())
+        },
+    )?;
+    reconcile_unmaterialized_cook_retry(&mut retry, run)?;
+    Ok(retry)
+}
+
+fn reconcile_unmaterialized_cook_retry(
+    retry: &mut AgentTaskRetryServiceResult,
+    run: bool,
+) -> Result<()> {
+    if run && agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
+        agent_task_lifecycle::rearm_unmaterialized_cook_admission(&retry.record.run_id)?;
+        crate::agent_task_service::reconcile_unmaterialized_cook_admission(&retry.record.run_id)?;
+        retry.record = agent_task_lifecycle::exact_record(&retry.record.run_id)?;
+    }
+    Ok(())
 }
 
 pub(super) fn deferred_cleanup_receipt_is_terminal(
@@ -1180,7 +1292,7 @@ pub fn retry_with_preflight<F>(
 where
     F: Fn(&AgentTaskPlan) -> Result<()>,
 {
-    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, preflight)
+    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, preflight)
 }
 
 fn retry_with_preflight_and_timeout<F>(
@@ -1189,6 +1301,7 @@ fn retry_with_preflight_and_timeout<F>(
     run: bool,
     force: bool,
     timeout_override_ms: Option<u64>,
+    route_override: Option<&CookProviderRouteOverride>,
     preflight: F,
 ) -> Result<AgentTaskRetryServiceResult>
 where
@@ -1208,12 +1321,45 @@ where
     let source_plan =
         agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
     preflight(&source_plan)?;
+    if source.state.is_terminal() && agent_task_lifecycle::is_unmaterialized_cook_admission(&source)
+    {
+        if let Some(route_override) = route_override.filter(|override_| !override_.is_empty()) {
+            validate_unmaterialized_replay_route_override(&source, route_override)?;
+        }
+        let retry_run_id = new_run_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("retry-{}", uuid::Uuid::new_v4()));
+        let (record, created) = agent_task_lifecycle::retry_unmaterialized_cook_admission_in_store(
+            &lifecycle_store,
+            &source.run_id,
+            &retry_run_id,
+            force,
+        )?;
+        return Ok(AgentTaskRetryServiceResult {
+            record,
+            // An admission is reconciled by the controller, never executed as
+            // the empty task plan a generic retry would otherwise submit.
+            run: false,
+            created,
+        });
+    }
     let recovered_replacement = config::with_config_lock(|| {
         let Some(mut cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
             return Ok(None);
         };
+        if route_override.is_some() && cook_retry.recipe_replacement {
+            return Err(Error::validation_invalid_argument(
+                "provider-route",
+                "provider-route override cannot alter an already persisted Cook retry recipe entry",
+                Some(source.run_id.clone()),
+                None,
+            ));
+        }
         if let Some(timeout_ms) = timeout_override_ms {
             apply_cook_timeout_override(&lifecycle_store, &source, &mut cook_retry, timeout_ms)?;
+        }
+        if let Some(route_override) = route_override {
+            apply_cook_provider_route_override(&source, &mut cook_retry.plan, route_override)?;
         }
         if !cook_retry.recipe_replacement {
             return Ok(None);
@@ -1255,7 +1401,7 @@ where
             )?;
         }
         Ok(Some(
-            agent_task_lifecycle::status_in_store(
+            agent_task_lifecycle::reconcile_status_in_store(
                 &lifecycle_store,
                 retry_run_id,
                 agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -1273,8 +1419,19 @@ where
         });
     }
     let mut cook_retry = retry_admission_in_store(&lifecycle_store, &source, false)?;
+    if route_override.is_some() && cook_retry.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "provider-route",
+            "provider-route overrides require a retryable durable Cook attempt",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
     if let (Some(cook_retry), Some(timeout_ms)) = (&mut cook_retry, timeout_override_ms) {
         apply_cook_timeout_override(&lifecycle_store, &source, cook_retry, timeout_ms)?;
+    }
+    if let (Some(cook_retry), Some(route_override)) = (&mut cook_retry, route_override) {
+        apply_cook_provider_route_override(&source, &mut cook_retry.plan, route_override)?;
     }
     let record = match cook_retry {
         Some(cook_retry) => {
@@ -1349,10 +1506,11 @@ where
                     &cook_retry.plan,
                 )?;
                 if cook_retry.replaces_source_attempt {
-                    super::record_recipe_attempt_replacement(
+                    super::record_recipe_attempt_replacement_with_plan(
                         &cook_retry.cook_id,
                         &source.run_id,
                         &retry_run_id,
+                        &cook_retry.plan,
                     )?;
                 } else {
                     super::record_recipe_attempt(
@@ -1372,7 +1530,7 @@ where
             registration.project_terminal_after_unlock()?;
             // `status` is this call with `Default::default()` and `exact = false`,
             // resolved against an ambient store. Same read, explicit root.
-            let record = agent_task_lifecycle::status_in_store(
+            let record = agent_task_lifecycle::reconcile_status_in_store(
                 &lifecycle_store,
                 &retry_run_id,
                 agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -1407,6 +1565,65 @@ where
     })
 }
 
+fn validate_unmaterialized_replay_route_override(
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+    route_override: &CookProviderRouteOverride,
+) -> Result<()> {
+    let binding = &source.metadata["unmaterialized_cook_admission"]["binding"];
+    let runtime = &binding["provider_runtime_refs"];
+    for (name, requested, persisted) in [
+        (
+            "backend",
+            route_override.backend.as_ref(),
+            runtime["backend"].as_str(),
+        ),
+        (
+            "selector",
+            route_override.selector.as_ref(),
+            runtime["selector"].as_str(),
+        ),
+        (
+            "model",
+            route_override.model.as_ref(),
+            runtime["model"].as_str(),
+        ),
+    ] {
+        if requested.is_some_and(|value| Some(value.as_str()) != persisted) {
+            return Err(unmaterialized_replay_route_override_error(
+                &source.run_id,
+                name,
+            ));
+        }
+    }
+    let persisted_rotations = binding["retry"]["provider_rotations"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok());
+    if route_override
+        .provider_rotations
+        .is_some_and(|value| Some(value) != persisted_rotations)
+        || route_override
+            .allow_provider_rotation
+            .is_some_and(|value| Some(value) != persisted_rotations.map(|value| value > 0))
+    {
+        return Err(unmaterialized_replay_route_override_error(
+            &source.run_id,
+            "provider rotation policy",
+        ));
+    }
+    Ok(())
+}
+
+fn unmaterialized_replay_route_override_error(run_id: &str, field: &str) -> Error {
+    Error::validation_invalid_argument(
+        "provider-route",
+        format!(
+            "terminal unmaterialized Cook retry cannot change persisted {field}; submit a fresh Cook for a new provider route or policy"
+        ),
+        Some(run_id.to_string()),
+        None,
+    )
+}
+
 fn apply_cook_timeout_override(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     source: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -1414,18 +1631,32 @@ fn apply_cook_timeout_override(
     timeout_ms: u64,
 ) -> Result<()> {
     let aggregate = lifecycle_store.read_aggregate(&source.run_id)?;
+    let review_form_only = retry
+        .plan
+        .tasks
+        .iter()
+        .any(crate::agent_task_cook_loop::request_is_review_form_only);
+    let timeout_field = if review_form_only {
+        "review-form-timeout-ms"
+    } else {
+        "timeout-ms"
+    };
     let timeout_outcome = aggregate.outcomes.iter().find(|outcome| {
         outcome.status == AgentTaskOutcomeStatus::Timeout
             || outcome.failure_classification == Some(AgentTaskFailureClassification::Timeout)
-            || outcome
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+            || outcome.diagnostics.iter().any(|diagnostic| {
+                diagnostic.class == "agent_task.provider_timeout"
+                    || diagnostic.class == "agent_task.review_form_timeout"
+            })
     });
     let Some(timeout_outcome) = timeout_outcome else {
         return Err(Error::validation_invalid_argument(
-            "timeout-ms",
-            "Cook timeout override requires a terminal provider timeout",
+            timeout_field,
+            if review_form_only {
+                "Cook review-form timeout override requires a terminal review-form timeout"
+            } else {
+                "Cook timeout override requires a terminal provider timeout"
+            },
             Some(source.run_id.clone()),
             None,
         ));
@@ -1439,7 +1670,7 @@ fn apply_cook_timeout_override(
             "timed-out provider or its deferred cleanup still owns the execution; wait for durable terminal ownership before retrying",
             Some(source.run_id.clone()),
             Some(vec![format!(
-                "homeboy agent-task status {} --exact --full",
+                "homeboy agent-task diagnose {} --full",
                 source.run_id
             )]),
         ));
@@ -1452,7 +1683,7 @@ fn apply_cook_timeout_override(
             "timed-out provider still owns deferred cleanup; wait for its cleanup receipt before retrying",
             Some(source.run_id.clone()),
             Some(vec![format!(
-                "homeboy agent-task status {} --exact --full",
+                "homeboy agent-task diagnose {} --full",
                 source.run_id
             )]),
         ));
@@ -1498,9 +1729,26 @@ fn apply_cook_timeout_override(
         .unwrap_or(crate::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS);
     if timeout_ms <= previous_timeout_ms {
         return Err(Error::validation_invalid_argument(
-            "timeout-ms",
+            timeout_field,
+            if review_form_only {
+                format!(
+                    "Cook review-form timeout override must increase the prior review-form timeout of {previous_timeout_ms}ms"
+                )
+            } else {
+                format!(
+                    "Cook timeout override must increase the prior provider timeout of {previous_timeout_ms}ms"
+                )
+            },
+            Some(timeout_ms.to_string()),
+            None,
+        ));
+    }
+    if review_form_only && timeout_ms > crate::agent_task_cook_loop::MAX_REVIEW_FORM_TIMEOUT_MS {
+        return Err(Error::validation_invalid_argument(
+            timeout_field,
             format!(
-                "Cook timeout override must increase the prior provider timeout of {previous_timeout_ms}ms"
+                "Cook review-form timeout cannot exceed {}ms",
+                crate::agent_task_cook_loop::MAX_REVIEW_FORM_TIMEOUT_MS
             ),
             Some(timeout_ms.to_string()),
             None,
@@ -1590,7 +1838,169 @@ fn apply_cook_timeout_override(
         remaining_executions,
         remaining_retries,
         remaining_rotations,
+        review_form_only,
     )?;
+    Ok(())
+}
+
+fn apply_cook_provider_route_override(
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+    plan: &mut AgentTaskPlan,
+    override_: &CookProviderRouteOverride,
+) -> Result<()> {
+    if override_.is_empty() {
+        return Ok(());
+    }
+    if !plan.metadata.is_null() && !plan.metadata.is_object() {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata",
+            "durable Cook plan metadata must be an object before recording a provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    if plan.metadata["cook_provider_route_overrides"] != Value::Null
+        && !plan.metadata["cook_provider_route_overrides"].is_array()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata.cook_provider_route_overrides",
+            "durable Cook provider-route override history must be an array",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    if plan.metadata["cook_retry_policy"] != Value::Null
+        && !plan.metadata["cook_retry_policy"].is_object()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata.cook_retry_policy",
+            "durable Cook retry policy must be an object before recording a provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    if plan.metadata["cook_retry_policy"]["route"] != Value::Null
+        && !plan.metadata["cook_retry_policy"]["route"].is_object()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata.cook_retry_policy.route",
+            "durable Cook retry route policy must be an object before recording a provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    let requested = json!({
+        "backend": override_.backend,
+        "selector": override_.selector,
+        "model": override_.model,
+        "allow_provider_rotation": override_.allow_provider_rotation,
+        "provider_rotations": override_.provider_rotations,
+    });
+    if let Some(existing) = plan.metadata["cook_provider_route_overrides"]
+        .as_array()
+        .and_then(|overrides| {
+            overrides
+                .iter()
+                .rev()
+                .find(|entry| entry["source_run_id"] == source.run_id)
+        })
+    {
+        if existing["requested"] == requested {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "provider-route",
+            "this Cook retry already has a different durable provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    let (old_route, new_route) = {
+        let task = plan.tasks.first_mut().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider-route",
+                "durable Cook attempt has no provider task to reroute",
+                Some(source.run_id.clone()),
+                None,
+            )
+        })?;
+        let old_route = json!({
+            "backend": task.executor.backend,
+            "selector": task.executor.selector,
+            "model": task.executor.model,
+        });
+        if let Some(backend) = &override_.backend {
+            task.executor.backend = backend.clone();
+        }
+        if let Some(selector) = &override_.selector {
+            task.executor.selector = Some(selector.clone());
+        }
+        if let Some(model) = &override_.model {
+            task.executor.model = Some(model.clone());
+        }
+        if let Some(selection) = task.executor.runtime_selection.as_mut() {
+            if override_.backend.is_some() {
+                selection.executor_backend = override_.backend.clone();
+            }
+            if override_.selector.is_some() {
+                selection.executor_provider_id = override_.selector.clone();
+            }
+            if override_.model.is_some() {
+                selection.model = override_.model.clone();
+            }
+        }
+        let new_route = json!({
+            "backend": task.executor.backend,
+            "selector": task.executor.selector,
+            "model": task.executor.model,
+        });
+        (old_route, new_route)
+    };
+
+    let rotation_opted_in = override_.allow_provider_rotation == Some(true)
+        || override_
+            .provider_rotations
+            .is_some_and(|rotations| rotations > 0);
+    let pin_route = override_.model.is_some() && !rotation_opted_in;
+    if pin_route {
+        plan.options.execution_budget.max_provider_rotations = 0;
+    } else if let Some(rotations) = override_.provider_rotations {
+        plan.options.execution_budget.max_provider_rotations = rotations;
+    } else if override_.allow_provider_rotation == Some(true) {
+        plan.options.execution_budget.max_provider_rotations =
+            plan.options.rotation.as_ref().map_or(0, |rotation| {
+                rotation.entries.len().try_into().unwrap_or(u32::MAX)
+            });
+    }
+    if plan.metadata.is_null() {
+        plan.metadata = json!({});
+    }
+    plan.metadata["cook_retry_policy"]["route"]["effective"] = new_route.clone();
+    plan.metadata["cook_retry_policy"]["route"]["fallback"] = json!({
+        "mode": if plan.options.execution_budget.max_provider_rotations == 0 { "pinned" } else { "rotatable" },
+        "enabled": plan.options.execution_budget.max_provider_rotations > 0,
+        "opted_in": rotation_opted_in,
+    });
+    plan.metadata
+        .as_object_mut()
+        .expect("Cook plan metadata is an object")
+        .entry("cook_provider_route_overrides")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("Cook provider route override history is an array")
+        .push(json!({
+            "schema": "homeboy/agent-task-cook-provider-route-override/v1",
+            "source_run_id": source.run_id,
+            "requested": requested,
+            "old_route": old_route,
+            "new_route": new_route,
+            "rotation": {
+                "allow_provider_rotation": override_.allow_provider_rotation,
+                "max_provider_rotations": plan.options.execution_budget.max_provider_rotations,
+            },
+            "authority": "operator provider-route override",
+        }));
+    plan.rebuild_homeboy_plan();
     Ok(())
 }
 
@@ -1602,6 +2012,7 @@ fn apply_timeout_override_to_plan(
     remaining_executions: u32,
     remaining_retries: u32,
     remaining_rotations: u32,
+    review_form_only: bool,
 ) -> Result<()> {
     if !plan.metadata.is_null() && !plan.metadata.is_object() {
         return Err(Error::validation_invalid_argument(
@@ -1627,19 +2038,38 @@ fn apply_timeout_override_to_plan(
     plan.options.execution_budget.max_provider_rotations = remaining_rotations;
     for task in &mut plan.tasks {
         task.limits.timeout_ms = Some(timeout_ms);
+        if review_form_only {
+            if !task.metadata.is_object() {
+                task.metadata = json!({});
+            }
+            if !task.metadata["cook_loop"].is_object() {
+                task.metadata["cook_loop"] = json!({});
+            }
+            task.metadata["cook_loop"]["review_form_timeout_ms"] = json!(timeout_ms);
+        }
     }
     let timeout_override = json!({
         "schema": "homeboy/agent-task-cook-timeout-override/v1",
         "source_run_id": source_run_id,
         "previous_timeout_ms": previous_timeout_ms,
         "timeout_ms": timeout_ms,
-        "authority": "operator --timeout-ms",
+        "authority": if review_form_only {
+            "operator --review-form-timeout-ms"
+        } else {
+            "operator --timeout-ms"
+        },
         "remaining_provider_executions": remaining_executions,
         "remaining_same_provider_retries_after_reservation": remaining_retries.saturating_sub(1),
         "remaining_provider_rotations": remaining_rotations,
     });
     if plan.metadata.is_null() {
         plan.metadata = json!({});
+    }
+    if review_form_only {
+        if !plan.metadata["cook_loop"].is_object() {
+            plan.metadata["cook_loop"] = json!({});
+        }
+        plan.metadata["cook_loop"]["review_form_timeout_ms"] = json!(timeout_ms);
     }
     plan.metadata
         .as_object_mut()
@@ -2139,17 +2569,44 @@ struct CookRetryAttempt {
 /// Recipe-backed Cook runs cannot fall back to generic lifecycle retry because
 /// that would lose the Cook's authenticated lineage.
 pub fn retry_admission(run_id: &str) -> Result<()> {
-    retry_admission_with_preflight(run_id, |plan| {
-        if plan.metadata.get("generic_lab_command_replay").is_some() {
-            return Err(Error::validation_invalid_argument(
-                "generic_lab_command_replay",
-                "generic Lab replay requires controller workspace preflight",
-                Some(plan.plan_id.clone()),
-                None,
-            ));
-        }
-        Ok(())
-    })
+    retry_admission_with_preflight(run_id, retry_plan_supported_by_generic_action)
+}
+
+/// Read-only Cook retry admission for control-plane projections. Unlike the
+/// executable admission path, this deliberately does not normalize placement
+/// metadata while rendering status.
+pub(crate) enum RetryProjectionAdmission {
+    DurableCook,
+    GenericLifecycle,
+}
+
+/// Read-only retry admission for control-plane projections of records that
+/// carry Cook metadata. Legacy metadata without a durable recipe follows the
+/// same generic lifecycle preflight as executable retry.
+pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let source = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, run_id)?;
+    if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
+        retry_plan_supported_by_generic_action(&retry.plan)?;
+        return Ok(RetryProjectionAdmission::DurableCook);
+    }
+    let plan =
+        agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
+    retry_plan_supported_by_generic_action(&plan)?;
+    Ok(RetryProjectionAdmission::GenericLifecycle)
+}
+
+fn retry_plan_supported_by_generic_action(plan: &AgentTaskPlan) -> Result<()> {
+    if plan.metadata.get("generic_lab_command_replay").is_some() {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "generic Lab replay requires controller workspace preflight",
+            Some(plan.plan_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Verify retry admission using the caller's execution-specific preflight.
@@ -2220,23 +2677,20 @@ pub struct AgentTaskRetryServiceResult {
     pub created: bool,
 }
 
-pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    agent_task_lifecycle::status(run_id)
-}
-
-/// [`status`] with explicit control over whether the read may reach the runner.
+/// Reconcile status with explicit control over whether the operation may reach
+/// the runner.
 ///
 /// Read-only inspection must stay answerable while the Lab is wedged (#10418).
-pub fn status_with_options(
+pub fn reconcile_status_with_options(
     run_id: &str,
     options: agent_task_lifecycle::AgentTaskStatusOptions,
 ) -> Result<agent_task_lifecycle::AgentTaskStatusOutcome> {
-    agent_task_lifecycle::status_with_options(run_id, options)
+    agent_task_lifecycle::reconcile_status_with_options(run_id, options)
 }
 
-/// Return the controller's durable record without runner liveness enrichment.
-pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    agent_task_lifecycle::persisted_status(run_id)
+/// Return the canonical non-reconciling control-plane run resource.
+pub fn control_plane_run(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneRun> {
+    crate::orchestration::run_from_current_environment(run_id)
 }
 
 /// Resolve the durable substantive candidate for a logical Cook reader.
@@ -2246,24 +2700,19 @@ pub fn select_cook_candidate(
     agent_task_lifecycle::select_cook_candidate(cook_id)
 }
 
-pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
-    agent_task_lifecycle::run_status(run_id, since_cursor)
-}
-
-pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
+pub fn logs(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     agent_task_lifecycle::logs(run_id)
 }
 
-pub fn logs_with_raw(run_id: &str) -> Result<AgentTaskRunLog> {
-    agent_task_lifecycle::logs_with_raw(run_id, true)
+pub fn logs_from_cursor(
+    run_id: &str,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    agent_task_lifecycle::logs_from_cursor(run_id, cursor)
 }
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     agent_task_lifecycle::artifacts(run_id)
-}
-
-pub fn cancel(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
-    agent_task_lifecycle::cancel_run(run_id, reason)
 }
 
 pub fn normalize_plan_workspaces(plan: &mut AgentTaskPlan) -> Result<()> {
@@ -2339,7 +2788,7 @@ fn prepare_plan_workspaces(plan: &mut AgentTaskPlan, run_id: Option<&str>) -> Re
     Ok(())
 }
 
-fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
+pub(crate) fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
     let mut secret_env_plan = SecretEnvPlan::from_secret_env_names(
         plan.tasks
             .iter()
@@ -2377,22 +2826,42 @@ fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
 /// Queue admission validates provider eligibility and credential provenance
 /// before a record is claimed Running. Workspace preparation remains after the
 /// claim because it creates controller-owned filesystem state.
-fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()> {
-    let mut plan = plan.clone();
+fn preflight_plan_provider_eligibility(plan: &mut AgentTaskPlan) -> Result<()> {
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-    catalog.validate_selected_models(&plan)?;
-    catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_plan_secret_env(&plan)?;
+    preflight_plan_provider_eligibility_with_catalog(plan, &catalog)
+}
+
+fn preflight_plan_provider_eligibility_with_catalog(
+    plan: &mut AgentTaskPlan,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> Result<()> {
+    let catalog_owns_every_route = plan.tasks.iter().all(|task| {
+        crate::agent_task_provider::is_fixture_backend(&task.executor.backend)
+            || crate::agent_task_gate_executor::is_repo_local_gate_request(task)
+            || catalog
+                .providers()
+                .iter()
+                .any(|provider| provider.backend == task.executor.backend)
+    });
+    if !catalog_owns_every_route {
+        return preflight_plan_secret_env(plan);
+    }
+    let admitted = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        plan,
+        catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )?;
+    // Admission owns live route selection. These are the remaining static and
+    // material checks for the selected route, not a second route derivation.
+    catalog.validate_selected_models(&admitted)?;
+    catalog.enforce_runtime_preflight_checks_for_plan(&admitted)?;
+    preflight_plan_secret_env(&admitted)?;
     crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-        &plan,
+        &admitted,
         catalog.providers(),
     )?;
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-        &plan,
-        catalog.providers(),
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )
+    *plan = admitted;
+    Ok(())
 }
 
 fn run_plan_with_scheduler(
@@ -2515,54 +2984,32 @@ fn prepare_component_worktree_workspace(
             .or_else(|| request.source_refs.first())
             .map(source_uri)
     });
-    let created = worktree_provider::create_worktree(worktree::WorktreeCreateOptions {
+    let created = worktree::create(worktree::WorktreeCreateOptions {
         component_id: component_id.clone(),
         branch,
         from: request.workspace.base_ref.clone(),
         task_url,
         run_id: run_id.map(str::to_string),
         cleanup_policy: cleanup_policy.clone(),
+        require_handoff_freshness: false,
     })?;
-    let (root, cleanup, materialization) = match created {
-        worktree_provider::WorktreeProviderCreateOutput::Native(created) => {
-            let record = created.record;
-            let cleanup = cleanup_lifecycle_policy(&record.cleanup_policy).to_string();
-            let root = record.worktree_path.clone();
-            let materialization = serde_json::json!({
-                "kind": "homeboy-worktree",
-                "id": record.id,
-                "component_id": record.component_id,
-                "branch": record.branch,
-                "base_ref": record.base_ref,
-                "root": record.worktree_path,
-                "source_checkout": record.source_checkout,
-                "task_url": record.task_url,
-                "run_id": record.run_id,
-                "cleanup_policy": cleanup.clone(),
-            });
-            (root, cleanup, materialization)
-        }
-        worktree_provider::WorktreeProviderCreateOutput::Configured(provision) => {
-            let cleanup_policy =
-                cleanup_policy.unwrap_or(worktree::CleanupPolicy::PreserveOnFailure);
-            let cleanup = cleanup_lifecycle_policy(&cleanup_policy).to_string();
-            let evidence = worktree_provider::ConfiguredWorktreeCreateEvidence::from(provision);
-            let root = evidence.path.clone();
-            let materialization = serde_json::json!({
-                "kind": "worktree-provider",
-                "provider": evidence.provider,
-                "id": evidence.handle,
-                "component_id": component_id.clone(),
-                "branch": evidence.branch,
-                "root": evidence.path,
-                "task_url": evidence.task_url,
-                "run_id": run_id,
-                "cleanup_policy": cleanup.clone(),
-                "provision_action": evidence.provision_action,
-                "idempotency_key": evidence.idempotency_key,
-            });
-            (root, cleanup, materialization)
-        }
+    let (root, cleanup, materialization) = {
+        let record = created.record;
+        let cleanup = cleanup_lifecycle_policy(&record.cleanup_policy).to_string();
+        let root = record.worktree_path.clone();
+        let materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": record.id,
+            "component_id": record.component_id,
+            "branch": record.branch,
+            "base_ref": record.base_ref,
+            "root": record.worktree_path,
+            "source_checkout": record.source_checkout,
+            "task_url": record.task_url,
+            "run_id": record.run_id,
+            "cleanup_policy": cleanup.clone(),
+        });
+        (root, cleanup, materialization)
     };
     request.workspace.kind = None;
     request.workspace.mode = AgentTaskWorkspaceMode::Existing;
@@ -2722,7 +3169,7 @@ mod tests {
         }]);
         let original_budget = plan.options.execution_budget.clone();
 
-        apply_timeout_override_to_plan(&mut plan, "timed-out-run", 200, 400, 3, 2, 1)
+        apply_timeout_override_to_plan(&mut plan, "timed-out-run", 200, 400, 3, 2, 1, false)
             .expect("apply timeout override");
 
         assert_eq!(plan.options.timeout_ms, Some(400));
@@ -2753,6 +3200,49 @@ mod tests {
             plan.homeboy_plan,
             plan.clone().canonicalize().homeboy_plan,
             "the portable plan projection is rebuilt with the override"
+        );
+    }
+
+    #[test]
+    fn review_form_timeout_override_updates_the_distinct_deadline_and_authority() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut plan = one_task_plan("review-form-timeout-override", workspace.path());
+        plan.tasks[0].metadata = json!({
+            "cook_loop": {
+                "kind": "review_form_only",
+                "review_form_timeout_ms": 300_000,
+            }
+        });
+
+        apply_timeout_override_to_plan(
+            &mut plan,
+            "timed-out-review-form",
+            300_000,
+            600_000,
+            1,
+            1,
+            0,
+            true,
+        )
+        .expect("apply review-form timeout override");
+
+        assert_eq!(plan.options.timeout_ms, Some(600_000));
+        assert_eq!(plan.tasks[0].limits.timeout_ms, Some(600_000));
+        assert_eq!(
+            plan.tasks[0].metadata["cook_loop"]["review_form_timeout_ms"],
+            600_000
+        );
+        assert_eq!(
+            plan.metadata["cook_loop"]["review_form_timeout_ms"],
+            600_000
+        );
+        let override_record = plan.metadata["cook_timeout_overrides"]
+            .as_array()
+            .and_then(|history| history.last())
+            .expect("timeout override history");
+        assert_eq!(
+            override_record["authority"],
+            "operator --review-form-timeout-ms"
         );
     }
 

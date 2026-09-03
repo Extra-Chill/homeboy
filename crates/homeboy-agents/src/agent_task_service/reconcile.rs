@@ -7,10 +7,12 @@
 //! [`register_orchestration_driver`].
 
 use crate::agent_task_lifecycle;
-use homeboy_core::Result;
+use homeboy_core::{Error, Result};
 use std::collections::HashMap;
 
-use super::discovery::{discover_runs, AgentTaskDiscoveryFilter, AgentTaskLiveness};
+use super::discovery::{
+    discover_runs, discover_runs_in_store, AgentTaskDiscoveryFilter, AgentTaskLiveness,
+};
 
 /// Report returned by [`reconcile_stale_active_runs`]. Lists every active run
 /// that was classified non-active, and for the reconcilable ones records the
@@ -61,12 +63,12 @@ pub struct AgentTaskReconcileRun {
 /// Genuinely-active runs (live owner/runner with a fresh heartbeat, or queued
 /// work) are never touched. With `dry_run`, candidates are reported but no
 /// record is mutated so an operator can preview the blast radius first.
-/// [`agent_task_lifecycle::status`] against an explicitly injected root.
+/// [`agent_task_lifecycle::reconcile_status`] against an explicitly injected root.
 fn rooted_status(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    Ok(agent_task_lifecycle::status_in_store(
+    Ok(agent_task_lifecycle::reconcile_status_in_store(
         lifecycle_store,
         run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -80,7 +82,7 @@ fn rooted_exact_status(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    Ok(agent_task_lifecycle::status_in_store(
+    Ok(agent_task_lifecycle::reconcile_status_in_store(
         lifecycle_store,
         run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -89,14 +91,57 @@ fn rooted_exact_status(
     .record)
 }
 
+/// Read back the durable record and its active discovery projection after an
+/// apply. A successful reconcile must mean the selected record is no longer a
+/// blocking projection, not merely that its cancellation write returned.
+fn verified_reconciled_status(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = rooted_exact_status(lifecycle_store, run_id)?;
+    let remains_active = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
+        .runs
+        .into_iter()
+        .any(|run| run.run_id == run_id);
+    let runner_projection_resolved = record.runner_id().is_none_or(|runner_id| {
+        agent_task_lifecycle::runner_live_job_authority(runner_id)
+            == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
+    });
+    verify_reconciled_postcondition(&record, remains_active, runner_projection_resolved)?;
+    Ok(record)
+}
+
+pub(super) fn verify_reconciled_postcondition(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    remains_active: bool,
+    runner_projection_resolved: bool,
+) -> Result<()> {
+    if record.state.is_terminal() && !remains_active && runner_projection_resolved {
+        return Ok(());
+    }
+
+    Err(Error::internal_unexpected(format!(
+        "agent-task reconciliation did not satisfy its postcondition for `{}`: durable state is {}, unresolved projection remains {}",
+        record.run_id,
+        run_state_label(record.state),
+        if remains_active {
+            "in active discovery"
+        } else if !runner_projection_resolved {
+            "on the runner"
+        } else {
+            "non-terminal"
+        },
+    )))
+}
+
 fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    let now = chrono::Utc::now();
     record.state.is_terminal()
         || record.has_fresh_controller_pre_provider_heartbeat()
         || (record.has_planned_runner_execution() && record.has_fresh_update())
-        || agent_task_lifecycle::has_live_pending_runner_submission_intent(
-            record,
-            chrono::Utc::now(),
-        )
+        || agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now)
+        || record.has_live_pending_local_cook_supervisor(now)
+        || record.owner_process_is_running()
 }
 
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
@@ -301,11 +346,19 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
 /// reconciliation: a state or ownership change becomes a no-op rather than a
 /// reason to inspect or mutate any other record (#10001).
 pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileReport> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_run_in_store(&lifecycle_store, run_id, dry_run)
+}
+
+pub(crate) fn reconcile_run_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    dry_run: bool,
+) -> Result<AgentTaskReconcileReport> {
     // One store for the whole reconciliation: the scope resolution, every
     // authoritative read, and the expiry or cancellation that follows are one
     // answer about one run.
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let requested_run_id = run_id.to_string();
     let resolved_run_ids =
         agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)?;
@@ -318,7 +371,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
             .runner_id()
             .map(|runner_id| format!("runner:{runner_id}"))
             .unwrap_or_else(|| "local".to_string());
-        let candidate = discover_runs(AgentTaskDiscoveryFilter::Active)?
+        let candidate = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
             .runs
             .into_iter()
             .find(|run| run.run_id == *resolved_run_id);
@@ -328,12 +381,15 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                 // Re-read immediately before apply. A newly-live runner or a changed
                 // owner is authoritative and turns this scoped request into a no-op.
                 let refreshed = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
-                let still_reconcilable = discover_runs(AgentTaskDiscoveryFilter::Active)?
-                    .runs
-                    .into_iter()
-                    .find(|run| run.run_id == *resolved_run_id)
-                    .and_then(|run| run.liveness)
-                    .is_some_and(AgentTaskLiveness::is_reconcilable);
+                let locally_reconcilable_after_runner_idle =
+                    refreshed.is_locally_reconcilable_after_runner_idle();
+                let still_reconcilable =
+                    discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
+                        .runs
+                        .into_iter()
+                        .find(|run| run.run_id == *resolved_run_id)
+                        .and_then(|run| run.liveness)
+                        .is_some_and(AgentTaskLiveness::is_reconcilable);
                 if refreshed.state.is_terminal() || !still_reconcilable {
                     runs.push(AgentTaskReconcileRun {
                         run_id: resolved_run_id.clone(),
@@ -346,6 +402,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                     });
                 } else if refreshed.runner_id().is_some()
                     && refreshed.runner_job_id().is_some()
+                    && !locally_reconcilable_after_runner_idle
                     && refreshed.runner_id().is_some_and(|runner_id| {
                         agent_task_lifecycle::runner_authority(runner_id)
                             != agent_task_lifecycle::RunnerAuthority::Removed
@@ -376,6 +433,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                     if let Some(runner_id) = refreshed.runner_id() {
                         if agent_task_lifecycle::runner_authority(runner_id)
                             != agent_task_lifecycle::RunnerAuthority::Removed
+                            && !locally_reconcilable_after_runner_idle
                         {
                             failed += 1;
                             runs.push(AgentTaskReconcileRun {
@@ -403,16 +461,30 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                             resolved_run_id,
                         ) {
                             Ok(true) => {
+                                let verified =
+                                    verified_reconciled_status(&lifecycle_store, resolved_run_id);
+                                let verified = match verified {
+                                    Ok(record) => record,
+                                    Err(error) => {
+                                        failed += 1;
+                                        runs.push(AgentTaskReconcileRun {
+                                            run_id: resolved_run_id.clone(),
+                                            liveness,
+                                            source: run.source,
+                                            authoritative_state: refreshed.state,
+                                            stale_reason: run.stale_reason,
+                                            action: "failed",
+                                            error: Some(error.message),
+                                        });
+                                        continue;
+                                    }
+                                };
                                 reconciled += 1;
                                 runs.push(AgentTaskReconcileRun {
                                     run_id: resolved_run_id.clone(),
                                     liveness,
                                     source: run.source,
-                                    authoritative_state: rooted_status(
-                                        &lifecycle_store,
-                                        resolved_run_id,
-                                    )?
-                                    .state,
+                                    authoritative_state: verified.state,
                                     stale_reason: run.stale_reason,
                                     action: "reconciled",
                                     error: None,
@@ -456,12 +528,30 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                         Some(&reason),
                     ) {
                         Ok(record) => {
+                            let verified =
+                                match verified_reconciled_status(&lifecycle_store, resolved_run_id)
+                                {
+                                    Ok(record) => record,
+                                    Err(error) => {
+                                        failed += 1;
+                                        runs.push(AgentTaskReconcileRun {
+                                            run_id: resolved_run_id.clone(),
+                                            liveness,
+                                            source: run.source,
+                                            authoritative_state: record.state,
+                                            stale_reason: run.stale_reason,
+                                            action: "failed",
+                                            error: Some(error.message),
+                                        });
+                                        continue;
+                                    }
+                                };
                             reconciled += 1;
                             runs.push(AgentTaskReconcileRun {
                                 run_id: resolved_run_id.clone(),
                                 liveness,
                                 source: run.source,
-                                authoritative_state: record.state,
+                                authoritative_state: verified.state,
                                 stale_reason: run.stale_reason,
                                 action: "reconciled",
                                 error: None,
@@ -1163,7 +1253,7 @@ mod tests {
 
             assert_eq!(report["reconciled"], 1, "{report}");
             let refreshed =
-                agent_task_lifecycle::status("reconcile-tick-orphan").expect("refreshed");
+                agent_task_lifecycle::reconcile_status("reconcile-tick-orphan").expect("refreshed");
             assert!(
                 refreshed.state.is_terminal(),
                 "orphan must not stay running: {:?}",
@@ -1197,7 +1287,7 @@ mod tests {
                 .expect("tick pass");
 
             assert_eq!(report["reconciled"], 0, "{report}");
-            let refreshed = agent_task_lifecycle::status(run_id).expect("refreshed");
+            let refreshed = agent_task_lifecycle::reconcile_status(run_id).expect("refreshed");
             assert_eq!(
                 refreshed.state,
                 agent_task_lifecycle::AgentTaskRunState::Queued
@@ -1227,19 +1317,92 @@ mod tests {
                     .remove("runner_pid");
             })
             .expect("owner identity removed");
-            let stale = agent_task_lifecycle::status(orphan_run_id)
+            let stale = agent_task_lifecycle::reconcile_status(orphan_run_id)
                 .expect("PID-less owner is projected stale before daemon reconciliation");
             assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("ownerless tick pass");
             assert_eq!(report["reconciled"], 1, "{report}");
-            let terminal = agent_task_lifecycle::status(orphan_run_id).expect("ownerless run");
+            let terminal =
+                agent_task_lifecycle::reconcile_status(orphan_run_id).expect("ownerless run");
             assert_eq!(
                 terminal.state,
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             assert_eq!(terminal.metadata["cancel_reason"], "missing_runner_pid");
+        });
+    }
+
+    #[test]
+    fn planned_lab_proxy_at_provider_start_survives_initiating_client_exit() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-lab-planned-provider-start";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::record_cook_progress_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                "provider_start",
+                1,
+                None,
+            )
+            .expect("provider_start");
+            let remote_command = [
+                "homeboy".to_string(),
+                "--placement".to_string(),
+                "local".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+            ];
+            agent_task_lifecycle::record_lab_offload_planned(
+                agent_task_lifecycle::LabOffloadProxyPlan {
+                    run_id,
+                    runner_id: "homeboy-lab",
+                    remote_workspace: "/runner/workspace/homeboy",
+                    remote_command: &remote_command,
+                    durable_plan: Some(&plan),
+                },
+            )
+            .expect("planned Lab proxy");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+            })
+            .expect("initiating client ended");
+
+            let live = agent_task_lifecycle::reconcile_status(run_id).expect("planned proxy");
+            assert!(
+                live.has_fresh_controller_pre_provider_heartbeat()
+                    || (live.has_planned_runner_execution() && live.has_fresh_update()),
+                "{live:?}"
+            );
+            assert!(
+                live.updated_at.is_some(),
+                "planned proxy must stamp a heartbeat"
+            );
+            assert_eq!(
+                live.metadata["runner_execution_record"]["status"],
+                "planned"
+            );
+            assert!(live.metadata.get("stale_running").is_none());
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick after initiating client exit");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained run");
+            assert!(
+                !retained.state.is_terminal(),
+                "Lab proxy must survive initiating-client exit: {:?}",
+                retained.state
+            );
+            assert!(retained.metadata.get("cancel_reason").is_none());
+            assert_eq!(retained.runner_id(), Some("homeboy-lab"));
+            assert!(retained.runner_job_id().is_none());
         });
     }
 
@@ -1277,7 +1440,8 @@ mod tests {
             })
             .expect("record slow provider evidence");
 
-            let status = agent_task_lifecycle::status(run_id).expect("status while ensure runs");
+            let status =
+                agent_task_lifecycle::reconcile_status(run_id).expect("status while ensure runs");
             assert!(
                 status.has_fresh_controller_pre_provider_heartbeat(),
                 "{status:?}"
@@ -1295,7 +1459,7 @@ mod tests {
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("watchdog pass");
             assert_eq!(report["reconciled"], 0, "{report}");
-            let retained = agent_task_lifecycle::status(run_id).expect("retained run");
+            let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained run");
             assert_eq!(
                 retained.state,
                 agent_task_lifecycle::AgentTaskRunState::Queued
@@ -1341,6 +1505,182 @@ mod tests {
     }
 
     #[test]
+    fn parallel_local_supervised_submissions_survive_daemon_reconciliation() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_ids = ["reconcile-parallel-local-a", "reconcile-parallel-local-b"];
+            std::thread::scope(|scope| {
+                for run_id in run_ids {
+                    scope.spawn(move || {
+                        let plan = AgentTaskPlan::new("parallel-local-cook", Vec::new());
+                        let metadata = serde_json::Map::from_iter([(
+                            "local_cook_supervisor".to_string(),
+                            serde_json::json!({
+                                "state": "supervising",
+                                "job_id": uuid::Uuid::new_v4(),
+                                "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+                                "pinned_run_id": run_id,
+                            }),
+                        )]);
+                        agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+                            &test_lifecycle_store(),
+                            &plan,
+                            Some(run_id),
+                            None,
+                            Some(metadata),
+                            None,
+                            |_| Ok(serde_json::json!({ "build": "test" })),
+                        )
+                        .expect("submit supervised local Cook");
+                    });
+                }
+            });
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick after parallel local submission");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            for run_id in run_ids {
+                let record = agent_task_lifecycle::reconcile_status(run_id).expect("retained");
+                assert!(!record.state.is_terminal(), "{run_id} was terminalized");
+                assert_eq!(record.metadata["runner_pid"], std::process::id());
+                assert!(record.owner_process_is_running());
+                assert!(record.metadata.get("cancel_reason").is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn projected_local_retry_supervisor_keeps_lease_ownership_before_runner_pid() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-projected-local-retry";
+            let cook_id = "reconcile-projected-local-retry-cook";
+            let plan = AgentTaskPlan::new("projected-local-retry", Vec::new());
+            let now = chrono::Utc::now();
+            let metadata = serde_json::Map::from_iter([
+                ("cook_id".to_string(), serde_json::json!(cook_id)),
+                (
+                    "local_cook_supervisor".to_string(),
+                    serde_json::json!({
+                        "state": "pending",
+                        "pinned_run_id": run_id,
+                        "lease_started_at": now.to_rfc3339(),
+                        "lease_expires_at": (now
+                            + chrono::Duration::seconds(
+                                agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS
+                            ))
+                        .to_rfc3339(),
+                        "launcher_pid": std::process::id(),
+                    }),
+                ),
+            ]);
+            agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+                &test_lifecycle_store(),
+                &plan,
+                Some(run_id),
+                None,
+                Some(metadata),
+                None,
+                |_| Ok(serde_json::json!({ "build": "test" })),
+            )
+            .expect("reserve retry");
+
+            agent_task_lifecycle::record_local_cook_retry_supervisor_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                cook_id,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .expect("project supervisor");
+
+            let supervised = agent_task_lifecycle::exact_record(run_id).expect("projected");
+            assert_eq!(
+                supervised.metadata["local_cook_supervisor"]["state"],
+                "supervising"
+            );
+            assert!(supervised.has_live_pending_local_cook_supervisor(now));
+            assert!(supervised.metadata.get("runner_pid").is_none());
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick after supervisor projection");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained");
+            assert!(!retained.state.is_terminal());
+            assert!(retained.metadata.get("cancel_reason").is_none());
+            assert!(retained.has_live_pending_local_cook_supervisor(now));
+        });
+    }
+
+    #[test]
+    fn fenced_recheck_preserves_local_owner_recorded_after_stale_discovery_snapshot() {
+        with_isolated_home(|_| {
+            let run_id = "reconcile-local-owner-after-snapshot";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+
+            let snapshot = discover_runs(AgentTaskDiscoveryFilter::Active)
+                .expect("ownerless queued run discovered");
+            let discovered = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .expect("stale snapshot contains run");
+            assert_eq!(discovered.liveness, Some(AgentTaskLiveness::Stale));
+
+            agent_task_lifecycle::mark_running(run_id).expect("publish owner pid");
+
+            let fenced =
+                agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
+                    .expect("fenced record");
+            assert!(fenced_record_is_live(&fenced));
+            assert!(fenced.owner_process_is_running());
+        });
+    }
+
+    #[test]
+    fn fenced_recheck_preserves_supervisor_lease_recorded_after_stale_discovery_snapshot() {
+        with_isolated_home(|_| {
+            let run_id = "reconcile-supervisor-after-snapshot";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+
+            let snapshot = discover_runs(AgentTaskDiscoveryFilter::Active)
+                .expect("ownerless queued run discovered");
+            let discovered = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .expect("stale snapshot contains run");
+            assert_eq!(discovered.liveness, Some(AgentTaskLiveness::Stale));
+
+            let now = chrono::Utc::now();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!("cook");
+                record.metadata["local_cook_supervisor"] = serde_json::json!({
+                    "state": "supervising",
+                    "pinned_run_id": run_id,
+                    "lease_started_at": now.to_rfc3339(),
+                    "lease_expires_at": (now
+                        + chrono::Duration::seconds(
+                            agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS
+                        ))
+                    .to_rfc3339(),
+                });
+            })
+            .expect("publish supervisor lease");
+
+            let fenced =
+                agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
+                    .expect("fenced record");
+            assert!(fenced_record_is_live(&fenced));
+            assert_eq!(
+                fenced.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+        });
+    }
+
+    #[test]
     fn missing_runner_pid_after_runner_submission_still_cancels() {
         with_isolated_home(|_| {
             register_orchestration_driver();
@@ -1362,13 +1702,14 @@ mod tests {
             })
             .expect("runner submission without PID");
 
-            let stale = agent_task_lifecycle::status(run_id).expect("status after submission");
+            let stale =
+                agent_task_lifecycle::reconcile_status(run_id).expect("status after submission");
             assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("watchdog pass");
             assert_eq!(report["reconciled"], 1, "{report}");
-            let cancelled = agent_task_lifecycle::status(run_id).expect("cancelled run");
+            let cancelled = agent_task_lifecycle::reconcile_status(run_id).expect("cancelled run");
             assert_eq!(
                 cancelled.state,
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -1429,7 +1770,8 @@ mod tests {
                 .expect("cleanup during delayed identity publication");
             assert_eq!(report["reconciled"], 0, "{report}");
             for run_id in run_ids {
-                let record = agent_task_lifecycle::status(run_id).expect("planned record");
+                let record =
+                    agent_task_lifecycle::reconcile_status(run_id).expect("planned record");
                 assert!(!record.state.is_terminal(), "{run_id} was terminalized");
                 assert_eq!(
                     record.metadata["runner_execution_record"]["status"],
@@ -1502,7 +1844,8 @@ mod tests {
                 report.runs.is_empty(),
                 "a pre-supervisor admission is not an abandoned executor: {report:#?}"
             );
-            let parent = agent_task_lifecycle::status(cook_id).expect("read durable admission");
+            let parent =
+                agent_task_lifecycle::reconcile_status(cook_id).expect("read durable admission");
             assert_eq!(
                 parent.state,
                 agent_task_lifecycle::AgentTaskRunState::Queued
@@ -1549,7 +1892,8 @@ mod tests {
 
             assert_eq!(report.reconciled, 2, "{report:#?}");
             for cook_id in ["expired-pre-supervisor", "expired-legacy-pending"] {
-                let parent = agent_task_lifecycle::status(cook_id).expect("read terminal parent");
+                let parent =
+                    agent_task_lifecycle::reconcile_status(cook_id).expect("read terminal parent");
                 assert_eq!(
                     parent.state,
                     agent_task_lifecycle::AgentTaskRunState::Failed
@@ -1597,7 +1941,7 @@ mod tests {
 
             assert!(report.runs.is_empty(), "{report:#?}");
             assert_eq!(
-                agent_task_lifecycle::status(cook_id)
+                agent_task_lifecycle::reconcile_status(cook_id)
                     .expect("read protected parent")
                     .metadata["detached_cook_handoff"]["admission_state"],
                 "supervising"
@@ -1623,10 +1967,12 @@ mod tests {
                 agent_task_lifecycle::AgentTaskRunState::Running,
                 "preview mutates nothing, so the observed state is the state",
             );
-            assert!(!agent_task_lifecycle::status("reconcile-preview-orphan")
-                .expect("unchanged")
-                .state
-                .is_terminal());
+            assert!(
+                !agent_task_lifecycle::reconcile_status("reconcile-preview-orphan")
+                    .expect("unchanged")
+                    .state
+                    .is_terminal()
+            );
         });
     }
 

@@ -1241,13 +1241,13 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
     })
 }
 
-/// Validate every provider-owned component checkout before acquiring a rig
+/// Validate every native managed component checkout before acquiring a rig
 /// lease, opening an observation, or running a pipeline step.
 pub fn preflight_effective_component_checkouts(rig: &RigSpec) -> Result<()> {
     for component in rig.components.values() {
         let path = expand_vars(rig, &component.path);
         let path = shellexpand::tilde(&path).into_owned();
-        homeboy_core::worktree_provider::resolve_configured_worktree_path(Path::new(&path))?;
+        native_worktree_path(Path::new(&path))?;
     }
     Ok(())
 }
@@ -1284,19 +1284,12 @@ fn component_status(
         }
         _ => (declared, "installed_default".to_string()),
     };
-    match homeboy_core::worktree_provider::resolve_configured_worktree_path(Path::new(&path)) {
-        Ok(Some(target)) => RigComponentStatusReport {
+    match native_worktree_path(Path::new(&path)) {
+        Ok(Some(record)) => RigComponentStatusReport {
             id: id.to_string(),
-            path: target.path.display().to_string(),
-            source: match target.provider {
-                homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
-                    "provider:native".to_string()
-                }
-                homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
-                    format!("provider:{provider}")
-                }
-            },
-            r#ref: target.branch,
+            path: record.worktree_path,
+            source: "native_registry".to_string(),
+            r#ref: Some(record.branch),
             freshness: "current".to_string(),
             error: None,
         },
@@ -1316,13 +1309,27 @@ fn component_status(
             RigComponentStatusReport {
                 id: id.to_string(),
                 path,
-                source: "provider".to_string(),
+                source: "native_registry".to_string(),
                 r#ref: branch,
                 freshness: "stale".to_string(),
                 error: Some(error.message),
             }
         }
     }
+}
+
+fn native_worktree_path(path: &Path) -> Result<Option<homeboy_core::worktree::TaskWorktreeRecord>> {
+    let requested = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    Ok(homeboy_core::worktree::list()?
+        .worktrees
+        .into_iter()
+        .find(|record| {
+            record.state == homeboy_core::worktree::TaskWorktreeState::Active
+                && Path::new(&record.worktree_path)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(&record.worktree_path))
+                    == requested
+        }))
 }
 
 fn symlink_status(rig: &RigSpec, link: &super::spec::SymlinkSpec) -> SymlinkStatusReport {

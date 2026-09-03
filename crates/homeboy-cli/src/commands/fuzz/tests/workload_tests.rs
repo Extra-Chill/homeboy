@@ -3,6 +3,114 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[test]
+fn selected_rig_workload_projects_plannable_inventory_without_inventory_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workload_path = temp.path().join("component-fuzz.json");
+    fs::write(
+        &workload_path,
+        serde_json::json!({
+            "schema": "homeboy/fuzz-workload/v1",
+            "id": "component-fuzz",
+            "safety_class": "read_only",
+            "surface_ids": ["component-runtime"],
+            "operations": ["query", "domain.verify"],
+            "target": {
+                "type": "service",
+                "component": "component-a",
+                "slug": "component-a"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write workload");
+    let workload = FuzzWorkloadOutput {
+        id: "component-fuzz".to_string(),
+        label: None,
+        description: None,
+        source: format!("rig_workloads:generic:{}", workload_path.display()),
+        manifest_path: Some(workload_path.to_string_lossy().to_string()),
+    };
+
+    let inventory = build_target_inventory(
+        "component-a",
+        std::slice::from_ref(&workload),
+        Some(&workload),
+        Some("proof-1".to_string()),
+        None,
+    )
+    .expect("project workload inventory");
+
+    assert_eq!(inventory.workloads.len(), 1);
+    assert_eq!(inventory.workloads[0].id, "component-fuzz");
+    assert_eq!(inventory.targets.len(), 1);
+    assert_eq!(inventory.targets[0].id, "component-a");
+    assert_eq!(inventory.targets[0].kind, "service");
+    assert_eq!(inventory.targets[0].operations.len(), 2);
+    assert_eq!(inventory.surfaces[0].id, "component-runtime");
+    assert_eq!(
+        inventory.metadata["workload_inventory_source"],
+        workload_path.to_string_lossy().as_ref()
+    );
+
+    let mut args = planner_args();
+    args.run.workload_id = Some("component-fuzz".to_string());
+    let metadata = plan_inventory_selection(&args, &inventory, None).expect("plan inventory");
+
+    assert_eq!(
+        metadata["selection"]["target_ids"],
+        serde_json::json!(["component-a"])
+    );
+    assert_eq!(
+        metadata["selection"]["operations"]
+            .as_array()
+            .expect("selected operations")
+            .len(),
+        2
+    );
+    assert_eq!(
+        metadata["sampling"]["operation_strata"][1]["values"],
+        serde_json::json!(["query", "domain.verify"])
+    );
+
+    args.strategy = FuzzPlanStrategy::CoverageGaps;
+    let coverage_gaps =
+        plan_inventory_selection(&args, &inventory, None).expect("plan coverage gaps");
+    assert!(coverage_gaps["selection"]["operations"]
+        .as_array()
+        .expect("selected operations")
+        .iter()
+        .any(|operation| operation["operation_id"] == "domain.verify"));
+
+    let explicit_path = temp.path().join("explicit-inventory.json");
+    let explicit_inventory = FuzzTargetInventory::from_value(serde_json::json!({
+        "id": "explicit-inventory",
+        "targets": [{
+            "id": "explicit-target",
+            "kind": "service",
+            "operations": [{ "id": "read", "kind": "read" }]
+        }]
+    }))
+    .expect("explicit inventory");
+    write_inventory(&explicit_path, &explicit_inventory);
+    let inventory = build_target_inventory(
+        "component-a",
+        &[workload.clone()],
+        Some(&workload),
+        Some("proof-2".to_string()),
+        Some(&explicit_path),
+    )
+    .expect("use explicit inventory");
+
+    assert_eq!(inventory.targets.len(), 1);
+    assert_eq!(inventory.targets[0].id, "explicit-target");
+    assert!(inventory.workloads.is_empty());
+    assert!(inventory
+        .metadata
+        .get("workload_inventory_source")
+        .is_none());
+}
+
+#[test]
 fn fuzz_workloads_include_rig_declared_paths() {
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
         "id": "package-fuzz",
@@ -154,7 +262,7 @@ fn resolve_fuzz_context_preserves_rig_extensions_with_explicit_path_when_registr
             &comp,
             &SettingArgs::default(),
             &ExtensionOverrideArgs::default(),
-            homeboy_extension::ExtensionCapability::Fuzz,
+            homeboy_extension_contract::ExtensionCapability::Fuzz,
             Some(&context),
         )
         .expect("resolve fuzz context");
@@ -217,7 +325,7 @@ fn resolve_fuzz_context_infers_single_rig_fuzz_workload_extension() {
             &comp,
             &SettingArgs::default(),
             &ExtensionOverrideArgs::default(),
-            homeboy_extension::ExtensionCapability::Fuzz,
+            homeboy_extension_contract::ExtensionCapability::Fuzz,
             Some(&context),
         )
         .expect("resolve fuzz context");
@@ -272,7 +380,7 @@ fn resolve_fuzz_context_reports_explicit_extension_without_fuzz_capability() {
             &comp,
             &SettingArgs::default(),
             &extension_override,
-            homeboy_extension::ExtensionCapability::Fuzz,
+            homeboy_extension_contract::ExtensionCapability::Fuzz,
             Some(&context),
         )
         .expect_err("old extension manifest should fail explicitly");

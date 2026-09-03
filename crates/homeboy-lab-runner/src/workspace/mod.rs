@@ -25,19 +25,20 @@ pub(crate) use sync::update_workspace_resource_lifecycle;
 pub(crate) use sync::workspace_resource_lifecycle;
 pub use sync::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, prune_workspaces,
-    reap_run_workspace, reuse_compatible_snapshot_workspace, workspace_snapshots,
+    reap_run_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
+    verify_workspace_ref_hydration_source, workspace_snapshots,
 };
-pub use sync::{sync_workspace, update_workspace};
+pub use sync::{sync_workspace, sync_workspace_before, update_workspace};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
-    RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
-    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
-    RunnerWorkspaceUpdateOutput,
+    RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotAppliedFilters,
+    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput,
 };
 
 pub(crate) use materialized::{

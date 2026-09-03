@@ -192,6 +192,7 @@ fn repo_local_gate_execution_kind_runs_without_extension_provider() {
             attempt: 1,
             cancellation: AgentTaskCancellationToken::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
 
@@ -527,7 +528,7 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
     );
 }
 
-fn extension_policy(id: &str, backend: &str) -> extension::ExtensionManifest {
+fn extension_policy(id: &str, backend: &str) -> homeboy_extension_contract::ExtensionManifest {
     serde_json::from_value(json!({
         "name": id,
         "version": "1.0.0",

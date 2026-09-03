@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use homeboy_extension::ParsedItem;
+use crate::refactor_provider::ParsedItem;
 
 use super::DecomposeGroup;
 

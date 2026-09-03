@@ -8,13 +8,13 @@ use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::rig::lease::ActiveRigRunLease;
 use homeboy::rig::{self, BenchPrepareReport, BenchSpec, RigSpec, RigStateSnapshot};
-use homeboy_extension::bench as extension_bench;
-use homeboy_extension::bench::report::collect_artifacts;
-use homeboy_extension::bench::{
+use homeboy_core::extension::bench as extension_bench;
+use homeboy_core::extension::bench::report::collect_artifacts;
+use homeboy_core::extension::bench::{
     BenchCommandOutput, BenchGate, BenchGateOp, BenchResults, BenchRunExecution,
     BenchRunWorkflowArgs, BenchRunWorkflowResult,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::observation::{self, BenchObservationStart};
 use super::{BenchRunArgs, CmdResult};
@@ -1242,19 +1242,19 @@ mod tests {
         assert_eq!(scenario_gates.len(), 2);
         assert!(scenario_gates.iter().any(|gate| {
             gate.metric == "native_block_quality_pass"
-                && gate.op == homeboy_extension::bench::BenchGateOp::Eq
+                && gate.op == homeboy_core::extension::bench::BenchGateOp::Eq
                 && gate.value == 1.0
         }));
         assert!(scenario_gates.iter().any(|gate| {
             gate.metric == "tool_error_count"
-                && gate.op == homeboy_extension::bench::BenchGateOp::Lte
+                && gate.op == homeboy_core::extension::bench::BenchGateOp::Lte
                 && gate.value == 0.0
         }));
         assert_eq!(gates.result_gates.len(), 1);
         assert_eq!(gates.result_gates[0].metric, "failed_fixture_count");
         assert_eq!(
             gates.result_gates[0].op,
-            homeboy_extension::bench::BenchGateOp::Lte
+            homeboy_core::extension::bench::BenchGateOp::Lte
         );
         assert_eq!(gates.result_gates[0].value, 0.0);
     }
@@ -1272,7 +1272,7 @@ mod tests {
             }"#,
         )
         .expect("parse rig spec");
-        let results = homeboy_extension::bench::parse_bench_results_str(
+        let results = homeboy_core::extension::bench::parse_bench_results_str(
             r#"{
                 "component_id": "static-site-importer",
                 "iterations": 1,
@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn default_result_gate_fails_discovered_but_not_run_fixtures() {
-        let results = homeboy_extension::bench::parse_bench_results_str(
+        let results = homeboy_core::extension::bench::parse_bench_results_str(
             r#"{
                 "component_id": "static-site-importer",
                 "iterations": 1,
@@ -1363,7 +1363,7 @@ mod tests {
 
     #[test]
     fn default_not_run_fixture_gate_skips_explicit_planning_workload() {
-        let results = homeboy_extension::bench::parse_bench_results_str(
+        let results = homeboy_core::extension::bench::parse_bench_results_str(
             r#"{
                 "component_id": "static-site-importer",
                 "iterations": 1,

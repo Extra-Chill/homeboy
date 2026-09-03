@@ -55,6 +55,374 @@ pub fn record_pre_execution_failure_in_store(
     Ok(record)
 }
 
+/// Persist interrupted-owner evidence before a local Cook observer loss becomes
+/// terminal. Aggregate, attempt diagnostics, candidate harvest (or explicit
+/// unavailability), stop reason, and retry duplication facts are committed first
+/// so later status/diagnose reads are not an empty Failed tombstone.
+pub fn record_interrupted_local_owner_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
+        let mut record = lifecycle_store.read_record(&run_id)?;
+        if record.state.is_terminal() {
+            return Ok((record, None));
+        }
+        let decision = annotate_local_provider_ownership(&mut record);
+        record_interrupted_local_owner_locked(lifecycle_store, record, decision)
+    })?;
+    if let Some(aggregate) = aggregate {
+        record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
+        update_cook_candidate_after_completion_in_store(
+            lifecycle_store,
+            &record,
+            &aggregate,
+            None,
+        )?;
+    } else if record.state.is_terminal() {
+        lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
+    }
+    Ok(record)
+}
+
+fn record_interrupted_local_owner_locked(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    mut record: AgentTaskRunRecord,
+    decision: LocalProviderOwnerDecision,
+) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+    let now = now_timestamp();
+    let (has_succeeded, has_failed, has_cancelled, recovery_identity) = match decision {
+        LocalProviderOwnerDecision::Interrupted {
+            has_succeeded,
+            has_failed,
+            has_cancelled,
+            recovery_identity,
+        } => (has_succeeded, has_failed, has_cancelled, recovery_identity),
+        LocalProviderOwnerDecision::StayRunning | LocalProviderOwnerDecision::NotApplicable => {
+            let identity = record
+                .metadata
+                .get("provider_executions")
+                .and_then(Value::as_array)
+                .map(|executions| {
+                    executions
+                        .iter()
+                        .map(|execution| execution["owner_identity"].clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (false, false, false, identity)
+        }
+    };
+    let consumed = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .map(|executions| executions.len())
+        .unwrap_or_default();
+    let in_flight = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .is_some_and(|executions| {
+            executions
+                .iter()
+                .any(|execution| execution["state"] == json!("running"))
+        });
+    if in_flight {
+        if let Some(executions) = record
+            .ensure_metadata_object()
+            .get_mut("provider_executions")
+            .and_then(Value::as_array_mut)
+        {
+            for execution in executions {
+                if execution["state"] == json!("running") {
+                    execution["state"] = json!("cancelled");
+                    execution["finished_at"] = json!(now.clone());
+                }
+            }
+        }
+    }
+    let stop_reason = "local Cook observer was interrupted during provider execution".to_string();
+    let outcomes = plan
+        .tasks
+        .iter()
+        .map(|task| {
+            build_interrupted_owner_outcome(
+                &record.run_id,
+                task,
+                has_succeeded,
+                has_failed,
+                consumed,
+                in_flight,
+                &stop_reason,
+            )
+        })
+        .collect::<Vec<_>>();
+    let harvested = outcomes.iter().any(|outcome| {
+        outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+            || outcome
+                .artifacts
+                .iter()
+                .any(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact)
+    });
+    let (aggregate_status, ownership_state, run_cancelled) = if has_succeeded || harvested {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
+            "owner_dead",
+            false,
+        )
+    } else if has_failed {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
+            "provider_failed",
+            false,
+        )
+    } else if has_cancelled {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled,
+            "provider_cancelled",
+            true,
+        )
+    } else {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled,
+            "owner_dead",
+            true,
+        )
+    };
+    let failed = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Failed | AgentTaskOutcomeStatus::Cancelled
+            )
+        })
+        .count();
+    let candidate_recoverable = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
+        .count();
+    let cancelled = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == AgentTaskOutcomeStatus::Cancelled)
+        .count();
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: aggregate_status,
+        totals: AgentTaskAggregateTotals {
+            failed,
+            cancelled,
+            candidate_recoverable,
+            recoverable_candidates: candidate_recoverable,
+            ..AgentTaskAggregateTotals::default()
+        },
+        outcomes,
+        events: plan
+            .tasks
+            .iter()
+            .map(|task| AgentTaskProgressEvent {
+                task_id: task.task_id.clone(),
+                state: if harvested || has_succeeded {
+                    AgentTaskState::CandidateRecoverable
+                } else if run_cancelled {
+                    AgentTaskState::Cancelled
+                } else {
+                    AgentTaskState::Failed
+                },
+                attempt: 1,
+                message: Some(stop_reason.clone()),
+            })
+            .collect(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: AgentTaskQueueStatus {
+            max_concurrency: plan.options.max_concurrency,
+            completed: plan.tasks.len(),
+            ..AgentTaskQueueStatus::default()
+        },
+    };
+    let aggregate_path = lifecycle_store
+        .aggregate_path(&record.run_id)
+        .display()
+        .to_string();
+    apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "local_provider_ownership".to_string(),
+        json!({
+            "state": ownership_state,
+            "recovery_identity": recovery_identity,
+            "reconciled_at": now,
+        }),
+    );
+    metadata.insert("stop_reason".to_string(), json!(stop_reason));
+    metadata.insert(
+        "terminal_failure_classification".to_string(),
+        json!("interrupted_owner"),
+    );
+    metadata.insert("terminal_phase".to_string(), json!("interrupted_owner"));
+    metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
+    metadata.insert(
+        "interrupted_owner".to_string(),
+        json!({
+            "schema": "homeboy/agent-task-interrupted-owner/v1",
+            "cause": "observer_interrupted_during_provider_execution",
+            "stop_reason": stop_reason,
+            "provider_executions_consumed": consumed,
+            "provider_budget_consumed": consumed > 0,
+            "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+            "candidate_status": if harvested || has_succeeded {
+                "harvested_or_recoverable"
+            } else {
+                "unavailable"
+            },
+        }),
+    );
+    if run_cancelled {
+        metadata.insert(
+            "cancel_reason".to_string(),
+            json!("local provider owner process is not running"),
+        );
+    }
+    metadata.insert(
+        "cook_progress".to_string(),
+        json!({
+            "phase": "terminal",
+            "attempt": 1,
+            "detail": "interrupted_owner",
+            "terminal_success": harvested || has_succeeded,
+            "exit_code": if harvested || has_succeeded { 0 } else { 1 },
+            "updated_at": now,
+        }),
+    );
+    let record = lifecycle_store
+        .write_aggregate_and_record_locked_without_terminal_projection(&record, &aggregate)?;
+    Ok((record, Some(aggregate)))
+}
+
+fn build_interrupted_owner_outcome(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    has_succeeded: bool,
+    has_failed: bool,
+    consumed: usize,
+    in_flight: bool,
+    stop_reason: &str,
+) -> AgentTaskOutcome {
+    let mut outcome = AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: task.task_id.clone(),
+        status: if has_succeeded {
+            AgentTaskOutcomeStatus::CandidateRecoverable
+        } else if has_failed {
+            AgentTaskOutcomeStatus::Failed
+        } else {
+            AgentTaskOutcomeStatus::Cancelled
+        },
+        summary: Some(stop_reason.to_string()),
+        failure_classification: if has_succeeded {
+            None
+        } else {
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        },
+        evidence_refs: vec![AgentTaskEvidenceRef {
+            kind: "interrupted-owner".to_string(),
+            uri: format!("homeboy://agent-task/run/{run_id}/status#interrupted-owner"),
+            label: Some("Interrupted local Cook observer".to_string()),
+        }],
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "interrupted_owner".to_string(),
+            message: stop_reason.to_string(),
+            data: json!({
+                "phase": "interrupted_owner",
+                "provider_executions_consumed": consumed,
+                "provider_budget_consumed": consumed > 0,
+                "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+            }),
+        }],
+        outputs: json!({
+            "schema": "homeboy/agent-task-interrupted-owner/v1",
+            "phase": "interrupted_owner",
+            "stop_reason": stop_reason,
+            "provider_executions_consumed": consumed,
+            "provider_budget_consumed": consumed > 0,
+            "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+        }),
+        metadata: json!({
+            "kind": "interrupted_owner",
+            "phase": "interrupted_owner",
+            "provider_executions_consumed": consumed,
+            "provider_budget_consumed": consumed > 0,
+            "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+        }),
+        ..Default::default()
+    };
+    harvest_interrupted_owner_candidate(run_id, task, &mut outcome);
+    outcome
+}
+
+fn harvest_interrupted_owner_candidate(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    outcome: &mut AgentTaskOutcome,
+) {
+    let discovery = crate::agent_task_timeout_artifacts::TimeoutArtifactDiscovery::discover(task);
+    crate::agent_task_timeout_artifacts::append_unique_artifacts(
+        &mut outcome.artifacts,
+        discovery.artifacts,
+    );
+    crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+        &mut outcome.evidence_refs,
+        discovery.evidence_refs,
+    );
+    outcome.diagnostics.extend(discovery.diagnostics);
+    if let Some(discovered) = discovery.outcome {
+        crate::agent_task_timeout_artifacts::append_unique_artifacts(
+            &mut outcome.artifacts,
+            discovered.artifacts,
+        );
+        crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+            &mut outcome.evidence_refs,
+            discovered.evidence_refs,
+        );
+        outcome.diagnostics.extend(discovered.diagnostics);
+    }
+    let harvested = outcome
+        .artifacts
+        .iter()
+        .any(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact);
+    if harvested {
+        outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        outcome.failure_classification = None;
+        outcome.summary =
+            Some("interrupted local Cook observer left a recoverable candidate".to_string());
+        outcome.metadata["candidate_status"] = json!("harvested");
+        return;
+    }
+    crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+        &mut outcome.evidence_refs,
+        vec![AgentTaskEvidenceRef {
+            kind: "interrupted-owner-candidate".to_string(),
+            uri: format!("homeboy://agent-task/run/{run_id}/status#interrupted-owner-candidate"),
+            label: Some("Candidate unavailable after interrupted owner".to_string()),
+        }],
+    );
+    outcome.diagnostics.push(AgentTaskDiagnostic {
+        class: "interrupted_owner.candidate_unavailable".to_string(),
+        message:
+            "no candidate could be harvested after the local Cook observer was interrupted during provider execution"
+                .to_string(),
+        data: json!({ "status": "unavailable" }),
+    });
+    outcome.metadata["candidate_status"] = json!("unavailable");
+}
+
 /// Replace only a scheduler-terminal snapshot fence failure with Cook's normal
 /// retryable pre-execution record. A provider ledger entry is authoritative: it
 /// permanently fences this path from rewriting real provider failures.
@@ -137,7 +505,7 @@ fn record_pre_execution_failure_locked(
     let failed = task_count;
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
-    let candidate_adoption_recovery = candidate_adoption_recovery(phase);
+    let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
     let outcomes = plan
         .tasks
@@ -410,7 +778,7 @@ pub(crate) fn build_pre_execution_failure_outcome(
 ) -> AgentTaskOutcome {
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
-    let candidate_adoption_recovery = candidate_adoption_recovery(phase);
+    let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
     let diagnostic = AgentTaskDiagnostic {
         class: "pre_execution_failure".to_string(),
@@ -483,18 +851,22 @@ fn reported_error_code(error: &Error) -> &str {
         .unwrap_or_else(|| error.code.as_str())
 }
 
-fn candidate_adoption_recovery(phase: &str) -> Option<serde_json::Value> {
-    matches!(
+fn candidate_adoption_recovery(phase: &str, error: &Error) -> Option<serde_json::Value> {
+    let reason = if matches!(
         phase,
         "lab_handoff_preacceptance" | "transport_dispatcher_prepare"
-    )
-    .then(|| {
-        json!({
-            "schema": super::CANDIDATE_ADOPTION_RECOVERY_SCHEMA,
-            "reason": "pre_provider_transport_failure",
-            "provider_executions_consumed": 0,
-        })
-    })
+    ) {
+        "pre_provider_transport_failure"
+    } else if error.details["dirty_candidate_adoption"]["reason"] == "first_provider_admission" {
+        "dirty_destination_first_provider_admission"
+    } else {
+        return None;
+    };
+    Some(json!({
+        "schema": super::CANDIDATE_ADOPTION_RECOVERY_SCHEMA,
+        "reason": reason,
+        "provider_executions_consumed": 0,
+    }))
 }
 
 fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassification {
@@ -548,7 +920,7 @@ pub fn record_pre_dispatch_failure_in_store(
     failure: AgentTaskPreDispatchFailure<'_>,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(failure.identity.run_id);
-    if let Ok(record) = status_in_store(
+    if let Ok(record) = reconcile_status_in_store(
         lifecycle_store,
         &run_id,
         AgentTaskStatusOptions::default(),
@@ -1224,7 +1596,7 @@ pub(crate) fn terminal_provider_model_reconciliation_needed(
 /// The persist at the end is the whole point of taking a store: it is the only
 /// durable effect, so a reconciliation driven from injected roots must land its
 /// repaired model in the same installation the record and aggregate were read
-/// from. There is no ambient wrapper — `status_in_store` is the only caller,
+/// from. There is no ambient wrapper — `reconcile_status_in_store` is the only caller,
 /// and the store it hands down is the one its own caller injected.
 pub(crate) fn reconcile_terminal_provider_model_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -1474,7 +1846,42 @@ pub fn terminal_artifact_projection_readiness_bounded_in_store(
         &record,
         lifecycle_store.read_aggregate_bounded(&record.run_id),
         |record, aggregate| {
-            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
+        },
+    )
+}
+
+/// Read-only promotion-path counterpart that preserves execution's mirrored
+/// aggregate preference while avoiding observation-store initialization.
+pub fn terminal_artifact_projection_readiness_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let (record, aggregate) =
+        lifecycle_store.read_record_with_aggregate_bounded(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+        lifecycle_store,
+        &record,
+        aggregate.as_ref(),
+    )
+}
+
+pub fn terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Result<Option<String>> {
+    terminal_artifact_projection_readiness_for_record_with(
+        record,
+        aggregate
+            .cloned()
+            .ok_or_else(|| Error::internal_unexpected("authoritative aggregate mirror is absent")),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
         },
     )
 }
@@ -1531,8 +1938,12 @@ fn project_terminal_artifacts_in_store(
         AgentTaskRunState::Cancelled => "fail",
         _ => return Ok(()),
     };
-    let mut existing_metadata = store
-        .get_run(&record.run_id)?
+    let existing = store.get_run(&record.run_id)?;
+    let homeboy_version = existing
+        .as_ref()
+        .map(|run| run.homeboy_version.clone())
+        .unwrap_or_else(|| Some(homeboy_core::build_identity::current().version));
+    let mut existing_metadata = existing
         .map(|run| run.metadata_json)
         .unwrap_or_else(|| json!({ "agent_task_run": record.run_id }));
     if !existing_metadata.is_object() {
@@ -1551,7 +1962,7 @@ fn project_terminal_artifacts_in_store(
         status: status.to_string(),
         command: Some("homeboy agent-task".to_string()),
         cwd: None,
-        homeboy_version: Some(homeboy_core::build_identity::current().display),
+        homeboy_version,
         git_sha: None,
         rig_id: None,
         metadata_json: existing_metadata,
@@ -1958,6 +2369,53 @@ fn reusable_terminal_artifact(
     ))
 }
 
+/// Declared authority of one controller-side projection.
+///
+/// Terminal projection deliberately keeps a legacy import as evidence while the
+/// finalized record carries the derived controller identity, so both records can
+/// legitimately share a task and logical artifact id. Resolution therefore
+/// selects by declared authority rather than by discovery order.
+fn controller_projection_precedence(
+    record: &homeboy_core::observation::ArtifactRecord,
+) -> (u8, &str) {
+    let rank = match record
+        .metadata_json
+        .pointer("/agent_task/projection")
+        .and_then(Value::as_str)
+    {
+        Some("controller_finalized") => 0,
+        Some("controller_local") => 1,
+        Some("runner_mirrored") => 2,
+        _ => 3,
+    };
+    (rank, record.id.as_str())
+}
+
+/// Reduce equivalent controller projections of one logical artifact to the
+/// single authoritative record. Candidates that disagree on content identity
+/// are a real conflict and still fail closed, naming the records involved.
+fn select_controller_artifact_projection(
+    candidates: Vec<homeboy_core::observation::ArtifactRecord>,
+) -> std::result::Result<homeboy_core::observation::ArtifactRecord, Vec<String>> {
+    let identity = |record: &homeboy_core::observation::ArtifactRecord| {
+        (record.sha256.clone(), record.size_bytes)
+    };
+    if let Some(first) = candidates.first().map(&identity) {
+        if candidates.iter().any(|record| identity(record) != first) {
+            let mut conflicting: Vec<String> =
+                candidates.iter().map(|record| record.id.clone()).collect();
+            conflicting.sort();
+            return Err(conflicting);
+        }
+    }
+    candidates
+        .into_iter()
+        .min_by(|left, right| {
+            controller_projection_precedence(left).cmp(&controller_projection_precedence(right))
+        })
+        .ok_or_else(Vec::new)
+}
+
 fn controller_projection_artifact_id(artifact_id: &str) -> String {
     let mut controller_hash = sha2::Sha256::new();
     sha2::Digest::update(&mut controller_hash, b"controller");
@@ -2155,7 +2613,7 @@ pub fn verified_controller_artifact_projection_path_in_store(
     else {
         return Ok(None);
     };
-    let mut candidates: Vec<_> = store
+    let candidates: Vec<_> = store
         .list_artifacts(run_id)?
         .into_iter()
         .filter(|candidate| {
@@ -2186,18 +2644,18 @@ pub fn verified_controller_artifact_projection_path_in_store(
     if candidates.is_empty() {
         return Ok(None);
     }
-    if candidates.len() != 1 {
-        return Err(Error::validation_invalid_argument(
+    let mut candidate = select_controller_artifact_projection(candidates).map_err(|conflicting| {
+        Error::validation_invalid_argument(
             "artifact_id",
             format!(
-                "multiple controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{}'",
-                artifact.id
+                "conflicting controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{}': {}",
+                artifact.id,
+                conflicting.join(", ")
             ),
             Some(artifact.id.clone()),
             None,
-        ));
-    }
-    let mut candidate = candidates.pop().expect("one candidate checked above");
+        )
+    })?;
     let path = PathBuf::from(&candidate.path);
     let actual_size = std::fs::metadata(&path)
         .ok()
@@ -2229,13 +2687,15 @@ pub fn verified_controller_artifact_projection_path_in_store(
             None,
         ));
     }
-    if !matches!(
-        candidate
-            .metadata_json
-            .pointer("/agent_task/projection")
-            .and_then(serde_json::Value::as_str),
-        Some("controller_local" | "controller_finalized" | "runner_mirrored")
-    ) {
+    if !store.is_readonly()
+        && !matches!(
+            candidate
+                .metadata_json
+                .pointer("/agent_task/projection")
+                .and_then(serde_json::Value::as_str),
+            Some("controller_local" | "controller_finalized" | "runner_mirrored")
+        )
+    {
         candidate.metadata_json["agent_task"]["projection"] = json!("controller_local");
         store.update_artifact_metadata(&candidate.id, candidate.metadata_json)?;
     }
@@ -2296,17 +2756,25 @@ pub fn verified_controller_artifact_projection_in_store(
     if candidates.is_empty() {
         return Ok(None);
     }
-    if candidates.len() != 1 {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            format!(
-                "multiple controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}'"
-            ),
-            Some(logical_artifact_id.to_string()),
-            None,
-        ));
-    }
-    let candidate = &candidates[0];
+    // An explicitly pinned record stays authoritative; selection only resolves
+    // equivalent projections the caller has not already chosen between.
+    let selected = match expected_record_id
+        .and_then(|id| candidates.iter().position(|candidate| candidate.id == id))
+    {
+        Some(index) => candidates.into_iter().nth(index).expect("located candidate"),
+        None => select_controller_artifact_projection(candidates).map_err(|conflicting| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!(
+                    "conflicting controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': {}",
+                    conflicting.join(", ")
+                ),
+                Some(logical_artifact_id.to_string()),
+                None,
+            )
+        })?,
+    };
+    let candidate = &selected;
     if expected_record_id.is_some_and(|id| id != candidate.id) {
         return Err(Error::validation_invalid_argument(
             "gate_feedback_candidate_baseline",
@@ -2618,5 +3086,150 @@ mod tests {
         assert_ne!(left, right);
         assert_eq!(std::fs::read(left).unwrap(), b"left");
         assert_eq!(std::fs::read(right).unwrap(), b"right");
+    }
+
+    /// Register one logical artifact twice the way terminal projection does for
+    /// a Lab run: a legacy import stamped with the lifecycle identity, plus the
+    /// finalized controller projection that carries projection authority.
+    fn record_duplicate_projections(
+        store: &homeboy_core::observation::ObservationStore,
+        run_id: &str,
+        legacy_bytes: &[u8],
+        finalized_bytes: &[u8],
+    ) {
+        let root = store.artifact_root().expect("artifact root");
+        std::fs::create_dir_all(&root).expect("artifact root directory");
+        let legacy_path = root.join("legacy-transcript.txt");
+        let finalized_path = root.join("finalized-transcript.txt");
+        std::fs::write(&legacy_path, legacy_bytes).expect("legacy bytes");
+        std::fs::write(&finalized_path, finalized_bytes).expect("finalized bytes");
+        store
+            .record_verified_artifact_with_id(
+                run_id,
+                "transcript",
+                &legacy_path,
+                "agent-task-legacy",
+                Some(legacy_bytes.len() as i64),
+                Some(&format!("{:x}", sha2::Sha256::digest(legacy_bytes))),
+                json!({
+                    "agent_task": { "task_id": "task", "logical_artifact_id": "transcript" }
+                }),
+            )
+            .expect("legacy projection");
+        store
+            .record_verified_artifact_with_id(
+                run_id,
+                "transcript",
+                &finalized_path,
+                "agent-task-finalized",
+                Some(finalized_bytes.len() as i64),
+                Some(&format!("{:x}", sha2::Sha256::digest(finalized_bytes))),
+                json!({
+                    "agent_task": {
+                        "task_id": "task",
+                        "logical_artifact_id": "transcript",
+                        "projection": "controller_finalized",
+                    }
+                }),
+            )
+            .expect("finalized projection");
+    }
+
+    fn transcript_artifact(bytes: &[u8]) -> AgentTaskArtifact {
+        let mut artifact = artifact("transcript", "transcript", None);
+        artifact.size_bytes = Some(bytes.len() as u64);
+        artifact.sha256 = Some(format!("{:x}", sha2::Sha256::digest(bytes)));
+        artifact
+    }
+
+    #[test]
+    fn equivalent_duplicate_projections_resolve_to_the_finalized_record() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let run = store
+                .start_run(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            let bytes = b"transcript bytes";
+            record_duplicate_projections(&store, &run.id, bytes, bytes);
+
+            // A Lab run legitimately retains its legacy import alongside the
+            // finalized projection, so this must resolve rather than abort the
+            // owning Cook (#14164).
+            let resolved = verified_controller_artifact_projection_path_in_store(
+                &store,
+                &run.id,
+                "task",
+                &transcript_artifact(bytes),
+            )
+            .expect("equivalent duplicates resolve")
+            .expect("a controller projection is available");
+
+            // Projection authority, not discovery order, selects the record.
+            assert!(
+                resolved
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains("agent-task-finalized")),
+                "expected the finalized projection, got {}",
+                resolved.display()
+            );
+            assert_eq!(std::fs::read(&resolved).expect("resolved bytes"), bytes);
+
+            let (_, bytes_read) = verified_controller_artifact_projection_in_store(
+                &store,
+                &run.id,
+                "task",
+                "transcript",
+                "transcript",
+                &format!("{:x}", sha2::Sha256::digest(bytes)),
+                None,
+            )
+            .expect("equivalent duplicates resolve for byte reads")
+            .expect("a controller projection is available");
+
+            assert_eq!(bytes_read, bytes);
+        });
+    }
+
+    #[test]
+    fn conflicting_duplicate_projections_still_fail_closed() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let run = store
+                .start_run(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            let bytes = b"transcript bytes";
+            record_duplicate_projections(&store, &run.id, b"different transcript", bytes);
+
+            let error = verified_controller_artifact_projection_path_in_store(
+                &store,
+                &run.id,
+                "task",
+                &transcript_artifact(bytes),
+            )
+            .expect_err("projections that disagree on content must fail closed");
+
+            assert!(
+                error.message.contains("conflicting"),
+                "got {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("agent-task-finalized")
+                    && error.message.contains("agent-task-legacy"),
+                "the conflicting records must be named: {}",
+                error.message
+            );
+        });
     }
 }

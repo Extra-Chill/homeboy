@@ -926,7 +926,7 @@ fn lab_preparation_does_not_offer_an_unavailable_reconciliation_plan() {
     freshness.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
     freshness.repair_plan = vec![DaemonRepairStep::text(
         "runner_reconcile_leaseless_orphans",
-        "homeboy runner connect lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+        "homeboy runner connect lab --reconcile-leaseless-orphans",
     )];
 
     let error = prepare_lab_runner_for_offload_with(

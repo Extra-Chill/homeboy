@@ -310,7 +310,7 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     }))
     .expect("register controller driver once");
     let request = serde_json::json!({
-        "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "request": { "schema": "test/v1", "private_input": "not-public" }
+        "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
     });
 
     // Admission is phase one: it is durable but cannot execute until start.
@@ -355,9 +355,20 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
         "not-public"
     ));
 
-    // No submitting-client state is retained: replay returns one daemon job and never executes twice.
-    let duplicate = route_with_body("POST", "/controller/jobs", Some(request), &store);
+    // A retry has a new one-shot key but coalesces with matching active work.
+    let duplicate = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-retry", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
+        })),
+        &store,
+    );
     assert_eq!(duplicate.body["body"]["job"]["id"], job_id.to_string());
+    assert_eq!(
+        duplicate.body["body"]["submission"]["disposition"],
+        "reused"
+    );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     let conflict = route_with_body(
         "POST",
@@ -382,6 +393,19 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     wait_for(
         "store.get(job_id).expect( first job ).status.is_terminal()",
         || store.get(job_id).expect("first job").status.is_terminal(),
+    );
+    let successor = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-successor", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
+        })),
+        &store,
+    );
+    assert_ne!(successor.body["body"]["job"]["id"], job_id.to_string());
+    assert_eq!(
+        successor.body["body"]["submission"]["disposition"],
+        "created"
     );
 
     let cancelled = route_with_body(
@@ -1899,7 +1923,7 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
     );
     assert_eq!(
         status.freshness.adoption_command.as_deref(),
-        Some("homeboy daemon adopt-orphan --lease-id test-lease --confirm-pid-dead")
+        Some("homeboy daemon adopt-orphan --lease-id test-lease")
     );
 }
 
@@ -2766,6 +2790,7 @@ fn routes_read_only_http_api_contract() {
     assert_eq!(findings.body["error"], "validation.invalid_argument");
 }
 
+#[cfg(unix)]
 #[test]
 fn cancelling_daemon_exec_job_terminates_process_tree() {
     super::tests::register_enqueue_test_driver();
@@ -2774,6 +2799,10 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
     let cwd = std::env::temp_dir().join(format!("homeboy-daemon-cancel-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).expect("test cwd");
     let marker = cwd.join("orphan-marker");
+    let child_pid_file = cwd.join("child.pid");
+    let child_pid_path =
+        homeboy_engine_primitives::shell::quote_path(&child_pid_file.display().to_string());
+    let marker_path = homeboy_engine_primitives::shell::quote_path(&marker.display().to_string());
 
     let response = route_with_job_store_and_body(
         "POST",
@@ -2782,9 +2811,8 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
             "runner_id": "lab-local",
             "cwd": cwd.display().to_string(),
             "command": [
-                "sh",
-                "-c",
-                format!("sleep 1; touch {}", marker.display()),
+                "__homeboy_test_process_tree__",
+                format!("sleep 30 & echo $! > {child_pid_path}; wait; touch {marker_path}"),
             ],
         })),
         &store,
@@ -2798,10 +2826,18 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         "store.get(job_id).expect( job ).status == JobStatus::Running",
         || store.get(job_id).expect("job").status == JobStatus::Running,
     );
+    wait_for("daemon exec child pid file", || child_pid_file.exists());
+    let child_pid = std::fs::read_to_string(&child_pid_file)
+        .expect("child pid fixture")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric child pid");
     store
         .cancel(job_id, "test cancellation")
         .expect("cancel job");
-    std::thread::sleep(std::time::Duration::from_millis(1600));
+    wait_for("cancelled daemon exec child to exit", || {
+        !crate::process::pid_is_running(child_pid)
+    });
 
     assert_eq!(store.get(job_id).expect("job").status, JobStatus::Cancelled);
     assert!(
@@ -3112,7 +3148,6 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission_fence() {
     let _home = HomeGuard::new();
@@ -3152,6 +3187,75 @@ fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission
         .expect("submission resumes after reconciliation");
     assert_eq!(response.status_code, 200);
     assert_eq!(store.list().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admission() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let (started_tx, _started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.parallel-build-admission",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: release_tx,
+        executions: Arc::new(AtomicUsize::new(0)),
+        cancellations: Arc::new(AtomicUsize::new(0)),
+    }))
+    .expect("register parallel-build controller driver");
+
+    // This is the guard retained by LocalControllerJobClient after it has
+    // verified the resident build but before it posts the Cook job.
+    let preflight_guard =
+        super::acquire_daemon_admission_lock(super::DaemonAdmissionLockMode::Shared)
+            .expect("Cook preflight acquires shared generation guard");
+    let (recovery_attempt_tx, recovery_attempt_rx) = mpsc::channel();
+    let (recovery_acquired_tx, recovery_acquired_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        recovery_attempt_tx
+            .send(())
+            .expect("report recovery attempt");
+        let fence = super::acquire_daemon_job_admission_fence()
+            .expect("parallel build acquires recovery fence");
+        recovery_acquired_tx
+            .send(())
+            .expect("report recovery fence");
+        drop(fence);
+    });
+    recovery_attempt_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("parallel build attempts recovery");
+    assert!(
+        recovery_acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "a sibling build must not replace the preflighted generation"
+    );
+
+    let admitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.parallel-build-admission",
+            "version": 1,
+            "idempotency_key": "parallel-cook",
+            "request": {}
+        })),
+        &store,
+    );
+    assert_eq!(admitted.status_code, 200);
+    assert_eq!(
+        store.list().len(),
+        1,
+        "Cook admission is durable before recovery"
+    );
+
+    drop(preflight_guard);
+    recovery_acquired_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("recovery can proceed after Cook admission");
 }
 
 #[test]

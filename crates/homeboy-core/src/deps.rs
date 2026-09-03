@@ -107,7 +107,7 @@ pub struct DependencyHydrationOutcome {
     pub provider_id: String,
     pub command: Vec<String>,
     pub reason: String,
-    pub duration_ms: u128,
+    pub duration_ms: u64,
     pub termination: DependencyHydrationTermination,
     pub status: DependencyHydrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -418,7 +418,7 @@ fn hydration_outcome(
         provider_id,
         command,
         reason: crate::redaction::redact_string(&reason),
-        duration_ms: duration.as_millis(),
+        duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         termination,
         status,
         exit_code,
@@ -648,6 +648,11 @@ pub struct DependencyInstallPlanStep {
     /// Portable install invocation the runner can execute without receiving a
     /// controller-local extension path.
     pub invocation: DependencyInstallInvocation,
+    /// Provider command root relative to the workspace passed to
+    /// [`dependency_install_plan`]. Consumers materialize this same relative
+    /// root on another machine before running the command or checking outputs.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub workspace_relative_root: String,
     /// Filesystem outputs that prove this provider's install/build preparation
     /// is present in a materialized workspace.
     pub outputs: Vec<DependencyInstallOutput>,
@@ -685,8 +690,8 @@ pub enum DependencyInstallInvocation {
     },
 }
 
-/// Detect dependency providers for a workspace path and return the install
-/// command each would run, without executing any of them.
+/// Detect dependency providers for a source path and return the install command
+/// each would run, without executing any of them.
 ///
 /// Reuses [`provider::resolve_dependency_providers_optional`] (the detection
 /// behind `homeboy deps install`) so a manifest detected by an existing provider
@@ -694,21 +699,23 @@ pub enum DependencyInstallInvocation {
 /// provide dependency support is equivalent to no provider for this optional
 /// planning surface; invalid explicit capability ownership still fails.
 /// Providers whose install cannot be expressed as a standalone shell command
-/// (component-script/extension providers) are omitted. Returns an empty vector
-/// when no provider detects the workspace.
+/// (component-script providers) are omitted. Returns an empty vector when no
+/// provider detects the workspace.
 ///
 /// The lockfile/manifest files are part of the synced snapshot (only built
 /// dependency trees like `vendor/`/`node_modules/` are excluded), so detecting
 /// against the controller-side source path yields the same providers the
-/// materialized runner workspace exposes.
+/// materialized runner workspace exposes. Each provider root is recorded
+/// relative to the source Git repository root, which the runner materializes.
 pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanStep>> {
+    let workspace = dependency_install_workspace_root(path)?;
     let (component, resolved_path) =
         resolve_component_path(None, Some(&path.display().to_string()))?;
     let providers =
         match provider::resolve_dependency_providers_optional(&component, &resolved_path) {
             Ok(providers) => providers,
             Err(error) => {
-                if !crate::extension_execution::has_linked_extension_for_capability(
+                if !crate::extension::resolve::has_linked_extension_for_capability(
                     &component,
                     homeboy_extension_contract::ExtensionCapability::Deps,
                 )? {
@@ -720,16 +727,124 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
         };
     let mut steps = Vec::new();
     for provider in providers {
-        let status = provider.status(&component, &resolved_path, None)?;
-        if let Some(command) = provider.install_command(&component, &resolved_path)? {
+        if let Some(plan) = provider.hydration_plan(&component, &resolved_path)? {
             steps.push(DependencyInstallPlanStep {
-                provider_id: status.package_manager,
-                invocation: dependency_install_invocation(command.argv())?,
-                outputs: provider.install_outputs()?,
+                provider_id: plan.provider_id,
+                invocation: dependency_install_invocation(plan.install.argv())?,
+                workspace_relative_root: dependency_workspace_relative_root(
+                    &workspace,
+                    &plan.install.cwd,
+                )?,
+                outputs: plan.outputs,
             });
         }
     }
     Ok(steps)
+}
+
+/// Return the repository root materialized by a runner for a source path.
+/// Standalone, non-Git callers use the supplied path as their workspace.
+pub fn dependency_install_workspace_root(path: &Path) -> Result<PathBuf> {
+    let workspace = crate::git::get_git_root(&path.display().to_string())
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| path.to_path_buf());
+    workspace.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "canonicalize dependency workspace {}",
+                workspace.display()
+            )),
+        )
+    })
+}
+
+/// Resolve a provider plan step's declared root within a workspace. The plan is
+/// allowed to address only its workspace or a normal child path; callers must
+/// not turn a controller-provided root into an out-of-workspace runner cwd.
+pub fn dependency_install_step_workspace_root(
+    workspace: &Path,
+    step: &DependencyInstallPlanStep,
+) -> Result<PathBuf> {
+    let root = Path::new(&step.workspace_relative_root);
+    if root.is_absolute()
+        || root.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "dependency_install_plan.workspace_relative_root",
+            "dependency install plan root must be relative to its workspace without traversal",
+            Some(step.workspace_relative_root.clone()),
+            None,
+        ));
+    }
+    Ok(workspace.join(root))
+}
+
+/// Resolve a declared provider output within its validated workspace root.
+pub fn dependency_install_step_output_path(
+    workspace: &Path,
+    step: &DependencyInstallPlanStep,
+    output: &DependencyInstallOutput,
+) -> Result<PathBuf> {
+    let path = Path::new(&output.path);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "dependency_install_plan.outputs.path",
+            "dependency install output must be relative to its provider root without traversal",
+            Some(output.path.clone()),
+            None,
+        ));
+    }
+    Ok(dependency_install_step_workspace_root(workspace, step)?.join(path))
+}
+
+fn dependency_workspace_relative_root(workspace: &Path, root: &Path) -> Result<String> {
+    let workspace = workspace.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "canonicalize dependency workspace {}",
+                workspace.display()
+            )),
+        )
+    })?;
+    let root = root.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "canonicalize dependency provider root {}",
+                root.display()
+            )),
+        )
+    })?;
+    let relative = root.strip_prefix(&workspace).map_err(|_| {
+        Error::validation_invalid_argument(
+            "dependency_install_plan.workspace_relative_root",
+            "dependency provider root must remain inside the workspace",
+            Some(root.display().to_string()),
+            None,
+        )
+    })?;
+    let step = DependencyInstallPlanStep {
+        provider_id: String::new(),
+        invocation: DependencyInstallInvocation::Argv { argv: Vec::new() },
+        workspace_relative_root: relative.display().to_string(),
+        outputs: Vec::new(),
+    };
+    dependency_install_step_workspace_root(&workspace, &step)?;
+    Ok(step.workspace_relative_root)
 }
 
 fn dependency_install_invocation(argv: Vec<String>) -> Result<DependencyInstallInvocation> {
@@ -743,7 +858,7 @@ fn dependency_install_invocation(argv: Vec<String>) -> Result<DependencyInstallI
             ));
         }
     }
-    for extension in crate::extension_store::load_all_extensions()? {
+    for extension in crate::extension::catalog::load_all_extensions()? {
         let Some(root) = extension.extension_path else {
             continue;
         };
@@ -924,6 +1039,55 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
+    fn write_builtin_dependency_adapters(home: &Path) {
+        let root = home.join(".config/homeboy/extensions/dependency-adapters");
+        std::fs::create_dir_all(root.join("examples")).expect("adapter directory");
+        std::fs::write(
+            root.join("index.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-index/v1",
+                "manifests":[
+                    {"id":"nodejs-package-managers","ecosystem":"nodejs","path":"examples/nodejs.json"},
+                    {"id":"composer-package-manager","ecosystem":"php","path":"examples/composer.json"}
+                ]
+            }"#,
+        )
+        .expect("adapter index");
+        std::fs::write(
+            root.join("examples/nodejs.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                "id":"nodejs-package-managers",
+                "version":1,
+                "ecosystem":"nodejs",
+                "project_signals":{"root_files":["package.json"]},
+                "package_managers":[
+                    {"id":"pnpm","selection":{"priority":1,"files":["pnpm-lock.yaml"]},"commands":{"install":{"command":"pnpm install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"yarn","selection":{"priority":2,"files":["yarn.lock"]},"commands":{"install":{"command":"yarn install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"npm","selection":{"priority":3,"files":["package-lock.json"],"default":true},"commands":{"install":{"command":"npm ci"}},"outputs":[{"path":"node_modules","kind":"directory"}]}
+                ]
+            }"#,
+        )
+        .expect("node adapter");
+        std::fs::write(
+            root.join("examples/composer.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                "id":"composer-package-manager",
+                "version":1,
+                "ecosystem":"php",
+                "project_signals":{"root_files":["composer.json"]},
+                "package_managers":[{
+                    "id":"composer",
+                    "selection":{"priority":1,"default":true},
+                    "commands":{"install":{"command":"composer install"}},
+                    "outputs":[{"path":"vendor","kind":"directory"},{"path":"vendor/autoload.php","kind":"file"}]
+                }]
+            }"#,
+        )
+        .expect("composer adapter");
+    }
+
     #[test]
     fn extension_owned_install_path_becomes_portable_invocation() {
         crate::test_support::with_isolated_home(|home| {
@@ -1012,6 +1176,118 @@ mod tests {
 
             assert!(plan.is_empty());
         });
+    }
+
+    #[test]
+    fn detected_builtin_adapters_declare_deterministic_outputs() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+
+            for (manager, lockfile) in [
+                ("pnpm", "pnpm-lock.yaml"),
+                ("yarn", "yarn.lock"),
+                ("npm", "package-lock.json"),
+            ] {
+                let project = tempfile::tempdir().expect("node project");
+                std::fs::write(project.path().join("package.json"), "{}").expect("package");
+                std::fs::write(project.path().join(lockfile), "").expect("lockfile");
+
+                let plan = dependency_install_plan(project.path()).expect("detected node plan");
+
+                assert_eq!(plan.len(), 1);
+                assert_eq!(plan[0].provider_id, manager);
+                assert_eq!(
+                    plan[0].outputs,
+                    vec![DependencyInstallOutput {
+                        path: "node_modules".to_string(),
+                        kind: DependencyInstallOutputKind::Directory,
+                    }]
+                );
+            }
+
+            let project = tempfile::tempdir().expect("composer project");
+            std::fs::write(project.path().join("composer.json"), "{}").expect("manifest");
+            let plan = dependency_install_plan(project.path()).expect("detected composer plan");
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].provider_id, "composer");
+            assert_eq!(
+                plan[0].outputs,
+                vec![
+                    DependencyInstallOutput {
+                        path: "vendor".to_string(),
+                        kind: DependencyInstallOutputKind::Directory,
+                    },
+                    DependencyInstallOutput {
+                        path: "vendor/autoload.php".to_string(),
+                        kind: DependencyInstallOutputKind::File,
+                    },
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_install_plan_preserves_nested_component_root() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+            let repository = tempfile::tempdir().expect("repository");
+            crate::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+            let component = repository.path().join("php-transformer");
+            std::fs::create_dir_all(&component).expect("nested component");
+            std::fs::write(component.join("composer.json"), "{}").expect("composer manifest");
+            let plan = dependency_install_plan(&component).expect("composer plan");
+
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].provider_id, "composer");
+            assert_eq!(plan[0].workspace_relative_root, "php-transformer");
+        });
+    }
+
+    #[test]
+    fn dependency_install_plan_uses_empty_root_for_repository_workspace() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+            let repository = tempfile::tempdir().expect("repository");
+            crate::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+            std::fs::write(repository.path().join("composer.json"), "{}")
+                .expect("composer manifest");
+
+            let plan = dependency_install_plan(repository.path()).expect("composer plan");
+
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].provider_id, "composer");
+            assert_eq!(plan[0].workspace_relative_root, "");
+        });
+    }
+
+    #[test]
+    fn dependency_install_plan_rejects_traversal_roots() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let step = DependencyInstallPlanStep {
+            provider_id: "fixture".to_string(),
+            invocation: DependencyInstallInvocation::Argv { argv: Vec::new() },
+            workspace_relative_root: "../outside".to_string(),
+            outputs: Vec::new(),
+        };
+
+        assert!(dependency_install_step_workspace_root(workspace.path(), &step).is_err());
+    }
+
+    #[test]
+    fn dependency_install_plan_rejects_traversal_outputs() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let step = DependencyInstallPlanStep {
+            provider_id: "fixture".to_string(),
+            invocation: DependencyInstallInvocation::Argv { argv: Vec::new() },
+            workspace_relative_root: String::new(),
+            outputs: Vec::new(),
+        };
+        let output = DependencyInstallOutput {
+            path: "../outside".to_string(),
+            kind: DependencyInstallOutputKind::Directory,
+        };
+
+        assert!(dependency_install_step_output_path(workspace.path(), &step, &output).is_err());
     }
 
     fn hydration_policy(

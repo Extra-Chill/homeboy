@@ -5,6 +5,15 @@ use super::cook::{
     PROVIDER_EVIDENCE_DECLARATION,
 };
 
+pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
+
+const VERIFICATION_PROFILES_HELP: &str = r#"JSON verification profile declaration, inline or @file.json.
+
+Profiles select one typed `plan`; shared `--verify` and `--private-verify` remain explicit shell escape hatches. Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector.
+
+Complete example:
+  {"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
+
 #[derive(Args, Debug)]
 pub struct AgentTaskFanoutArgs {
     #[command(subcommand)]
@@ -63,12 +72,15 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// issues; every URL must be unique and resolve through the tracker.
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
-    /// Registered repository slug or exact registered primary checkout path.
+    /// Registered repository/component slug or exact registered primary checkout path.
     ///
-    /// A primary path resolves to its slug before child planning. Use a repo
-    /// slug for worktree handles and other workspace paths.
+    /// Component identities and aliases resolve to their canonical owning
+    /// repository before child planning and worktree handoff.
     #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
     pub repo: String,
+    /// Controller-resolved component selector retained across replay.
+    #[arg(long = "component", value_name = "COMPONENT_ID", hide = true)]
+    pub component: Option<String>,
     /// Source ref used to create every child worktree. When omitted, this is
     /// inferred from the repository default branch. An explicit value wins and
     /// must resolve to the same commit as --base.
@@ -141,9 +153,11 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub ai_tool: Option<String>,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
-    /// JSON verification profile declaration, inline or @file.json. Profiles
-    /// append to or replace shared --verify/--private-verify gates per issue.
-    #[arg(long = "verification-profiles", value_name = "JSON")]
+    #[arg(
+        long = "verification-profiles",
+        value_name = "JSON",
+        help = VERIFICATION_PROFILES_HELP
+    )]
     pub verification_profiles: Option<String>,
     /// Maximum number of child cooks to run at once.
     ///
@@ -173,10 +187,11 @@ pub struct AgentTaskFanoutCookBatchArgs {
         value_name = "SECONDS"
     )]
     pub max_duration: Option<u64>,
-    /// Resolve and validate the batch without side effects: no repository
-    /// hydration, provider dispatch, worktree creation, or file reads. Prints
-    /// the static plan, worktree projection, preflight, and a replayable
-    /// command — the batch-wide counterpart of `agent-task cook --preview`.
+    /// Resolve and validate the batch without repository hydration, provider
+    /// dispatch, or worktree creation. Runs the selected provider's bounded
+    /// readiness admission, then prints the static plan, worktree projection,
+    /// preflight, and a replayable command — the batch-wide counterpart of
+    /// `agent-task cook --preview`.
     /// `--dry-run` is accepted as the historical spelling of this flag.
     #[arg(long = "preview", alias = "dry-run")]
     pub preview: bool,
@@ -311,6 +326,8 @@ impl AgentTaskFanoutPlanArgs {
         AgentTaskFanoutCookBatchArgs {
             issues: self.issues,
             repo: self.repo.unwrap_or_default(),
+            // `fanout plan` does not expose component selection.
+            component: None,
             from: self.from,
             base: self.base,
             base_resolution: None,

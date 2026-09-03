@@ -239,7 +239,7 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                crate::extension_store::load_extension(extension_id)
+                crate::extension::catalog::load_extension(extension_id)
                     .ok()
                     .is_some_and(|m| m.has_build())
             })
@@ -336,7 +336,7 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
 }
 
 fn extension_suggestions_for_path(local_path: &Path) -> Vec<String> {
-    crate::extension_store::load_all_extensions()
+    crate::extension::catalog::load_all_extensions()
         .map(|extensions| extension_suggestions_from_manifests(local_path, &extensions))
         .unwrap_or_default()
 }
@@ -453,7 +453,7 @@ pub fn resolve_project_ssh_with_base_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{with_isolated_home, write_component_registration};
 
     fn manifest(id: &str, markers: serde_json::Value) -> ExtensionManifest {
         let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
@@ -509,20 +509,6 @@ mod tests {
         );
 
         assert_eq!(suggestions, vec!["node-like", "typescript-like"]);
-    }
-
-    fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
-        let dir = home.join(".config/homeboy/components");
-        std::fs::create_dir_all(&dir).expect("components dir");
-        std::fs::write(
-            dir.join(format!("{id}.json")),
-            serde_json::json!({
-                "local_path": local_path,
-                "remote_path": format!("wp-content/plugins/{id}")
-            })
-            .to_string(),
-        )
-        .expect("component registration");
     }
 
     fn write_project(home: &Path, id: &str, component_ids: &[&str]) {

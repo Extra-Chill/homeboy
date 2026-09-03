@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use crate::lab_contract::LabRunnerWorkload;
 use crate::secret_env_plan::SecretEnvPlan;
-use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
+use homeboy_runner_contract::RunnerCapabilityPreflight;
 
 use crate::error::Result;
 

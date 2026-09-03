@@ -7,8 +7,8 @@ use serde::Serialize;
 use super::expand::expand_vars;
 use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
 use super::spec::{ExecutableRequirementSpec, FilesystemAssertionSpec, RigSpec};
-use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
-use homeboy_lab_runner_contract::RunnerToolCapabilityRequirement;
+use homeboy_runner_contract::RunnerCapabilityPreflight;
+use homeboy_runner_contract::RunnerToolCapabilityRequirement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[allow(
@@ -74,11 +74,7 @@ pub(crate) fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by the rig test suite"
-)]
-pub(crate) fn runner_capability_preflight(
+pub fn runner_capability_preflight(
     rig: &RigSpec,
     command: &str,
 ) -> Option<RunnerCapabilityPreflight> {

@@ -313,7 +313,7 @@ fn hydrate_homeboy_evidence_ref(
         }
         "logs" => serde_json::to_value(super::logs(run_id)?)
             .unwrap_or_else(|_| json!({ "summary": "logs could not be serialized" })),
-        "status" => serde_json::to_value(super::status(run_id)?)
+        "status" => serde_json::to_value(super::control_plane_run(run_id)?)
             .unwrap_or_else(|_| json!({ "summary": "status could not be serialized" })),
         "gates" => {
             let gate_id = parsed.gate.as_deref().ok_or_else(|| {
@@ -324,7 +324,7 @@ fn hydrate_homeboy_evidence_ref(
                     None,
                 )
             })?;
-            let record = super::status(run_id)?;
+            let record = crate::agent_task_lifecycle::status(run_id)?;
             let promotion = record
                 .metadata
                 .get("latest_promotion")

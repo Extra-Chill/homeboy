@@ -9,7 +9,8 @@ use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use homeboy_core::server::{
-    self, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout, SshClient,
+    self, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout, CommandOutput,
+    SshClient,
 };
 
 use super::runner_probe_gate::{deduplicated_probe, deduplicated_probe_until};
@@ -23,12 +24,12 @@ pub(crate) const RUNNER_CAPABILITY_PROBE: &str = "runner_capability_batch";
 // data. Re-exported so internal/CLI call sites resolve unchanged. The
 // `From<LabRunnerGateDecision> for HomeboyGateResult` impl stays in core below
 // (orphan rule: HomeboyGateResult is core-owned).
-pub use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
+pub use homeboy_runner_contract::RunnerCapabilityPreflight;
 
 // RunnerToolCapabilityRequirement now lives in the shared runner-contract crate
 // (behavior-free data). Re-exported so existing call sites resolve unchanged.
-pub use homeboy_lab_runner_contract::RunnerToolCapabilityRequirement;
-pub use homeboy_lab_runner_contract::RunnerToolchainReadinessProbe;
+pub use homeboy_runner_contract::RunnerToolCapabilityRequirement;
+pub use homeboy_runner_contract::RunnerToolchainReadinessProbe;
 
 pub use homeboy_lab_runner_contract::{
     LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
@@ -37,7 +38,7 @@ pub use homeboy_lab_runner_contract::{
 
 // RunnerRequiredTool (data + pure constructors) now lives in the shared
 // runner-contract crate. Re-exported so existing call sites resolve unchanged.
-pub use homeboy_lab_runner_contract::RunnerRequiredTool;
+pub use homeboy_runner_contract::RunnerRequiredTool;
 
 /// Remediation text for a required tool. Lives in core (not on the contract
 /// type) because it consults core's runner tool registry — an inherent method
@@ -136,8 +137,14 @@ pub(crate) fn validate_runner_capability_preflight(
         .filter(|command| !capabilities.has_command(command))
         .cloned()
         .collect::<Vec<_>>();
-    let missing_tool_capabilities = preflight
+    let missing_tool_requirements = preflight
         .required_tool_capabilities
+        .iter()
+        .filter(|requirement| {
+            missing_tool_capability(requirement, capabilities, request_env).is_some()
+        })
+        .collect::<Vec<_>>();
+    let missing_tool_capabilities = missing_tool_requirements
         .iter()
         .filter_map(|requirement| missing_tool_capability(requirement, capabilities, request_env))
         .collect::<Vec<_>>();
@@ -245,7 +252,7 @@ pub(crate) fn validate_runner_capability_preflight(
             .to_string(),
     );
 
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "runner_capabilities",
         format!(
             "Runner '{runner_id}' is missing required capability parity for `{command}`: {}.",
@@ -253,7 +260,44 @@ pub(crate) fn validate_runner_capability_preflight(
         ),
         Some(runner_id.to_string()),
         Some(remediation),
-    ))
+    );
+    error.details["runner_capability_failure"] = serde_json::json!({
+        "schema": "homeboy/runner-capability-failure/v1",
+        "runner_id": runner_id,
+        "command": command,
+        "predicates": missing_tools.iter().filter_map(|tool| {
+            capabilities.tool_probe_evidence.get(tool).map(|evidence| serde_json::json!({
+                "kind": "runner_tool",
+                "tool": tool.id(),
+                "command": evidence.command,
+                "exit_status": evidence.exit_status,
+                "output": evidence.output,
+                "satisfied": false,
+            }))
+        }).chain(missing_tool_requirements.iter().map(|requirement| serde_json::json!({
+            "kind": "runner_tool_capability",
+            "tool": requirement.tool,
+            "command": requirement.command,
+            "env": requirement.env,
+            "capabilities": requirement.capabilities,
+            "satisfied": false,
+        }))).chain(failed_toolchain_probes.iter().map(|failure| serde_json::json!({
+            "kind": "extension_toolchain_readiness",
+            "id": failure.split(':').next().unwrap_or(failure),
+            "detail": failure,
+            "satisfied": false,
+        }))).collect::<Vec<_>>(),
+        "recovery_actions": preflight.required_toolchain_probes.iter().filter(|probe| {
+            failed_toolchain_probes.iter().any(|failed| failed.starts_with(&format!("{}:", probe.id)))
+        }).filter_map(|probe| probe.repair_command.as_ref().map(|command| serde_json::json!({
+            "schema": "homeboy/runner-readiness-recovery-action/v1",
+            "kind": "extension_setup",
+            "extension_id": probe.extension_id,
+            "restores_predicate": probe.id,
+            "command": command,
+        }))).collect::<Vec<_>>(),
+    });
+    Err(error)
 }
 
 /// Run arbitrary extension-owned readiness probes during controller admission,
@@ -272,6 +316,7 @@ pub(crate) fn preflight_runner_toolchain_readiness(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RunnerCapabilitySnapshot {
     tools: BTreeSet<RunnerRequiredTool>,
+    tool_probe_evidence: BTreeMap<RunnerRequiredTool, RunnerToolProbeEvidence>,
     commands: BTreeSet<String>,
     tool_capabilities: BTreeSet<String>,
     failed_toolchain_probes: HashMap<String, String>,
@@ -392,6 +437,7 @@ impl RunnerCapabilitySnapshot {
             let probe = Self::local_batch_probe(runner, preflight)?;
             return Ok(Self {
                 tools: probe.tools,
+                tool_probe_evidence: probe.tool_probe_evidence,
                 commands: probe.commands,
                 tool_capabilities: probe.tool_capabilities,
                 failed_toolchain_probes: probe.failed_toolchain_probes,
@@ -404,6 +450,7 @@ impl RunnerCapabilitySnapshot {
 
         Ok(Self {
             tools: probe.tools,
+            tool_probe_evidence: probe.tool_probe_evidence,
             commands: probe.commands,
             tool_capabilities: probe.tool_capabilities,
             failed_toolchain_probes: probe.failed_toolchain_probes,
@@ -439,23 +486,11 @@ impl RunnerCapabilitySnapshot {
         client: &SshClient,
         preflight: &RunnerCapabilityPreflight,
     ) -> Result<RunnerCapabilityProbeResult> {
-        let tool_commands = RunnerToolRegistry::required_tools(runner, preflight)
-            .into_iter()
-            .map(|tool| {
-                let command = if tool.id() == "homeboy" {
-                    effective_homeboy_command(runner, "runner capability preflight")?
-                } else {
-                    RunnerToolRegistry::spec_for_required_tool(&tool)
-                        .map(|spec| spec.command)
-                        .unwrap_or_else(|| tool.id().to_string())
-                };
-                Ok((tool, command))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let tool_probes = runner_tool_probes(runner, preflight)?;
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
         let script = batch_probe_script(
-            &tool_commands,
+            &tool_probes,
             &command_names,
             &capability_probes,
             &preflight.required_toolchain_probes,
@@ -489,13 +524,15 @@ impl RunnerCapabilitySnapshot {
                     }),
                 ));
             }
-            Ok(parse_batch_probe_output(
-                &output.stdout,
-                &tool_commands,
+            parse_batch_probe_output(
+                runner,
+                &script,
+                &output,
+                &tool_probes,
                 &command_names,
                 &capability_probes,
                 &preflight.required_toolchain_probes,
-            ))
+            )
         };
         match preflight.timeout {
             Some(timeout) => deduplicated_probe_until(
@@ -513,23 +550,11 @@ impl RunnerCapabilitySnapshot {
         runner: &Runner,
         preflight: &RunnerCapabilityPreflight,
     ) -> Result<RunnerCapabilityProbeResult> {
-        let tool_commands = RunnerToolRegistry::required_tools(runner, preflight)
-            .into_iter()
-            .map(|tool| {
-                let command = if tool.id() == "homeboy" {
-                    effective_homeboy_command(runner, "runner capability preflight")?
-                } else {
-                    RunnerToolRegistry::spec_for_required_tool(&tool)
-                        .map(|spec| spec.command)
-                        .unwrap_or_else(|| tool.id().to_string())
-                };
-                Ok((tool, command))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let tool_probes = runner_tool_probes(runner, preflight)?;
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
         let script = batch_probe_script(
-            &tool_commands,
+            &tool_probes,
             &command_names,
             &capability_probes,
             &preflight.required_toolchain_probes,
@@ -545,14 +570,15 @@ impl RunnerCapabilitySnapshot {
                 execute_local_command_in_dir_with_timeout(&script, None, Some(&env), timeout)
             })
             .unwrap_or_else(|| execute_local_command_in_dir(&script, None, Some(&env)));
-        let stdout = output.stdout;
-        Ok(parse_batch_probe_output(
-            &stdout,
-            &tool_commands,
+        parse_batch_probe_output(
+            runner,
+            &script,
+            &output,
+            &tool_probes,
             &command_names,
             &capability_probes,
             &preflight.required_toolchain_probes,
-        ))
+        )
     }
 
     fn ssh_client_for_runner(runner: &Runner) -> Result<SshClient> {
@@ -582,14 +608,55 @@ fn effective_homeboy_command(runner: &Runner, context: &str) -> Result<String> {
         .unwrap_or_else(|| remote_runner_homeboy_path(runner, context).map(str::to_string))
 }
 
+fn runner_tool_probes(
+    runner: &Runner,
+    preflight: &RunnerCapabilityPreflight,
+) -> Result<Vec<RunnerToolProbe>> {
+    RunnerToolRegistry::required_tools(runner, preflight)
+        .into_iter()
+        .map(|tool| {
+            let spec = RunnerToolRegistry::spec_for_runner_required_tool(runner, &tool);
+            let (command, version_args) = if tool.id() == "homeboy" {
+                (
+                    effective_homeboy_command(runner, "runner capability preflight")?,
+                    spec.map(|spec| spec.version_args).unwrap_or_default(),
+                )
+            } else {
+                spec.map(|spec| (spec.command, spec.version_args))
+                    .unwrap_or_else(|| (tool.id().to_string(), Vec::new()))
+            };
+            Ok(RunnerToolProbe {
+                tool,
+                command,
+                version_args,
+            })
+        })
+        .collect()
+}
+
 // `Clone` so one probe's answer can be handed to every caller that coalesced
 // onto it instead of each opening its own connection (#11080).
 #[derive(Debug, Clone, Default)]
 struct RunnerCapabilityProbeResult {
     tools: BTreeSet<RunnerRequiredTool>,
+    tool_probe_evidence: BTreeMap<RunnerRequiredTool, RunnerToolProbeEvidence>,
     commands: BTreeSet<String>,
     tool_capabilities: BTreeSet<String>,
     failed_toolchain_probes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerToolProbe {
+    tool: RunnerRequiredTool,
+    command: String,
+    version_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerToolProbeEvidence {
+    command: String,
+    exit_status: i32,
+    output: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,17 +684,31 @@ fn batch_probe_fingerprint(script: &str, env: &HashMap<String, String>) -> Strin
 }
 
 fn batch_probe_script(
-    tool_commands: &[(RunnerRequiredTool, String)],
+    tool_probes: &[RunnerToolProbe],
     command_names: &[String],
     capability_probes: &[RunnerToolCapabilityProbe],
     toolchain_probes: &[RunnerToolchainReadinessProbe],
 ) -> String {
     let mut lines = Vec::new();
     lines.push("set +e".to_string());
-    for (index, (_tool, command)) in tool_commands.iter().enumerate() {
-        let condition = format!("command -v {} >/dev/null 2>&1", shell::quote_arg(command));
+    for (index, probe) in tool_probes.iter().enumerate() {
+        // Only invoke an executable when its registry definition supplies a
+        // non-empty, read-only version probe. A bare required command retains
+        // the prior presence check rather than starting an interactive tool.
+        let command = if probe.version_args.is_empty() {
+            format!(
+                "command -v {} >/dev/null 2>&1",
+                shell::quote_arg(&probe.command)
+            )
+        } else {
+            std::iter::once(&probe.command)
+                .chain(probe.version_args.iter())
+                .map(|arg| shell::quote_arg(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         lines.push(format!(
-            "if {condition}; then printf 'T\\t{index}\\t1\\n'; else printf 'T\\t{index}\\t0\\n'; fi"
+            "__homeboy_probe_output=$({{ {command}; }} 2>&1); __homeboy_probe_status=$?; printf 'T\\t{index}\\t%s\\t%s\\n' \"$__homeboy_probe_status\" \"$__homeboy_probe_output\""
         ));
     }
     for (index, command) in command_names.iter().enumerate() {
@@ -665,14 +746,16 @@ fn tool_capability_probe_script(index: usize, probe: &RunnerToolCapabilityProbe)
 }
 
 fn parse_batch_probe_output(
-    stdout: &str,
-    tool_commands: &[(RunnerRequiredTool, String)],
+    runner: &Runner,
+    script: &str,
+    output: &CommandOutput,
+    tool_probes: &[RunnerToolProbe],
     command_names: &[String],
     capability_probes: &[RunnerToolCapabilityProbe],
     toolchain_probes: &[RunnerToolchainReadinessProbe],
-) -> RunnerCapabilityProbeResult {
+) -> Result<RunnerCapabilityProbeResult> {
     let mut result = RunnerCapabilityProbeResult::default();
-    for line in stdout.lines() {
+    for line in output.stdout.lines() {
         let mut fields = line.split('\t');
         let Some(kind) = fields.next() else {
             continue;
@@ -680,16 +763,35 @@ fn parse_batch_probe_output(
         let Some(index) = fields.next().and_then(|value| value.parse::<usize>().ok()) else {
             continue;
         };
-        let succeeded = fields.next() == Some("1");
+        let status = fields.next();
+        let succeeded = status == Some("1");
+        if kind == "T" {
+            let Some(probe) = tool_probes.get(index) else {
+                continue;
+            };
+            let Some(exit_status) = status.and_then(|value| value.parse::<i32>().ok()) else {
+                continue;
+            };
+            let Some(captured) = fields.next() else {
+                continue;
+            };
+            result.tool_probe_evidence.insert(
+                probe.tool.clone(),
+                RunnerToolProbeEvidence {
+                    command: rendered_tool_probe_command(probe),
+                    exit_status,
+                    output: captured.to_string(),
+                },
+            );
+            if exit_status == 0 {
+                result.tools.insert(probe.tool.clone());
+            }
+            continue;
+        }
         if !succeeded && kind != "R" {
             continue;
         }
         match kind {
-            "T" => {
-                if let Some((tool, _)) = tool_commands.get(index) {
-                    result.tools.insert(tool.clone());
-                }
-            }
             "C" => {
                 if let Some(command) = command_names.get(index) {
                     result.commands.insert(command.clone());
@@ -711,7 +813,67 @@ fn parse_batch_probe_output(
             _ => {}
         }
     }
-    result
+    if !output.success
+        || output.observation != homeboy_core::server::CommandObservation::Complete
+        || tool_probes
+            .iter()
+            .any(|probe| !result.tool_probe_evidence.contains_key(&probe.tool))
+    {
+        return Err(capability_probe_transport_error(
+            runner,
+            script,
+            output,
+            &result,
+            tool_probes,
+        ));
+    }
+    Ok(result)
+}
+
+fn rendered_tool_probe_command(probe: &RunnerToolProbe) -> String {
+    if probe.version_args.is_empty() {
+        return format!("command -v {}", shell::quote_arg(&probe.command));
+    }
+    std::iter::once(&probe.command)
+        .chain(probe.version_args.iter())
+        .map(|arg| shell::quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn capability_probe_transport_error(
+    runner: &Runner,
+    script: &str,
+    output: &CommandOutput,
+    result: &RunnerCapabilityProbeResult,
+    tool_probes: &[RunnerToolProbe],
+) -> Error {
+    let missing_records = tool_probes
+        .iter()
+        .filter(|probe| !result.tool_probe_evidence.contains_key(&probe.tool))
+        .map(|probe| probe.tool.id())
+        .collect::<Vec<_>>();
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "Runner '{}' capability probe did not produce usable evidence",
+            runner.id
+        ),
+        json!({
+            "runner_id": runner.id,
+            "probe": {
+                "command": script,
+                "exit_status": output.exit_code,
+                "success": output.success,
+                "observation": output.observation.code(),
+                "timed_out": output.timed_out,
+                "stdout": output.stdout,
+                "stderr": output.stderr,
+                "missing_tool_records": missing_records,
+            },
+        }),
+    )
+    .with_retryable(true)
 }
 
 fn evaluate_lab_runner_capabilities(
@@ -1133,9 +1295,16 @@ mod tests {
             server_id: None,
             workspace_root: None,
             settings: RunnerSettings::default(),
-            env: [("PATH".to_string(), fixture.path().display().to_string())]
-                .into_iter()
-                .collect(),
+            env: [(
+                "PATH".to_string(),
+                format!(
+                    "{}:{}",
+                    fixture.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )]
+            .into_iter()
+            .collect(),
             secret_env: Default::default(),
             resources: Default::default(),
             policy: RunnerPolicy::default(),
@@ -1153,11 +1322,15 @@ mod tests {
         };
         let started = std::time::Instant::now();
 
-        let snapshot = RunnerCapabilitySnapshot::from_runner_probe(&runner, &preflight)
-            .expect("bounded preflight returns a capability snapshot");
+        let error = RunnerCapabilitySnapshot::from_runner_probe(&runner, &preflight)
+            .expect_err("incomplete timed-out evidence must not become an empty inventory");
 
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(snapshot.tool_capabilities.is_empty());
+        assert!(matches!(
+            error.code,
+            ErrorCode::RemoteCommandTimeout | ErrorCode::RunnerLabTransportFailure
+        ));
+        assert_eq!(error.retryable, Some(true));
     }
 
     #[test]
@@ -1188,6 +1361,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            tool_probe_evidence: BTreeMap::new(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             failed_toolchain_probes: HashMap::new(),
@@ -1217,6 +1391,7 @@ mod tests {
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
+            tool_probe_evidence: BTreeMap::new(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             failed_toolchain_probes: HashMap::new(),
@@ -1262,6 +1437,7 @@ mod tests {
             &plan,
             &RunnerCapabilitySnapshot {
                 tools: [RunnerRequiredTool::git()].into_iter().collect(),
+                tool_probe_evidence: BTreeMap::new(),
                 commands: BTreeSet::new(),
                 tool_capabilities: BTreeSet::new(),
                 failed_toolchain_probes: HashMap::new(),
@@ -1322,6 +1498,7 @@ mod tests {
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
+            tool_probe_evidence: BTreeMap::new(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             failed_toolchain_probes: HashMap::new(),
@@ -1365,6 +1542,7 @@ mod tests {
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
+            tool_probe_evidence: BTreeMap::new(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             failed_toolchain_probes: HashMap::new(),
@@ -1441,6 +1619,7 @@ mod tests {
             tools: [RunnerRequiredTool::new("playwright")]
                 .into_iter()
                 .collect(),
+            tool_probe_evidence: BTreeMap::new(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             failed_toolchain_probes: HashMap::new(),
@@ -1483,6 +1662,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            tool_probe_evidence: BTreeMap::new(),
             commands: ["zip".to_string()].into_iter().collect(),
             tool_capabilities: BTreeSet::new(),
             failed_toolchain_probes: HashMap::new(),
@@ -1493,6 +1673,111 @@ mod tests {
 
         validate_runner_capability_preflight("lab", &preflight, &capabilities, &env)
             .expect("capability parity passes");
+    }
+
+    #[test]
+    fn capability_preflight_accepts_configured_homeboy_and_git_version_evidence() {
+        let fixture = tempdir().expect("fixture");
+        let homeboy = fixture.path().join("configured-homeboy");
+        let git = fixture.path().join("configured-git");
+        fs::write(
+            &homeboy,
+            "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nexit 1\n",
+        )
+        .expect("write configured homeboy");
+        fs::write(
+            &git,
+            "#!/bin/sh\n[ \"$1\" = configured-version ] && exit 0\nexit 1\n",
+        )
+        .expect("write git on PATH");
+        make_executable(&homeboy);
+        make_executable(&git);
+
+        let runner = Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: HashMap::from([
+                ("HOMEBOY_COMMAND".to_string(), homeboy.display().to_string()),
+                (
+                    "PATH".to_string(),
+                    format!("{}:/bin", fixture.path().display()),
+                ),
+            ]),
+            secret_env: Default::default(),
+            resources: HashMap::from([(
+                "tools".to_string(),
+                json!({
+                    "git": {
+                        "command": git,
+                        "version_args": ["configured-version"]
+                    }
+                }),
+            )]),
+            policy: RunnerPolicy::default(),
+        };
+        let preflight = RunnerCapabilityPreflight {
+            command: "agent-task cook".to_string(),
+            required_tools: vec![RunnerRequiredTool::homeboy(), RunnerRequiredTool::git()],
+            ..Default::default()
+        };
+
+        let capabilities = runner_capability_snapshot_for_preflight(&runner, &preflight)
+            .expect("capability snapshot");
+        assert!(
+            capabilities.has_tool(&RunnerRequiredTool::homeboy()),
+            "Configured Homeboy version evidence was not recorded: {capabilities:?}"
+        );
+        assert!(
+            capabilities.has_tool(&RunnerRequiredTool::git()),
+            "Git version evidence was not recorded: {capabilities:?}"
+        );
+        validate_runner_capability_preflight("local", &preflight, &capabilities, &HashMap::new())
+            .expect("successful configured Homeboy and Git probes satisfy handoff preflight");
+
+        fs::write(
+            &git,
+            "#!/bin/sh\nprintf 'configured git failed\\n' >&2\nexit 1\n",
+        )
+        .expect("make git version probe fail");
+        let unavailable = runner_capability_snapshot_for_preflight(&runner, &preflight)
+            .expect("capability snapshot");
+        let error = validate_runner_capability_preflight(
+            "local",
+            &preflight,
+            &unavailable,
+            &HashMap::new(),
+        )
+        .expect_err("an unusable Git executable blocks handoff before provider execution");
+        assert!(error.message.contains("tools: git"));
+        let predicate = &error.details["runner_capability_failure"]["predicates"][0];
+        assert_eq!(predicate["kind"], "runner_tool");
+        assert_eq!(predicate["tool"], "git");
+        assert_eq!(
+            predicate["command"],
+            format!("{} configured-version", git.display())
+        );
+        assert_eq!(predicate["exit_status"], 1);
+        assert_eq!(predicate["output"], "configured git failed");
+
+        fs::write(
+            &git,
+            "#!/bin/sh\n[ \"$1\" = configured-version ] && exit 0\nexit 1\n",
+        )
+        .expect("restore git version probe");
+        fs::write(&homeboy, "#!/bin/sh\nexit 1\n").expect("make Homeboy version probe fail");
+        let unavailable = runner_capability_snapshot_for_preflight(&runner, &preflight)
+            .expect("capability snapshot");
+        let error = validate_runner_capability_preflight(
+            "local",
+            &preflight,
+            &unavailable,
+            &HashMap::new(),
+        )
+        .expect_err("an unusable configured Homeboy blocks handoff before provider execution");
+        assert!(error.message.contains("tools: homeboy"));
     }
 
     #[test]
@@ -1603,6 +1888,16 @@ mod tests {
             .expect("remediation")
             .iter()
             .any(|hint| hint.as_str() == Some("repair-fixture-toolchain")));
+        let failure = &error.details["runner_capability_failure"];
+        assert_eq!(failure["schema"], "homeboy/runner-capability-failure/v1");
+        assert_eq!(
+            failure["recovery_actions"][0]["command"],
+            "repair-fixture-toolchain"
+        );
+        assert_eq!(
+            failure["recovery_actions"][0]["restores_predicate"],
+            "fixture:usable-toolchain"
+        );
     }
 
     #[test]
@@ -1628,6 +1923,51 @@ mod tests {
         assert!(output.status.success());
         assert!(!side_effect.exists(), "metacharacter argument executed");
         assert!(String::from_utf8_lossy(&output.stdout).contains("R\t0\t1"));
+    }
+
+    #[test]
+    fn tool_probe_uses_presence_check_without_registry_version_arguments() {
+        let probes = vec![RunnerToolProbe {
+            tool: RunnerRequiredTool::new("interactive-tool"),
+            command: "interactive-tool".to_string(),
+            version_args: Vec::new(),
+        }];
+
+        let script = batch_probe_script(&probes, &[], &[], &[]);
+
+        assert!(script.contains("command -v interactive-tool >/dev/null 2>&1"));
+        assert!(!script.contains("if interactive-tool >/dev/null 2>&1"));
+    }
+
+    #[test]
+    fn incomplete_tool_probe_output_is_a_transport_failure_with_transcript() {
+        let runner = ssh_runner();
+        let probes = vec![RunnerToolProbe {
+            tool: RunnerRequiredTool::git(),
+            command: "git".to_string(),
+            version_args: vec!["--version".to_string()],
+        }];
+        let script = batch_probe_script(&probes, &[], &[], &[]);
+        let output = CommandOutput {
+            stdout: "unframed output".to_string(),
+            stderr: "transport warning".to_string(),
+            success: true,
+            exit_code: 0,
+            timed_out: false,
+            observation: homeboy_core::server::CommandObservation::Complete,
+            child_resource: None,
+        };
+
+        let error = parse_batch_probe_output(&runner, &script, &output, &probes, &[], &[], &[])
+            .expect_err("missing tool frame must not become an empty inventory");
+
+        assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["probe"]["command"], script);
+        assert_eq!(error.details["probe"]["exit_status"], 0);
+        assert_eq!(error.details["probe"]["stdout"], "unframed output");
+        assert_eq!(error.details["probe"]["stderr"], "transport warning");
+        assert_eq!(error.details["probe"]["missing_tool_records"][0], "git");
     }
 
     #[cfg(unix)]

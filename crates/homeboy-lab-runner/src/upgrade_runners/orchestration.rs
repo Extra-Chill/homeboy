@@ -4,7 +4,7 @@ use crate::Runner;
 use crate::RunnerExecOptions;
 use crate::RunnerStatusReport;
 use homeboy_core::Result;
-use homeboy_lab_runner_contract::RunnerKind;
+use homeboy_runner_contract::RunnerKind;
 use homeboy_upgrade::upgrade::version_is_newer;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::InstallMethod;
@@ -72,7 +72,6 @@ fn runner_manifest_preflight_with_executor(
         homeboy_path.to_string(),
         "extension".to_string(),
         "list".to_string(),
-        "--skip-ready-check".to_string(),
     ];
     let inventory_options =
         runner_manifest_query_options(runner, inventory_command, allow_diagnostic_ssh);
@@ -87,7 +86,7 @@ fn runner_manifest_preflight_with_executor(
     };
     if inventory_exit_code != 0 {
         return Some(format!(
-            "runner manifest preflight could not query installed extension inventory; recover with: {homeboy_path} extension list --skip-ready-check"
+            "runner manifest preflight could not query installed extension inventory; recover with: {homeboy_path} extension list"
         ));
     }
     let inventory = match runner_extension_inventory(&inventory_output.stdout) {
@@ -111,7 +110,6 @@ fn runner_manifest_preflight_with_executor(
                 "extension".to_string(),
                 "show".to_string(),
                 extension_id.clone(),
-                "--skip-ready-check".to_string(),
             ],
             allow_diagnostic_ssh,
         );
@@ -125,7 +123,7 @@ fn runner_manifest_preflight_with_executor(
             }
         };
         if exit_code != 0 {
-            return Some(format!("runner manifest preflight failed for installed extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id} --skip-ready-check"));
+            return Some(format!("runner manifest preflight failed for installed extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id}"));
         }
         let requires_homeboy =
             match runner_extension_requires_homeboy(&output.stdout, &extension_id) {
@@ -135,7 +133,7 @@ fn runner_manifest_preflight_with_executor(
         let Some(requires_homeboy) = requires_homeboy else {
             continue;
         };
-        match homeboy_extension::evaluate_core_compatibility_for_version(
+        match homeboy_extension_contract::evaluate_core_compatibility_for_version(
             Some(&requires_homeboy),
             None,
             candidate_version,
@@ -444,10 +442,7 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             call_count += 1;
             assert_eq!(runner_id, "lab-a");
-            assert_eq!(
-                options.command,
-                ["homeboy", "extension", "list", "--skip-ready-check"]
-            );
+            assert_eq!(options.command, ["homeboy", "extension", "list"]);
             assert!(!options.read_only_artifact_access);
             Ok(successful_output(
                 runner_id,
@@ -473,22 +468,13 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             let stdout = match call_count {
                 0 => {
-                    assert_eq!(
-                        options.command,
-                        ["homeboy", "extension", "list", "--skip-ready-check"]
-                    );
+                    assert_eq!(options.command, ["homeboy", "extension", "list"]);
                     r#"{"success":true,"data":{"extensions":[{"id":"runner-only"}]}}"#
                 }
                 1 => {
                     assert_eq!(
                         options.command,
-                        [
-                            "homeboy",
-                            "extension",
-                            "show",
-                            "runner-only",
-                            "--skip-ready-check"
-                        ]
+                        ["homeboy", "extension", "show", "runner-only"]
                     );
                     r#"{"success":true,"data":{"extension":{"id":"runner-only","core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#
                 }
@@ -530,17 +516,11 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             let stdout = match call_count {
                 0 => {
-                    assert_eq!(
-                        options.command,
-                        ["homeboy", "extension", "list", "--skip-ready-check"]
-                    );
+                    assert_eq!(options.command, ["homeboy", "extension", "list"]);
                     r#"{"success":true,"data":{"extensions":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust"}]}}"#
                 }
                 1 => {
-                    assert_eq!(
-                        options.command,
-                        ["homeboy", "extension", "show", "rust", "--skip-ready-check"]
-                    );
+                    assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
                     r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#
                 }
                 _ => {
@@ -570,16 +550,10 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             assert_eq!(runner_id, "lab-a");
             let stdout = if call_count % 2 == 0 {
-                assert_eq!(
-                    options.command,
-                    ["homeboy", "extension", "list", "--skip-ready-check"]
-                );
+                assert_eq!(options.command, ["homeboy", "extension", "list"]);
                 r#"{"success":true,"data":{"extensions":[{"id":"rust"}]}}"#
             } else {
-                assert_eq!(
-                    options.command,
-                    ["homeboy", "extension", "show", "rust", "--skip-ready-check"]
-                );
+                assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
                 manifests[call_count / 2]
             };
             assert!(!options.read_only_artifact_access);
@@ -900,11 +874,13 @@ pub fn upgrade_runner_with_executor(
     let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
+    let selected_source_revision = source_path.and_then(source_checkout_revision);
     if is_managed_immutable_homeboy_path(runner, &original_homeboy_path) {
         return refresh_managed_immutable_runner(
             runner,
             original_homeboy_path,
             previous_version,
+            selected_source_revision.as_deref(),
             extension_updates,
             exec,
         );
@@ -916,7 +892,6 @@ pub fn upgrade_runner_with_executor(
                 .then(|| source_path.and_then(source_checkout_build_identity))
                 .flatten()
         });
-    let selected_source_revision = source_path.and_then(source_checkout_revision);
     let selected_source_url = source_path.and_then(homeboy_core::git::remote_origin_url);
     let command_source_path = match runner_upgrade_source_path(
         runner,
@@ -1323,24 +1298,31 @@ fn refresh_managed_immutable_runner(
     runner: &Runner,
     previous_homeboy_path: String,
     previous_version: Option<String>,
+    selected_source_revision: Option<&str>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> RunnerUpgradeEntry {
-    let recovery_commands = managed_immutable_runner_recovery_commands(&runner.id);
-    let Some(controller_commit) = homeboy_product_identity::build_identity().git_commit else {
+    let Some(controller_commit) =
+        managed_immutable_runner_target_revision(selected_source_revision)
+    else {
         return managed_immutable_runner_failure_entry(
             &runner.id,
             previous_homeboy_path,
             previous_version,
+            None,
             1,
             "managed immutable runner refresh requires the controller's immutable commit identity; no mutable version-tag recovery action was emitted".to_string(),
         );
     };
+    let recovery_commands = managed_immutable_runner_recovery_commands_with_commit(
+        &runner.id,
+        Some(&controller_commit),
+    );
     let options = crate::HomeboyBinaryRefreshOptions {
         runner_id: runner.id.clone(),
         mode: crate::HomeboyBinaryRefreshMode::Materialize,
         source: None,
-        git_ref: Some(controller_commit),
+        git_ref: Some(controller_commit.clone()),
         target_dir: None,
         reconnect: true,
         force: false,
@@ -1354,6 +1336,7 @@ fn refresh_managed_immutable_runner(
                 &runner.id,
                 previous_homeboy_path,
                 previous_version,
+                Some(&controller_commit),
                 1,
                 format!(
                     "managed immutable runner refresh failed: {}; recover with {}",
@@ -1398,6 +1381,7 @@ fn refresh_managed_immutable_runner(
                 &runner.id,
                 refreshed.selected_binary_path,
                 previous_version,
+                Some(&controller_commit),
                 1,
                 format!(
                     "managed immutable runner refresh completed but reconciliation failed: {}; recover with {}",
@@ -1408,9 +1392,15 @@ fn refresh_managed_immutable_runner(
         }
     };
     let homeboy_path = refreshed.selected_binary_path;
-    let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
-        .ok()
-        .flatten();
+    let new_version = reconciled
+        .session
+        .as_ref()
+        .map(|session| session.homeboy_version.clone())
+        .or_else(|| {
+            runner_homeboy_version(runner, &homeboy_path, exec)
+                .ok()
+                .flatten()
+        });
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let admission_ready = managed_immutable_admission_ready(&reconciled);
@@ -1445,6 +1435,14 @@ fn refresh_managed_immutable_runner(
     }
 }
 
+pub(super) fn managed_immutable_runner_target_revision(
+    selected_source_revision: Option<&str>,
+) -> Option<String> {
+    selected_source_revision
+        .map(str::to_string)
+        .or_else(|| homeboy_product_identity::build_identity().git_commit)
+}
+
 pub(super) fn managed_immutable_admission_ready(status: &crate::RunnerStatusReport) -> bool {
     status.admission_summary(0).accepting_jobs
 }
@@ -1461,6 +1459,7 @@ fn managed_immutable_runner_failure_entry(
     runner_id: &str,
     homeboy_path: String,
     previous_version: Option<String>,
+    target_revision: Option<&str>,
     exit_code: i32,
     detail: String,
 ) -> RunnerUpgradeEntry {
@@ -1473,7 +1472,10 @@ fn managed_immutable_runner_failure_entry(
         new_version: None,
         bare_homeboy_version: None,
         path_drift: Some("managed immutable runner refresh did not converge".to_string()),
-        recovery_commands: managed_immutable_runner_recovery_commands(runner_id),
+        recovery_commands: managed_immutable_runner_recovery_commands_with_commit(
+            runner_id,
+            target_revision,
+        ),
         extensions_synced: Vec::new(),
         extensions_skipped: Vec::new(),
         extensions_failed: Vec::new(),

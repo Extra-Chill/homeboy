@@ -11,7 +11,7 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::Job;
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::process::Command;
@@ -32,6 +32,7 @@ enum TestRunnerReconciliation {
 
 struct ReconciliationProvider {
     result: Mutex<Option<TestRunnerReconciliation>>,
+    recovered_runner_job_id: Mutex<Option<String>>,
 }
 
 impl RunnerContinuationProvider for ReconciliationProvider {
@@ -61,6 +62,18 @@ impl RunnerContinuationProvider for ReconciliationProvider {
         }
     }
 
+    fn runner_job_id_for_durable_run(
+        &self,
+        _runner_id: &str,
+        _durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .recovered_runner_job_id
+            .lock()
+            .expect("recovered runner job")
+            .clone())
+    }
+
     fn is_runner_connected(&self, _runner_id: &str) -> bool {
         true
     }
@@ -79,10 +92,10 @@ impl RunnerContinuationProvider for ReconciliationProvider {
         Err(Error::internal_unexpected("not used by reconciliation"))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by reconciliation"))
     }
@@ -182,7 +195,7 @@ fn accepted_runner_identity_binds_before_snapshot_validation_and_survives_caller
     // Reloading models controller/caller loss after daemon acceptance. A
     // status reconciliation validates the accepted job directly and never
     // needs to replay the provider command.
-    let mut recovered = status_in_store(
+    let mut recovered = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -289,7 +302,7 @@ fn submit_plan_persists_queued_status() {
         let plan = test_plan();
 
         let record = submit_plan(&plan, Some("run/a")).expect("submitted");
-        let loaded = status(&record.run_id).expect("status loaded");
+        let loaded = reconcile_status(&record.run_id).expect("status loaded");
 
         assert_eq!(record.run_id, "run_a");
         assert_eq!(loaded.state, AgentTaskRunState::Queued);
@@ -337,13 +350,59 @@ fn submit_plan_persists_safe_route_resolution_without_a_destination() {
 }
 
 #[cfg(unix)]
+fn pin_record_from_artifact(
+    run_id: &str,
+    artifact: &std::path::Path,
+    digest: &str,
+    identity: &str,
+) {
+    let temporary_legacy = artifact
+        .parent()
+        .expect("artifact parent")
+        .join(format!("{run_id}-legacy"));
+    std::fs::write(&temporary_legacy, b"corrupted legacy bytes").expect("write legacy pin");
+    rewrite_record_for_test(run_id, |record| {
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+            "originating": {
+                "build_identity": identity,
+                "pinned_executable": temporary_legacy,
+                "sha256": digest,
+            }
+        });
+    })
+    .expect("project legacy pin");
+    recover_controller_runtime_in_store(&test_lifecycle_store(), run_id, Some(artifact), None)
+        .expect("recover pin");
+}
+
+#[cfg(unix)]
+fn record_pin(run_id: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        reconcile_status(run_id).expect("record").metadata
+            [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+            ["pinned_executable"]
+            .as_str()
+            .expect("pin"),
+    )
+}
+
+#[cfg(unix)]
+fn snapshot_reasons_for(
+    snapshots: &[homeboy_core::controller_runtime::ControllerRuntimeSnapshot],
+    pin: &std::path::Path,
+) -> Vec<String> {
+    snapshots
+        .iter()
+        .find(|snapshot| snapshot.pins.iter().any(|candidate| candidate == pin))
+        .map(|snapshot| snapshot.retention_reasons())
+        .expect("snapshot")
+}
+
+#[cfg(unix)]
 #[test]
-fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
+fn controller_pin_retention_keeps_in_flight_and_pending_mutation_inside_the_window() {
     super::ensure_runner_continuation_provider_reset_hook();
     with_isolated_home(|_| {
-        // Controller-runtime retention discovers referenced pins through the
-        // agent-task pin-reference provider hook; register it so the report can
-        // see this test's durable records.
         super::controller_pin_reference_provider::register();
         let temporary = tempfile::tempdir().expect("temporary fake controller directory");
         let identity = homeboy_core::build_identity::current().display;
@@ -357,75 +416,138 @@ fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
         let active = submit_plan(&test_plan(), Some("retention-active")).expect("submit active");
         let terminal =
             submit_plan(&test_plan(), Some("retention-terminal")).expect("submit terminal");
-        for (record, artifact, digest) in [
-            (&active, &active_artifact, &active_digest),
-            (&terminal, &terminal_artifact, &terminal_digest),
-        ] {
-            let legacy = temporary.path().join(format!("{}-legacy", record.run_id));
-            std::fs::write(&legacy, b"corrupted legacy bytes").expect("write legacy pin");
-            rewrite_record_for_test(&record.run_id, |record| {
-                record.metadata
-                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-                    "originating": {
-                        "build_identity": identity,
-                        "pinned_executable": legacy,
-                        "sha256": digest,
-                    }
-                });
-            })
-            .expect("project legacy pin");
-            recover_controller_runtime_in_store(
-                &test_lifecycle_store(),
-                &record.run_id,
-                Some(artifact),
-                None,
-            )
-            .expect("recover pin");
-        }
+        pin_record_from_artifact(&active.run_id, &active_artifact, &active_digest, &identity);
+        pin_record_from_artifact(
+            &terminal.run_id,
+            &terminal_artifact,
+            &terminal_digest,
+            &identity,
+        );
         rewrite_record_for_test(&terminal.run_id, |record| {
-            // Use `set_run_state` so the run state and its lifecycle execution
-            // projection stay consistent. A raw `record.state = Succeeded` write
-            // left `lifecycle.execution.state` unchanged, so `diagnose_run`
-            // flagged the record `ConflictingProjections` and dropped it from
-            // `list_records_with_health` — the source the retention report reads —
-            // making the terminal pin silently unreferenced (#8964).
             set_run_state(record, AgentTaskRunState::Succeeded);
-            record.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
         })
         .expect("make terminal");
 
-        let active_pin = std::path::PathBuf::from(
-            status(&active.run_id).expect("active record").metadata
-                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
-                ["pinned_executable"]
-                .as_str()
-                .expect("active pin"),
-        );
-        let terminal_pin = std::path::PathBuf::from(
-            status(&terminal.run_id).expect("terminal record").metadata
-                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
-                ["pinned_executable"]
-                .as_str()
-                .expect("terminal pin"),
-        );
+        let active_pin = record_pin(&active.run_id);
+        let terminal_pin = record_pin(&terminal.run_id);
         let report =
             homeboy_core::controller_runtime::retention_report().expect("retention report");
         assert!(report.retained.contains(&active_pin));
         assert!(report.retained.contains(&terminal_pin));
-        // Opt out of the configured age/size window so this asserts reference
-        // retention specifically, not "nothing was old enough to delete".
+        assert!(snapshot_reasons_for(&report.snapshots, &active_pin)
+            .iter()
+            .any(|reason| reason == "protected_in_flight"));
+        assert!(snapshot_reasons_for(&report.snapshots, &terminal_pin)
+            .iter()
+            .any(|reason| reason == "protected_by_pending_mutation"));
         let purge = homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides {
             limit: None,
             ignore_retention: true,
         };
-        let dry_run = prune_controller_runtime_pins(false, purge).expect("plan pin pruning");
-        assert!(dry_run.retained.contains(&active_pin));
-        assert!(dry_run.retained.contains(&terminal_pin));
-        assert!(dry_run.removed.is_empty());
         let applied = prune_controller_runtime_pins(true, purge).expect("prune unreferenced pins");
         assert!(!applied.removed.contains(&terminal_pin));
         assert!(active_pin.exists());
         assert!(terminal_pin.exists());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn controller_pin_retention_reclaims_old_terminal_retained_artifacts_under_pressure() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        super::controller_pin_reference_provider::register();
+        homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+            retention: homeboy_core::defaults::RetentionConfig {
+                controller_runtime_days: 14,
+                controller_runtime_max_bytes: 0,
+                limit: 10,
+                ..homeboy_core::defaults::RetentionConfig::default()
+            },
+            ..homeboy_core::defaults::HomeboyConfig::default()
+        })
+        .expect("save retention config");
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = homeboy_core::build_identity::current().display;
+        let terminal_artifact = temporary.path().join("terminal-homeboy");
+        let terminal_digest =
+            fake_controller_artifact(&terminal_artifact, &identity, "terminal artifact");
+        let terminal =
+            submit_plan(&test_plan(), Some("retention-old-terminal")).expect("submit terminal");
+        pin_record_from_artifact(
+            &terminal.run_id,
+            &terminal_artifact,
+            &terminal_digest,
+            &identity,
+        );
+        rewrite_record_for_test(&terminal.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Succeeded);
+            record.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
+            record.submitted_at = "2020-01-01T00:00:00Z".to_string();
+        })
+        .expect("age terminal retained record");
+
+        let terminal_pin = record_pin(&terminal.run_id);
+        let applied = prune_controller_runtime_pins(
+            true,
+            homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides::default(),
+        )
+        .expect("reclaim under pressure");
+        assert!(applied.removed.contains(&terminal_pin));
+        assert!(!terminal_pin.exists());
+        assert!(applied.snapshots.iter().any(|snapshot| {
+            snapshot.pins.contains(&terminal_pin)
+                && snapshot
+                    .retention_reasons()
+                    .iter()
+                    .any(|reason| reason == "reclaimable")
+        }));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn controller_pin_retention_keeps_queued_runs_outside_the_age_window() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        super::controller_pin_reference_provider::register();
+        homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+            retention: homeboy_core::defaults::RetentionConfig {
+                controller_runtime_days: 0,
+                controller_runtime_max_bytes: 0,
+                limit: 10,
+                ..homeboy_core::defaults::RetentionConfig::default()
+            },
+            ..homeboy_core::defaults::HomeboyConfig::default()
+        })
+        .expect("save retention config");
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = homeboy_core::build_identity::current().display;
+        let queued_artifact = temporary.path().join("queued-homeboy");
+        let queued_digest =
+            fake_controller_artifact(&queued_artifact, &identity, "queued artifact");
+        let queued =
+            submit_plan(&test_plan(), Some("retention-old-queued")).expect("submit queued");
+        pin_record_from_artifact(&queued.run_id, &queued_artifact, &queued_digest, &identity);
+        rewrite_record_for_test(&queued.run_id, |record| {
+            record.submitted_at = "2020-01-01T00:00:00Z".to_string();
+        })
+        .expect("age queued record");
+
+        let queued_pin = record_pin(&queued.run_id);
+        let report =
+            homeboy_core::controller_runtime::retention_report().expect("retention report");
+        assert!(report.retained.contains(&queued_pin));
+        assert!(snapshot_reasons_for(&report.snapshots, &queued_pin)
+            .iter()
+            .any(|reason| reason == "protected_in_flight"));
+        let applied = prune_controller_runtime_pins(
+            true,
+            homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides::default(),
+        )
+        .expect("prune");
+        assert!(!applied.removed.contains(&queued_pin));
+        assert!(queued_pin.exists());
     });
 }
 
@@ -465,7 +587,7 @@ fn stamp_stale_controller_runtime(run_id: &str, stale_identity: &str) {
 }
 
 fn stamped_runtime_identity(run_id: &str) -> String {
-    status(run_id).expect("record loaded").metadata
+    reconcile_status(run_id).expect("record loaded").metadata
         [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
         ["build_identity"]
         .as_str()
@@ -506,7 +628,7 @@ fn retry_stamps_replacement_run_with_current_runtime_not_stale_source() {
         );
 
         // (2) Mutating the original runtime-A run under runtime B remains rejected.
-        let source_record = status(&source.run_id).expect("source record");
+        let source_record = reconcile_status(&source.run_id).expect("source record");
         let mutation = homeboy_core::controller_runtime::validate_for_mutation(
             &source_record.metadata,
             &current_identity,
@@ -856,7 +978,7 @@ fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
     )
     .expect_err("different accepted identity is rejected");
     assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    let stored = status_in_store(
+    let stored = reconcile_status_in_store(
         &lifecycle_store,
         "immutable-handoff",
         AgentTaskStatusOptions::default(),
@@ -872,10 +994,10 @@ fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
 /// sibling is missing — `reconcile_transport_proxy_snapshot_in_store` exists and
 /// every other call here has one.
 ///
-/// The blocker is the closing `status()`. Unlike its migrated siblings, this
+/// The blocker is the closing `reconcile_status()`. Unlike its migrated siblings, this
 /// test reads status back over a record the reconciliation left *Running* and
 /// runner-backed, so `runner_probe_plan` returns `performed: true` and
-/// `status_in_store` reaches `reconcile_runner_job_state_in_store` ->
+/// `reconcile_status_in_store` reaches `reconcile_runner_job_state_in_store` ->
 /// `with_runner_continuation`. That provider slot is process-global by design
 /// (#12618) and is *not* covered by any lock of its own:
 /// `RunnerContinuationTestGuard` installs and clears it, and the only thing
@@ -921,7 +1043,7 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
         );
         assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
         assert_eq!(
-            status("snapshot-accepted-handoff")
+            reconcile_status("snapshot-accepted-handoff")
                 .expect("durable handoff")
                 .runner_job_id(),
             Some("00000000-0000-0000-0000-000000000123")
@@ -1075,7 +1197,7 @@ fn pending_handoff_rejects_acceptance_from_a_different_runner_without_mutation()
         })
         .expect_err("different runner cannot accept pending handoff");
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        let stored = status("pending-runner-identity").expect("pending handoff retained");
+        let stored = reconcile_status("pending-runner-identity").expect("pending handoff retained");
         assert_eq!(stored, planned);
     });
 }
@@ -1127,7 +1249,7 @@ fn accepted_proxy_resume_rejects_a_different_runner_without_rewriting_legacy_pro
     )
     .expect_err("different runner resume is rejected");
     assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    let stored = status_in_store(
+    let stored = reconcile_status_in_store(
         &lifecycle_store,
         "immutable-proxy",
         AgentTaskStatusOptions::default(),
@@ -1227,9 +1349,10 @@ fn accepted_handoff_adopts_a_job_found_on_another_known_generation() {
             // This represents a 404 on the current generation followed by a
             // matching snapshot on another generation in the durable ledger.
             result: Mutex::new(Some(TestRunnerReconciliation::Snapshot(Box::new(snapshot)))),
+            recovered_runner_job_id: Mutex::new(None),
         }));
 
-        let reconciled = status(run_id).expect("adopted generation snapshot");
+        let reconciled = reconcile_status(run_id).expect("adopted generation snapshot");
 
         assert_eq!(reconciled.state, AgentTaskRunState::Running);
         assert_eq!(reconciled.metadata["runner_job_status"], "running");
@@ -1245,9 +1368,10 @@ fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
         accepted_detached_handoff(run_id);
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
             result: Mutex::new(Some(TestRunnerReconciliation::ConfirmedAbsent(2))),
+            recovered_runner_job_id: Mutex::new(None),
         }));
 
-        let terminal = status(run_id).expect("terminal lost accepted job");
+        let terminal = reconcile_status(run_id).expect("terminal lost accepted job");
 
         assert_eq!(terminal.state, AgentTaskRunState::Failed);
         assert_eq!(terminal.metadata["phase"], "accepted_lab_runner_job_lost");
@@ -1272,14 +1396,73 @@ fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
         accepted_detached_handoff(run_id);
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
             result: Mutex::new(Some(TestRunnerReconciliation::Unconfirmed)),
+            recovered_runner_job_id: Mutex::new(None),
         }));
 
-        let retained = status(run_id).expect("retain unconfirmed handoff");
+        let retained = reconcile_status(run_id).expect("retain unconfirmed handoff");
 
         assert_eq!(retained.state, AgentTaskRunState::Running);
         assert!(retained.metadata.get("lost_accepted_runner_job").is_none());
         assert_eq!(retained.metadata["provider_executions_consumed"], 0);
         assert!(retained.provider_handles.is_empty());
+    });
+}
+
+#[test]
+fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
+    with_isolated_home(|_| {
+        let run_id = "recover-reserved-lab-admission";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("persist planned proxy before daemon admission");
+        record_lab_admission_reservation_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            "homeboy-lab",
+            "daemon-lease-1",
+            "reservation-job-1",
+            u64::MAX,
+        )
+        .expect("persist direct daemon reservation before client loss");
+        rewrite_record_for_test(run_id, |record| {
+            // The synchronous caller has exited and its last controller
+            // heartbeat is stale. Recovery must bind the admitted daemon job
+            // before the no-PID watchdog classifies this as ownerless.
+            record.updated_at = Some(
+                (chrono::Utc::now()
+                    - chrono::Duration::minutes(
+                        homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES,
+                    ))
+                .to_rfc3339(),
+            );
+        })
+        .expect("age interrupted caller heartbeat");
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::Unconfirmed)),
+            recovered_runner_job_id: Mutex::new(Some("accepted-runner-job-1".to_string())),
+        }));
+
+        let recovered = reconcile_status(run_id).expect("recover admitted runner job");
+
+        assert_eq!(recovered.state, AgentTaskRunState::Running);
+        assert_eq!(recovered.runner_id(), Some("homeboy-lab"));
+        assert_eq!(recovered.runner_job_id(), Some("accepted-runner-job-1"));
+        assert_eq!(
+            recovered.metadata["handoff_acceptance"]["state"],
+            "accepted"
+        );
+        assert!(recovered.metadata.get("stale_running").is_none());
+        assert!(recovered.metadata.get("stale_running_reason").is_none());
     });
 }
 
@@ -1474,7 +1657,7 @@ fn foreground_terminal_projection_binds_a_pending_handoff_before_validation() {
         "authoritative terminal snapshot projects the run"
     );
 
-    let bound = status_in_store(
+    let bound = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -1517,7 +1700,7 @@ fn terminal_aggregate_binds_runner_job_before_snapshot_validation() {
     lifecycle_store
         .write_aggregate(run_id, &aggregate)
         .expect("aggregate written");
-    let terminal = status_in_store(
+    let terminal = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -1539,7 +1722,7 @@ fn terminal_aggregate_binds_runner_job_before_snapshot_validation() {
             .expect("terminal run binds the daemon job before validation");
     assert!(!projected, "the matching aggregate was already projected");
 
-    let bound = status_in_store(
+    let bound = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -1661,7 +1844,7 @@ fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
     .expect_err("handoff without plan must not become running");
     assert_eq!(error.code, ErrorCode::InternalIoError);
 
-    let terminal = status_in_store(
+    let terminal = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -1727,7 +1910,7 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
     .expect("runner transport projection replaces display path");
 
     assert_eq!(
-        status_in_store(
+        reconcile_status_in_store(
             &lifecycle_store,
             &record.run_id,
             AgentTaskStatusOptions::default(),
@@ -1741,7 +1924,8 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
     assert_eq!(
         logs_in_store(&lifecycle_store, &record.run_id)
             .expect("controller logs")
-            .run_id,
+            .run
+            .as_str(),
         record.run_id
     );
     assert_eq!(
@@ -1783,7 +1967,7 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
     .expect("project runner-local plan path");
     std::fs::remove_file(missing_plan.plan_path)
         .expect("remove authoritative controller plan despite projected display path");
-    let error = status_in_store(
+    let error = reconcile_status_in_store(
         &lifecycle_store,
         &missing_plan.run_id,
         AgentTaskStatusOptions::default(),
@@ -1805,7 +1989,7 @@ fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() 
             remote_command: &command,
         })
         .expect("running proxy");
-        let mut record = status("agent-task-terminal-proxy").expect("status");
+        let mut record = reconcile_status("agent-task-terminal-proxy").expect("status");
         apply_runner_job_terminal_state(
             &mut record,
             homeboy_core::api_jobs::JobStatus::Succeeded,
@@ -1940,9 +2124,8 @@ fn running_child_snapshot_persists_provider_handle_and_live_log_progress() {
     );
     let log = logs_in_store(&lifecycle_store, &record.run_id).expect("live logs");
     assert_eq!(log.events.len(), 1);
-    assert!(log.events[0]
-        .message
-        .as_deref()
+    assert!(log.events[0].data["message"]
+        .as_str()
         .is_some_and(|message| message.contains("provider dispatch accepted")));
 }
 
@@ -1978,7 +2161,7 @@ fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
         .write_record(&before)
         .expect("stale running writer is ignored");
     assert_eq!(
-        status_in_store(
+        reconcile_status_in_store(
             &lifecycle_store,
             &record.run_id,
             AgentTaskStatusOptions::default(),
@@ -2207,7 +2390,7 @@ fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
     assert_eq!(index.attempts[0].run_id, first_run_id);
     assert_eq!(index.attempts[1].run_id, second_run_id);
 
-    let latest = status_in_store(
+    let latest = reconcile_status_in_store(
         &lifecycle_store,
         "cook-issue-6978",
         AgentTaskStatusOptions::default(),
@@ -2372,7 +2555,7 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
         .expect("remote dispatch failure recorded")
         .expect("dispatch envelope recognized");
 
-        let loaded = status("local-run").expect("status loaded");
+        let loaded = reconcile_status("local-run").expect("status loaded");
         let log = logs("local-run").expect("logs loaded");
         let artifacts = artifacts("local-run").expect("artifacts loaded");
         let (raw_aggregate, _) = aggregate_source("local-run").expect("aggregate source");
@@ -2395,7 +2578,7 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
             "/runner/workspace/repo"
         );
         assert_eq!(
-            log.events[0].message.as_deref(),
+            log.events[0].data["message"].as_str(),
             Some("Remote provider agent task failed.")
         );
         assert_eq!(artifacts.evidence_refs[0].kind, "logs");
@@ -2645,7 +2828,7 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
         .expect("recorded");
     let record = record_aggregate_in_store(&lifecycle_store, &mut submitted, &plan, &aggregate)
         .expect("recorded");
-    let durable_status = status_in_store(
+    let durable_status = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -2674,7 +2857,7 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
 fn status_marks_running_run_without_owner_as_stale() {
     // Rooted in an explicit store rather than a mutated process environment
     // (#7505). The stub admission keeps submission off the machine-global
-    // controller-runtime queue; `status_in_store` reads its admission from this
+    // controller-runtime queue; `reconcile_status_in_store` reads its admission from this
     // store's own controller-runtime root, so the staleness classification and
     // the record it is persisted onto are projections of the same home.
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2692,7 +2875,7 @@ fn status_marks_running_run_without_owner_as_stale() {
         .write_record(&record)
         .expect("stored running record");
 
-    let loaded = status_in_store(
+    let loaded = reconcile_status_in_store(
         &lifecycle_store,
         "run-stale-missing-owner",
         AgentTaskStatusOptions::default(),
@@ -2715,7 +2898,7 @@ fn status_marks_running_run_without_owner_as_stale() {
         .read_record("run-stale-missing-owner")
         .expect("persisted record");
     assert_eq!(persisted.metadata["stale_running"], json!(true));
-    let repeated = status_in_store(
+    let repeated = reconcile_status_in_store(
         &lifecycle_store,
         "run-stale-missing-owner",
         AgentTaskStatusOptions::default(),
@@ -2741,7 +2924,7 @@ fn status_keeps_fresh_planned_runner_submission_live() {
                 .remove("runner_pid");
         })
         .expect("controller owner removed");
-        let stale = status(run_id).expect("pre-planning status loaded");
+        let stale = reconcile_status(run_id).expect("pre-planning status loaded");
         assert_eq!(stale.metadata["stale_running"], true);
 
         record_lab_offload_phase(
@@ -2755,7 +2938,7 @@ fn status_keeps_fresh_planned_runner_submission_live() {
         )
         .expect("planned runner submission recorded");
 
-        let loaded = status(run_id).expect("status loaded");
+        let loaded = reconcile_status(run_id).expect("status loaded");
 
         assert_eq!(loaded.state, AgentTaskRunState::Running);
         assert_eq!(
@@ -2774,9 +2957,51 @@ fn status_keeps_fresh_planned_runner_submission_live() {
             );
         })
         .expect("planned submission aged past heartbeat threshold");
-        let stale = status(run_id).expect("stale status loaded");
+        let stale = reconcile_status(run_id).expect("stale status loaded");
         assert_eq!(stale.metadata["stale_running"], true);
         assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+    });
+}
+
+#[test]
+fn planned_lab_proxy_stamps_heartbeat_without_a_runner_pid() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let run_id = "run-planned-lab-proxy-heartbeat";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        record_cook_progress_in_store(&test_lifecycle_store(), run_id, "provider_start", 1, None)
+            .expect("provider_start");
+        let remote_command = ["homeboy".to_string(), "agent-task".to_string()];
+        let recorded = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &remote_command,
+            durable_plan: Some(&plan),
+        })
+        .expect("planned Lab proxy");
+        rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata object")
+                .remove("runner_pid");
+        })
+        .expect("initiating client ended");
+
+        assert!(recorded.updated_at.is_some(), "{recorded:?}");
+        assert!(recorded.has_planned_runner_execution(), "{recorded:?}");
+        assert!(recorded.is_controller_pre_provider_phase(), "{recorded:?}");
+
+        let loaded = reconcile_status(run_id).expect("status loaded");
+        assert!(loaded.has_fresh_update(), "{loaded:?}");
+        assert!(loaded.has_fresh_controller_pre_provider_heartbeat());
+        assert!(loaded.metadata.get("stale_running").is_none());
+        assert_eq!(
+            loaded.metadata["runner_execution_record"]["status"],
+            "planned"
+        );
+        assert_eq!(loaded.metadata["cook_progress"]["phase"], "provider_start");
     });
 }
 
@@ -2843,7 +3068,7 @@ fn cancel_run_marks_queued_record_cancelled() {
 
     let cancelled = cancel_run_in_store(&lifecycle_store, "run-cancel-queued", Some("loser cell"))
         .expect("queued run cancelled");
-    let loaded = status_in_store(
+    let loaded = reconcile_status_in_store(
         &lifecycle_store,
         "run-cancel-queued",
         AgentTaskStatusOptions::default(),
@@ -2876,10 +3101,10 @@ fn list_records_skips_malformed_observation_records() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&plan, "good-run", |_| Ok(json!({})))
         .expect("submitted");
-    let store = lifecycle_store
+    let observation_store = lifecycle_store
         .open_observation_initialized()
         .expect("observation store");
-    store
+    observation_store
         .upsert_imported_run(&homeboy_core::observation::RunRecord {
             id: "bad-run".to_string(),
             kind: "agent-task".to_string(),
@@ -2889,11 +3114,16 @@ fn list_records_skips_malformed_observation_records() {
             ..Default::default()
         })
         .expect("bad record inserted");
+    store::fail_next_record_write_for_test();
 
     let records = list_records_in_store(&lifecycle_store).expect("records listed");
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, "good-run");
+    assert!(
+        lifecycle_store.write_record(&records[0]).is_err(),
+        "listing must leave the injected write failure unconsumed"
+    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3050,7 +3280,7 @@ fn status_filters_empty_uri_artifact_refs() {
         .expect("recorded");
     let record = record_aggregate_in_store(&lifecycle_store, &mut submitted, &plan, &aggregate)
         .expect("recorded");
-    let durable_status = status_in_store(
+    let durable_status = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),

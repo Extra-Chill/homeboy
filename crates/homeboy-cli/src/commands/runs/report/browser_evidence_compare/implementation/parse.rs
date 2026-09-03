@@ -3,8 +3,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use homeboy_extension::trace::{trace_browser_artifact_map_fields, trace_browser_summary_extract};
-use homeboy_extension::TraceBrowserEvidenceAdapterConfig;
+use homeboy_core::extension::trace::{
+    trace_browser_artifact_map_fields, trace_browser_summary_extract,
+};
+use homeboy_extension_contract::trace_config::TraceBrowserEvidenceAdapterConfig;
 
 use super::super::types::{AssertionFailure, AssertionStats, BrowserEvidenceArtifactLink};
 use super::BrowserEvidenceSample;

@@ -8,9 +8,10 @@ use std::path::Path;
 use super::{tagged_line_replacement, tagged_range_removal};
 use crate::auto::{Fix, RefactorPrimitive, SkippedFile};
 use homeboy_code_audit::{AuditFinding, CodeAuditResult};
-use homeboy_extension::{
-    extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
-    CompilerWarningContract, ExtensionManifest,
+use homeboy_core::extension::{catalog::capability_provider_ids, invoke::invoke_api};
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiInvokeRequest, COMPILER_WARNING_FIXES_CAPABILITY_ID,
+    EXTENSION_API_INVOKE_REQUEST_SCHEMA, EXTENSION_API_V1,
 };
 
 /// A machine-applicable fix suggestion from the compiler.
@@ -59,13 +60,12 @@ pub(crate) fn generate_compiler_warning_fixes(
         return;
     }
 
-    let suggestions =
-        extensions_for_compiler_warning_contract(root, CompilerWarningContract::Fixes)
-            .into_iter()
-            .flat_map(|extension| {
-                run_compiler_warning_fixes_script(&extension, root, result, skipped)
-            })
-            .collect::<Vec<_>>();
+    let suggestions = capability_provider_ids(root, COMPILER_WARNING_FIXES_CAPABILITY_ID)
+        .into_iter()
+        .flat_map(|extension_id| {
+            run_compiler_warning_fixes_script(&extension_id, root, result, skipped)
+        })
+        .collect::<Vec<_>>();
 
     for suggestion in suggestions {
         let fix = match suggestion.kind.as_str() {
@@ -93,41 +93,43 @@ pub(crate) fn generate_compiler_warning_fixes(
 }
 
 fn run_compiler_warning_fixes_script(
-    extension: &ExtensionManifest,
+    extension_id: &str,
     root: &Path,
     result: &CodeAuditResult,
     skipped: &mut Vec<SkippedFile>,
 ) -> Vec<CompilerSuggestion> {
-    let input = serde_json::json!({
-        "root": root,
-        "findings": result.findings,
+    let response = invoke_api(&ExtensionApiInvokeRequest {
+        schema: EXTENSION_API_INVOKE_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        extension_id: extension_id.to_string(),
+        capability_id: COMPILER_WARNING_FIXES_CAPABILITY_ID.to_string(),
+        working_directory: root.to_string_lossy().into_owned(),
+        input: serde_json::json!({
+            "root": root,
+            "findings": result.findings,
+        }),
     });
+    if let Some(failure) = response.failure {
+        skipped.push(SkippedFile {
+            file: String::new(),
+            reason: failure.message,
+        });
+        return Vec::new();
+    }
 
-    let stdout = match run_compiler_warning_contract_script(
-        extension,
-        CompilerWarningContract::Fixes,
-        root,
-        &input,
-    ) {
-        Ok(Some(stdout)) => stdout,
-        Ok(None) => return Vec::new(),
-        Err(error) => {
-            skipped.push(SkippedFile {
-                file: String::new(),
-                reason: error,
-            });
-            return Vec::new();
-        }
-    };
-
-    serde_json::from_str::<CompilerFixEnvelope>(&stdout)
+    response
+        .output
+        .ok_or_else(|| "missing response output".to_string())
+        .and_then(|output| {
+            serde_json::from_value::<CompilerFixEnvelope>(output).map_err(|e| e.to_string())
+        })
         .map(|envelope| envelope.fixes)
         .unwrap_or_else(|e| {
             skipped.push(SkippedFile {
                 file: String::new(),
                 reason: format!(
                     "Invalid compiler warning fix output for extension '{}': {}",
-                    extension.id, e
+                    extension_id, e
                 ),
             });
             Vec::new()

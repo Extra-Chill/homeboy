@@ -2,7 +2,8 @@ use super::common::{request, script};
 use super::*;
 use crate::agent_task::AgentTaskArtifactDeclaration;
 use crate::agent_task_scheduler::{
-    AgentTaskAggregateStatus, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+    AgentTaskAggregateStatus, AgentTaskExecutionBudget, AgentTaskProviderRotationEntry,
+    AgentTaskProviderRotationPolicy,
 };
 use std::sync::{Arc, Mutex};
 
@@ -252,6 +253,81 @@ fn scheduler_dispatches_extension_provider_command() {
 }
 
 #[test]
+fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let marker = temp.path().join("executed.json");
+    let probe_count = temp.path().join("probe-count");
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));fs.writeFileSync({:?},JSON.stringify({{model:req.executor.model,config:req.executor.config}}));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded'}}));",
+            marker.display().to_string()
+        ))
+    );
+    let (mut task, mut provider) = request("cook-ready-fallback", command);
+    task.executor.model = Some("blocked-model".to_string());
+    let readiness = script(&format!(
+        "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let p={:?};fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1));let ready=req.effective_config.model==='ready-model';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'blocked',cache_key:req.effective_config.model,identity:{{model:req.effective_config.model}}}}));",
+        probe_count.display().to_string()
+    ));
+    provider.readiness_invocation = Some(
+        CommandInvocation {
+            argv: vec!["node".to_string(), readiness],
+            ..CommandInvocation::default()
+        }
+        .into(),
+    );
+    let catalog = AgentTaskProviderCatalog {
+        providers: vec![provider.clone()],
+        ..Default::default()
+    };
+    let mut plan = AgentTaskPlan::new("cook-production-readiness", vec![task]);
+    plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+        entries: vec![
+            AgentTaskProviderRotationEntry {
+                model: Some("blocked-model".to_string()),
+                ..Default::default()
+            },
+            AgentTaskProviderRotationEntry {
+                model: Some("ready-model".to_string()),
+                provider_config: json!({ "account": "ready-account" }),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+
+    preflight_plan_provider_dispatchability_with_providers(
+        &mut plan,
+        &catalog,
+        &mut ProviderRuntimeReadinessCache::default(),
+    )
+    .expect("Cook admits the first ready production route");
+    assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+    assert!(plan.tasks[0].executor.config.get("account").is_none());
+
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::from_catalog(catalog),
+    ))
+    .run(plan);
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    let executed: Value = serde_json::from_slice(&std::fs::read(marker).expect("execution marker"))
+        .expect("execution identity");
+    assert_eq!(executed["model"], "ready-model");
+    assert_eq!(executed["config"]["account"], "ready-account");
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
+        1
+    );
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["provider_rotations_used"],
+        0
+    );
+}
+
+#[test]
 fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let roots = context.path_roots();
@@ -398,6 +474,46 @@ fn scheduler_reports_missing_provider_capability() {
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].data["required_capabilities"],
         json!(["workspace_write"])
+    );
+}
+
+#[test]
+fn scheduler_rotates_from_an_incapable_plan_level_primary_to_a_capable_fallback() {
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded'}));")
+    );
+    let (mut request, mut primary) = request("task-capability-rotation", command);
+    primary.id = "test.primary".to_string();
+    primary.capabilities.clear();
+    let mut fallback = primary.clone();
+    fallback.id = "test.fallback".to_string();
+    fallback.capabilities = vec!["workspace_write".to_string()];
+    request.executor.selector = Some(primary.id.clone());
+    request.executor.required_capabilities = vec!["workspace_write".to_string()];
+    let mut plan = AgentTaskPlan::new("plan-capability-rotation", vec![request]);
+    plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+        entries: vec![AgentTaskProviderRotationEntry {
+            selector: Some(fallback.id.clone()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![primary, fallback]),
+    ))
+    .run(plan);
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
+        1
+    );
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["provider_rotations_used"],
+        0
     );
 }
 
@@ -1319,6 +1435,134 @@ fn missing_declared_secret_env_fails_before_provider_spawn() {
         aggregate.outcomes[0].diagnostics[0].data["missing_secret_env"],
         json!([secret_name])
     );
+}
+
+#[test]
+fn launched_execution_uses_the_exact_credentials_bound_by_readiness() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let credential = root.path().join("account.json");
+    let observed = root.path().join("observed");
+    std::fs::write(&credential, r#"{"token":"bound-account"}"#).expect("initial credential");
+    let readiness = script(&format!(
+        "const fs=require('fs');const token=process.env.TEST_BOUND_ACCOUNT_TOKEN||'';fs.writeFileSync({:?},JSON.stringify({{token:'rotated-account'}}));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='bound-account',classification:token==='bound-account'?'ready':'auth_failure',retryable:false,remediation:'',reason:token,cache_key:token,identity:{{account:token}}}}));",
+        credential.display().to_string()
+    ));
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.TEST_BOUND_ACCOUNT_TOKEN||'';fs.writeFileSync({:?},token);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:token==='bound-account'?'succeeded':'provider_error',summary:token==='bound-account'?'bound credential used':'credential drifted'}}));",
+            observed.display().to_string()
+        ))
+    );
+    let (mut request, mut provider) = request("bound-launch-credential", command);
+    request.executor.config = json!({"provider":"account"});
+    provider.provider_defaults = serde_json::from_value(json!({
+        "account": {
+            "required_secret_env": ["TEST_BOUND_ACCOUNT_TOKEN"],
+            "secret_env_sources": {
+                "TEST_BOUND_ACCOUNT_TOKEN": {
+                    "source": "json-file",
+                    "path": credential,
+                    "field": "token"
+                }
+            }
+        }
+    }))
+    .expect("provider defaults");
+    provider.readiness_invocation = Some(
+        homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["node".to_string(), readiness],
+            ..Default::default()
+        }
+        .into(),
+    );
+
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ))
+    .run(AgentTaskPlan::new("bound-launch-credential", vec![request]));
+
+    assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
+    assert_eq!(
+        std::fs::read_to_string(observed).expect("launched credential"),
+        "bound-account"
+    );
+    assert_eq!(
+        std::fs::read_to_string(credential).expect("rotated source"),
+        r#"{"token":"rotated-account"}"#
+    );
+}
+
+#[test]
+fn concurrent_launches_keep_each_readiness_bound_credential() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let observed = root.path().join("observed");
+    std::fs::create_dir(&observed).expect("observed directory");
+    let readiness = script(
+        "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN||'';fs.writeFileSync(req.effective_config.credential_path,JSON.stringify({token:'rotated-'+token}));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token.startsWith('bound-'),classification:token.startsWith('bound-')?'ready':'auth_failure',retryable:false,remediation:'',reason:token,cache_key:token,identity:{account:token}}));",
+    );
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "const fs=require('fs'),path=require('path');const req=JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN||'';fs.writeFileSync(path.join({:?},req.task_id),token);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:token.startsWith('bound-')?'succeeded':'provider_error',summary:'credential observation'}}));",
+            observed.display().to_string()
+        ))
+    );
+    let (_, mut provider) = request("concurrent-template", command);
+    provider.readiness_invocation = Some(
+        homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["node".to_string(), readiness],
+            ..Default::default()
+        }
+        .into(),
+    );
+    let mut tasks = Vec::new();
+    let mut credentials = Vec::new();
+    for index in 0..4 {
+        let account = format!("account-{index}");
+        let credential = root.path().join(format!("{account}.json"));
+        std::fs::write(&credential, format!(r#"{{"token":"bound-{index}"}}"#)).expect("credential");
+        provider.provider_defaults.insert(
+            account.clone(),
+            json!({
+                "required_secret_env": ["TEST_CONCURRENT_ACCOUNT_TOKEN"],
+                "secret_env_sources": {
+                    "TEST_CONCURRENT_ACCOUNT_TOKEN": {
+                        "source": "json-file",
+                        "path": credential,
+                        "field": "token"
+                    }
+                }
+            }),
+        );
+        let (mut task, _) = request(&format!("concurrent-{index}"), "unused".to_string());
+        task.executor.config = json!({
+            "provider": account,
+            "credential_path": credential,
+        });
+        tasks.push(task);
+        credentials.push(credential);
+    }
+    let mut plan = AgentTaskPlan::new("concurrent-bound-launch-credentials", tasks);
+    plan.options.max_concurrency = 4;
+
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ))
+    .run(plan);
+
+    assert_eq!(aggregate.totals.succeeded, 4, "{aggregate:?}");
+    for (index, credential) in credentials.iter().enumerate() {
+        assert_eq!(
+            std::fs::read_to_string(observed.join(format!("concurrent-{index}")))
+                .expect("launched credential"),
+            format!("bound-{index}")
+        );
+        assert_eq!(
+            std::fs::read_to_string(credential).expect("rotated credential source"),
+            format!(r#"{{"token":"rotated-bound-{index}"}}"#)
+        );
+    }
 }
 
 #[test]

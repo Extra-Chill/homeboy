@@ -89,6 +89,8 @@ pub enum CookStatus {
     GreenNoFinalize,
     /// A verified provider review intentionally produced no candidate patch.
     IntentionalNoChange,
+    /// Verified no-change evidence cannot satisfy a task that requires a patch.
+    NoCandidate,
     /// Finalization ran and found no changed files.
     NoChanges,
     /// A no-op candidate failed its gates.
@@ -107,6 +109,8 @@ pub enum CookStatus {
     Cancelled,
     /// Exceeded its wall-clock budget.
     TimedOut,
+    /// The optional read-only review form exceeded its distinct deadline.
+    ReviewFormTimeout,
     /// Ran out of retries.
     RetriesExhausted,
     /// Ran out of execution budget.
@@ -146,6 +150,7 @@ impl CookStatus {
             "draft_published" => Self::DraftPublished,
             "green_no_finalize" => Self::GreenNoFinalize,
             "intentional_no_change" => Self::IntentionalNoChange,
+            "no_candidate" => Self::NoCandidate,
             "no_changes" => Self::NoChanges,
             "no_op_gate_failed" => Self::NoOpGateFailed,
             "gate_failed" => Self::GateFailed,
@@ -155,6 +160,7 @@ impl CookStatus {
             "blocked" => Self::Blocked,
             "cancelled" => Self::Cancelled,
             "timed_out" => Self::TimedOut,
+            "review_form_timeout" => Self::ReviewFormTimeout,
             "retries_exhausted" => Self::RetriesExhausted,
             "execution_budget_exhausted" => Self::ExecutionBudgetExhausted,
             "policy_failure" => Self::PolicyFailure,
@@ -179,6 +185,7 @@ impl CookStatus {
             Self::DraftPublished => "draft_published",
             Self::GreenNoFinalize => "green_no_finalize",
             Self::IntentionalNoChange => "intentional_no_change",
+            Self::NoCandidate => "no_candidate",
             Self::NoChanges => "no_changes",
             Self::NoOpGateFailed => "no_op_gate_failed",
             Self::GateFailed => "gate_failed",
@@ -188,6 +195,7 @@ impl CookStatus {
             Self::Blocked => "blocked",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::ReviewFormTimeout => "review_form_timeout",
             Self::RetriesExhausted => "retries_exhausted",
             Self::ExecutionBudgetExhausted => "execution_budget_exhausted",
             Self::PolicyFailure => "policy_failure",
@@ -313,11 +321,13 @@ mod tests {
             "draft_published",
             "green_no_finalize",
             "intentional_no_change",
+            "no_candidate",
             "no_changes",
             "gate_failed",
             "awaiting_acceptance",
             "cancelled",
             "timed_out",
+            "review_form_timeout",
             "durable_failure",
             "selection_required",
         ] {
@@ -381,6 +391,7 @@ mod tests {
             CookStatus::DraftPublished,
             CookStatus::GreenNoFinalize,
             CookStatus::IntentionalNoChange,
+            CookStatus::NoCandidate,
             CookStatus::NoChanges,
             CookStatus::NoOpGateFailed,
             CookStatus::GateFailed,
@@ -390,6 +401,7 @@ mod tests {
             CookStatus::Blocked,
             CookStatus::Cancelled,
             CookStatus::TimedOut,
+            CookStatus::ReviewFormTimeout,
             CookStatus::RetriesExhausted,
             CookStatus::ExecutionBudgetExhausted,
             CookStatus::PolicyFailure,

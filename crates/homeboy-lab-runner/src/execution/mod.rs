@@ -42,14 +42,14 @@ pub(crate) const RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_CANCE
 // These runner env-var markers now live in the shared runner-contract crate so
 // core can reference them without a core -> runner edge. Re-exported here so the
 // existing `runner::execution::RUNNER_*_ENV` call sites keep resolving.
-pub use homeboy_lab_runner_contract::{
+pub use homeboy_runner_contract::{
     RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 
 // Moved to the runner-contract crate (contract-level env classification) so
 // core can call it without a core -> runner edge. Re-exported for runner-
 // internal call sites.
-pub(crate) use homeboy_lab_runner_contract::is_internal_control_env;
+pub(crate) use homeboy_runner_contract::is_internal_control_env;
 
 mod artifact_promotion;
 mod broker;
@@ -66,6 +66,7 @@ mod process;
 mod recovery;
 pub(crate) mod redaction;
 mod secrets;
+mod submission;
 mod worker;
 
 #[cfg(test)]
@@ -89,7 +90,7 @@ use daemon::*;
 use daemon_api::*;
 pub(crate) use daemon_api::{
     daemon_api_get_for_session, daemon_api_get_for_session_with_timeout,
-    daemon_api_post_json_for_session,
+    daemon_api_post_json_for_session_with_broker_token,
 };
 use failure::*;
 use handoff::*;
@@ -98,6 +99,7 @@ use paths::*;
 use process::*;
 use redaction::*;
 use secrets::*;
+use submission::*;
 
 // Crate-internal surface consumed by sibling `runner` modules (evidence, worker,
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
@@ -120,6 +122,9 @@ pub(crate) use process::{
 pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
 pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
+
+mod request;
+pub use request::{exec_request, RunnerExecRequest};
 
 // Public surface re-exported by the parent `runner` module. These mirror the
 // pre-split `pub` items so external callers keep referencing them unchanged.
@@ -205,9 +210,14 @@ pub(crate) fn resolve_provider_env_with_execution_context(
     cwd: &std::path::Path,
     env: &HashMap<String, String>,
     explicit_run_id: Option<&str>,
-) -> Result<Vec<homeboy_extension::EnvProviderContribution>> {
+) -> Result<Vec<homeboy_core::extension::invoke::EnvProviderContribution>> {
     let env = provider_resolution_env(env, explicit_run_id);
-    homeboy_extension::resolve_installed_env_providers(execution_context, provider_ids, cwd, &env)
+    homeboy_core::extension::invoke::resolve_installed_all(
+        execution_context,
+        provider_ids,
+        cwd,
+        &env,
+    )
 }
 
 /// Environment visible to extension providers before they contribute their
@@ -570,7 +580,7 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
     let mut extensions = required_extensions
         .iter()
         .filter_map(|extension_id| {
-            let manifest = homeboy_extension::load_extension(extension_id).ok()?;
+            let manifest = homeboy_core::extension::catalog::load_extension(extension_id).ok()?;
             let path = manifest.extension_path.clone().unwrap_or_else(|| {
                 homeboy_core::paths::extension(extension_id)
                     .map(|path| path.display().to_string())
@@ -583,14 +593,15 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
             Some(ExtensionProvenance {
                 extension_id: extension_id.clone(),
                 path,
-                install_mode: if homeboy_extension::is_extension_linked(extension_id) {
+                install_mode: if homeboy_core::extension::catalog::is_extension_linked(extension_id)
+                {
                     "linked".to_string()
                 } else {
                     "copied".to_string()
                 },
                 manifest_path,
                 version: Some(manifest.version),
-                source_revision: homeboy_core::extension_update_check::read_source_revision(
+                source_revision: homeboy_core::extension::lifecycle::read_source_revision(
                     extension_id,
                 ),
             })
@@ -976,7 +987,7 @@ fn exec_with_status_snapshot_attempt(
         let provider_secret_names = options
             .extension_env_providers
             .iter()
-            .map(|id| homeboy_extension::env_provider_secret_names(id))
+            .map(|id| homeboy_core::extension::invoke::declared_secret_names(id))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
@@ -1614,7 +1625,6 @@ pub(super) fn fire_runner_direct_notification(
     let Some(route) = notification_route else {
         return;
     };
-    let status = job.status.as_str();
     let store = match homeboy_core::observation::ObservationStore::open_initialized() {
         Ok(store) => store,
         Err(_) => return,
@@ -1623,16 +1633,32 @@ pub(super) fn fire_runner_direct_notification(
     if already_delivered {
         return;
     }
-    let mut event =
-        homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    let run = store.get_run(run_id).ok().flatten();
+    let event = runner_direct_notification_event(run_id, job.status.as_str(), route, run.as_ref());
     // The store is already open for the delivery guard; reuse it so the
     // runner's direct delivery carries the same structured detail the
     // controller's notifier does.
-    if let Ok(Some(run)) = store.get_run(run_id) {
-        event = event.with_payload(homeboy_core::notify::run_completed_payload(&run));
-    }
     let outcome = homeboy_core::notify::dispatch(&event);
     if outcome.delivered {
         let _ = store.mark_notification_delivered(run_id, "runner-direct");
+    }
+}
+
+pub(super) fn runner_direct_notification_event(
+    run_id: &str,
+    fallback_status: &str,
+    route: &homeboy_core::notification_route::NotificationRoute,
+    run: Option<&homeboy_core::observation::RunRecord>,
+) -> homeboy_core::notify::NotifyEvent {
+    // The mirrored run is authoritative when it exists. In particular, a
+    // detached wrapper can remain `running` after its nested run has failed.
+    let status = run
+        .map(|run| run.status.as_str())
+        .unwrap_or(fallback_status);
+    let event =
+        homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    match run {
+        Some(run) => event.with_payload(homeboy_core::notify::run_completed_payload(run)),
+        None => event,
     }
 }

@@ -295,60 +295,151 @@ pub(crate) fn queued_events(tasks: &[AgentTaskRunTask]) -> Vec<AgentTaskProgress
         .collect()
 }
 
-pub(crate) fn totals_for_tasks(tasks: &[AgentTaskRunTask]) -> AgentTaskAggregateTotals {
-    let mut totals = AgentTaskAggregateTotals::default();
-    for task in tasks {
-        match task.state {
-            AgentTaskState::Queued => totals.queued += 1,
-            AgentTaskState::Running => totals.running += 1,
-            AgentTaskState::Blocked => totals.blocked += 1,
-            AgentTaskState::Skipped => totals.skipped += 1,
-            AgentTaskState::Succeeded => totals.succeeded += 1,
-            AgentTaskState::CandidateRecoverable => {
-                totals.candidate_recoverable += 1;
-                totals.recoverable_candidates += 1;
-            }
-            AgentTaskState::Failed => totals.failed += 1,
-            AgentTaskState::Cancelled => totals.cancelled += 1,
-            AgentTaskState::TimedOut => totals.timed_out += 1,
-        }
-    }
-    totals
-}
-
 pub(crate) fn normalize_progress_events(
-    run_id: &str,
+    record: &AgentTaskRunRecord,
     events: &[AgentTaskProgressEvent],
     artifact_refs: &[AgentTaskArtifactRef],
-) -> Vec<AgentTaskEventEnvelope> {
+) -> Result<Vec<homeboy_control_plane_contract::ControlPlaneEvent>> {
     events
         .iter()
         .enumerate()
-        .map(|(index, event)| AgentTaskEventEnvelope {
-            schema: schemas::EVENT.to_string(),
-            run_id: run_id.to_string(),
-            task_id: event.task_id.clone(),
-            sequence: (index + 1) as u64,
-            event_type: "agent_task.state_changed".to_string(),
-            status: event.state,
-            message: event.message.clone(),
-            provider: None,
-            phase: None,
-            activity: None,
-            heartbeat_at_ms: None,
-            progress: json!({
-                "attempt": event.attempt,
-            }),
-            artifact_refs: artifact_refs
-                .iter()
-                .filter(|artifact_ref| artifact_ref.task_id == event.task_id)
-                .cloned()
-                .collect(),
-            metadata: json!({
-                "source_schema": AGENT_TASK_AGGREGATE_SCHEMA,
-            }),
+        .map(|(index, event)| {
+            control_plane_event(
+                record,
+                (index + 1) as u64,
+                &event.task_id,
+                "task.state_changed",
+                None,
+                "agent-task",
+                json!({
+                    "state": event.state,
+                    "message": event.message,
+                    "progress": { "attempt": event.attempt },
+                    "source_schema": AGENT_TASK_AGGREGATE_SCHEMA,
+                }),
+                artifact_refs
+                    .iter()
+                    .filter(|artifact_ref| artifact_ref.task_id == event.task_id),
+            )
         })
         .collect()
+}
+
+pub(crate) fn control_plane_event<'a>(
+    record: &AgentTaskRunRecord,
+    sequence: u64,
+    task_id: &str,
+    kind: &str,
+    occurred_at: Option<String>,
+    source: &str,
+    data: Value,
+    artifact_refs: impl Iterator<Item = &'a AgentTaskArtifactRef>,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEvent> {
+    use homeboy_control_plane_contract::{
+        ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneEvidenceRef, EventId, RunId,
+        TaskId, CONTROL_PLANE_EVENT_SCHEMA,
+    };
+
+    let run = RunId::new(&record.run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    let task = TaskId::new(task_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "task_id",
+            error.to_string(),
+            Some(task_id.to_string()),
+            None,
+        )
+    })?;
+    let identities = canonical_control_plane_identities(record)?;
+    let artifacts = artifact_refs
+        .enumerate()
+        .take(crate::orchestration::REF_BOUND)
+        .map(|(index, reference)| ControlPlaneEvidenceRef {
+            id: crate::orchestration::redacted_bounded(
+                &reference
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("{}-artifact-{}", task_id, index + 1)),
+                128,
+            ),
+            kind: crate::orchestration::redacted_bounded(&reference.kind, 64),
+            uri: crate::orchestration::redacted_bounded(&reference.uri, 512),
+        })
+        .collect();
+
+    Ok(ControlPlaneEvent {
+        schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
+        event: EventId::new(format!("{}:event:{sequence}", record.run_id))
+            .expect("validated run identity produces a nonempty event id"),
+        sequence,
+        occurred_at,
+        mission: identities.as_ref().map(|value| value.mission.clone()),
+        run,
+        task: Some(task),
+        attempt: identities.map(|value| value.attempt),
+        execution: record
+            .runner_job_id()
+            .and_then(|value| homeboy_control_plane_contract::ExecutionId::new(value).ok()),
+        kind: kind.to_string(),
+        source: ControlPlaneEventSource {
+            component: source.to_string(),
+            instance: None,
+        },
+        data: bounded_event_data(homeboy_core::redaction::redact_json(&data), 0),
+        artifacts,
+        evidence: Vec::new(),
+    })
+}
+
+fn bounded_event_data(value: Value, depth: usize) -> Value {
+    const MAX_DEPTH: usize = 8;
+    const MAX_ITEMS: usize = 32;
+    const MAX_STRING_CHARS: usize = 2_048;
+
+    if depth >= MAX_DEPTH {
+        return Value::String("[truncated]".to_string());
+    }
+    match value {
+        Value::String(value) => Value::String(value.chars().take(MAX_STRING_CHARS).collect()),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .take(MAX_ITEMS)
+                .map(|value| bounded_event_data(value, depth + 1))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .take(MAX_ITEMS)
+                .map(|(key, value)| (key, bounded_event_data(value, depth + 1)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+pub(crate) fn control_plane_event_page(
+    record: &AgentTaskRunRecord,
+    events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    crate::orchestration::event_page(run, events, cursor)
+        .map_err(|error| Error::validation_invalid_argument("cursor", error.message, None, None))
 }
 
 pub(crate) fn artifact_refs_for_outcomes(

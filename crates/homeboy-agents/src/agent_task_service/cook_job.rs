@@ -40,9 +40,6 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 
-use homeboy_core::daemon::controller_job_driver::{
-    self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
-};
 use homeboy_core::process::{
     process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
 };
@@ -252,8 +249,6 @@ fn invalid_cook_job(message: &str) -> homeboy_core::Error {
     homeboy_core::Error::validation_invalid_argument("cook_job", message, None, None)
 }
 
-pub struct CookJobDriver;
-
 struct CookWorkHandler;
 
 impl WorkJobHandler for CookWorkHandler {
@@ -284,13 +279,6 @@ impl WorkJobHandler for CookWorkHandler {
             "run_id": result.get("run_id").cloned().unwrap_or(Value::Null),
             "terminal_state": result.get("terminal_state").cloned().unwrap_or(Value::Null),
         }))
-    }
-
-    fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
-        ControllerJobPublicError {
-            message: "controller-owned cook supervision failed".to_string(),
-            data: json!({ "code": format!("{:?}", error.code) }),
-        }
     }
 
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
@@ -324,6 +312,11 @@ impl WorkJobHandler for CookWorkHandler {
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
+        // `agent_task_lifecycle::cancel_run` owns both cancellation paths:
+        // before materialization it terminates the detached child's process
+        // tree under an exact `ProcessStartIdentity` match; after
+        // materialization it marks the live attempt cancelled for the cook's
+        // own supervisor to stop cleanly.
         let job = AgentTaskCookJob::parse(checkpoint.clone())?;
         if job.phase == AgentTaskCookJobPhase::Completed {
             return Ok(());
@@ -334,77 +327,6 @@ impl WorkJobHandler for CookWorkHandler {
             .as_deref()
             .unwrap_or(&job.request.cook_id);
         agent_task_lifecycle::cancel_run(run_id, Some("controller job cancelled")).map(|_| ())
-    }
-}
-
-/// Recovery-only adapter for persisted `agent-task-cook` v1 controller jobs.
-impl ControllerJobDriver for CookJobDriver {
-    fn job_type(&self) -> &'static str {
-        AGENT_TASK_COOK_JOB_TYPE
-    }
-
-    fn version(&self) -> u32 {
-        AGENT_TASK_COOK_JOB_VERSION
-    }
-
-    fn public_request(&self, request: &Value) -> Result<Value> {
-        CookWorkHandler.public_request(request)
-    }
-
-    fn public_progress(&self, progress: &Value) -> Result<Value> {
-        CookWorkHandler.public_progress(progress)
-    }
-
-    fn public_result(&self, result: &Value) -> Result<Value> {
-        CookWorkHandler.public_result(result)
-    }
-
-    fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
-        CookWorkHandler.public_error(error)
-    }
-
-    fn validate_secret_references(&self, request: &Value) -> Result<()> {
-        CookWorkHandler.validate_secret_references(request)
-    }
-
-    fn prepare(&self, request: Value) -> Result<Value> {
-        CookWorkHandler.prepare(request)
-    }
-
-    fn execute(&self, prepared: Value, handle: ControllerJobHandle) -> Result<Value> {
-        CookWorkHandler.advance(
-            prepared,
-            WorkJobHandle::legacy(handle, &CookWorkHandler),
-            WorkJobInvocation::Execute,
-        )
-    }
-
-    /// Re-adopt supervision after a daemon restart.
-    ///
-    /// This is idempotent by construction: no branch below spawns provider work.
-    /// A completed job short-circuits on its durable terminal state; an
-    /// unfinished one either re-attaches to a child still provably alive, or
-    /// observes the durable outcome of one that is not.
-    fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
-        CookWorkHandler.advance(
-            checkpoint,
-            WorkJobHandle::legacy(handle, &CookWorkHandler),
-            WorkJobInvocation::Resume,
-        )
-    }
-
-    /// Stop the cook through the one established cancellation path.
-    ///
-    /// `agent_task_lifecycle::cancel_run` already owns both halves of this:
-    /// before the cook materializes an attempt it terminates the detached
-    /// child's process tree, guarded by an exact `ProcessStartIdentity` match so
-    /// a reused PID is never signalled; after materialization it follows the
-    /// Cook alias to the live attempt and marks it cancelled, which the running
-    /// cook's own supervisor observes and turns into
-    /// `terminate_process_tree(std::process::id())` — the in-flight stop path.
-    /// No second mechanism is introduced here.
-    fn cancel(&self, prepared: &Value) -> Result<()> {
-        CookWorkHandler.cancel(prepared)
     }
 }
 
@@ -520,16 +442,17 @@ impl AgentTaskCookJob {
                 &self.request.cook_id,
                 "detached Cook exited before materializing its first attempt",
             )?;
-        }
-        // A retry supervisor is attached to an existing queued attempt rather
-        // than an initial handoff parent. If its launcher exits before provider
-        // execution, retain the normal zero-provider terminal outcome.
-        if self.request.supervisor_id.is_some() {
-            if let Some(run_id) = run_id.as_deref() {
-                let lifecycle_store =
-                    agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-                let record = lifecycle_store.read_record(run_id)?;
-                if !record.state.is_terminal() {
+        } else if let Some(run_id) = run_id.as_deref() {
+            let lifecycle_store =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            let record = lifecycle_store.read_record(run_id)?;
+            if !record.state.is_terminal() {
+                let provider_started = record
+                    .metadata
+                    .get("provider_executions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|executions| !executions.is_empty());
+                if self.request.supervisor_id.is_some() && !provider_started {
                     let plan = lifecycle_store.read_controller_plan(run_id)?;
                     let error = retry_child_failure(&self.request);
                     agent_task_lifecycle::record_pre_execution_failure_in_store(
@@ -538,6 +461,11 @@ impl AgentTaskCookJob {
                         &plan,
                         "local_retry_supervisor",
                         &error,
+                    )?;
+                } else {
+                    agent_task_lifecycle::record_interrupted_local_owner_in_store(
+                        &lifecycle_store,
+                        run_id,
                     )?;
                 }
             }
@@ -731,16 +659,14 @@ fn bound_child_diagnostic(value: &mut Value, depth: usize) {
     }
 }
 
-/// Register the cook driver with core's generic controller-job lifecycle.
+/// Register the cook handler with the generic work lifecycle.
 /// Registration is idempotent because CLI startup can run in test processes
 /// that initialize the command runtime more than once.
-pub fn register_cook_job_driver() {
+pub fn register_cook_work_handler() {
     static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     REGISTERED.get_or_init(|| {
         register_work_job_handler(std::sync::Arc::new(CookWorkHandler))
             .expect("register cook work job handler");
-        controller_job_driver::register_controller_job_driver(std::sync::Arc::new(CookJobDriver))
-            .expect("register cook controller job driver");
     });
 }
 
@@ -813,6 +739,7 @@ mod tests {
         WORK_JOB_RESULT_SCHEMA, WORK_JOB_TYPE, WORK_JOB_VERSION,
     };
     use homeboy_core::api_jobs::JobEventKind;
+    use homeboy_core::daemon::controller_job_driver::ControllerJobDriver;
     use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
     use std::sync::Arc;
 
@@ -821,7 +748,7 @@ mod tests {
     };
 
     fn submission(cook_id: &str, pid: u32) -> Value {
-        register_cook_job_driver();
+        register_cook_work_handler();
         cook_job_submission(cook_id, pid, &IDENTITY).expect("build cook job submission")
     }
 
@@ -1020,13 +947,13 @@ mod tests {
         assert!(!result.to_string().contains("private task text"));
     }
 
-    /// A cook's error text can quote provider output, which can quote the
-    /// prompt. Only the typed code may cross into public job state.
+    /// Work errors use the actual daemon projection, which withholds domain
+    /// error text that could quote provider output or the prompt.
     #[test]
     fn the_public_error_carries_only_a_code() {
-        let public = CookJobDriver.public_error(&invalid_cook_job("prompt: the private task text"));
+        let public = WorkJobDriver.public_error(&invalid_cook_job("prompt: the private task text"));
 
-        assert_eq!(public.message, "controller-owned cook supervision failed");
+        assert_eq!(public.message, "controller-owned work failed");
         assert!(!public.data.to_string().contains("private task text"));
     }
 
@@ -1216,7 +1143,7 @@ mod tests {
         job.phase = AgentTaskCookJobPhase::Completed;
         job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
 
-        CookJobDriver
+        CookWorkHandler
             .cancel(&job.to_checkpoint().expect("serialize"))
             .expect("cancelling a completed cook job is a no-op");
     }
@@ -1252,7 +1179,7 @@ mod tests {
             let submission = cook_job_submission(cook_id, child.id(), &start_identity)
                 .expect("build submission");
 
-            CookJobDriver
+            CookWorkHandler
                 .cancel(&submission["request"]["request"])
                 .expect("driver cancellation reaches the lifecycle stop path");
 
@@ -1299,7 +1226,7 @@ mod tests {
                 "retry-session",
             )
             .expect("build retry supervisor submission");
-            CookJobDriver
+            CookWorkHandler
                 .cancel(&submission["request"]["request"])
                 .expect("cancel pinned retry supervisor");
 
@@ -1319,9 +1246,9 @@ mod tests {
     }
 
     #[test]
-    fn driver_registration_is_idempotent() {
-        register_cook_job_driver();
-        register_cook_job_driver();
+    fn work_handler_registration_is_idempotent() {
+        register_cook_work_handler();
+        register_cook_work_handler();
     }
 
     #[test]
@@ -1422,6 +1349,109 @@ mod tests {
                     && reference.uri
                         == format!("homeboy://agent-task/run/{run_id}/status#detached-child-command-result")
             }));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observe_terminal_persists_interrupted_owner_aggregate_during_provider_execution() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-interrupted-observer";
+            let run_id = "cook-interrupted-observer-attempt-1";
+            let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+                "interrupted-observer",
+                vec![AgentTaskRequest {
+                    schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "test".to_string(),
+                        selector: Some("fixture".to_string()),
+                        runtime_selection: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "run".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    component_contracts: Vec::new(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    artifact_declarations: Vec::new(),
+                    output_declarations: Vec::new(),
+                    runtime_tools: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                run_id,
+            )
+            .expect("index attempt");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::reserve_provider_execution_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &plan.tasks[0],
+                1,
+            )
+            .expect("reserved");
+            let mut owner = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start cook observer");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+                record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] =
+                    Value::Null;
+            })
+            .expect("observer fixture");
+            owner.kill().expect("kill cook observer");
+            owner.wait().expect("reap cook observer");
+
+            let mut job =
+                AgentTaskCookJob::parse(request_of(cook_id, u32::MAX)).expect("parse request");
+            job.phase = AgentTaskCookJobPhase::Supervising;
+            job.observe_terminal(Some(run_id.to_string()))
+                .expect("observe interrupted observer");
+
+            let record = agent_task_lifecycle::exact_record(run_id).expect("read interrupted run");
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                record.metadata["stop_reason"],
+                json!("local Cook observer was interrupted during provider execution")
+            );
+            assert_eq!(
+                record.metadata["terminal_failure_classification"],
+                json!("interrupted_owner")
+            );
+            assert_eq!(
+                record.metadata["interrupted_owner"]["provider_budget_consumed"],
+                true
+            );
+            let aggregate = test_lifecycle_store()
+                .read_aggregate(run_id)
+                .expect("read interrupted-owner aggregate");
+            assert_eq!(
+                aggregate.outcomes[0].diagnostics[0].class,
+                "interrupted_owner"
+            );
         });
     }
 

@@ -23,7 +23,6 @@ use serde::Serialize;
 
 use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use homeboy_core::Error;
-use homeboy_extension as extension;
 
 // ============================================================================
 // Types
@@ -115,6 +114,7 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
             struct_name,
             &def_content,
             &relative,
+            root,
             &refactor_exts,
         )
         .ok_or_else(|| {
@@ -149,7 +149,7 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
     // Step 4: For each refactor extension, scan the files it handles and send
     // them to that extension's refactor script.
     for ext_manifest in &refactor_exts {
-        let handled_exts: Vec<String> = ext_manifest.provided_file_extensions().to_vec();
+        let handled_exts = ext_manifest.file_extensions.clone();
 
         let scan_config = ScanConfig {
             extensions: ExtensionFilter::Only(handled_exts.clone()),
@@ -176,6 +176,10 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
             let Ok(file_content) = std::fs::read_to_string(file_path) else {
                 continue;
             };
+            let Some(file_extension) = file_path.extension().and_then(|value| value.to_str())
+            else {
+                continue;
+            };
 
             // Quick check: skip files that don't mention the struct name
             if !file_content.contains(struct_name) {
@@ -192,7 +196,12 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
                 "file_path": relative,
             });
 
-            let Some(result) = extension::run_refactor_script(ext_manifest, &cmd) else {
+            let Some(result) = crate::refactor_provider::invoke_refactor_value(
+                ext_manifest,
+                root,
+                file_extension,
+                cmd,
+            ) else {
                 homeboy_core::log_status!(
                     "warning",
                     "Extension returned no result for {}",

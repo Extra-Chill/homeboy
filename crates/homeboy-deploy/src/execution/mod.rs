@@ -168,6 +168,7 @@ mod tests {
                 source_commit: "0123456789abcdef".to_string(),
             }),
             resume_run_id: None,
+            max_concurrency: 1,
             target: None,
         };
 
@@ -837,6 +838,7 @@ mod tests {
             tagged,
             prepared_artifact: None,
             resume_run_id: None,
+            max_concurrency: 1,
             target: None,
         }
     }

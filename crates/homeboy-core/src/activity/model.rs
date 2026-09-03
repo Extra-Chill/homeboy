@@ -2,7 +2,7 @@
 //! report, plus the small state predicates over them. Extracted from the
 //! `activity` module to keep each file within one responsibility (#9794).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::run_lifecycle_status::RunLifecycleStatus;
@@ -69,21 +69,39 @@ pub struct ActivityRunnerRefs {
     pub transport: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ActivityCrossRefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_task_run_id: Option<String>,
+    /// Runner-job / execution reference. Not a run-id alias.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_job_id: Option<String>,
 }
 
-/// Stable task identity carried by sources that know the submitted work.
+impl<'de> Deserialize<'de> for ActivityCrossRefs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            run_id: Option<String>,
+            #[serde(default)]
+            agent_task_run_id: Option<String>,
+            #[serde(default)]
+            runner_job_id: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            run_id: raw.run_id.or(raw.agent_task_run_id),
+            runner_job_id: raw.runner_job_id,
+        })
+    }
+}
+
+/// Task context carried by sources that know the submitted work.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityContext {
-    /// Legacy single-task identity. Retained for existing persisted activity
-    /// consumers; new agent-task projections populate `identities`.
+    /// Operator-facing task reference — a link to follow, not a task identity.
+    /// [`Self::identities`] is the identity surface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,6 +115,7 @@ pub struct ActivityContext {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityTaskIdentity {
+    /// Operator-facing task reference attached to this identity, not the identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,7 +133,10 @@ impl ActivityContext {
     }
 }
 
-/// Exact identity selectors for a bounded unified activity lookup.
+/// Selectors for a bounded unified activity lookup.
+///
+/// `repository` and `worktree` match [`ActivityContext::identities`].
+/// `task_url` matches the operator task reference, not a distinct identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityFilter {
     pub task_url: Option<String>,
@@ -127,6 +149,15 @@ pub struct ActivityEvidenceRef {
     pub id: String,
     pub kind: String,
     pub uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityFailure {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 /// A store-specific view retained with the canonical activity item so state
@@ -182,6 +213,8 @@ pub struct ActivityItem {
     pub state_conflicts: Vec<ActivityStateConflict>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<ActivityNextAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ActivityFailure>,
 }
 
 /// The `source_store` of the worktree provider projection. Items from this
@@ -382,13 +415,9 @@ pub struct ActivityReport {
     pub zero_executing_work: bool,
     /// Whether this surface reconciled while reading.
     ///
-    /// `activity` is a deliberately **non**-reconciling read model, so this is
-    /// always `false` here — while `agent-task status` is "a reconciling read
-    /// that writes" and `runs watch` reconciles on purpose. The two surfaces can
-    /// therefore legitimately report different states for the same run at the
-    /// same instant, *and calling one changes what the other returns*. Emitting
-    /// the flag lets a consumer tell which kind of answer it is holding instead
-    /// of inferring it from the command name (#W3-15).
+    /// `activity` and `agent-task status` are deliberately non-reconciling read
+    /// models, so this is always `false`. Explicit reconciliation returns its
+    /// mutation result separately (#W3-15).
     #[serde(default)]
     pub reconciled: bool,
     /// `true` when at least one activity source could not be fully read, so

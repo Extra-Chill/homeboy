@@ -97,7 +97,6 @@ fn item_from_run(store: &ObservationStore, run: RunRecord) -> Result<ActivityIte
         },
         refs: ActivityCrossRefs {
             run_id: Some(run.id.clone()),
-            agent_task_run_id: None,
             runner_job_id: job_id,
         },
         context: ActivityContext::default(),
@@ -106,6 +105,7 @@ fn item_from_run(store: &ObservationStore, run: RunRecord) -> Result<ActivityIte
         source_projections: Vec::new(),
         state_conflicts: Vec::new(),
         next_actions: actions_for_observation_run(&run.id, state_from_run_status(&run.status)),
+        failure: None,
     })
 }
 

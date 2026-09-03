@@ -57,13 +57,9 @@ pub struct AgentTaskDiscoveryReport {
     pub filter: &'static str,
     /// Whether this surface reconciled while reading.
     ///
-    /// Discovery is a pure read over the durable records — always `false`.
-    /// `agent_task_lifecycle::status()` is by contrast a reconciling read that
-    /// *writes*, so it and this list can legitimately report different states
-    /// for the same run at the same instant, and calling that one changes what
-    /// this one returns next. Emitting the flag lets a consumer tell which kind
-    /// of answer it is holding rather than inferring it from the command name
-    /// (#W3-15).
+    /// Discovery and status are pure reads over durable records, so this is
+    /// always `false`. Explicit reconciliation reports its mutation separately
+    /// instead of changing a read as a side effect (#W3-15).
     pub reconciled: bool,
     pub count: usize,
     /// Total matching runs before any `--limit` cap was applied. Equals `count`
@@ -180,6 +176,8 @@ pub struct AgentTaskDiscoveryRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
@@ -261,6 +259,23 @@ pub fn discover_runs_with_options(
 ) -> Result<AgentTaskDiscoveryReport> {
     let (records, record_health) = agent_task_lifecycle::read_records_with_health()?;
     discovery_report(filter, options, records, record_health)
+}
+
+/// [`discover_runs_with_options`] against an explicitly injected lifecycle
+/// store. Reconciliation uses this to verify the same durable projection it
+/// just changed rather than consulting ambient storage.
+pub(crate) fn discover_runs_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    filter: AgentTaskDiscoveryFilter,
+) -> Result<AgentTaskDiscoveryReport> {
+    let (records, record_health) =
+        agent_task_lifecycle::read_records_with_health_in_store(lifecycle_store)?;
+    discovery_report(
+        filter,
+        AgentTaskDiscoveryOptions::default(),
+        records,
+        record_health,
+    )
 }
 
 /// Find the newest run matching list filters without treating a bounded display
@@ -451,8 +466,7 @@ fn liveness_summary_for_records(
         ..Default::default()
     };
     for record in records {
-        let liveness =
-            classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+        let liveness = liveness_for_record(record, now);
         match liveness {
             AgentTaskLiveness::Active => summary.active += 1,
             AgentTaskLiveness::Stale => summary.stale += 1,
@@ -464,6 +478,15 @@ fn liveness_summary_for_records(
         }
     }
     summary
+}
+
+/// Classify one record with the same ownership rules used by active discovery
+/// and controller-upgrade admission.
+pub fn liveness_for_record(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AgentTaskLiveness {
+    classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now)
 }
 
 /// Read-only controller-upgrade admission derived from the same liveness model
@@ -514,8 +537,7 @@ pub(crate) fn controller_upgrade_admission_for_records(
         // metadata remains from the process that produced it.
         .filter(|record| !record.state.is_terminal())
         .filter_map(|record| {
-            let liveness =
-                classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+            let liveness = liveness_for_record(record, now);
             let runner_unverified = record.runner_job_id().is_some()
                 && matches!(
                     liveness,
@@ -528,8 +550,14 @@ pub(crate) fn controller_upgrade_admission_for_records(
                     .get(record.run_id.as_str())
                     .copied()
                     .unwrap_or(&record.run_id);
+                let locally_reconcilable_after_runner_idle =
+                    record.is_locally_reconcilable_after_runner_idle();
                 let recovery_command = if invalid_handoff_parents.contains(record.run_id.as_str()) {
                     "homeboy agent-task reconcile-records --dry-run".to_string()
+                } else if locally_reconcilable_after_runner_idle {
+                    format!(
+                        "homeboy --placement local agent-task reconcile {group_run_id} --apply"
+                    )
                 } else {
                     match record.runner_id() {
                         Some(runner)
@@ -585,7 +613,9 @@ pub(crate) fn controller_upgrade_admission_for_records(
                     scope,
                     postcondition: postcondition.to_string(),
                     liveness: liveness.as_str(),
-                    reason: if runner_unverified {
+                    reason: if locally_reconcilable_after_runner_idle {
+                        "ownerless_queued_after_runner_reconciliation".to_string()
+                    } else if runner_unverified {
                         "runner_job_unverified_after_daemon_restart".to_string()
                     } else {
                         stale_reason_for_record(record)
@@ -668,12 +698,10 @@ fn classify_liveness(
     if record.lab_handoff_validation_error().is_some() {
         return AgentTaskLiveness::Unreconciled;
     }
-    // Retry reservation publishes a short, exact-run lease before its daemon
-    // job id can be projected. Honor only that bounded, well-formed window so
-    // discovery cannot cancel the queued successor between those two writes.
-    if record.state == agent_task_lifecycle::AgentTaskRunState::Queued
-        && record.has_live_pending_local_cook_supervisor(now)
-    {
+    // A bounded local Cook supervisor lease is ownership for both initial
+    // submissions and retries until runner identity is published. Honor it
+    // regardless of queued/running so discovery cannot cancel a live lease.
+    if record.has_live_pending_local_cook_supervisor(now) {
         return AgentTaskLiveness::Active;
     }
     // A local Cook retry owns a queued lifecycle reservation before its child
@@ -718,6 +746,9 @@ fn classify_liveness(
     // runner PID cannot be probed on this controller; acceptance or expiry is
     // the durable boundary for resolving its liveness.
     if agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now) {
+        return AgentTaskLiveness::Active;
+    }
+    if record.has_planned_runner_execution() && record.has_fresh_update() {
         return AgentTaskLiveness::Active;
     }
 
@@ -849,6 +880,13 @@ fn discovery_run(
         .or_else(|| first_task.and_then(|task| task.group_key.clone()))
         .or_else(|| first_task.and_then(|task| task.workspace.component_id.clone()))
         .or_else(|| first_task.and_then(|task| task.workspace.slug.clone()));
+    let component = plan.as_ref().and_then(|plan| {
+        plan.metadata
+            .pointer("/cook_repository_identity/component_id")
+            .or_else(|| plan.metadata.get("component"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
     let workspace = first_task
         .and_then(|task| task.workspace.root.clone())
         .or_else(|| metadata_string(&record.metadata, "remote_workspace"));
@@ -893,6 +931,7 @@ fn discovery_run(
         run_id: run_id.clone(),
         state: record.state,
         repo,
+        component,
         workspace,
         task_url,
         counts: discovery_counts(&record.tasks),

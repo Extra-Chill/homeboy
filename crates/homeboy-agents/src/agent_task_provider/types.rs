@@ -1,4 +1,10 @@
 use super::*;
+use std::ops::Deref;
+
+use homeboy_extension_contract::agent_task_executor_declaration::{
+    validate_provider_readiness_invocation_timeout_ms,
+    DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS,
+};
 
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
 pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
@@ -79,7 +85,7 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_readiness: Vec<AgentTaskProviderRunnerReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub readiness_invocation: Option<CommandInvocation>,
+    pub readiness_invocation: Option<AgentTaskProviderReadinessInvocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_sources: Vec<AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -126,6 +132,51 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// A provider-owned readiness command and its total, core-enforced deadline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderReadinessInvocation {
+    #[serde(flatten)]
+    pub command: CommandInvocation,
+    #[serde(
+        default = "default_provider_readiness_invocation_timeout_ms",
+        deserialize_with = "deserialize_provider_readiness_invocation_timeout_ms"
+    )]
+    pub timeout_ms: u64,
+}
+
+impl Deref for AgentTaskProviderReadinessInvocation {
+    type Target = CommandInvocation;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl From<CommandInvocation> for AgentTaskProviderReadinessInvocation {
+    fn from(command: CommandInvocation) -> Self {
+        Self {
+            command,
+            timeout_ms: DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS,
+        }
+    }
+}
+
+fn default_provider_readiness_invocation_timeout_ms() -> u64 {
+    DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS
+}
+
+fn deserialize_provider_readiness_invocation_timeout_ms<'de, D>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let timeout_ms = u64::deserialize(deserializer)?;
+    validate_provider_readiness_invocation_timeout_ms(timeout_ms)
+        .map_err(serde::de::Error::custom)?;
+    Ok(timeout_ms)
 }
 
 fn reject_deprecated_provider_command<'de, D>(deserializer: D) -> Result<String, D::Error>

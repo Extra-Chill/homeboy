@@ -69,7 +69,6 @@ pub struct CleanupArgs {
 pub enum CleanupCategoryArg {
     RepoArtifacts,
     TaskWorktrees,
-    WorktreeProviders,
     TerminalRuns,
     PersistedRunArtifacts,
     OrphanedArtifactBytes,
@@ -93,8 +92,6 @@ pub enum CleanupCategoryArg {
 pub enum CleanupCommand {
     /// Inspect or remove declared reconstructable artifacts across repo worktrees
     Artifacts(CleanupArtifactsArgs),
-    /// Aggregate cleanup across configured external worktree providers
-    Worktrees(CleanupWorktreesArgs),
     /// Explain retained Homeboy storage without deleting or reconciling resources.
     ///
     /// Reports lifecycle aggregates alongside root filesystem accounting, top-level
@@ -135,9 +132,12 @@ pub struct CleanupArtifactsArgs {
     /// Clean artifacts from the Homeboy source checkout that built this binary.
     #[arg(long = "self", conflicts_with = "path")]
     pub self_artifacts: bool,
-    /// Resolve managed worktrees from this checkout instead of the current directory.
+    /// Clean only this checkout instead of the current directory.
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
+    /// Discover artifacts across every Git worktree in the selected repository.
+    #[arg(long)]
+    pub all_worktrees: bool,
     /// Also scan this temp root for detached Homeboy build artifacts. Repeatable.
     #[arg(long, value_name = "PATH")]
     pub temp_root: Vec<PathBuf>,
@@ -181,19 +181,6 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     } else {
         Ok(limit)
     }
-}
-
-#[derive(Args, Debug, PartialEq, Eq)]
-pub struct CleanupWorktreesArgs {
-    /// Cleanup a specific configured provider. Repeatable.
-    #[arg(long = "provider", value_name = "ID", conflicts_with = "all_providers")]
-    pub provider: Vec<String>,
-    /// Cleanup every enabled configured provider.
-    #[arg(long)]
-    pub all_providers: bool,
-    /// Apply cleanup. Omit for provider preview/dry-run output.
-    #[arg(long)]
-    pub apply: bool,
 }
 
 /// Naming for one cleanup category plus its specialist command.
@@ -375,6 +362,18 @@ mod tests {
         assert_eq!(args.sort, CleanupArtifactsSortArg::Size);
         assert_eq!(args.limit, Some(7));
         assert!(args.merged_only);
+
+        let parsed = CleanupParserTest::parse_from([
+            "cleanup",
+            "artifacts",
+            "--path",
+            "/repo/checkout",
+            "--all-worktrees",
+        ]);
+        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
+            panic!("expected cleanup artifacts command");
+        };
+        assert!(args.all_worktrees);
 
         let parsed = CleanupParserTest::parse_from([
             "cleanup",

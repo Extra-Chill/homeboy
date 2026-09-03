@@ -1,64 +1,17 @@
 use super::{AgentTaskRunRecord, AgentTaskRunState, LocalOwnerLiveness};
 use crate::agent_task_schedule::AgentTaskPlan;
-use serde::{Deserialize, Serialize};
-
-pub const AGENT_TASK_LIFECYCLE_ACTION_ELIGIBILITY_SCHEMA: &str =
-    "homeboy/agent-task-lifecycle-action-eligibility/v1";
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskLifecycleAction {
-    Cancel,
-    Resume,
-    Retry,
-    Review,
-    Promote,
-    Reconcile,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskActionConfirmation {
-    None,
-    Required,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskActionAvailability {
-    Available,
-    Unavailable,
-    Indeterminate,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskLifecycleActionEligibility {
-    pub action: AgentTaskLifecycleAction,
-    pub availability: AgentTaskActionAvailability,
-    pub reason: String,
-    pub confirmation: AgentTaskActionConfirmation,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_inputs: Vec<String>,
-    pub idempotent: bool,
-    pub requires_revalidation: bool,
-    pub result_resource_type: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskLifecycleActionEligibilityReport {
-    pub schema: String,
-    pub run_id: String,
-    pub state: AgentTaskRunState,
-    pub location: String,
-    pub actions: Vec<AgentTaskLifecycleActionEligibility>,
-}
+use homeboy_control_plane_contract::{
+    ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
+    ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, RunId,
+    CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+};
 
 /// Canonical non-mutating lifecycle action policy for CLI, daemon, and API projections.
 /// Mutation commands revalidate these snapshot decisions under their own locks.
 pub fn lifecycle_action_eligibility(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
-) -> AgentTaskLifecycleActionEligibilityReport {
+) -> ControlPlaneActionEligibilityReport {
     let cancellation = match super::cancellation::ensure_rooted_exact_cancellation_supported(record)
     {
         Ok(()) => available("run is non-terminal and its ownership transport is supported"),
@@ -84,62 +37,54 @@ pub fn lifecycle_action_eligibility(
         unavailable("reconciliation is offered only for running records without a live local owner")
     };
 
-    AgentTaskLifecycleActionEligibilityReport {
-        schema: AGENT_TASK_LIFECYCLE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
-        run_id: record.run_id.clone(),
-        state: record.state,
-        location: record
-            .runner_id()
-            .map(|runner| format!("runner:{runner}"))
-            .unwrap_or_else(|| "local_controller".to_string()),
+    ControlPlaneActionEligibilityReport {
+        schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
+        run: RunId::new(&record.run_id).expect("durable run IDs are validated before persistence"),
         actions: vec![
             action(
-                AgentTaskLifecycleAction::Cancel,
+                ControlPlaneAction::Cancel,
                 cancellation,
-                AgentTaskActionConfirmation::Required,
+                ControlPlaneActionConfirmation::Required,
                 Vec::new(),
-                false,
+                true,
                 "agent_task_run",
             ),
             action(
-                AgentTaskLifecycleAction::Resume,
+                ControlPlaneAction::Resume,
                 resume,
-                AgentTaskActionConfirmation::None,
+                ControlPlaneActionConfirmation::None,
                 Vec::new(),
-                record
-                    .metadata
-                    .get("unmaterialized_cook_admission")
-                    .is_some_and(serde_json::Value::is_object),
+                true,
                 "agent_task_run",
             ),
             action(
-                AgentTaskLifecycleAction::Retry,
+                ControlPlaneAction::Retry,
                 retry,
-                AgentTaskActionConfirmation::Required,
+                ControlPlaneActionConfirmation::Required,
                 Vec::new(),
-                false,
+                true,
                 "agent_task_run",
             ),
             action(
-                AgentTaskLifecycleAction::Review,
+                ControlPlaneAction::Review,
                 available("review is a non-mutating read available for every durable run"),
-                AgentTaskActionConfirmation::None,
+                ControlPlaneActionConfirmation::None,
                 Vec::new(),
                 true,
                 "agent_task_review",
             ),
             action(
-                AgentTaskLifecycleAction::Promote,
+                ControlPlaneAction::Promote,
                 promotion,
-                AgentTaskActionConfirmation::Required,
+                ControlPlaneActionConfirmation::Required,
                 vec!["to_worktree"],
-                false,
+                true,
                 "agent_task_promotion",
             ),
             action(
-                AgentTaskLifecycleAction::Reconcile,
+                ControlPlaneAction::Reconcile,
                 reconcile,
-                AgentTaskActionConfirmation::None,
+                ControlPlaneActionConfirmation::None,
                 Vec::new(),
                 true,
                 "agent_task_run",
@@ -149,14 +94,14 @@ pub fn lifecycle_action_eligibility(
 }
 
 fn action(
-    action: AgentTaskLifecycleAction,
-    decision: (AgentTaskActionAvailability, String),
-    confirmation: AgentTaskActionConfirmation,
+    action: ControlPlaneAction,
+    decision: (ControlPlaneActionAvailability, String),
+    confirmation: ControlPlaneActionConfirmation,
     required_inputs: Vec<&str>,
     idempotent: bool,
     result_resource_type: &str,
-) -> AgentTaskLifecycleActionEligibility {
-    AgentTaskLifecycleActionEligibility {
+) -> ControlPlaneActionEligibility {
+    ControlPlaneActionEligibility {
         action,
         availability: decision.0,
         reason: decision.1,
@@ -168,19 +113,19 @@ fn action(
     }
 }
 
-fn available(reason: impl Into<String>) -> (AgentTaskActionAvailability, String) {
-    (AgentTaskActionAvailability::Available, reason.into())
+fn available(reason: impl Into<String>) -> (ControlPlaneActionAvailability, String) {
+    (ControlPlaneActionAvailability::Available, reason.into())
 }
 
-fn unavailable(reason: impl Into<String>) -> (AgentTaskActionAvailability, String) {
-    (AgentTaskActionAvailability::Unavailable, reason.into())
+fn unavailable(reason: impl Into<String>) -> (ControlPlaneActionAvailability, String) {
+    (ControlPlaneActionAvailability::Unavailable, reason.into())
 }
 
-fn indeterminate(reason: impl Into<String>) -> (AgentTaskActionAvailability, String) {
-    (AgentTaskActionAvailability::Indeterminate, reason.into())
+fn indeterminate(reason: impl Into<String>) -> (ControlPlaneActionAvailability, String) {
+    (ControlPlaneActionAvailability::Indeterminate, reason.into())
 }
 
-fn resume_availability(record: &AgentTaskRunRecord) -> (AgentTaskActionAvailability, String) {
+fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
     }
@@ -202,7 +147,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (AgentTaskActionAvailabil
 fn retry_availability(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
-) -> (AgentTaskActionAvailability, String) {
+) -> (ControlPlaneActionAvailability, String) {
     if !matches!(
         record.state,
         AgentTaskRunState::Failed
@@ -217,6 +162,24 @@ fn retry_availability(
                 && acceptance.verdict != super::AgentTaskAcceptanceVerdict::Rejected)
     }) {
         return unavailable("acceptance rejection repair budget is exhausted for this lineage");
+    }
+    if record.metadata["cook_id"].is_string() {
+        match crate::agent_task_service::retry_admission_for_projection(&record.run_id) {
+            Ok(crate::agent_task_service::RetryProjectionAdmission::DurableCook) => {
+                return available(
+                "durable Cook retry is admitted; runtime admission will be revalidated before execution",
+            )
+            }
+            Ok(crate::agent_task_service::RetryProjectionAdmission::GenericLifecycle) => {
+                return available(
+                    "generic lifecycle retry is admitted; runtime admission will be revalidated before execution",
+                )
+            }
+            Err(error) => return unavailable(format!(
+                "durable Cook retry is unavailable: {}; inspect this exact attempt with: homeboy agent-task status {}",
+                error.message, record.run_id
+            )),
+        }
     }
     match plan {
         Some(plan) if super::plan_has_retry_materialization_identity(plan) => {
@@ -244,9 +207,9 @@ mod tests {
     }
 
     fn decision(
-        report: &AgentTaskLifecycleActionEligibilityReport,
-        action: AgentTaskLifecycleAction,
-    ) -> AgentTaskActionAvailability {
+        report: &ControlPlaneActionEligibilityReport,
+        action: ControlPlaneAction,
+    ) -> ControlPlaneActionAvailability {
         report
             .actions
             .iter()
@@ -268,15 +231,16 @@ mod tests {
             AgentTaskRunState::Cancelled,
         ] {
             let report = lifecycle_action_eligibility(&record(state, false), None);
+            assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
             assert_eq!(report.actions.len(), 6);
             assert_eq!(
-                decision(&report, AgentTaskLifecycleAction::Review),
-                AgentTaskActionAvailability::Available
+                decision(&report, ControlPlaneAction::Review),
+                ControlPlaneActionAvailability::Available
             );
             if state.is_terminal() {
                 assert_eq!(
-                    decision(&report, AgentTaskLifecycleAction::Cancel),
-                    AgentTaskActionAvailability::Unavailable
+                    decision(&report, ControlPlaneAction::Cancel),
+                    ControlPlaneActionAvailability::Unavailable
                 );
             }
             if matches!(
@@ -286,8 +250,8 @@ mod tests {
                     | AgentTaskRunState::PartialRecoverable
             ) {
                 assert_eq!(
-                    decision(&report, AgentTaskLifecycleAction::Promote),
-                    AgentTaskActionAvailability::Indeterminate
+                    decision(&report, ControlPlaneAction::Promote),
+                    ControlPlaneActionAvailability::Indeterminate
                 );
             }
         }
@@ -300,8 +264,8 @@ mod tests {
         let report = lifecycle_action_eligibility(&record, None);
 
         assert_eq!(
-            decision(&report, AgentTaskLifecycleAction::Resume),
-            AgentTaskActionAvailability::Unavailable
+            decision(&report, ControlPlaneAction::Resume),
+            ControlPlaneActionAvailability::Unavailable
         );
     }
 
@@ -314,9 +278,12 @@ mod tests {
         let resume = report
             .actions
             .iter()
-            .find(|action| action.action == AgentTaskLifecycleAction::Resume)
+            .find(|action| action.action == ControlPlaneAction::Resume)
             .expect("resume action");
         assert!(resume.idempotent);
-        assert_eq!(resume.availability, AgentTaskActionAvailability::Available);
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Available
+        );
     }
 }

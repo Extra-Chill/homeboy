@@ -20,6 +20,21 @@ use crate::api_jobs::{
 use crate::daemon::controller_job_driver::{ControllerJobDriver, ControllerJobHandle};
 use crate::error::{Error, Result};
 
+pub fn save_test_server(id: &str, host: &str) -> Result<()> {
+    crate::server::save(&crate::server::Server {
+        id: id.to_string(),
+        aliases: Vec::new(),
+        host: host.to_string(),
+        user: "tester".to_string(),
+        port: 22,
+        identity_file: None,
+        kind: None,
+        auth: None,
+        env: std::collections::HashMap::new(),
+        runner: None,
+    })
+}
+
 /// A real in-memory controller job boundary for domain-driver tests.
 ///
 /// The harness keeps construction internals out of the production API while
@@ -52,6 +67,7 @@ impl ControllerJobHarness {
                 request,
                 public_request,
                 request_digest,
+                active_idempotency_key: None,
                 checkpoint: None,
                 cancellation_requested: false,
                 cancellation_reason: None,
@@ -222,7 +238,6 @@ static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 #[cfg(unix)]
 static SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
 static SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
-static SHARED_CONTROLLER_RUNTIME_STORE: OnceLock<TempDir> = OnceLock::new();
 /// Destinations whose controller fixture bytes this process has already
 /// published. Keeps the copy to at most once per process per fixture path —
 /// including a path inherited from a parent test process — and serializes
@@ -394,11 +409,9 @@ impl HermeticTestContext {
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
                 crate::build_identity::current().display,
             )
-            // Runtime pins are immutable content-addressed files, so tests can
-            // share them without sharing mutable Homeboy state.
             .env(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_STORE_ENV,
-                shared_controller_runtime_store(),
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_USE_ENV,
+                "1",
             );
         command
     }
@@ -1345,11 +1358,14 @@ fn test_controller_fixture_source(binary: TestBinary) -> PathBuf {
                     .get_or_init(|| {
                         let root = SHARED_CONTROLLER_RUNTIME_FIXTURE.get_or_init(exec_capable_tempdir);
                         let source = root.path().join("homeboy-controller-version-fixture");
+                        let identity = crate::build_identity::current().display.clone();
+                        let identity_json = serde_json::json!({
+                            "data": { "display": identity }
+                        });
                         fs::write(
                             &source,
                             format!(
-                                "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 64\n",
-                                crate::build_identity::current().display
+                                "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then\n  printf '%s\\n' '{identity}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = self ] && [ \"${{2:-}}\" = identity ]; then\n  printf '%s\\n' '{identity_json}'\n  exit 0\nfi\nexit 64\n"
                             ),
                         )
                         .expect("write controller version fixture");
@@ -1479,14 +1495,6 @@ fn publish_test_controller_fixture(source: &Path, destination: &Path) {
     let _ = fs::remove_file(&staging);
 }
 
-/// Return the process-wide immutable controller-runtime pin store for tests
-/// that spawn controller subprocesses outside `controller_runtime_command`.
-pub fn shared_controller_runtime_store() -> &'static Path {
-    SHARED_CONTROLLER_RUNTIME_STORE
-        .get_or_init(exec_capable_tempdir)
-        .path()
-}
-
 fn make_test_controller_fixture_read_only(path: &Path) {
     #[cfg(unix)]
     {
@@ -1510,12 +1518,7 @@ fn make_test_controller_fixture_read_only(path: &Path) {
 /// Materializes the fixture, so callers may execute, hash, or stat the returned
 /// path exactly as they could when the copy was made eagerly.
 pub fn controller_runtime_test_executable() -> PathBuf {
-    let executable = PathBuf::from(
-        std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
-            .expect("controller runtime test executable"),
-    );
-    ensure_test_controller_fixture(&executable);
-    executable
+    test_controller_fixture_source(TestBinary::CurrentTest)
 }
 
 pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
@@ -1590,6 +1593,78 @@ pub fn write_source_extension(home: &std::path::Path, id: &str, file_extension: 
     }
 }
 
+pub fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+    let dir = home.join(".config/homeboy/components");
+    fs::create_dir_all(&dir).expect("components dir");
+    fs::write(
+        dir.join(format!("{id}.json")),
+        serde_json::json!({
+            "local_path": local_path,
+            "remote_path": format!("wp-content/plugins/{id}")
+        })
+        .to_string(),
+    )
+    .expect("component registration");
+}
+
+pub fn write_extension_fixture(root: &Path, id: &str) {
+    write_extension_fixture_with_version(root, id, "1.0.0");
+}
+
+pub fn write_extension_fixture_with_version(root: &Path, id: &str, version: &str) {
+    let dir = root.join(id);
+    fs::create_dir_all(&dir).expect("extension dir");
+    fs::write(
+        dir.join(format!("{}.json", id)),
+        format!(
+            r#"{{
+  "name": "{} extension",
+  "version": "{}"
+}}"#,
+            id, version
+        ),
+    )
+    .expect("extension manifest");
+}
+
+/// Git command execution shared by test fixtures.
+///
+/// Topology-specific setup stays at the caller: branch names, remotes, commit
+/// identity, and failure scenarios remain visible in each test.
+pub struct GitFixture<'a> {
+    repo: &'a Path,
+    identity: Option<(&'static str, &'static str)>,
+}
+
+impl<'a> GitFixture<'a> {
+    pub fn new(repo: &'a Path) -> Self {
+        Self {
+            repo,
+            identity: None,
+        }
+    }
+
+    fn with_identity(repo: &'a Path, name: &'static str, email: &'static str) -> Self {
+        Self {
+            repo,
+            identity: Some((name, email)),
+        }
+    }
+
+    pub fn execute(&self, args: &[&str]) -> Output {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(self.repo);
+        if let Some((name, email)) = self.identity {
+            command
+                .env("GIT_AUTHOR_NAME", name)
+                .env("GIT_AUTHOR_EMAIL", email)
+                .env("GIT_COMMITTER_NAME", name)
+                .env("GIT_COMMITTER_EMAIL", email);
+        }
+        command.output().expect("git fixture command")
+    }
+}
+
 pub fn shared_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
     git_repo_fixture(name, false)
 }
@@ -1613,15 +1688,8 @@ fn git_repo_fixture(name: &str, committed: bool) -> (TempDir, PathBuf) {
 }
 
 pub fn run_git_fixture_command(repo: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_AUTHOR_NAME", "homeboy-test")
-        .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "homeboy-test")
-        .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
-        .output()
-        .expect("git fixture command");
+    let output = GitFixture::with_identity(repo, "homeboy-test", "homeboy-test@example.invalid")
+        .execute(args);
     assert!(
         output.status.success(),
         "git fixture command {:?} failed: stdout={} stderr={}",
@@ -1651,15 +1719,8 @@ fn run_git_template_command(repo: &Path, args: &[&str]) {
 }
 
 pub fn git_fixture_output(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_AUTHOR_NAME", "homeboy-test")
-        .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "homeboy-test")
-        .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
-        .output()
-        .expect("git fixture command");
+    let output = GitFixture::with_identity(repo, "homeboy-test", "homeboy-test@example.invalid")
+        .execute(args);
     assert!(
         output.status.success(),
         "git fixture command {:?} failed: stdout={} stderr={}",
@@ -2052,7 +2113,7 @@ impl ReverseBrokerFixture {
 
     pub fn enqueue(&self, request: RemoteRunnerJobRequest) -> Job {
         self.store
-            .submit_remote_runner_job(request)
+            .submit_runner_api_fixture(request)
             .expect("enqueue reverse broker fixture job")
     }
 
@@ -2152,14 +2213,80 @@ fn handle_reverse_broker_request(
         return ok(json!({ "registered": true }));
     }
     if request.method == "POST" && request.path == "/runner/jobs" {
-        let submitted: RemoteRunnerJobRequest =
-            serde_json::from_value(request.body).expect("parse reverse broker job submission");
-        let job = store
-            .submit_remote_runner_job(submitted)
-            .expect("submit broker job");
+        let typed_submission = serde_json::from_value::<
+            homeboy_runner_contract::RunnerApiSubmitRequest,
+        >(request.body.clone());
+        let is_typed_submission = typed_submission.is_ok();
+        let job = match typed_submission {
+            Ok(submitted) => store
+                .submit_runner_api_request(submitted)
+                .expect("submit envelope broker job"),
+            Err(_) => {
+                let submitted: RemoteRunnerJobRequest = serde_json::from_value(request.body)
+                    .expect("parse legacy reverse broker job submission");
+                store
+                    .submit_remote_runner_job(submitted)
+                    .expect("submit legacy broker job")
+            }
+        };
+        if is_typed_submission {
+            return ok(json!({
+                "response": homeboy_runner_contract::RunnerApiSubmitResponse {
+                    schema: homeboy_runner_contract::RUNNER_API_SUBMIT_RESPONSE_SCHEMA.to_string(),
+                    api_version: homeboy_runner_contract::RUNNER_API_V1,
+                    outcome: homeboy_runner_contract::RunnerApiSubmitOutcome::Accepted {
+                        job_id: job.id.to_string(),
+                        job_status: serde_json::to_value(job.status)
+                            .expect("serialize fixture job status")
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                },
+                "job": job,
+            }));
+        }
         return ok(json!({ "job": job }));
     }
+    if request.method == "POST" && request.path == "/runner/jobs/submissions/lookup" {
+        let submission_key = request.body["submission_key"]
+            .as_str()
+            .expect("fixture submission key");
+        return ok(json!({ "result": store.lookup_remote_runner_submission(submission_key) }));
+    }
     if request.method == "POST" && request.path == "/runner/jobs/claim" {
+        if let Ok(request) =
+            serde_json::from_value::<homeboy_runner_contract::RunnerApiClaimRequest>(request.body)
+        {
+            let claim = store
+                .claim_remote_runner_job_with_protocols(
+                    &request.runner_id,
+                    request.project_id.as_deref(),
+                    request.lease_ms.unwrap_or(30_000),
+                    request.concurrency_limit,
+                    crate::api_jobs::RemoteRunnerClaimProtocols {
+                        execution: request.execution_protocol.as_ref(),
+                        workspace_claim: request.workspace_claim_protocol.as_ref(),
+                        workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+                    },
+                )
+                .expect("claim canonical broker job");
+            let outcome = match claim {
+                Some(claim) => homeboy_runner_contract::RunnerApiClaimOutcome::Claimed {
+                    claim: claim
+                        .runner_api_claimed_execution()
+                        .expect("project canonical broker claim"),
+                },
+                None => homeboy_runner_contract::RunnerApiClaimOutcome::Empty,
+            };
+            return ok(json!({
+                "response": homeboy_runner_contract::RunnerApiClaimResponse {
+                    schema: homeboy_runner_contract::RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
+                    api_version: homeboy_runner_contract::RUNNER_API_V1,
+                    outcome,
+                },
+            }));
+        }
         let claim = store
             .claim_remote_runner_job(runner_id, None, 30_000, None)
             .expect("claim broker job");
@@ -2272,14 +2399,37 @@ fn handle_reverse_broker_request(
             "max_chunk_bytes": 64 * 1024,
         }));
     }
+    if request.method == "GET" && request.path.starts_with("/jobs/reconcile") {
+        return ok(json!({ "reconciled": [] }));
+    }
     if request.method == "GET" {
         if let Some(job_path) = request.path.strip_prefix("/jobs/") {
             let (job_id, action) = job_path.split_once('/').unwrap_or((job_path, ""));
-            let job_id = uuid::Uuid::parse_str(job_id).expect("broker job id");
+            let execution_context_probe_runner = matches!(action, "" | "events")
+                .then(|| job_id.strip_prefix("runner-exec:"))
+                .flatten()
+                .and_then(|runner| runner.strip_suffix(":reverse_broker"));
+            let job = uuid::Uuid::parse_str(job_id)
+                .ok()
+                .and_then(|job_id| store.get(job_id).ok())
+                .or_else(|| {
+                    execution_context_probe_runner
+                        .map(|probe_runner| {
+                            // The direct-session cancellation probe identifies the
+                            // planned execution, while the reverse broker owns UUID
+                            // job ids. Resolve only that exact planned-runner shape.
+                            store
+                                .list()
+                                .into_iter()
+                                .find(|job| job.target_runner_id.as_deref() == Some(probe_runner))
+                        })
+                        .flatten()
+                })
+                .expect("broker job");
             return match action {
-                "" => ok(json!({ "job": store.get(job_id).expect("broker job") })),
+                "" => ok(json!({ "job": job })),
                 "events" => ok(json!({
-                    "events": store.events(job_id).expect("broker job events")
+                    "events": store.events(job.id).expect("broker job events")
                 })),
                 _ => json!({
                     "success": false,
@@ -2797,7 +2947,7 @@ mod tests {
     fn reverse_broker_fixture_projects_active_and_stale_runner_jobs() {
         let store = JobStore::default();
         let active = store
-            .submit_remote_runner_job(
+            .submit_runner_api_fixture(
                 serde_json::from_value(serde_json::json!({
                     "runner_id": "lab",
                     "command": ["true"],
@@ -2831,7 +2981,7 @@ mod tests {
         let path = temp.path().join("jobs.json");
         let store = JobStore::open(&path).expect("open durable store");
         let stale = store
-            .submit_remote_runner_job(
+            .submit_runner_api_fixture(
                 serde_json::from_value(serde_json::json!({
                     "runner_id": "lab",
                     "command": ["true"],

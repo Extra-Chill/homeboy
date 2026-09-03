@@ -1,7 +1,6 @@
-use homeboy_core::extension_update_check::read_source_revision;
-use homeboy_extension::{
-    check_update_available, extension_ready_status, is_extension_linked, load_extension,
-};
+use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
+use homeboy_core::extension::lifecycle::{check_update_available, read_source_revision};
+use homeboy_core::extension::readiness::extension_ready_status;
 
 use super::types::FuzzDoctorArgs;
 use super::types_extra::{FuzzDoctorExtensionOutput, FuzzDoctorHomeboyOutput, FuzzDoctorOutput};

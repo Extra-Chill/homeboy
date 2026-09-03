@@ -86,7 +86,8 @@ pub(super) mod concurrency_tests {
             aggregate.outcomes[0].failure_classification,
             Some(AgentTaskFailureClassification::PolicyDenied)
         );
-        let record = crate::agent_task_lifecycle::status(run_id).expect("durable terminal record");
+        let record =
+            crate::agent_task_lifecycle::reconcile_status(run_id).expect("durable terminal record");
         let execution = &record.metadata["provider_executions"][0];
         assert_eq!(execution["state"], "failed");
         assert!(execution["finished_at"].is_string());

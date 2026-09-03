@@ -17,11 +17,11 @@ pub struct RealAgentTaskPrFinalizationBackend;
 
 impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord> {
-        Ok(crate::agent_task_lifecycle::status(run_id)?.lifecycle)
+        Ok(crate::agent_task_lifecycle::reconcile_status(run_id)?.lifecycle)
     }
 
     fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
-        let record = crate::agent_task_lifecycle::status(run_id)?;
+        let record = crate::agent_task_lifecycle::reconcile_status(run_id)?;
         let promotion = record.metadata.get("latest_promotion").cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
         let promotion: AgentTaskPromotionReport =
             serde_json::from_value(promotion).map_err(|_| {
@@ -42,7 +42,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         &mut self,
         run_id: &str,
     ) -> Result<Option<AgentTaskPrDurableGateProof>> {
-        let record = crate::agent_task_lifecycle::status(run_id)?;
+        let record = crate::agent_task_lifecycle::reconcile_status(run_id)?;
         optional_gate_proof(record)
     }
 
@@ -793,7 +793,7 @@ fn is_git_object_id(value: &str) -> bool {
 pub(super) fn validate_real_candidate_fingerprint(
     options: &AgentTaskPrFinalizationOptions,
 ) -> Result<()> {
-    let record = crate::agent_task_lifecycle::status(&options.run_id)?;
+    let record = crate::agent_task_lifecycle::reconcile_status(&options.run_id)?;
     validate_real_candidate_fingerprint_from_record(options, &record)
 }
 
@@ -869,12 +869,18 @@ fn validate_adoption_merge_proof(
     }
     let Some(proof) = adoption_merge.filter(|proof| !proof.is_null()) else {
         if parents.len() == 2 {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "two-parent promoted candidate is missing its required adoption merge proof",
-                None,
-                None,
-            ));
+            let committed_tree = git_output(
+                &options.path,
+                &["rev-parse", &format!("{}^{{tree}}", fingerprint.head)],
+            )?;
+            if committed_tree == fingerprint.tree {
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    "two-parent promoted candidate is missing its required adoption merge proof",
+                    None,
+                    None,
+                ));
+            }
         }
         return Ok(());
     };

@@ -3,7 +3,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
@@ -32,23 +32,24 @@ use super::git::{
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
     local_snapshot_stats, materialize_prepared_workspace_update, materialize_snapshot,
-    materialize_snapshot_git, materialize_snapshot_incremental, materialize_snapshot_with_scratch,
-    snapshot_identity, snapshot_manifest_delta, workspace_content_manifest_for_policy,
-    SnapshotManifestDelta, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    materialize_snapshot_git, materialize_snapshot_incremental_before,
+    materialize_snapshot_with_scratch, materialize_snapshot_with_scratch_before, snapshot_identity,
+    snapshot_manifest_delta, workspace_content_manifest_for_policy, SnapshotManifestDelta,
+    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
     RunnerWorkspaceLivenessEvidence, RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata,
     RunnerWorkspacePruneConvergence, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
     RunnerWorkspacePruneOutput, RunnerWorkspacePrunePageReceipt, RunnerWorkspacePruneSkippedEntry,
-    RunnerWorkspacePruneWithheldReason, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspacePruneWithheldReason, RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions,
     RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
-    deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
-    validate_absolute_path,
+    deterministic_remote_path, git_output, parent_remote_path, run_shell_command_before, ssh_args,
+    ssh_client_for_runner, validate_absolute_path,
 };
 use homeboy_core::engine::shell;
 use homeboy_core::server::{
@@ -56,10 +57,10 @@ use homeboy_core::server::{
 };
 
 mod snapshots;
-use snapshots::workspace_snapshot_for_lease;
 #[cfg(test)]
 pub(crate) use snapshots::workspace_snapshot_scan_command;
 pub use snapshots::{list_workspaces, workspace_snapshots};
+use snapshots::{workspace_metadata_for_lease, workspace_snapshot_entry};
 
 pub(crate) const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -83,10 +84,26 @@ pub fn sync_workspace(
     runner_id: &str,
     options: RunnerWorkspaceSyncOptions,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
-    sync_workspace_in_roots(
+    sync_workspace_in_roots_with_deadline(
         &homeboy_core::paths::PathRoots::from_environment()?,
         runner_id,
         options,
+        None,
+    )
+}
+
+/// Runner-exec-only workspace preparation. The caller owns this deadline; the
+/// ordinary sync API deliberately remains unbounded for reusable callers.
+pub fn sync_workspace_before(
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+    deadline: Instant,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    sync_workspace_in_roots_with_deadline(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        options,
+        Some(deadline),
     )
 }
 
@@ -96,10 +113,20 @@ pub fn sync_workspace(
 /// modes take are the same installation's state. Resolving the runner from the
 /// ambient config root while reserving space under an injected data root would
 /// sync one home's runner into another home's disk budget (#7505).
+#[allow(dead_code)]
 pub fn sync_workspace_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     options: RunnerWorkspaceSyncOptions,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    sync_workspace_in_roots_with_deadline(roots, runner_id, options, None)
+}
+
+fn sync_workspace_in_roots_with_deadline(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+    deadline: Option<Instant>,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     let runner = load_in_roots(roots, runner_id)?;
     let local_path = canonical_workspace_path(&options.path)?;
@@ -181,78 +208,118 @@ pub fn sync_workspace_in_roots(
             )?;
             let scratch = admission.scratch();
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
-            let (synthetic_checkout, fallback_reason) = if options.mode
-                == RunnerWorkspaceSyncMode::SnapshotGit
-                && git_backed_snapshot
-            {
-                match materialize_git_snapshot_from_controller_bundle(
-                    &runner,
-                    &local_path,
-                    &remote_path,
-                    &excludes,
-                ) {
-                    Ok(provenance) => {
-                        materialization_plan.controller_git_bundle = provenance;
-                        (None, None)
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                match materialize_snapshot_git(
-                    &runner,
-                    &local_path,
-                    &remote_path,
-                    &excludes,
-                    &snapshot,
-                ) {
-                    Ok(identity) => (Some(identity), None),
-                    Err(error) => {
-                        rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                        return Err(error);
-                    }
-                }
-            } else {
-                let seed = compatible_incremental_snapshot(
-                    &runner,
-                    &local_path,
-                    &excludes,
-                    &content_manifest,
-                )?;
-                materialization_plan.snapshot_transfer = Some(match seed {
-                    Some((seed, delta)) => match materialize_snapshot_incremental(
+            let (synthetic_checkout, fallback_reason) =
+                if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && git_backed_snapshot {
+                    match materialize_git_snapshot_from_controller_bundle(
                         &runner,
                         &local_path,
                         &remote_path,
-                        &seed.remote_path,
                         &excludes,
-                        &delta,
+                        &options.git_fetch_refs,
                     ) {
-                        Ok(transfer) => transfer,
+                        Ok(provenance) => {
+                            materialization_plan.controller_git_bundle = provenance;
+                            (None, None)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+                    match materialize_snapshot_git(
+                        &runner,
+                        &local_path,
+                        &remote_path,
+                        &excludes,
+                        &snapshot,
+                    ) {
+                        Ok(identity) => (Some(identity), None),
                         Err(error) => {
-                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                            rollback_materialized_workspace_before(
+                                &runner,
+                                workspace_root,
+                                &remote_path,
+                                true,
+                            );
                             return Err(error);
-                        }
-                    },
-                    None => {
-                        if let Err(error) = materialize_snapshot_with_scratch(
-                            &runner,
-                            &local_path,
-                            &remote_path,
-                            &excludes,
-                            Some(scratch),
-                        ) {
-                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                            return Err(error);
-                        }
-                        super::types::SnapshotTransferStats {
-                            reused: ByteFileCounts::default(),
-                            transferred: stats,
-                            final_size: stats,
                         }
                     }
-                });
-                (None, None)
-            };
+                } else {
+                    let seed = compatible_incremental_snapshot(
+                        &runner,
+                        &local_path,
+                        &excludes,
+                        &content_manifest,
+                    )?;
+                    materialization_plan.snapshot_transfer = Some(match (seed, deadline) {
+                        (Some((seed, delta)), deadline) => {
+                            match materialize_snapshot_incremental_before(
+                                &runner,
+                                &local_path,
+                                &remote_path,
+                                &seed.remote_path,
+                                &excludes,
+                                &delta,
+                                deadline,
+                            ) {
+                                Ok(transfer) => transfer,
+                                Err(error) => {
+                                    rollback_materialized_workspace_before(
+                                        &runner,
+                                        workspace_root,
+                                        &remote_path,
+                                        deadline.is_some(),
+                                    );
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        (None, Some(deadline)) => {
+                            if let Err(error) = materialize_snapshot_with_scratch_before(
+                                &runner,
+                                &local_path,
+                                &remote_path,
+                                &excludes,
+                                Some(scratch),
+                                Some(deadline),
+                            ) {
+                                rollback_materialized_workspace_before(
+                                    &runner,
+                                    workspace_root,
+                                    &remote_path,
+                                    true,
+                                );
+                                return Err(error);
+                            }
+                            super::types::SnapshotTransferStats {
+                                reused: ByteFileCounts::default(),
+                                transferred: stats,
+                                final_size: stats,
+                            }
+                        }
+                        (None, None) => {
+                            if let Err(error) = materialize_snapshot_with_scratch(
+                                &runner,
+                                &local_path,
+                                &remote_path,
+                                &excludes,
+                                Some(scratch),
+                            ) {
+                                rollback_materialized_workspace_before(
+                                    &runner,
+                                    workspace_root,
+                                    &remote_path,
+                                    deadline.is_some(),
+                                );
+                                return Err(error);
+                            }
+                            super::types::SnapshotTransferStats {
+                                reused: ByteFileCounts::default(),
+                                transferred: stats,
+                                final_size: stats,
+                            }
+                        }
+                    });
+                    (None, None)
+                };
             if fallback_reason.is_some() || options.mode == RunnerWorkspaceSyncMode::Snapshot {
                 materialization_plan.actual_materialization_mode =
                     Some("filesystem_snapshot".to_string());
@@ -287,6 +354,9 @@ pub fn sync_workspace_in_roots(
                 )
             });
             let prepared_workspace_lease = metadata.workspace_lease.clone();
+            let workspace_ref = prepared_workspace_lease
+                .clone()
+                .expect("new workspace metadata has an opaque ref");
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 metadata,
@@ -296,7 +366,12 @@ pub fn sync_workspace_in_roots(
             ) {
                 Ok(dependencies) => dependencies,
                 Err(err) => {
-                    rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                    rollback_materialized_workspace_before(
+                        &runner,
+                        workspace_root,
+                        &remote_path,
+                        deadline.is_some(),
+                    );
                     return Err(err);
                 }
             };
@@ -321,6 +396,7 @@ pub fn sync_workspace_in_roots(
                     resource_lifecycle,
                     sync_mode: options.mode,
                     snapshot_identity: snapshot,
+                    workspace_ref,
                     prepared_workspace_lease,
                     counts: stats,
                     excludes,
@@ -488,6 +564,9 @@ pub fn sync_workspace_in_roots(
                 )
             });
             let prepared_workspace_lease = metadata.workspace_lease.clone();
+            let workspace_ref = prepared_workspace_lease
+                .clone()
+                .expect("new workspace metadata has an opaque ref");
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 metadata,
@@ -522,6 +601,7 @@ pub fn sync_workspace_in_roots(
                     resource_lifecycle,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
+                    workspace_ref,
                     prepared_workspace_lease,
                     counts: ByteFileCounts::default(),
                     excludes,
@@ -574,7 +654,7 @@ pub(crate) fn save_prepared_source_cache(
 
 pub(super) fn prepared_source_cache_command(cache: &str, cache_root: &str, source: &str) -> String {
     format!(
-        "cache={cache}; cache_root={cache_root}; source={source}; lock=\"$cache.lock\"; {capture_owner}; mkdir -p \"$cache_root\"; if test -f \"$cache/.homeboy/prepared-source-ready\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\"' EXIT; tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\" && mkdir -p \"$tmp/.homeboy\" && : > \"$tmp/.homeboy/prepared-source-ready\" && chmod -R a-w \"$tmp\" && mv \"$tmp\" \"$cache\" && printf 'homeboy_prepared_source_cache event=created cache=%s\n' \"$cache\" || exit 1; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f \"$candidate/.homeboy/prepared-source-ready\" || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f \"$candidate/.homeboy/prepared-source-ready\"; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\n' >&2; fi; else printf 'homeboy_prepared_source_cache event=pruned cache=%s\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\"; done",
+        "cache={cache}; cache_root={cache_root}; source={source}; lock=\"$cache.lock\"; {capture_owner}; mkdir -p \"$cache_root\"; if test -f \"$cache/.homeboy/prepared-source-ready\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\"' EXIT; if test -f \"$cache/.homeboy/prepared-source-ready\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; else tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\" && mkdir -p \"$tmp/.homeboy\" && : > \"$tmp/.homeboy/prepared-source-ready\" && chmod -R a-w \"$tmp\" && mv \"$tmp\" \"$cache\" && printf 'homeboy_prepared_source_cache event=created cache=%s\n' \"$cache\" || exit 1; fi; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f \"$candidate/.homeboy/prepared-source-ready\" || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f \"$candidate/.homeboy/prepared-source-ready\"; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\n' >&2; fi; else printf 'homeboy_prepared_source_cache event=pruned cache=%s\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\"; done",
         cache = shell::quote_arg(cache), cache_root = shell::quote_arg(cache_root), source = shell::quote_arg(source), capture_owner = super::util::owner_capture_shell("$cache_root"), restore_owner = super::util::owner_restore_path_shell("$cache_root"), max_entries = PREPARED_SOURCE_CACHE_MAX_ENTRIES, max_failures = 8,
     )
 }
@@ -754,6 +834,9 @@ fn materialize_git_fallback_filesystem_snapshot(
         )
     });
     let prepared_workspace_lease = metadata.workspace_lease.clone();
+    let workspace_ref = prepared_workspace_lease
+        .clone()
+        .expect("new workspace metadata has an opaque ref");
     let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
         runner,
         metadata,
@@ -788,6 +871,7 @@ fn materialize_git_fallback_filesystem_snapshot(
             resource_lifecycle,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: snapshot,
+            workspace_ref,
             prepared_workspace_lease,
             counts: stats,
             excludes: excludes.to_vec(),
@@ -820,11 +904,12 @@ pub fn update_workspace(
         )
     })?;
     validate_absolute_path("workspace_root", workspace_root)?;
-    let snapshot = workspace_snapshot_for_lease(
+    let snapshot = workspace_metadata_for_lease(
         &runner,
         &format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/')),
         &options.lease,
     )?
+    .and_then(|(_, metadata)| workspace_snapshot_entry(metadata))
     .ok_or_else(|| {
         Error::validation_invalid_argument(
             "lease",
@@ -956,6 +1041,195 @@ pub fn update_workspace(
     ))
 }
 
+/// Resolve an opaque workspace capability to the exact metadata-backed
+/// materialization it names. The metadata is never allowed to redirect the
+/// capability away from the physical directory that contained it.
+pub fn resolve_workspace_ref(
+    runner_id: &str,
+    workspace_ref: &str,
+) -> Result<RunnerWorkspaceRefResolution> {
+    workspace_ref
+        .strip_prefix("workspace:")
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+        .ok_or_else(|| {
+            workspace_ref_error(
+                workspace_ref,
+                "workspace_ref_invalid",
+                "runner workspace ref must be an opaque `workspace:<uuid>` capability",
+            )
+        })?;
+    let runner = load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace ref resolution requires workspace_root",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    validate_absolute_path("workspace_root", workspace_root)?;
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    let (physical_path, metadata) =
+        workspace_metadata_for_lease(&runner, &lab_workspaces_root, workspace_ref)?.ok_or_else(
+            || {
+                workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_missing",
+            "runner workspace ref is missing, superseded, or no longer retained on this runner",
+        )
+            },
+        )?;
+
+    let physical = Path::new(&physical_path);
+    if metadata.runner_id != runner.id
+        || metadata.remote_path != physical_path
+        || physical.parent() != Some(Path::new(&lab_workspaces_root))
+    {
+        return Err(workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_refused",
+            "runner workspace ref metadata does not match its selected runner and physical snapshot",
+        ));
+    }
+    if runner.kind == RunnerKind::Local {
+        if physical
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return Err(workspace_ref_error(
+                workspace_ref,
+                "workspace_ref_refused",
+                "runner workspace ref cannot resolve through a symlinked snapshot",
+            ));
+        }
+        let canonical_root = Path::new(&lab_workspaces_root)
+            .canonicalize()
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("canonicalize runner workspace ref root".to_string()),
+                )
+            })?;
+        let canonical_physical = physical.canonicalize().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("canonicalize runner workspace ref".to_string()),
+            )
+        })?;
+        if canonical_physical.parent() != Some(canonical_root.as_path()) {
+            return Err(workspace_ref_error(
+                workspace_ref,
+                "workspace_ref_refused",
+                "runner workspace ref does not resolve to a direct physical snapshot under the runner workspace root",
+            ));
+        }
+    }
+
+    let lifecycle = metadata.resource_lifecycle.as_ref().ok_or_else(|| {
+        workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_refused",
+            "runner workspace ref has no authoritative lifecycle record",
+        )
+    })?;
+    let lifecycle_matches = lifecycle.is_runner_workspace()
+        && lifecycle.runner_id.as_deref() == Some(runner.id.as_str())
+        && lifecycle.path == metadata.remote_path
+        && lifecycle.status == ResourceLifecycleResourceStatus::Active;
+    let expired = lifecycle.ttl.as_deref().is_some_and(|ttl| {
+        chrono::DateTime::parse_from_rfc3339(&metadata.synced_at)
+            .ok()
+            .map(|created| {
+                resource_lifecycle_path_ttl_expired_at(
+                    ttl,
+                    SystemTime::from(created),
+                    chrono::Utc::now(),
+                )
+            })
+            .unwrap_or(true)
+    });
+    if metadata.terminal_evidence.is_some() || !lifecycle_matches || expired {
+        return Err(workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_expired",
+            "runner workspace ref has expired or reached terminal lifecycle state",
+        ));
+    }
+
+    let mut source_snapshot = homeboy_core::source_snapshot::existing_remote(
+        &runner.id,
+        &metadata.remote_path,
+        Some(workspace_root),
+    );
+    source_snapshot.local_path = Some(metadata.local_path.clone());
+    source_snapshot.git_branch = metadata.source_ref.clone();
+    source_snapshot.git_sha = metadata.source_commit.clone();
+    source_snapshot.dirty = metadata.source_dirty.unwrap_or(false);
+    source_snapshot.sync_mode = metadata.sync_mode.clone();
+    source_snapshot.workspace_snapshot_identity = Some(metadata.snapshot_identity.clone());
+    source_snapshot.prepared_workspace_original_snapshot_identity =
+        metadata.original_prepared_snapshot_identity.clone();
+    source_snapshot.prepared_workspace_update_lineage = metadata.update_lineage.clone();
+    source_snapshot.synced_at = metadata.synced_at.clone();
+    source_snapshot.sync_excludes = metadata.snapshot_excludes.clone();
+
+    Ok(RunnerWorkspaceRefResolution {
+        workspace_ref: workspace_ref.to_string(),
+        local_path: metadata.local_path,
+        remote_path: metadata.remote_path,
+        source_snapshot,
+        snapshot_excludes: metadata.snapshot_excludes,
+        content_manifest: metadata.content_manifest,
+    })
+}
+
+/// Prove the controller source used to detect and package dependencies still
+/// has the content identity persisted with the resolved runner snapshot.
+pub fn verify_workspace_ref_hydration_source(
+    resolved: &RunnerWorkspaceRefResolution,
+) -> Result<()> {
+    let local_path = Path::new(&resolved.local_path);
+    let unchanged = if let Some(expected) = resolved.content_manifest.as_ref() {
+        local_path.is_dir()
+            && workspace_content_manifest_for_policy(
+                local_path,
+                &resolved.snapshot_excludes,
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+            )
+            .is_ok_and(|actual| &actual == expected)
+    } else {
+        let state = local_git_state(local_path);
+        local_path.is_dir()
+            && state.commit == resolved.source_snapshot.git_sha
+            && state.ref_name == resolved.source_snapshot.git_branch
+            && state.dirty == Some(resolved.source_snapshot.dirty)
+    };
+    if unchanged {
+        return Ok(());
+    }
+
+    Err(workspace_ref_error(
+        &resolved.workspace_ref,
+        "workspace_ref_source_drift",
+        "runner workspace ref hydration source no longer matches the persisted snapshot",
+    ))
+}
+
+fn workspace_ref_error(workspace_ref: &str, reason: &'static str, message: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "workspace_ref",
+        message,
+        Some(workspace_ref.to_string()),
+        Some(vec![
+            "Run `homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot` and retry with the returned `workspace_ref`.".to_string(),
+        ]),
+    );
+    error.details["reason"] = serde_json::json!(reason);
+    error.details["recovery"] = serde_json::json!("resync_workspace");
+    error
+}
+
 /// Hydrate execution provenance from a metadata-backed prepared workspace.
 /// Ordinary runner paths remain unchanged; only an exact workspace match gains
 /// the original snapshot and ordered delta lineage recorded at promotion time.
@@ -1029,10 +1303,14 @@ pub fn reuse_compatible_snapshot_workspace(
     let local_path_string = local_path.display().to_string();
     let Some(snapshot) = snapshots.snapshots.into_iter().find(|snapshot| {
         snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
+            && snapshot.workspace_ref.is_some()
             && snapshot.local_path == local_path_string
             && snapshot.source_commit.as_deref() == Some(source_commit.as_str())
             && snapshot.source_dirty == Some(false)
     }) else {
+        return Ok(None);
+    };
+    let Some(workspace_ref) = snapshot.workspace_ref.clone() else {
         return Ok(None);
     };
 
@@ -1114,6 +1392,7 @@ pub fn reuse_compatible_snapshot_workspace(
         resource_lifecycle,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: snapshot.snapshot_identity,
+        workspace_ref,
         prepared_workspace_lease: snapshot.workspace_lease,
         counts: ByteFileCounts::default(),
         excludes,
@@ -2180,6 +2459,48 @@ fn rollback_materialized_workspace(
     let _ = remove_workspace(runner, &lab_workspaces_root, remote_path);
 }
 
+fn rollback_materialized_workspace_before(
+    runner: &super::super::Runner,
+    workspace_root: &str,
+    remote_path: &str,
+    bounded: bool,
+) {
+    if !bounded {
+        rollback_materialized_workspace(runner, workspace_root, remote_path);
+        return;
+    }
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    if validate_workspace_removal_path(Path::new(&lab_workspaces_root), Path::new(remote_path))
+        .is_err()
+    {
+        return;
+    }
+    let remove = format!("rm -rf -- {}", shell::quote_arg(remote_path));
+    let command = match runner.kind {
+        RunnerKind::Local => remove,
+        RunnerKind::Ssh => {
+            let Ok((_server, client)) = ssh_client_for_runner(runner) else {
+                return;
+            };
+            if client.is_local {
+                remove
+            } else {
+                format!(
+                    "ssh {} {} {}",
+                    ssh_args(&client),
+                    shell::quote_arg(&format!("{}@{}", client.user, client.host)),
+                    shell::quote_arg(&remove),
+                )
+            }
+        }
+    };
+    let _ = run_shell_command_before(
+        &command,
+        "rollback timed out workspace synchronization",
+        Some(Instant::now() + Duration::from_secs(5)),
+    );
+}
+
 fn write_workspace_metadata(
     runner: &super::super::Runner,
     metadata: RunnerWorkspaceMetadata,
@@ -2966,7 +3287,10 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()> {
-    let git_dir = workspace_path.join(".git");
+    let git_dir = match git_output(workspace_path, &["rev-parse", "--absolute-git-dir"]) {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => return Ok(()),
+    };
     if !git_dir.is_dir() {
         return Ok(());
     }

@@ -1,16 +1,17 @@
-use homeboy_extension as extension;
+use homeboy_core::extension;
 use std::fmt::Write;
 
+use crate::release::context::ReleaseExtension;
 use crate::release::types::{ReleaseState, ReleaseStepResult};
 use homeboy_core::component::GithubConfig;
 use homeboy_core::error::{Error, Result};
-use homeboy_extension::{self, ExtensionManifest};
+use homeboy_core::{self};
 
 use super::{build_release_payload, step_failed, step_skipped, step_success};
 
 /// Invoke the `release.publish` action on the named extension.
 pub(crate) fn run_publish(
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     state: &ReleaseState,
     component_id: &str,
     component_local_path: &str,
@@ -30,7 +31,7 @@ pub(crate) fn run_publish(
     })?;
 
     let action_id = "release.publish";
-    let has_action = extension.actions.iter().any(|a| a.id == action_id);
+    let has_action = extension.provides_action(action_id);
     if !has_action {
         return Err(Error::validation_invalid_argument(
             "release.publish",
@@ -51,7 +52,13 @@ pub(crate) fn run_publish(
         None,
         extra_config.as_ref(),
     );
-    let response = extension::execute_action(&extension.id, action_id, None, None, Some(&payload))?;
+    let response = extension::invoke::action_api::invoke_action(
+        &extension.id,
+        action_id,
+        None,
+        &[],
+        Some(&payload),
+    )?;
     let extension_data = serde_json::to_value(&response).map_err(|e| {
         Error::internal_json(e.to_string(), Some("extension action output".to_string()))
     })?;
@@ -427,10 +434,11 @@ fn publish_failure_message(target: &str, response: &serde_json::Value) -> String
 #[cfg(test)]
 mod tests {
     use super::{publish_step_result, run_publish};
+    use crate::release::context::ReleaseExtension;
     use crate::release::types::ReleaseState;
     use crate::release::types::ReleaseStepStatus;
     use homeboy_core::component::{GithubConfig, GithubHostConfig};
-    use homeboy_extension::ExtensionManifest;
+    use homeboy_extension_contract::ExtensionManifest;
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -495,10 +503,11 @@ mod tests {
                 "registry",
                 "printf '{\"component_id\":\"%s\",\"component_path\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"",
             );
-            homeboy_extension::save_manifest(&publish).expect("save publish extension");
+            homeboy_core::extension::catalog::save_manifest(&publish)
+                .expect("save publish extension");
 
             let result = run_publish(
-                &[publish],
+                &[ReleaseExtension::from_manifest(&publish)],
                 &ReleaseState::default(),
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
@@ -529,7 +538,8 @@ mod tests {
             let component = tempfile::tempdir_in(std::env::temp_dir()).expect("component tempdir");
             let publish =
                 release_publish_extension("registry", "printf '%s' \"$HOMEBOY_SETTINGS_JSON\"");
-            homeboy_extension::save_manifest(&publish).expect("save publish extension");
+            homeboy_core::extension::catalog::save_manifest(&publish)
+                .expect("save publish extension");
             let github = GithubConfig {
                 hosts: HashMap::from([(
                     "github.enterprise.test".to_string(),
@@ -544,7 +554,7 @@ mod tests {
             };
 
             let result = run_publish(
-                &[publish],
+                &[ReleaseExtension::from_manifest(&publish)],
                 &ReleaseState::default(),
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),

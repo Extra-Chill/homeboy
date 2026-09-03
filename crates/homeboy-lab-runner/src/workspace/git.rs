@@ -11,7 +11,9 @@ use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializ
 use super::snapshot::materialize_snapshot_overlay;
 use super::types::ControllerGitBundleProvenance;
 use super::types::GitSnapshot;
-use super::util::{git_output, run_shell_command, ssh_args, ssh_client_for_runner};
+use super::util::{
+    git_output, run_shell_command, ssh_args, ssh_client_for_runner, verify_valid_git_representation,
+};
 
 pub(super) fn git_snapshot(
     local_path: &Path,
@@ -249,6 +251,7 @@ pub(super) fn materialize_git_snapshot_from_controller_bundle(
     local_path: &Path,
     remote_path: &str,
     excludes: &[String],
+    git_fetch_refs: &[String],
 ) -> Result<Option<ControllerGitBundleProvenance>> {
     let head = git_output(local_path, &["rev-parse", "HEAD"])?;
     let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -267,12 +270,47 @@ pub(super) fn materialize_git_snapshot_from_controller_bundle(
             branch: branch.as_deref(),
             remote_url: &remote_url,
             changed_since_base: None,
-            git_fetch_refs: &[],
+            git_fetch_refs,
             allow_dirty_lab_workspace: false,
         },
     )?;
     materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
+    verify_materialized_snapshot_git_representation(runner, remote_path)?;
     Ok(Some(provenance))
+}
+
+fn verify_materialized_snapshot_git_representation(
+    runner: &Runner,
+    remote_path: &str,
+) -> Result<()> {
+    match runner.kind {
+        RunnerKind::Local => verify_valid_git_representation(Path::new(remote_path)),
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                return verify_valid_git_representation(Path::new(remote_path));
+            }
+            let inside = super::snapshot::synthetic_checkout_value(
+                runner,
+                remote_path,
+                "rev-parse --is-inside-work-tree",
+            )?;
+            if inside != "true" {
+                return Err(Error::validation_invalid_argument(
+                    "workspace",
+                    "snapshot-git workspace .git representation is not a Git work tree",
+                    Some(remote_path.to_string()),
+                    None,
+                ));
+            }
+            super::snapshot::synthetic_checkout_value(
+                runner,
+                remote_path,
+                "rev-parse --verify -q HEAD",
+            )
+            .map(|_| ())
+        }
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String> {

@@ -1,0 +1,220 @@
+//! Changed-file scope resolution — maps `--changed-only`/`--changed-since`
+//! flags into runner-compatible globbed lint runs via extension routes.
+
+use super::types::{LintRunWorkflowArgs, ScopedLintPlan, ScopedLintRun};
+use homeboy_core::component::Component;
+use homeboy_core::git;
+use homeboy_extension_contract::LintChangedFileRoute;
+use std::path::Path;
+
+/// An extension-declared lint fixer route selected for a concrete file scope.
+///
+/// The step name is opaque to Homeboy. Extensions define both the file matcher
+/// and the runner step in their manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintFixRoute {
+    pub step: Option<String>,
+    pub files: Vec<String>,
+}
+
+/// Resolve runner-compatible scopes from --changed-only or --changed-since flags.
+///
+/// Returns a [`ScopedLintPlan`] with an empty `runs` when changed-file mode is
+/// active but no compatible files were found — the caller should treat this as
+/// an early "passed" exit. `changed_files_considered` distinguishes the two
+/// very different ways that can happen (#10685): a genuinely empty diff, or a
+/// non-empty diff that no declared lint route claimed.
+/// Returns `None` when no changed-file scoping is active (use args.glob directly).
+pub(super) fn resolve_scoped_lint_runs(
+    component: &Component,
+    args: &LintRunWorkflowArgs,
+) -> homeboy_core::Result<Option<ScopedLintPlan>> {
+    if args.changed_only {
+        let changed_files = if let Some(files) = &args.precomputed_changed_files {
+            files.clone()
+        } else {
+            let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
+            let mut files: Vec<String> = Vec::new();
+            files.extend(uncommitted.staged);
+            files.extend(uncommitted.unstaged);
+            files.extend(uncommitted.untracked);
+            files
+        };
+
+        let changed_files = component_relative_changed_files(component, changed_files);
+        if changed_files.is_empty() {
+            println!("No files in working tree changes");
+            return Ok(Some(ScopedLintPlan {
+                runs: Vec::new(),
+                changed_files_considered: 0,
+            }));
+        }
+
+        eprintln!(
+            "Linting {} changed file(s) (--changed-only is file-scoped; findings may be outside changed hunks)",
+            changed_files.len()
+        );
+
+        Ok(Some(ScopedLintPlan {
+            runs: build_changed_lint_runs(component, &changed_files),
+            changed_files_considered: changed_files.len(),
+        }))
+    } else if let Some(ref git_ref) = args.changed_since {
+        let changed_files = match &args.precomputed_changed_files {
+            Some(files) => files.clone(),
+            None => git::get_files_changed_since(&component.local_path, git_ref)?,
+        };
+
+        let changed_files = component_relative_changed_files(component, changed_files);
+        if changed_files.is_empty() {
+            println!("No files changed since {}", git_ref);
+            return Ok(Some(ScopedLintPlan {
+                runs: Vec::new(),
+                changed_files_considered: 0,
+            }));
+        }
+
+        Ok(Some(ScopedLintPlan {
+            runs: build_changed_lint_runs(component, &changed_files),
+            changed_files_considered: changed_files.len(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn component_relative_changed_files(
+    component: &Component,
+    changed_files: Vec<String>,
+) -> Vec<String> {
+    let Some(prefix) = git::get_component_path_prefix(&component.local_path) else {
+        return changed_files;
+    };
+    let prefix = format!("{}/", prefix.trim_end_matches('/'));
+
+    changed_files
+        .into_iter()
+        .filter_map(|file| file.strip_prefix(&prefix).map(str::to_string))
+        .collect()
+}
+
+pub(super) fn build_changed_lint_runs(
+    component: &Component,
+    changed_files: &[String],
+) -> Vec<ScopedLintRun> {
+    let routes = changed_file_routes_for_component(component);
+    build_changed_lint_runs_with_routes(component, changed_files, &routes)
+}
+
+/// Resolve the extension-owned fixer steps applicable to known lint files.
+///
+/// Components without routes retain their single-runner behavior. When routes
+/// are declared, only matching steps are returned: falling back to every step
+/// would let an unrelated fixer claim a scoped diagnostic.
+pub fn resolve_lint_fix_routes(component: &Component, files: &[String]) -> Vec<LintFixRoute> {
+    let routes = changed_file_routes_for_component(component);
+    resolve_lint_fix_routes_with_routes(files, &routes)
+}
+
+pub(crate) fn resolve_lint_fix_routes_with_routes(
+    files: &[String],
+    routes: &[LintChangedFileRoute],
+) -> Vec<LintFixRoute> {
+    if routes.is_empty() {
+        return vec![LintFixRoute {
+            step: None,
+            files: files.to_vec(),
+        }];
+    }
+
+    routes
+        .iter()
+        .filter_map(|route| {
+            let files = files
+                .iter()
+                .filter(|file| route_matches_file(route, file))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!files.is_empty()).then(|| LintFixRoute {
+                step: Some(route.step.clone()),
+                files,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn build_changed_lint_runs_with_routes(
+    component: &Component,
+    changed_files: &[String],
+    routes: &[LintChangedFileRoute],
+) -> Vec<ScopedLintRun> {
+    if routes.is_empty() {
+        return vec![ScopedLintRun {
+            glob: glob_for_files(&component.local_path, changed_files),
+            step: None,
+            changed_files: changed_files.to_vec(),
+        }];
+    }
+
+    let mut runs = Vec::new();
+    for route in routes {
+        let matched_files: Vec<String> = changed_files
+            .iter()
+            .filter(|file| route_matches_file(route, file))
+            .cloned()
+            .collect();
+
+        if !matched_files.is_empty() {
+            runs.push(ScopedLintRun {
+                glob: glob_for_files(&component.local_path, &matched_files),
+                step: Some(route.step.clone()),
+                changed_files: matched_files,
+            });
+        }
+    }
+    runs
+}
+
+fn changed_file_routes_for_component(component: &Component) -> Vec<LintChangedFileRoute> {
+    let Some(extensions) = component.extensions.as_ref() else {
+        return Vec::new();
+    };
+
+    extensions
+        .keys()
+        .filter_map(|extension_id| crate::extension::catalog::load_extension(extension_id).ok())
+        .filter_map(|manifest| manifest.lint)
+        .flat_map(|lint| lint.changed_file_routes)
+        .collect()
+}
+
+fn route_matches_file(route: &LintChangedFileRoute, file: &str) -> bool {
+    if !route.extensions.is_empty() && has_extension(file, &route.extensions) {
+        return true;
+    }
+
+    route
+        .globs
+        .iter()
+        .any(|pattern| glob_match::glob_match(pattern, file))
+}
+
+fn has_extension(file: &str, extensions: &[String]) -> bool {
+    Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extensions.iter().any(|expected| expected == extension))
+}
+
+fn glob_for_files(root: &str, files: &[String]) -> String {
+    let abs_files: Vec<String> = files
+        .iter()
+        .map(|file| format!("{}/{}", root, file))
+        .collect();
+
+    if abs_files.len() == 1 {
+        abs_files[0].clone()
+    } else {
+        format!("{{{}}}", abs_files.join(","))
+    }
+}

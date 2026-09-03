@@ -21,6 +21,7 @@ use homeboy_core::api_jobs::RemoteRunnerJobResult;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope;
 use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
+use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 
 use super::super::execution::{exec_worker_local_until_cancelled_with_progress, RunnerExecOptions};
 use super::broker::{
@@ -215,16 +216,17 @@ fn run_once_output(
     // Every cancellation checkpoint in this claim lifecycle polls the broker for
     // the same claimed job snapshot through identical plumbing; funnel them
     // through one borrow-only helper so the three checkpoints stay in lockstep.
-    let poll_cancelled = |client: &Client,
-                          options: &ReverseRunnerWorkerOptions,
-                          job: &homeboy_core::api_jobs::Job| {
-        cancelled_job_snapshot(
-            client,
-            &options.broker_url,
-            options.broker_token.as_deref(),
-            job,
-        )
-    };
+    let poll_cancelled =
+        |client: &Client,
+         options: &ReverseRunnerWorkerOptions,
+         claim: &homeboy_runner_contract::RunnerApiClaimedExecution| {
+            cancelled_job_snapshot(
+                client,
+                &options.broker_url,
+                options.broker_token.as_deref(),
+                claim,
+            )
+        };
     let claim = claim_job(&client, &options)?;
     let Some(claim) = claim else {
         let loop_mode = options.loop_mode;
@@ -256,7 +258,7 @@ fn run_once_output(
         Error::validation_invalid_argument(
             "execution_context",
             "reverse runner claim predates authenticated execution context support",
-            Some(claim.job.id.to_string()),
+            Some(claim.job_id.clone()),
             Some(vec![
                 "Resubmit the handoff through a compatible controller before retrying.".to_string(),
             ]),
@@ -269,12 +271,21 @@ fn run_once_output(
             Error::validation_invalid_argument(
                 "execution_protocol",
                 "reverse runner claim predates execution-context protocol negotiation",
-                Some(claim.job.id.to_string()),
+                Some(claim.job_id.clone()),
                 None,
             )
         })?
-        .verify()?;
-    if claim.request.requires_workspace_claim_protocol() {
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "execution_protocol",
+                "reverse runner claim has an unsupported execution-context protocol",
+                Some(claim.job_id.clone()),
+                None,
+            )
+        })?;
+    if claim.workspace_claim_binding.is_some() {
         claim
             .workspace_claim_protocol
             .as_ref()
@@ -282,13 +293,13 @@ fn run_once_output(
                 Error::validation_invalid_argument(
                     "workspace_claim_protocol",
                     "reverse runner claim predates workspace-claim protocol negotiation",
-                    Some(claim.job.id.to_string()),
+                    Some(claim.job_id.clone()),
                     None,
                 )
             })?
             .verify()?;
     }
-    if claim.request.requires_workspace_owner_lease_protocol() {
+    if claim.workspace_owner_lease.is_some() {
         claim
             .workspace_owner_lease_protocol
             .as_ref()
@@ -296,20 +307,21 @@ fn run_once_output(
                 Error::validation_invalid_argument(
                     "workspace_owner_lease_protocol",
                     "reverse runner claim predates workspace owner lease protocol negotiation",
-                    Some(claim.job.id.to_string()),
+                    Some(claim.job_id.clone()),
                     None,
                 )
             })?
             .verify()?;
     }
-    let execution_context = execution_context.verify_claim(&claim.job, &claim.request)?;
+    let execution_context = RunnerJobExecutionContext::from_assertion(execution_context.clone())
+        .verify_claimed_execution(&claim.job_id, &options.runner_id, claim.claim_expires_at_ms)?;
 
     // Commit runner-owned evidence before materializing any broker input. The
     // controller persists the same identity in its claim event; keeping both
     // records lets either side recover after its own restart.
     persist_runner_execution_context(&options.runner_id, &execution_context)?;
 
-    if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
+    if let Some(job) = poll_cancelled(&client, &options, &claim)? {
         return Ok(cancelled_output(
             options,
             iterations,
@@ -328,20 +340,20 @@ fn run_once_output(
         &options.broker_url,
         options.broker_token.as_deref(),
         &options.runner_id,
-        &claim.job,
+        &claim,
         serde_json::json!({
             "phase": "runner_job_execution_context_verified",
             "runner_job_execution_context": execution_context.evidence_record()?,
         }),
-        claim.request.workspace_claim_binding.as_ref(),
-        claim.request.workspace_owner_lease.as_ref(),
+        claim.workspace_claim_binding.as_ref(),
+        claim.workspace_owner_lease.as_ref(),
     )?;
     let heartbeat = start_claim_heartbeat(
         &client,
         &options,
-        &claim.job,
-        claim.request.workspace_claim_binding.clone(),
-        claim.request.workspace_owner_lease.clone(),
+        &claim,
+        claim.workspace_claim_binding.clone(),
+        claim.workspace_owner_lease.clone(),
     )?;
     let current_owner_lease = heartbeat.owner_lease_handle();
     // Remote capability-parity preflight: validate that this runner can satisfy
@@ -349,8 +361,15 @@ fn run_once_output(
     // starting execution, so a missing tool fails before remote dispatch instead
     // of mid-run (#5093). The local worker execution path runs this preflight
     // before handing the claimed job directly to the local runtime.
-    let capability_preflight = reverse_worker_capability_preflight(&claim.request);
-    let mut execution_envelope = claim.request.execution_envelope();
+    let capability_preflight = reverse_worker_capability_preflight(&claim.envelope);
+    let mut execution_envelope = claim.envelope.clone();
+    let lab_runner_workload = lab_runner_workload_from_execution_envelope(&execution_envelope)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode claimed runner workload".to_string()),
+            )
+        })?;
     // Authorize the exact durable owner lease immediately before any workspace,
     // private-file, or source materialization. This intentionally does not consume
     // the receipt; consume remains at the provider-invocation boundary below.
@@ -364,16 +383,15 @@ fn run_once_output(
             &options.broker_url,
             options.broker_token.as_deref(),
             &options.runner_id,
-            &claim.job,
+            &claim,
             lease,
         )?;
     }
-    let _command_assets =
-        materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
+    let _command_assets = materialize_command_assets(&claim.job_id, &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
     let _staged_workspace = materialize_staged_source_artifact(
         &options.runner_id,
-        &claim.job.id.to_string(),
+        &claim.job_id,
         &mut execution_envelope,
     )?;
     materialize_snapshot_git_baseline(&execution_envelope)?;
@@ -385,9 +403,9 @@ fn run_once_output(
             &options.broker_url,
             options.broker_token.as_deref(),
             &options.runner_id,
-            &claim.job,
+            &claim,
             result,
-            claim.request.workspace_claim_binding.as_ref(),
+            claim.workspace_claim_binding.as_ref(),
             current_owner_lease
                 .lock()
                 .expect("owner lease lock")
@@ -399,8 +417,8 @@ fn run_once_output(
     let claimed_run_id = claimed_job_run_id(&execution_envelope);
     let progress_client = client.clone();
     let progress_options = options.clone();
-    let progress_job = claim.job.clone();
-    let progress_workspace_claim_binding = claim.request.workspace_claim_binding.clone();
+    let progress_claim = claim.clone();
+    let progress_workspace_claim_binding = claim.workspace_claim_binding.clone();
     let progress_owner_lease = current_owner_lease.clone();
     let progress_sink = Arc::new(move |data| {
         append_progress_data(
@@ -408,7 +426,7 @@ fn run_once_output(
             &progress_options.broker_url,
             progress_options.broker_token.as_deref(),
             &progress_options.runner_id,
-            &progress_job,
+            &progress_claim,
             data,
             progress_workspace_claim_binding.as_ref(),
             progress_owner_lease
@@ -424,7 +442,7 @@ fn run_once_output(
             capability_preflight,
             claimed_run_id,
             execution_context.clone(),
-            claim.job.id.to_string(),
+            claim.job_id.clone(),
         )?,
         || {
             verify_staged_workspace_before_execution(
@@ -439,9 +457,9 @@ fn run_once_output(
                 &options.broker_url,
                 options.broker_token.as_deref(),
                 &options.runner_id,
-                &claim.job,
+                &claim,
                 recovered.id(),
-                claim.request.workspace_claim_binding.as_ref(),
+                claim.workspace_claim_binding.as_ref(),
                 current_owner_lease
                     .lock()
                     .expect("owner lease lock")
@@ -459,7 +477,7 @@ fn run_once_output(
                 return cancel_seen;
             }
             last_cancel_poll = Instant::now();
-            cancel_seen = poll_cancelled(&client, &options, &claim.job)
+            cancel_seen = poll_cancelled(&client, &options, &claim)
                 .map(|job| job.is_some())
                 .unwrap_or(false);
             cancel_seen
@@ -469,7 +487,7 @@ fn run_once_output(
     let (exec_output, exit_code) = match exec_result {
         Ok(result) => result,
         Err(err) => {
-            if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
+            if let Some(job) = poll_cancelled(&client, &options, &claim)? {
                 return Ok(cancelled_output(
                     options,
                     iterations,
@@ -511,7 +529,7 @@ fn run_once_output(
             ));
         }
     };
-    if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
+    if let Some(job) = poll_cancelled(&client, &options, &claim)? {
         return Ok(cancelled_output(
             options,
             iterations,
@@ -524,7 +542,7 @@ fn run_once_output(
     let job = finish(remote_runner_result_from_exec_output(
         exec_output,
         exit_code,
-        claim.request.lab_runner_workload.clone(),
+        lab_runner_workload,
     ))?;
 
     Ok((
@@ -964,9 +982,11 @@ fn private_at_file_snapshot_directory() -> std::io::Result<std::path::PathBuf> {
     ))
 }
 
-/// Snapshot transport intentionally excludes `.git`. Reconstruct the verified,
-/// deterministic baseline before the nested agent-task command starts so its
-/// provider and harvest share the exact accepted workspace provenance.
+/// Snapshot transport intentionally excludes `.git`. Reconstruct or verify the
+/// Git baseline before the nested agent-task command starts so its provider and
+/// harvest share the exact accepted workspace provenance. Snapshot-git must
+/// already own a valid `.git` representation; this gate refuses a dangling
+/// linked-worktree gitfile before handoff.
 fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Result<()> {
     let Some(dispatch) = envelope.dispatch.as_ref() else {
         return Ok(());
@@ -983,7 +1003,7 @@ fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Resu
     let lab = reverse_worker_lab_offload(lab)?;
     if !matches!(
         lab.get("sync_mode").and_then(serde_json::Value::as_str),
-        Some("snapshot" | "filesystem_snapshot")
+        Some("snapshot" | "filesystem_snapshot" | "snapshot-git")
     ) {
         return Ok(());
     }
@@ -1449,13 +1469,16 @@ fn runner_exec_options_from_envelope(
     execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
     runner_job_id: String,
 ) -> Result<RunnerExecOptions> {
+    let lab_runner_workload =
+        lab_runner_workload_from_execution_envelope(&envelope).map_err(|error| {
+            Error::validation_invalid_argument("runner_workload", error.to_string(), None, None)
+        })?;
     let dispatch = envelope.dispatch.ok_or_else(|| {
         Error::internal_unexpected("runner execution envelope is missing dispatch payload")
     })?;
     let secret_env_plan = envelope.secret_env.unwrap_or_default();
     let secret_env_names = secret_env_plan.secret_env_names();
-    let required_extensions = envelope
-        .lab_runner_workload
+    let required_extensions = lab_runner_workload
         .as_ref()
         .map(|workload| workload.required_extensions.clone())
         .unwrap_or_default();
@@ -1485,7 +1508,7 @@ fn runner_exec_options_from_envelope(
         accepted_extension_settings: Vec::new(),
         require_paths: dispatch.require_paths,
         extension_env_providers: dispatch.extension_env_providers,
-        lab_runner_workload: envelope.lab_runner_workload,
+        lab_runner_workload,
         run_id,
         run_id_owns_generic_exec: false,
         detach_after_handoff: false,

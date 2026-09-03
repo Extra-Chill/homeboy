@@ -15,7 +15,7 @@ use crate::command_contract::{
 };
 use crate::commands::{adapter, agent_task};
 use crate::core::engine::execution_context::{self, ResolveOptions};
-use homeboy_extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use crate::command_contract::{
     CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy,
@@ -293,6 +293,9 @@ impl Commands {
             Commands::Extension(args) if args.is_update_command() => {
                 LabCommandContract::explicit_runner_simple(args.update_command_label())
             }
+            Commands::Extension(args) if args.is_readiness_repair_command() => {
+                LabCommandContract::runner_resident("extension setup")
+            }
             Commands::Extension(args) if args.is_runner_resident_read_command() => {
                 LabCommandContract::runner_resident(args.runner_resident_read_command_label())
             }
@@ -382,13 +385,13 @@ fn agent_task_fanout_local_only_contract(
 /// A durable run id is resolved through the controller lifecycle store, whose
 /// aggregate and finalized artifact projections are not portable path inputs.
 /// Other promotion source forms retain their existing runner-local behavior.
-fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
+pub(crate) fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
     // A run artifact URI is an immutable selector over controller-owned durable
     // state, even when its bytes must be fetched from the producing runner.
     // Keep its resolution, integrity verification, and target application on
     // the controller rather than splitting those phases across placements.
     source.starts_with("homeboy://agent-task/run/")
-        || agent_task_lifecycle::status(source).is_ok()
+        || agent_task_lifecycle::reconcile_status(source).is_ok()
         || std::path::Path::new(source).is_file()
 }
 

@@ -4,6 +4,7 @@
 use super::shared::*;
 
 mod timeout_tests {
+    use super::super::concurrency::concurrency_tests::init_git_workspace;
     use super::*;
 
     struct ReturnedTimeoutOnceExecutor {
@@ -146,6 +147,66 @@ mod timeout_tests {
             aggregate.outcomes[0].failure_classification,
             Some(AgentTaskFailureClassification::Timeout)
         );
+        assert!(aggregate.outcomes[0].artifacts.is_empty());
+        assert_eq!(aggregate.totals.candidate_recoverable, 0);
+    }
+
+    #[test]
+    fn timeout_after_workspace_edits_preserves_an_incomplete_recoverable_candidate() {
+        struct EditThenTimeout;
+
+        impl AgentTaskExecutorAdapter for EditThenTimeout {
+            fn execute(
+                &self,
+                request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                let workspace = request.workspace.root.expect("attempt workspace");
+                fs::write(
+                    std::path::Path::new(&workspace).join("provider-change.txt"),
+                    "partial work survives timeout\n",
+                )
+                .expect("write attempt workspace change");
+                thread::sleep(Duration::from_millis(25));
+                outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        init_git_workspace(&source);
+        let scheduler = AgentTaskScheduler::new(Arc::new(EditThenTimeout));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(source.display().to_string());
+        plan.tasks[0].executor.config = json!({
+            "workspace": { "root": source.display().to_string() },
+            "workspace_root": source.display().to_string(),
+        });
+        plan.tasks[0].limits.timeout_ms = Some(1);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::PartialRecoverable,
+            "a non-empty attempt diff is recoverable rather than discarded"
+        );
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        assert_eq!(
+            outcome.metadata["timeout_recovery"]["incomplete"],
+            Value::Bool(true)
+        );
+        let patch = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.metadata["change_source"] == "uncommitted_attempt_workspace")
+            .expect("harvested attempt-workspace diff");
+        assert_eq!(patch.metadata["incomplete"], Value::Bool(true));
+        assert_eq!(
+            patch.metadata["recovery_required"],
+            json!(["fresh_review", "deterministic_gates"])
+        );
     }
 
     #[test]
@@ -169,7 +230,7 @@ mod timeout_tests {
             .iter()
             .find(|diagnostic| diagnostic.class == "agent_task.execution_deadline_exceeded")
             .expect("deadline diagnostic");
-        assert_eq!(diagnostic.data["completed_phase"], "materialization");
+        assert_eq!(diagnostic.data["completed_phase"], "provider_readiness");
         assert_eq!(diagnostic.data["remaining_budget_ms"], 0);
     }
 
@@ -195,6 +256,40 @@ mod timeout_tests {
                 .limits
                 .execution_deadline_unix_ms,
             Some(deadline)
+        );
+        let timeout_ms = observed.lock().expect("observed request")[0]
+            .limits
+            .timeout_ms
+            .expect("resolved timeout");
+        assert!(
+            (59_000..=60_000).contains(&timeout_ms),
+            "providers receive the execution-deadline-bounded timeout rather than an implicit default: {timeout_ms}"
+        );
+    }
+
+    #[test]
+    fn task_execution_deadline_caps_the_plan_deadline() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(Arc::new(ConceptPacketExecutor {
+            observed: Arc::clone(&observed),
+            emit_concept_packet: false,
+        }));
+        let mut plan = plan_with_tasks(1);
+        let task_deadline = crate::agent_task_timeout::now_unix_ms().saturating_add(30_000);
+        plan.options.execution_budget.deadline_unix_ms = Some(task_deadline.saturating_add(30_000));
+        plan.tasks[0].limits.execution_deadline_unix_ms = Some(task_deadline);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Succeeded
+        );
+        assert_eq!(
+            observed.lock().expect("observed request")[0]
+                .limits
+                .execution_deadline_unix_ms,
+            Some(task_deadline)
         );
     }
 

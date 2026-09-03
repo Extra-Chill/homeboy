@@ -137,6 +137,42 @@ pub(crate) fn existing_remote_with_policy(
     }
 }
 
+/// Git exclusion pathspecs with the same root and glob semantics as snapshot
+/// traversal. A malformed Git pathspec is left for Git to reject so callers
+/// that validate provenance fail closed.
+pub fn git_exclude_pathspecs(excludes: &[String]) -> Vec<String> {
+    let mut pathspecs = Vec::new();
+    for exclude in excludes {
+        let root_anchored = exclude.starts_with("./");
+        let pattern = exclude
+            .trim_start_matches("./")
+            .trim_end_matches('/')
+            .trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let pattern = if root_anchored || pattern.contains('/') {
+            pattern.to_string()
+        } else {
+            format!("**/{pattern}")
+        };
+        let pathspec = format!(":(exclude,top,glob){pattern}");
+        if !pathspecs.contains(&pathspec) {
+            pathspecs.push(pathspec);
+        }
+        // Snapshot traversal skips an excluded directory before visiting its
+        // children. Add its descendants explicitly because Git status reports
+        // files rather than the excluded directory entry itself.
+        if !pattern.contains('*') {
+            let descendants = format!(":(exclude,top,glob){pattern}/**");
+            if !pathspecs.contains(&descendants) {
+                pathspecs.push(descendants);
+            }
+        }
+    }
+    pathspecs
+}
+
 pub fn declared_sync_excludes_for_path(path: &Path) -> Vec<String> {
     let mut excludes = Vec::new();
     append_unique(&mut excludes, component_extension_sync_excludes(path));
@@ -163,7 +199,7 @@ fn component_extension_sync_excludes(path: &Path) -> Vec<String> {
         let mut extension_ids = extensions.keys().collect::<Vec<_>>();
         extension_ids.sort();
         for extension_id in extension_ids {
-            let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
+            let Ok(extension) = crate::extension::catalog::load_extension(extension_id) else {
                 continue;
             };
             if let Some(source_snapshot) = extension.source_snapshot {
@@ -176,16 +212,7 @@ fn component_extension_sync_excludes(path: &Path) -> Vec<String> {
 
 pub(crate) fn gitignore_sync_excludes(path: &Path) -> Vec<String> {
     let mut excludes = Vec::new();
-    if let Ok(contents) = fs::read_to_string(path.join(".gitignore")) {
-        for line in contents.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
-                continue;
-            }
-            append_gitignore_exclude(&mut excludes, line);
-        }
-    }
-
-    let Some(output) = git::output_optional(
+    let Some(output) = git::output_optional_bytes(
         path,
         &[
             "ls-files",
@@ -193,17 +220,17 @@ pub(crate) fn gitignore_sync_excludes(path: &Path) -> Vec<String> {
             "--ignored",
             "--exclude-standard",
             "--directory",
+            "-z",
         ],
     ) else {
         return excludes;
     };
 
-    for line in output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+    for relative in output
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
     {
-        append_gitignore_exclude(&mut excludes, line);
+        append_gitignore_exclude(&mut excludes, &String::from_utf8_lossy(relative));
     }
     excludes
 }
@@ -308,6 +335,21 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn git_exclude_pathspecs_match_root_files_and_directory_trees() {
+        let pathspecs = git_exclude_pathspecs(&[
+            "AGENTS.md".to_string(),
+            ".claude".to_string(),
+            ".claude/**".to_string(),
+            "./.datamachine".to_string(),
+        ]);
+        assert!(pathspecs.contains(&":(exclude,top,glob)**/AGENTS.md".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob)**/.claude".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob).claude/**".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob).datamachine".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob).datamachine/**".to_string()));
+    }
+
+    #[test]
     fn test_default_sync_excludes() {
         let excludes = default_sync_excludes();
 
@@ -333,13 +375,37 @@ mod tests {
     }
 
     #[test]
-    fn gitignore_root_anchored_directory_excludes_remain_root_anchored() {
+    fn gitignore_excludes_preserve_reincluded_tracked_subtree() {
         let tempdir = tempfile::tempdir().expect("creates source fixture");
-        fs::write(tempdir.path().join(".gitignore"), "/dist\ndist\n").expect("writes gitignore");
+        let source_path = tempdir.path();
+        let tracked_subtree = source_path.join("runtime-overlays/php-wasm-node-8-3");
+        let ignored_artifact = source_path.join("runtime-overlays/generated/cache.bin");
+        fs::create_dir_all(&tracked_subtree).expect("creates tracked subtree");
+        fs::create_dir_all(ignored_artifact.parent().expect("artifact parent"))
+            .expect("creates ignored artifact directory");
+        fs::write(
+            source_path.join(".gitignore"),
+            "runtime-overlays/*\n!runtime-overlays/php-wasm-node-8-3/\n!runtime-overlays/php-wasm-node-8-3/**\n",
+        )
+        .expect("writes gitignore");
+        fs::write(tracked_subtree.join("package.json"), "{}\n").expect("writes tracked file");
+        fs::write(&ignored_artifact, "generated\n").expect("writes ignored artifact");
+        git_test_command(source_path, &["init"]);
+        git_test_command(
+            source_path,
+            &[
+                "add",
+                ".gitignore",
+                "runtime-overlays/php-wasm-node-8-3/package.json",
+            ],
+        );
 
         assert_eq!(
-            gitignore_sync_excludes(tempdir.path()),
-            vec!["./dist".to_string(), "dist".to_string()]
+            gitignore_sync_excludes(source_path),
+            vec![
+                "runtime-overlays/generated".to_string(),
+                "runtime-overlays/generated/**".to_string(),
+            ]
         );
     }
 
@@ -378,7 +444,7 @@ mod tests {
                 .extensions
                 .as_ref()
                 .is_some_and(|extensions| extensions.contains_key("snapshot-fixture")));
-            let extension = crate::extension_store::load_extension("snapshot-fixture")
+            let extension = crate::extension::catalog::load_extension("snapshot-fixture")
                 .expect("loads extension manifest");
             assert_eq!(
                 extension

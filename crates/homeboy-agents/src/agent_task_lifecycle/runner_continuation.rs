@@ -16,7 +16,7 @@ use homeboy_core::api_jobs::{
     Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot,
 };
 use homeboy_core::error::{Error, Result};
-use homeboy_core::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
+use homeboy_runner_contract::{RunnerApiSubmitRequest, WorkspaceClaim, WorkspaceIdentity};
 
 /// Result of reconciling a runner job across its known daemon generations.
 ///
@@ -43,6 +43,24 @@ impl RunnerAuthority {
     pub fn is_configured(self) -> bool {
         matches!(self, Self::Configured)
     }
+}
+
+/// Authoritative live-job evidence for one runner after generation
+/// reconciliation. Unknown must keep runner-generation ownership: a missing
+/// probe cannot prove the daemon is idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerLiveJobAuthority {
+    Idle,
+    Busy,
+    Unknown,
+}
+
+/// One reverse-broker submission operation. Current callers use the Runner API;
+/// the legacy variant exists only to replay request-shaped durable records
+/// without changing their established idempotency fingerprint.
+pub enum RunnerContinuationSubmission {
+    RunnerApi(RunnerApiSubmitRequest),
+    LegacyReplay(RemoteRunnerJobRequest),
 }
 
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
@@ -131,6 +149,17 @@ pub trait RunnerContinuationProvider: Send + Sync {
         }
     }
 
+    /// Recover an accepted runner job whose response did not reach the
+    /// controller. The durable run id is the daemon's idempotency key, so a
+    /// unique matching active job is sufficient to bind the handoff safely.
+    fn runner_job_id_for_durable_run(
+        &self,
+        _runner_id: &str,
+        _durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
 
@@ -151,6 +180,12 @@ pub trait RunnerContinuationProvider: Send + Sync {
         }
     }
 
+    /// Live-job evidence after runner-generation reconciliation. Default is
+    /// unknown so older providers cannot turn a missing probe into idle proof.
+    fn runner_live_job_authority(&self, _runner_id: &str) -> RunnerLiveJobAuthority {
+        RunnerLiveJobAuthority::Unknown
+    }
+
     /// Execute a continuation command on the runner, returning the exit code.
     fn run_continuation_exec(
         &self,
@@ -161,10 +196,10 @@ pub trait RunnerContinuationProvider: Send + Sync {
     ) -> Result<i32>;
 
     /// Submit a replayable reverse-broker request during lifecycle reconciliation.
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        request: RemoteRunnerJobRequest,
+        submission: RunnerContinuationSubmission,
     ) -> Result<Job>;
 
     fn lookup_reverse_broker_submission(
@@ -209,10 +244,10 @@ impl RunnerContinuationProvider for NoopProvider {
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected(
             "runner subsystem is unavailable: cannot submit reverse broker job",
@@ -260,6 +295,12 @@ pub(crate) fn with_runner_continuation<T>(
 /// durable runner id. A missing provider remains unknown, not removed.
 pub fn runner_authority(runner_id: &str) -> RunnerAuthority {
     with_runner_continuation(|provider| provider.runner_authority(runner_id))
+}
+
+/// Resolve whether a runner currently has zero live jobs and a resolved
+/// generation projection. A missing provider remains unknown, not idle.
+pub fn runner_live_job_authority(runner_id: &str) -> RunnerLiveJobAuthority {
+    with_runner_continuation(|provider| provider.runner_live_job_authority(runner_id))
 }
 
 /// Clear any registered runner-continuation provider so a fresh test starts from
@@ -356,13 +397,24 @@ mod tests {
             Err(Error::internal_unexpected("unused in fixture"))
         }
 
-        fn submit_reverse_broker_job(
+        fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _request: RemoteRunnerJobRequest,
+            _submission: RunnerContinuationSubmission,
         ) -> Result<Job> {
             Err(Error::internal_unexpected("unused in fixture"))
         }
+    }
+
+    #[test]
+    fn default_live_job_authority_is_unknown() {
+        assert_eq!(
+            LegacyProvider {
+                runner_exists: true,
+            }
+            .runner_live_job_authority("legacy-runner"),
+            RunnerLiveJobAuthority::Unknown
+        );
     }
 
     #[test]

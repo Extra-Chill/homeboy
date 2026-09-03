@@ -162,6 +162,15 @@ where
     let deadline = Instant::now() + runner_exec_wait_timeout();
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
+        if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
+            observed_agent_task_terminal_job_status(run_id, flow.run_id_owns_generic_exec)
+        }) {
+            // The agent-task lifecycle owns provider terminality. A stale runner
+            // job projection must not hold Cook in dispatch after its aggregate
+            // and artifacts are already durable on the controller.
+            job.status = status;
+            break;
+        }
         let job_id = job.id.to_string();
         if Instant::now() >= deadline {
             let events = events(&job)
@@ -272,8 +281,11 @@ where
         flow.run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
+    // A detached handoff wrapper is only the transport owner. Once the
+    // runner has mirrored the terminal result, that nested run owns the
+    // operator-visible outcome and its notification.
     fire_runner_direct_notification(
-        flow.run_id.as_deref(),
+        terminal_notification_run_id(mirror_run_id.as_deref(), flow.run_id.as_deref()),
         &job,
         flow.lab_runner_workload
             .as_ref()
@@ -383,4 +395,93 @@ where
         append_runner_exec_diagnostic_hint(&mut output, Some(hint.to_string()));
     }
     Ok((output, exit_code))
+}
+
+pub(super) fn terminal_notification_run_id<'a>(
+    mirrored_run_id: Option<&'a str>,
+    wrapper_run_id: Option<&'a str>,
+) -> Option<&'a str> {
+    mirrored_run_id
+        .filter(|run_id| !run_id.trim().is_empty())
+        .or(wrapper_run_id)
+}
+
+fn observed_agent_task_terminal_job_status(
+    run_id: &str,
+    run_id_owns_generic_exec: bool,
+) -> Option<JobStatus> {
+    if run_id_owns_generic_exec {
+        return None;
+    }
+    let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
+    let store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .ok()?;
+    let run = homeboy_agents::orchestration::OrchestrationService::new(
+        homeboy_agents::orchestration::LifecycleStoreLookup::new(store),
+    )
+    .run(&run_id)
+    .ok()?;
+    control_plane_terminal_job_status(run.state)
+}
+
+fn control_plane_terminal_job_status(
+    state: homeboy_control_plane_contract::ControlPlaneRunState,
+) -> Option<JobStatus> {
+    use homeboy_control_plane_contract::ControlPlaneRunState;
+    match state {
+        ControlPlaneRunState::Succeeded
+        | ControlPlaneRunState::CandidateRecoverable
+        | ControlPlaneRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        ControlPlaneRunState::PartialFailure
+        | ControlPlaneRunState::Failed
+        | ControlPlaneRunState::TimedOut => Some(JobStatus::Failed),
+        ControlPlaneRunState::Cancelled => Some(JobStatus::Cancelled),
+        ControlPlaneRunState::Queued
+        | ControlPlaneRunState::Running
+        | ControlPlaneRunState::Stale
+        | ControlPlaneRunState::Unknown => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy_control_plane_contract::ControlPlaneRunState;
+
+    #[test]
+    fn agent_task_terminal_state_bounds_stale_runner_job_polling() {
+        for state in [
+            ControlPlaneRunState::Succeeded,
+            ControlPlaneRunState::CandidateRecoverable,
+            ControlPlaneRunState::PartialRecoverable,
+        ] {
+            assert_eq!(
+                control_plane_terminal_job_status(state),
+                Some(JobStatus::Succeeded)
+            );
+        }
+        for state in [
+            ControlPlaneRunState::PartialFailure,
+            ControlPlaneRunState::Failed,
+            ControlPlaneRunState::TimedOut,
+        ] {
+            assert_eq!(
+                control_plane_terminal_job_status(state),
+                Some(JobStatus::Failed)
+            );
+        }
+        assert_eq!(
+            control_plane_terminal_job_status(ControlPlaneRunState::Cancelled),
+            Some(JobStatus::Cancelled)
+        );
+        for state in [
+            ControlPlaneRunState::Queued,
+            ControlPlaneRunState::Running,
+            ControlPlaneRunState::Stale,
+            ControlPlaneRunState::Unknown,
+        ] {
+            assert_eq!(control_plane_terminal_job_status(state), None);
+        }
+    }
 }

@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
 
-use homeboy::runner::runners::RunnerKind;
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::DynamicSetArgs;
 use super::doctor;
@@ -251,10 +251,6 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         adopt_orphan_lease: Option<String>,
 
-        /// Deprecated no-op retained for one release; the runner proves the recorded PID dead itself
-        #[arg(long)]
-        confirm_pid_dead: bool,
-
         /// Operator-confirm a live lease/PID/build adoption within the trusted remote SSH UID boundary; never stops or replaces a daemon
         #[arg(long)]
         adopt_live_lease: Option<String>,
@@ -275,10 +271,6 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         reconcile_unleased_candidates: bool,
 
-        /// Deprecated no-op retained for one release; the runner fails closed on owner-lock, process, and listener probes
-        #[arg(long)]
-        confirm_no_daemon_owner: bool,
-
         /// Recover this exact lease after the remote daemon state record was lost
         #[arg(long)]
         recover_missing_lease_state: Option<String>,
@@ -290,10 +282,6 @@ pub(super) enum RunnerCommand {
         /// Recorded concrete remote daemon endpoint paired with --recover-missing-lease-state
         #[arg(long)]
         recorded_endpoint: Option<String>,
-
-        /// Deprecated no-op retained for one release; the runner probes its own state record and endpoint
-        #[arg(long)]
-        confirm_control_plane_lost: bool,
     },
     /// Show persisted runner tunnel status
     Status {
@@ -442,9 +430,17 @@ pub(super) enum RunnerCommand {
         #[arg(long = "sync-workspace")]
         sync_workspace: Option<String>,
 
+        /// Opaque ref returned by runner workspace sync. Resolves the exact existing snapshot without rematerializing it.
+        #[arg(long = "workspace-ref", conflicts_with_all = ["cwd", "sync_workspace"])]
+        workspace_ref: Option<String>,
+
         /// Hydrate detected dependencies from a matching runner cache or sealed controller package before execution. This offline-safe mode never invokes a runner package manager.
         #[arg(long)]
         hydrate_deps: bool,
+
+        /// Bound --sync-workspace snapshot preparation and transfer before command handoff. Defaults to 240s; does not limit dependency hydration or the runner command itself.
+        #[arg(long = "workspace-sync-timeout", default_value = "240s", value_parser = crate::commands::utils::watch::parse_duration_arg, value_name = "DURATION")]
+        workspace_sync_timeout: std::time::Duration,
 
         /// Project ID used for runner trust policy checks
         #[arg(long)]
@@ -730,6 +726,10 @@ pub(super) enum RunnerJobCommand {
         #[arg(long)]
         cursor: Option<u64>,
 
+        /// Emit one structured document without human event rendering
+        #[arg(long)]
+        json: bool,
+
         /// Return only lifecycle events, exit code, and a bounded stdout/stderr tail
         #[arg(long)]
         compact: bool,
@@ -801,6 +801,33 @@ mod tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
+
+    #[test]
+    fn runner_exec_workspace_sync_timeout_defaults_and_overrides() {
+        for (extra, expected) in [
+            (Vec::<&str>::new(), std::time::Duration::from_secs(240)),
+            (
+                vec!["--workspace-sync-timeout", "7s"],
+                std::time::Duration::from_secs(7),
+            ),
+        ] {
+            let mut argv = vec!["homeboy", "runner", "exec", "lab"];
+            argv.extend(extra);
+            argv.extend(["--", "pwd"]);
+            let cli = Cli::try_parse_from(argv).expect("parse runner exec timeout");
+            let Commands::Runner(RunnerArgs {
+                command:
+                    RunnerCommand::Exec {
+                        workspace_sync_timeout,
+                        ..
+                    },
+            }) = cli.command
+            else {
+                panic!("expected runner exec command");
+            };
+            assert_eq!(workspace_sync_timeout, expected);
+        }
+    }
 
     #[test]
     fn preflight_accepts_only_the_request_json_flag() {
@@ -890,6 +917,23 @@ mod tests {
     }
 
     #[test]
+    fn runner_job_logs_accepts_explicit_machine_output() {
+        let cli = Cli::try_parse_from([
+            "homeboy", "runner", "job", "logs", "lab", "job-42", "--json",
+        ])
+        .expect("parse machine-readable runner logs");
+
+        assert!(matches!(
+            cli.command,
+            Commands::Runner(RunnerArgs {
+                command: RunnerCommand::Job {
+                    command: RunnerJobCommand::Logs { json: true, .. }
+                }
+            })
+        ));
+    }
+
+    #[test]
     fn recipe_run_preserves_required_execution_arguments_and_recipe_providers_is_a_sibling() {
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -935,5 +979,38 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("--provider"));
         assert!(!rendered.contains("--runner_id"));
+    }
+
+    #[test]
+    fn runner_exec_accepts_workspace_ref_and_rejects_raw_path_combinations() {
+        let workspace_ref = "workspace:00000000-0000-0000-0000-000000000001";
+        Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "exec",
+            "--workspace-ref",
+            workspace_ref,
+            "--hydrate-deps",
+            "lab",
+            "--",
+            "true",
+        ])
+        .expect("workspace-ref hydrated exec parses");
+
+        for conflicting in [
+            ["--cwd", "/runner/path"],
+            ["--sync-workspace", "/local/path"],
+        ] {
+            let mut args = vec![
+                "homeboy",
+                "runner",
+                "exec",
+                "--workspace-ref",
+                workspace_ref,
+            ];
+            args.extend(conflicting);
+            args.extend(["lab", "--", "true"]);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 }

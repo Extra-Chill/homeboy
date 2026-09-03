@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use homeboy::core::observation::{ObservationStore, RunListFilter, RunStatus};
+use homeboy::core::paths::PathRoots;
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy::core::resource_lifecycle_index::{
     resource_lifecycle_index_from_artifacts, resource_lifecycle_record_is_actionable,
@@ -188,9 +189,19 @@ pub struct RunsResourcesDiagnosticOutput {
 }
 
 pub(crate) fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
+    let roots = PathRoots::from_environment()?;
+    let store = ObservationStore::open_initialized_in_roots(&roots)?;
+    runs_resources_in_store(&store, roots.config(), args)
+}
+
+pub(crate) fn runs_resources_in_store(
+    store: &ObservationStore,
+    config_root: &Path,
+    args: RunsResourcesArgs,
+) -> CmdResult<RunsOutput> {
     validate_cleanup_args(&args)?;
 
-    let loaded = load_indexes(&args)?;
+    let loaded = load_indexes(store, config_root, &args)?;
     let source_count = loaded.len();
     let mut sources = Vec::with_capacity(source_count);
     let mut all_resources = Vec::new();
@@ -221,7 +232,7 @@ pub(crate) fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
     } else {
         None
     };
-    let diagnostics = load_runtime_diagnostics(&args)?;
+    let diagnostics = load_runtime_diagnostics(store, config_root, &args)?;
     let mode = if args.apply {
         ResourceCleanupMode::Apply
     } else if args.cleanup_plan {
@@ -461,7 +472,11 @@ struct LoadedResourceIndex {
     index: ResourceLifecycleIndex,
 }
 
-fn load_indexes(args: &RunsResourcesArgs) -> Result<Vec<LoadedResourceIndex>> {
+fn load_indexes(
+    store: &ObservationStore,
+    config_root: &Path,
+    args: &RunsResourcesArgs,
+) -> Result<Vec<LoadedResourceIndex>> {
     if args.sample {
         return Ok(vec![LoadedResourceIndex {
             source: "sample".to_string(),
@@ -473,10 +488,7 @@ fn load_indexes(args: &RunsResourcesArgs) -> Result<Vec<LoadedResourceIndex>> {
         return args.file.iter().map(|path| load_index_file(path)).collect();
     }
 
-    let store = ObservationStore::open_initialized()?;
-    // Boundary: one `runs resources` load is one unit of work (#7505).
-    let roots = homeboy::core::paths::PathRoots::from_environment()?;
-    load_observation_store_index(roots.config(), &store, args.run_id.as_deref())
+    load_observation_store_index(config_root, store, args.run_id.as_deref())
 }
 
 fn load_observation_store_index(
@@ -610,17 +622,16 @@ fn rig_lease_resource_record(
 }
 
 fn load_runtime_diagnostics(
+    store: &ObservationStore,
+    config_root: &Path,
     args: &RunsResourcesArgs,
 ) -> Result<Vec<RunsResourcesDiagnosticOutput>> {
     if args.sample || !args.file.is_empty() {
         return Ok(Vec::new());
     }
 
-    let store = ObservationStore::open_initialized()?;
     let mut outputs = Vec::new();
-    // Boundary: one resource-lifecycle report is one unit of work (#7505).
-    let roots = homeboy::core::paths::PathRoots::from_environment()?;
-    for diagnostic in homeboy::rig::lease::run_lease_diagnostics(roots.config())? {
+    for diagnostic in homeboy::rig::lease::run_lease_diagnostics(config_root)? {
         if args
             .run_id
             .as_deref()
@@ -628,7 +639,7 @@ fn load_runtime_diagnostics(
         {
             continue;
         }
-        outputs.push(rig_lease_diagnostic_output(&store, diagnostic)?);
+        outputs.push(rig_lease_diagnostic_output(store, diagnostic)?);
     }
     Ok(outputs)
 }

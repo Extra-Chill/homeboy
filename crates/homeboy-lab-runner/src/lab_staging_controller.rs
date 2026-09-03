@@ -246,17 +246,61 @@ impl LabStagingRecipe {
     }
 
     fn validate_with_source_requirement(&self, require_source_path: bool) -> Result<()> {
-        if self.schema != LAB_STAGING_RECIPE_SCHEMA
-            || self.run_id.trim().is_empty()
-            || self.runner_id.trim().is_empty()
-            || !self.command.portable
-            || self.normalized_args.is_empty()
-            || (require_source_path && self.source_path.is_none())
-        {
+        // Each staging requirement fails under its own name. A caller that
+        // supplies a non-portable command and a caller that omits the
+        // controller source path have different next actions, so one shared
+        // message reciting the whole contract is not a usable report.
+        if self.schema != LAB_STAGING_RECIPE_SCHEMA {
             return Err(Error::validation_invalid_argument(
-                "lab_staging_recipe",
-                "Lab staging requires its v1 schema, bound run and runner identities, portable argv, and a controller source path when controller materialization is selected",
+                "lab_staging_recipe.schema",
+                format!(
+                    "Lab staging requires schema `{LAB_STAGING_RECIPE_SCHEMA}`, but this recipe declares `{}`",
+                    self.schema
+                ),
+                Some(self.schema.clone()),
                 None,
+            ));
+        }
+        if self.run_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.run_id",
+                "Lab staging requires a bound durable run identity",
+                None,
+                None,
+            ));
+        }
+        if self.runner_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.runner_id",
+                "Lab staging requires a bound runner identity",
+                Some(self.run_id.clone()),
+                None,
+            ));
+        }
+        if !self.command.portable {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.command",
+                format!(
+                    "Lab staging requires a portable command, but `{}` is resolved as local-only",
+                    self.command.hot_label
+                ),
+                Some(self.run_id.clone()),
+                None,
+            ));
+        }
+        if self.normalized_args.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.normalized_args",
+                "Lab staging requires portable argv, but this recipe normalized to an empty argument list",
+                Some(self.run_id.clone()),
+                None,
+            ));
+        }
+        if require_source_path && self.source_path.is_none() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.source_path",
+                "Lab staging requires a controller source path when controller materialization is selected",
+                Some(self.run_id.clone()),
                 None,
             ));
         }
@@ -1025,6 +1069,20 @@ where
             None,
             None,
         ));
+    }
+    if let Some(durable_plan) = request.durable_agent_task_plan {
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            homeboy_agents::agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id,
+                phase: "materializing",
+                remote_workspace: None,
+                source_checkout: None,
+                provider_rotation: None,
+                durable_plan: Some(durable_plan),
+            },
+        )?;
     }
     let daemon = match ensure_daemon() {
         Ok(daemon) => daemon,
@@ -1820,7 +1878,7 @@ pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
             None,
         ));
     }
-    let record = homeboy_agents::agent_task_lifecycle::status(run_id)?;
+    let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)?;
     if record.run_id != recipe.run_id {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -3135,6 +3193,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &mut lab_metadata,
             crate::lab::offload::LabWorkspaceMetadataInputs {
                 source_snapshot: &stage.source_snapshot,
+                workspace_snapshots: &stage.workspace_snapshots,
                 legacy_path_materialization_plan: &stage.path_materialization_plan,
                 primary_synced_workspace: &stage.synced,
             },
@@ -3526,6 +3585,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         let mut public_env = request.recipe.job_override_env.clone();
         public_env.extend(runtime_env);
         public_env.extend(crate::lab_env::build_lab_offload_env(&lab_metadata));
+        public_env.extend(durable_runtime_rig_registry_env(&runtime.payload.output));
         let mut secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
             &request.recipe.command.secret_env_sources,
             &request.recipe.normalized_args,
@@ -3851,6 +3911,14 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         }
         Ok(())
     }
+}
+
+fn durable_runtime_rig_registry_env(output: &Value) -> HashMap<String, String> {
+    let root = output
+        .get("rig_registry_root")
+        .and_then(Value::as_str)
+        .filter(|root| !root.trim().is_empty());
+    crate::lab::offload::lab_rig_registry_env(root)
 }
 
 /// Executes the durable phase machine. It owns lifecycle mechanics only: the
@@ -4198,7 +4266,7 @@ pub struct LabStagingDispatchDriver;
 /// controller lifecycle is closed, so the dispatch job must terminalize with
 /// it instead of admitting new work that could escape the controller.
 fn ensure_linked_attempt_not_terminal(run_id: &str) -> Result<()> {
-    let Ok(record) = homeboy_agents::agent_task_lifecycle::status(run_id) else {
+    let Ok(record) = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id) else {
         // The durable recipe and plan attachments remain the staging
         // authority; a missing run record is handled by their validation.
         return Ok(());
@@ -4343,8 +4411,12 @@ impl ControllerJobDriver for LabStagingDispatchDriver {
     }
     fn public_error(&self, error: &Error) -> ControllerJobPublicError {
         ControllerJobPublicError {
-            message: "Lab staging and dispatch failed".to_string(),
-            data: json!({ "classification": "lab_staging", "code": format!("{:?}", error.code) }),
+            message: error.message.clone(),
+            data: json!({
+                "classification": "lab_staging",
+                "code": error.code.as_str(),
+                "details": error.details,
+            }),
         }
     }
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
@@ -4500,6 +4572,55 @@ mod tests {
             Some(run_id),
         )
         .expect("submit durable attempt");
+    }
+
+    #[test]
+    fn detached_staging_publishes_planned_ownership_before_daemon_convergence() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let _adapter_guard = global_state_lock().lock().expect("adapter lock");
+            clear_installed_adapter();
+            register();
+            enable_production_routing();
+
+            let run_id = "detached-staging-daemon-convergence";
+            let plan = homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
+                "detached-staging-daemon-convergence",
+                Vec::new(),
+            );
+            submit_recipe_run(run_id);
+            let args = vec!["agent-task".to_string(), "run-plan".to_string()];
+            let mut request = recipe_request(Some(recipe_command()), &args, HashMap::new());
+            request.durable_agent_task_plan = Some(&plan);
+
+            let result = submit_detached_staging_with_daemon_ensure(
+                run_id,
+                "lab-1",
+                crate::RunnerTunnelMode::DirectSsh,
+                &request,
+                || {
+                    let report =
+                        homeboy_agents::agent_task_service::reconcile_stale_active_runs(false)
+                            .expect("reconcile during daemon convergence");
+                    assert_eq!(report.reconciled, 0, "{report:#?}");
+
+                    let record = homeboy_agents::agent_task_lifecycle::exact_record(run_id)
+                        .expect("planned Lab proxy");
+                    assert!(!record.state.is_terminal(), "{record:#?}");
+                    assert_eq!(
+                        record.metadata["runner_execution_record"]["status"],
+                        "planned"
+                    );
+                    assert_eq!(record.metadata["phase"], "materializing");
+                    Err(Error::internal_unexpected("stop after ownership assertion"))
+                },
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("fixture must stop before controller daemon submission"),
+            };
+
+            assert_ne!(error.message, "missing_runner_pid");
+        });
     }
 
     #[cfg(unix)]
@@ -6346,8 +6467,9 @@ mod tests {
             record_checkpointed_lifecycle_phase(&request, &checkpoint)
                 .expect("project checkpointed runtime stage");
 
-            let record = homeboy_agents::agent_task_lifecycle::status(&request.recipe.run_id)
-                .expect("persisted parent run");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(&request.recipe.run_id)
+                    .expect("persisted parent run");
             assert_eq!(record.metadata["phase"], "runtime_staging");
             assert_eq!(record.metadata["phase_activity"], "Homeboy runtime_staging");
             assert_eq!(
@@ -7554,6 +7676,68 @@ mod tests {
     }
 
     #[test]
+    fn each_staging_requirement_fails_under_its_own_name() {
+        let args = vec!["agent-task".to_string(), "run-plan".to_string()];
+        let valid = || {
+            LabStagingRecipe::from_request(
+                "run",
+                "lab-1",
+                &recipe_request(Some(recipe_command()), &args, HashMap::new()),
+            )
+            .expect("recipe")
+        };
+
+        let mut wrong_schema = valid();
+        wrong_schema.schema = "homeboy/lab-staging-recipe/v99".to_string();
+        let error = wrong_schema.validate().expect_err("schema rejected");
+        assert_eq!(error.details["field"], "lab_staging_recipe.schema");
+        assert!(error.message.contains("homeboy/lab-staging-recipe/v99"));
+
+        let mut unbound_run = valid();
+        unbound_run.run_id = "   ".to_string();
+        assert_eq!(
+            unbound_run.validate().expect_err("run rejected").details["field"],
+            "lab_staging_recipe.run_id"
+        );
+
+        let mut unbound_runner = valid();
+        unbound_runner.runner_id = String::new();
+        assert_eq!(
+            unbound_runner
+                .validate()
+                .expect_err("runner rejected")
+                .details["field"],
+            "lab_staging_recipe.runner_id"
+        );
+
+        let mut local_only = valid();
+        local_only.command.portable = false;
+        let error = local_only.validate().expect_err("portability rejected");
+        assert_eq!(error.details["field"], "lab_staging_recipe.command");
+        assert!(error.message.contains(&local_only.command.hot_label));
+
+        let mut empty_argv = valid();
+        empty_argv.normalized_args.clear();
+        assert_eq!(
+            empty_argv.validate().expect_err("argv rejected").details["field"],
+            "lab_staging_recipe.normalized_args"
+        );
+
+        // Only controller materialization requires the source path, so the same
+        // recipe is rejected by `validate` and accepted by the runner-staging
+        // form that has already replaced it.
+        let mut no_source = valid();
+        no_source.source_path = None;
+        assert_eq!(
+            no_source.validate().expect_err("source rejected").details["field"],
+            "lab_staging_recipe.source_path"
+        );
+        no_source
+            .validate_for_runner_staging()
+            .expect("runner staging does not require the controller source path");
+    }
+
+    #[test]
     fn prepare_recipe_lookup_failure_terminalizes_the_parent_with_retry_metadata() {
         let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -7594,7 +7778,8 @@ mod tests {
                 .prepare(serde_json::to_value(envelope).expect("serialize envelope"))
                 .expect_err("missing recipe must fail before staging");
 
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id).expect("parent");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("parent");
             assert!(matches!(
                 record.state,
                 homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Failed
@@ -7647,7 +7832,8 @@ mod tests {
             let public_checkpoint = LabStagingDispatchDriver
                 .public_progress(&serde_json::to_value(&checkpoint).expect("checkpoint"))
                 .expect("public checkpoint");
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id).expect("record");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("record");
             let recipe_bytes = std::fs::read(
                 homeboy_core::paths::homeboy_data()
                     .expect("data root")
@@ -7676,6 +7862,40 @@ mod tests {
     }
 
     #[test]
+    fn durable_dispatch_reasserts_materialized_rig_registry() {
+        let env = durable_runtime_rig_registry_env(&json!({
+            "rig_registry_root": "/runner/job-artifacts/rig-registry"
+        }));
+
+        assert_eq!(
+            env.get(homeboy_core::paths::RIG_REGISTRY_ROOT_ENV),
+            Some(&"/runner/job-artifacts/rig-registry".to_string())
+        );
+        assert!(durable_runtime_rig_registry_env(&json!({
+            "rig_registry_root": null
+        }))
+        .is_empty());
+    }
+
+    #[test]
+    fn staging_public_error_preserves_safe_typed_cause() {
+        let error = Error::validation_invalid_argument(
+            "rig",
+            "runner dispatch cannot materialize selected rig package",
+            Some("fixture-rig".to_string()),
+            None,
+        );
+        let projected = LabStagingDispatchDriver.public_error(&error);
+
+        assert_eq!(
+            projected.message,
+            "Invalid argument 'rig': runner dispatch cannot materialize selected rig package"
+        );
+        assert_eq!(projected.data["code"], "validation.invalid_argument");
+        assert_eq!(projected.data["details"]["field"], "rig");
+    }
+
+    #[test]
     fn recipe_load_requires_existing_attempt_plan_and_immutable_attachment() {
         homeboy_core::test_support::with_isolated_home(|_| {
             assert!(load_lab_staging_recipe("missing-attempt").is_err());
@@ -7685,7 +7905,8 @@ mod tests {
             let request = recipe_request(Some(recipe_command()), &args, HashMap::new());
             persist_lab_staging_recipe(run_id, "lab-1", &request).expect("persist");
             assert!(persist_lab_staging_recipe(run_id, "lab-2", &request).is_err());
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id).expect("record");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("record");
             std::fs::remove_file(record.plan_path).expect("remove durable plan");
             assert!(load_lab_staging_recipe(run_id).is_err());
         });

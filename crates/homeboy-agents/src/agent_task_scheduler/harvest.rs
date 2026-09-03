@@ -121,6 +121,50 @@ pub(super) fn harvest_uncommitted_patch(
     Ok(())
 }
 
+/// A deadline can interrupt an otherwise valid workspace diff before the
+/// provider has completed its result contract. Keep that distinction on the
+/// durable artifact: it is recoverable evidence, never an implicitly complete
+/// provider result.
+pub(super) fn mark_timeout_workspace_candidates_incomplete(outcome: &mut AgentTaskOutcome) {
+    let mut recovered = 0;
+    for artifact in &mut outcome.artifacts {
+        if !is_actionable_patch_artifact(artifact)
+            || artifact
+                .metadata
+                .get("change_source")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|source| {
+                    !matches!(source, "uncommitted_attempt_workspace" | "local_commits")
+                })
+        {
+            continue;
+        }
+        if !artifact.metadata.is_object() {
+            artifact.metadata = serde_json::json!({});
+        }
+        let metadata = artifact
+            .metadata
+            .as_object_mut()
+            .expect("patch artifact metadata object");
+        metadata.insert("incomplete".to_string(), serde_json::json!(true));
+        metadata.insert(
+            "recovery_required".to_string(),
+            serde_json::json!(["fresh_review", "deterministic_gates"]),
+        );
+        recovered += 1;
+    }
+    if recovered == 0 {
+        return;
+    }
+    if !outcome.metadata.is_object() {
+        outcome.metadata = serde_json::json!({});
+    }
+    outcome.metadata["timeout_recovery"] = serde_json::json!({
+        "incomplete": true,
+        "recoverable_candidate_count": recovered,
+    });
+}
+
 fn persist_attempt_patch_artifacts(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
@@ -488,14 +532,30 @@ pub(super) fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
 
 /// Report workspace changes while excluding state injected by Homeboy's runner.
 pub(super) fn git_status_ignoring_runner_metadata(cwd: &Path) -> Result<String, HarvestError> {
+    git_status_ignoring_snapshot_excludes(cwd, &[])
+}
+
+/// Same cleanliness surface as [`git_status_ignoring_runner_metadata`], plus
+/// declared snapshot excludes so omitted tracked context is not source dirt.
+pub(super) fn git_status_ignoring_snapshot_excludes(
+    cwd: &Path,
+    sync_excludes: &[String],
+) -> Result<String, HarvestError> {
+    let extra = homeboy_core::source_snapshot::git_exclude_pathspecs(sync_excludes);
     let mut args = vec![
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--",
-        ".",
+        "status".to_string(),
+        "--porcelain=v1".to_string(),
+        "--untracked-files=all".to_string(),
+        "--".to_string(),
+        ".".to_string(),
     ];
-    args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    args.extend(
+        RUNNER_METADATA_EXCLUDE_PATHSPECS
+            .iter()
+            .map(|pathspec| (*pathspec).to_string()),
+    );
+    args.extend(extra);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     git_output(cwd, &args)
 }
 
@@ -947,7 +1007,10 @@ mod committed_harvest_tests {
             execution_deadline_unix_ms: None,
             timeout_cancel_requested: false,
             rotation_index: 0,
+            rotation_transitions_used: 0,
             rotation_attempts: Vec::new(),
+            readiness_skips: Vec::new(),
+            provider_capacity_key: "test-capacity".to_string(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
             source_workspace_root: None,
@@ -1096,7 +1159,10 @@ mod committed_harvest_tests {
             execution_deadline_unix_ms: None,
             timeout_cancel_requested: false,
             rotation_index: 0,
+            rotation_transitions_used: 0,
             rotation_attempts: Vec::new(),
+            readiness_skips: Vec::new(),
+            provider_capacity_key: "test-capacity".to_string(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
             source_workspace_root: None,
@@ -1348,7 +1414,10 @@ mod committed_harvest_tests {
             execution_deadline_unix_ms: None,
             timeout_cancel_requested: false,
             rotation_index: 0,
+            rotation_transitions_used: 0,
             rotation_attempts: Vec::new(),
+            readiness_skips: Vec::new(),
+            provider_capacity_key: "test-capacity".to_string(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
             // The durable source workspace is the real, persistent checkout.

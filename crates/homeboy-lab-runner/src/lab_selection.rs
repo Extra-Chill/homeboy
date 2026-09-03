@@ -8,7 +8,7 @@ use homeboy_core::runtime_promotion::RuntimePromotionWaitEvent;
 use homeboy_core::{Error, ErrorCode, Result};
 
 use super::{
-    default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
+    default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode, Runner,
     RunnerActiveJobSource, RunnerAvailability, RunnerConnectReport, RunnerStaleDaemonWarning,
     RunnerStatusReport, RunnerTunnelMode,
 };
@@ -209,12 +209,93 @@ pub fn compile_lab_admission_plan(
             .map(|capability| capability.name.clone())
             .collect(),
     });
+    let mut toolchain = crate::lab_capabilities::toolchain_readiness_preflight(command)?;
+    if let Some(workload) = command.workload.as_ref() {
+        for rig_id in &workload.rig_ids {
+            let Some(rig) = load_admission_rig(source_path, rig_id)? else {
+                continue;
+            };
+            merge_runner_capability_preflight(
+                &mut toolchain,
+                homeboy_rig::runner_capability_preflight(&rig, command.hot_label),
+            );
+        }
+    }
     Ok(LabAdmissionPlan {
         source_path: source_path.to_path_buf(),
-        toolchain: crate::lab_capabilities::toolchain_readiness_preflight(command)?,
+        toolchain,
         capability,
         executable_probe_required: false,
     })
+}
+
+fn load_admission_rig(
+    source_path: &std::path::Path,
+    rig_id: &str,
+) -> Result<Option<homeboy_rig::RigSpec>> {
+    if !source_path.join("rig.json").is_file() && !source_path.join("rigs").is_dir() {
+        return Ok(None);
+    }
+    let Some(discovered) = homeboy_rig::discover_rigs(source_path)?
+        .into_iter()
+        .find(|candidate| candidate.id == rig_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(homeboy_rig::load_local_source(
+        &discovered.rig_path.to_string_lossy(),
+        Some(discovered.id.as_str()),
+    )?))
+}
+
+pub(crate) fn merge_runner_capability_preflight(
+    target: &mut Option<super::RunnerCapabilityPreflight>,
+    incoming: Option<super::RunnerCapabilityPreflight>,
+) {
+    let Some(incoming) = incoming else {
+        return;
+    };
+    let target = target.get_or_insert_with(|| super::RunnerCapabilityPreflight {
+        command: incoming.command.clone(),
+        ..Default::default()
+    });
+    if target.command.is_empty() {
+        target.command = incoming.command;
+    }
+    for tool in incoming.required_tools {
+        if !target.required_tools.contains(&tool) {
+            target.required_tools.push(tool);
+        }
+    }
+    for command in incoming.required_commands {
+        if !target.required_commands.contains(&command) {
+            target.required_commands.push(command);
+        }
+    }
+    for requirement in incoming.required_tool_capabilities {
+        if !target.required_tool_capabilities.contains(&requirement) {
+            target.required_tool_capabilities.push(requirement);
+        }
+    }
+    for probe in incoming.required_toolchain_probes {
+        if !target.required_toolchain_probes.contains(&probe) {
+            target.required_toolchain_probes.push(probe);
+        }
+    }
+    for component in incoming.required_components {
+        if !target.required_components.contains(&component) {
+            target.required_components.push(component);
+        }
+    }
+    for name in incoming.required_env {
+        if !target.required_env.contains(&name) {
+            target.required_env.push(name);
+        }
+    }
+    target.timeout = match (target.timeout, incoming.timeout) {
+        (Some(current), Some(incoming)) => Some(current.min(incoming)),
+        (current, incoming) => current.or(incoming),
+    };
 }
 
 pub(crate) fn compile_execution_lab_admission_plan(
@@ -338,9 +419,11 @@ struct PlacementReadinessObservation {
     status: RunnerStatusReport,
     capacity: Option<usize>,
     mode: RunnerTunnelMode,
+    capability_runner: Option<Runner>,
     capability_inventory: Option<super::RunnerCapabilityInventory>,
     provider_catalog: Option<Vec<homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider>>,
     command_prefix_required_tools: Vec<super::RunnerRequiredTool>,
+    require_exact_runner_version: bool,
 }
 
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
@@ -354,6 +437,9 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         Ok(PlacementReadinessObservation {
             capacity: runner.settings.concurrency_limit,
             mode: status_tunnel_mode(&status),
+            require_exact_runner_version:
+                super::lab::offload::metadata::require_exact_runner_version(&runner.settings),
+            capability_runner: Some(runner),
             capability_inventory: None,
             provider_catalog: matches!(
                 request.invocation,
@@ -384,7 +470,6 @@ fn placement_readiness_with_transport(
             .expect("validated invocation has one source path"),
     );
     let observation = observe(request, source_path)?;
-    let runner = load(&request.runner_id)?;
     let provider_admission =
         provider_admission_for_request(request, observation.provider_catalog.as_deref());
     let routed = build_routed_lab_admission_command(
@@ -435,7 +520,11 @@ fn placement_readiness_with_transport(
             super::LabRunnerGateMode::Explicit,
         ),
         None => super::evaluate_lab_runner_capabilities_for_runner(
-            &runner,
+            observation.capability_runner.as_ref().ok_or_else(|| {
+                Error::internal_unexpected(
+                    "placement readiness observation omitted its capability runner",
+                )
+            })?,
             &plan.capability,
             super::LabRunnerGateMode::Explicit,
         )?,
@@ -447,7 +536,7 @@ fn placement_readiness_with_transport(
         observation.mode,
         capability,
         observation.provider_catalog.as_deref(),
-        super::lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        observation.require_exact_runner_version,
     ))
 }
 
@@ -1612,7 +1701,7 @@ mod daemon_repair_step_tests {
         assert_eq!(steps[0].code, daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE);
         assert_eq!(
             steps[0].command,
-            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
+            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead"
         );
         assert_eq!(
             daemon_repair_command("homeboy-lab", &report),
@@ -1828,6 +1917,7 @@ mod placement_readiness_tests {
             status: status(),
             capacity: Some(1),
             mode: RunnerTunnelMode::DirectSsh,
+            capability_runner: None,
             capability_inventory: Some(super::super::RunnerCapabilityInventory {
                 runtime_ids: std::collections::BTreeSet::from(["runner-homeboy".to_string()]),
                 capabilities: std::collections::BTreeSet::from([
@@ -1840,6 +1930,7 @@ mod placement_readiness_tests {
             command_prefix_required_tools: vec![super::super::RunnerRequiredTool::new(
                 "runner-homeboy",
             )],
+            require_exact_runner_version: false,
         }
     }
 

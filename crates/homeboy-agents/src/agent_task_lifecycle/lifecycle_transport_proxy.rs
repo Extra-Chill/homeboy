@@ -256,7 +256,7 @@ fn resume_transport_proxy_on_runner_in_store(
 
     record = lifecycle_store.read_record(&record.run_id)?;
     Ok(Some(TransportProxyRecovery::Resumed {
-        next_action: format!("homeboy agent-task status {} --full", record.run_id),
+        next_action: format!("homeboy agent-task status {}", record.run_id),
         record,
     }))
 }

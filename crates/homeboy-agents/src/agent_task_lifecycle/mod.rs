@@ -36,6 +36,7 @@ pub mod agent_task_handoff_event;
 pub mod agent_task_lifecycle_event;
 mod artifact_materialization;
 mod cancellation;
+mod control_plane_identities;
 pub mod controller_pin_reference_provider;
 mod conversion;
 mod cook_workspace_restore;
@@ -68,6 +69,10 @@ pub use acceptance_verifier::{
 pub use action_eligibility::*;
 pub use artifact_materialization::*;
 pub use cancellation::*;
+pub use control_plane_identities::{
+    canonical_control_plane_identities, canonical_control_plane_identities_for_run,
+    CanonicalControlPlaneIdentities,
+};
 pub use failure_recording::*;
 pub use health::*;
 pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;
@@ -88,8 +93,9 @@ pub use runner_continuation::{
     clear_runner_continuation_provider_for_test, RunnerContinuationTestGuard,
 };
 pub use runner_continuation::{
-    register_runner_continuation_provider, runner_authority, RunnerAuthority,
-    RunnerContinuationProvider, RunnerJobReconciliation,
+    register_runner_continuation_provider, runner_authority, runner_live_job_authority,
+    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationSubmission,
+    RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
 pub use runner_exec::*;
 pub use workspace_authority::*;

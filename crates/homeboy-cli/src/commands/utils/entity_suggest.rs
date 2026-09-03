@@ -2,7 +2,6 @@
 
 use homeboy::core::engine::text::levenshtein;
 use homeboy::core::{component, project, server};
-use homeboy_extension as extension;
 use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +21,17 @@ impl EntityType {
             EntityType::Extension => "extension",
         }
     }
+
+    /// Extension dispatch makes an installed ID reachable, but does not make it
+    /// a likely correction for every unknown top-level token. Only a declared
+    /// spelling (an exact ID today; aliases can use the same contract) may
+    /// recover to an extension. Other entity IDs retain lexical recovery.
+    fn minimum_suggestion_confidence(self) -> MatchConfidence {
+        match self {
+            Self::Extension => MatchConfidence::Exact,
+            Self::Component | Self::Project | Self::Server => MatchConfidence::EditDistance,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +45,13 @@ pub struct EntityMatch {
 struct EntityIdList {
     entity_type: EntityType,
     ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchConfidence {
+    EditDistance,
+    Affix,
+    Exact,
 }
 
 static ENTITY_SUGGESTION_SNAPSHOT: OnceLock<RwLock<Option<Vec<EntityIdList>>>> = OnceLock::new();
@@ -71,7 +88,7 @@ fn load_entity_suggestion_snapshot() -> Vec<EntityIdList> {
         },
         EntityIdList {
             entity_type: EntityType::Extension,
-            ids: extension::available_extension_ids(),
+            ids: homeboy_core::extension::catalog::available_extension_ids(),
         },
     ]
 }
@@ -104,38 +121,43 @@ pub(crate) fn find_entity_match(input: &str) -> Option<EntityMatch> {
     let input_lower = input.to_lowercase();
 
     for entry in entity_suggestion_snapshot() {
-        if let Some(m) = find_match_in_list(&input_lower, &entry.ids) {
-            return Some(EntityMatch {
-                entity_type: entry.entity_type,
-                entity_id: m.0,
-                exact: m.1,
-            });
+        if let Some((id, exact, confidence)) = find_match_in_list(&input_lower, &entry.ids) {
+            if confidence >= entry.entity_type.minimum_suggestion_confidence() {
+                return Some(EntityMatch {
+                    entity_type: entry.entity_type,
+                    entity_id: id,
+                    exact,
+                });
+            }
         }
     }
 
     None
 }
 
-fn find_match_in_list(input_lower: &str, ids: &[String]) -> Option<(String, bool)> {
+fn find_match_in_list(
+    input_lower: &str,
+    ids: &[String],
+) -> Option<(String, bool, MatchConfidence)> {
     for id in ids {
         if id.to_lowercase() == *input_lower {
-            return Some((id.clone(), true));
+            return Some((id.clone(), true, MatchConfidence::Exact));
         }
     }
     for id in ids {
         if id.to_lowercase().starts_with(input_lower) {
-            return Some((id.clone(), false));
+            return Some((id.clone(), false, MatchConfidence::Affix));
         }
     }
     for id in ids {
         if id.to_lowercase().ends_with(input_lower) {
-            return Some((id.clone(), false));
+            return Some((id.clone(), false, MatchConfidence::Affix));
         }
     }
     for id in ids {
         let dist = levenshtein(input_lower, &id.to_lowercase());
         if dist <= 3 && dist > 0 {
-            return Some((id.clone(), false));
+            return Some((id.clone(), false, MatchConfidence::EditDistance));
         }
     }
     None
@@ -198,6 +220,16 @@ mod tests {
     use crate::test_support::with_isolated_home;
     use homeboy::core::project::{self, Project};
 
+    fn write_extension(home: &std::path::Path, id: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({ "name": id, "version": "0.0.0" }).to_string(),
+        )
+        .expect("extension manifest");
+    }
+
     #[test]
     fn isolated_home_guard_resets_entity_suggestion_cache_between_homes() {
         with_isolated_home(|_| {
@@ -214,6 +246,23 @@ mod tests {
 
         with_isolated_home(|_| {
             assert!(find_entity_match("cached-project").is_none());
+        });
+    }
+
+    #[test]
+    fn extension_ids_require_an_exact_declared_spelling() {
+        with_isolated_home(|home| {
+            write_extension(home.path(), "rust");
+            reset_entity_suggestion_cache_for_test();
+
+            let (_, _, confidence) = find_match_in_list("init", &["rust".to_string()])
+                .expect("control: init is within the old fuzzy threshold for rust");
+            assert!(confidence < EntityType::Extension.minimum_suggestion_confidence());
+            assert!(find_entity_match("init").is_none());
+
+            let matched = find_entity_match("rust").expect("exact extension ID");
+            assert_eq!(matched.entity_type, EntityType::Extension);
+            assert!(matched.exact);
         });
     }
 }

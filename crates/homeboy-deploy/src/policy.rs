@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
-use homeboy_extension::{DeployCapability, ExtensionManifest};
+use homeboy_core::extension::catalog::load_extension;
+use homeboy_extension_contract::manifest_capabilities::DeployCapability;
 
 /// Framework-neutral shared directory names that typically contain sibling components.
 const GENERIC_PROTECTED_PATH_SUFFIXES: &[&str] =
@@ -82,10 +83,9 @@ fn component_extension_policies(component: &Component) -> Vec<DeployCapability> 
 }
 
 fn extension_deploy_policy(extension_id: &str) -> Option<DeployCapability> {
-    let path = homeboy_core::paths::extension_manifest(extension_id).ok()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    let manifest: ExtensionManifest = serde_json::from_str(&raw).ok()?;
-    manifest.deploy
+    // Deploy declarations are private manifest configuration. The catalog owns
+    // installation resolution and manifest validation for both copied and linked extensions.
+    load_extension(extension_id).ok()?.deploy
 }
 
 #[cfg(test)]
@@ -95,13 +95,10 @@ mod tests {
     use homeboy_core::test_support::with_isolated_home;
     use std::collections::HashMap;
 
-    fn write_extension_fixture(id: &str, deploy_json: &str) {
-        let dir = homeboy_core::paths::extensions()
-            .expect("extensions dir")
-            .join(id);
+    fn write_extension_fixture(dir: &std::path::Path, id: &str, deploy_json: &str) {
         std::fs::create_dir_all(&dir).expect("extension dir");
         std::fs::write(
-            dir.join(format!("{}.json", id)),
+            dir.join(format!("{id}.json")),
             format!(
                 r#"{{
   "name": "{} extension",
@@ -112,6 +109,17 @@ mod tests {
             ),
         )
         .expect("extension manifest");
+    }
+
+    fn component_with_extension(extension_id: &str) -> Component {
+        Component {
+            id: "my-plugin".to_string(),
+            extensions: Some(HashMap::from([(
+                extension_id.to_string(),
+                ScopedExtensionConfig::default(),
+            )])),
+            ..Component::default()
+        }
     }
 
     #[test]
@@ -151,21 +159,18 @@ mod tests {
     #[test]
     fn test_protected_path_suffixes() {
         with_isolated_home(|_| {
+            let extension = homeboy_core::paths::extensions()
+                .expect("extensions dir")
+                .join("example");
             write_extension_fixture(
+                &extension,
                 "example",
                 r#"{
     "protected_path_suffixes": ["/shared/plugins", "/shared/uploads"]
   }"#,
             );
 
-            let component = Component {
-                id: "my-plugin".to_string(),
-                extensions: Some(HashMap::from([(
-                    "example".to_string(),
-                    ScopedExtensionConfig::default(),
-                )])),
-                ..Component::default()
-            };
+            let component = component_with_extension("example");
 
             assert_eq!(
                 protected_path_suffixes(&component),
@@ -177,7 +182,11 @@ mod tests {
     #[test]
     fn test_owner_hint_for_path() {
         with_isolated_home(|_| {
+            let extension = homeboy_core::paths::extensions()
+                .expect("extensions dir")
+                .join("example");
             write_extension_fixture(
+                &extension,
                 "example",
                 r#"{
     "owner_hints": [
@@ -186,20 +195,72 @@ mod tests {
   }"#,
             );
 
-            let component = Component {
-                id: "my-plugin".to_string(),
-                extensions: Some(HashMap::from([(
-                    "example".to_string(),
-                    ScopedExtensionConfig::default(),
-                )])),
-                ..Component::default()
-            };
+            let component = component_with_extension("example");
 
             assert_eq!(
                 owner_hint_for_path(&component, "shared/plugins/my-plugin").as_deref(),
                 Some("www-data:www-data")
             );
             assert!(owner_hint_for_path(&component, "other/my-plugin").is_none());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deploy_policy_matches_copied_and_linked_installations() {
+        with_isolated_home(|_| {
+            let extensions = homeboy_core::paths::extensions().expect("extensions dir");
+            let copied = extensions.join("example");
+            write_extension_fixture(
+                &copied,
+                "example",
+                r#"{
+    "protected_path_suffixes": ["/shared/plugins"],
+    "owner_hints": [
+      { "path_contains": "shared/plugins/", "suggested_owner": "www-data:www-data" }
+    ]
+  }"#,
+            );
+            let component = component_with_extension("example");
+            let copied_policy = protected_path_suffixes(&component);
+            let copied_owner = owner_hint_for_path(&component, "shared/plugins/my-plugin");
+
+            std::fs::remove_dir_all(&copied).expect("remove copied extension");
+            let source = tempfile::tempdir().expect("extension source");
+            let linked = source.path().join("example");
+            write_extension_fixture(
+                &linked,
+                "example",
+                r#"{
+    "protected_path_suffixes": ["/shared/plugins"],
+    "owner_hints": [
+      { "path_contains": "shared/plugins/", "suggested_owner": "www-data:www-data" }
+    ]
+  }"#,
+            );
+            std::fs::create_dir_all(&extensions).expect("extensions dir");
+            std::os::unix::fs::symlink(&linked, &copied).expect("linked extension");
+
+            assert_eq!(protected_path_suffixes(&component), copied_policy);
+            assert_eq!(
+                owner_hint_for_path(&component, "shared/plugins/my-plugin"),
+                copied_owner
+            );
+        });
+    }
+
+    #[test]
+    fn malformed_extension_manifest_has_no_deploy_policy() {
+        with_isolated_home(|_| {
+            let extension = homeboy_core::paths::extensions()
+                .expect("extensions dir")
+                .join("example");
+            std::fs::create_dir_all(&extension).expect("extension dir");
+            std::fs::write(extension.join("example.json"), "{").expect("malformed manifest");
+
+            let component = component_with_extension("example");
+            assert!(protected_path_suffixes(&component).is_empty());
+            assert!(owner_hint_for_path(&component, "shared/plugins/my-plugin").is_none());
         });
     }
 }

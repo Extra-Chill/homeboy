@@ -11,10 +11,11 @@ use homeboy::core::daemon::{
     DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonStaleReasonCode,
 };
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerKind, RunnerSession,
-    RunnerStatusReport, RunnerTunnelMode,
+    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode,
 };
 use homeboy::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
@@ -262,7 +263,7 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
             "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
         )],
     });
     let mut admission = admission_fixture();
@@ -298,7 +299,7 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
             "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect 'homeboy lab' --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+            "homeboy runner connect 'homeboy lab' --reconcile-leaseless-orphans",
         )],
     });
 
@@ -592,7 +593,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
 
     let commands = runner_status_operator_commands(&report);
     let serialized = serde_json::to_string(&commands).expect("serialize orphan commands");
-    assert!(serialized.contains("homeboy agent-task status run-123 --full"));
+    assert!(serialized.contains("homeboy agent-task status run-123"));
     assert!(serialized.contains("homeboy agent-task retry run-123"));
     assert!(!serialized.contains("runner job logs"));
 }
@@ -688,9 +689,11 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             restartable: false,
             lease_id: Some("lease-23456".to_string()),
             pid: Some(23456),
-        recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
+            recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
             ownership_evidence: None,
-            adoption_command: Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string()),
+            adoption_command: Some(
+                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans".to_string(),
+            ),
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -871,7 +874,7 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
             "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
         )],
     });
     let generations = vec![RunnerDaemonGenerationStatus {

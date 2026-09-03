@@ -28,6 +28,7 @@ pub fn is_zero_u32(v: &u32) -> bool {
 // a compatibility surface from the production homeboy-core package.
 #[cfg(test)]
 extern crate self as homeboy;
+extern crate self as homeboy_core;
 #[cfg(test)]
 pub use crate as core;
 #[cfg(test)]
@@ -78,6 +79,7 @@ pub mod cleanup;
 pub use homeboy_code_audit as code_audit;
 pub mod command_execution_plan;
 pub use homeboy_command_contract as command_invocation;
+pub use homeboy_control_plane_contract as control_plane_contract;
 pub mod component;
 pub mod content_diff;
 pub mod context;
@@ -99,18 +101,13 @@ pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
 pub mod expand;
-pub mod extension_execution;
-pub mod extension_invocation_context;
-pub mod extension_provider_discovery;
-pub mod extension_readiness;
-pub mod extension_scope;
-pub mod extension_store;
-pub mod extension_update_check;
+pub mod extension;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
 pub mod fleet;
 pub use homeboy_gate_contract::gate;
+pub mod control_plane;
 pub mod gate_feedback_baseline;
 pub mod git;
 pub mod harvest;
@@ -164,6 +161,7 @@ pub mod repository_integrity;
 pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;
 pub mod resource_policy_context;
+pub mod resource_topology;
 pub mod resources;
 pub mod rig_provider;
 pub mod rig_toolchain_provider;
@@ -213,7 +211,6 @@ pub mod workspace_claim;
 pub mod workspace_snapshot;
 pub mod worktree;
 pub mod worktree_provider;
-pub mod worktree_providers;
 
 // Internal path resolution helpers.
 // paths moved to the internal `homeboy-paths` crate. Re-exported so existing

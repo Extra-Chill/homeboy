@@ -127,7 +127,7 @@ pub use super::agent_task_scheduler::{
 pub use super::agent_tool_control_plane::{
     dispatch_agent_tool_request, AgentToolControlPlaneDispatcher, AgentToolDispatchEvidence,
     AgentToolDispatchOutcome, HomeboyAgentToolControlPlaneDispatcher,
-    UnsupportedAgentToolControlPlaneDispatcher, AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA,
+    AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA,
 };
 
 // Matrix expansion is `pub(crate)` on the implementation module; expose it
@@ -141,8 +141,8 @@ pub use super::agent_task_loop_controller::{
     AgentTaskLoopControllerState, AgentTaskLoopTaskLineage,
 };
 pub use super::agent_task_loop_definition::{
-    compile_loop_definition, compile_loop_spec_value, AgentTaskLoopDefinition,
-    AgentTaskLoopDefinitionTask, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
+    compile_loop_definition, AgentTaskLoopDefinition, AgentTaskLoopDefinitionTask,
+    AGENT_TASK_LOOP_DEFINITION_SCHEMA,
 };
 
 // Secret-env status type is referenced from review/dispatch commands.
@@ -209,8 +209,11 @@ pub mod batch {
     pub use super::super::agent_task_batch::status;
     pub use super::super::agent_task_batch::{
         artifacts, claim_fanout_run_batch, fanout_dependency_graph_with_finalization_statuses,
-        heartbeat_fanout_run_batch, owned_child_run_ids, persist_fanout_run_batch,
-        read_batch_record, record_fanout_run_batch_failure,
+        finalize_provider_worktree_for_child, heartbeat_fanout_run_batch, owned_child_run_ids,
+        persist_fanout_run_batch, read_batch_record, record_fanout_run_batch_failure,
+        record_provider_worktree_finalization_deferred,
+        record_provider_worktree_finalization_preflight_error, start_fanout_run_batch,
+        BatchProviderWorktreeFinalization,
     };
     pub use super::super::agent_task_batch::{
         fanout_aggregate_state, record_fanout_run_batch_failed_admissions, submit_plan_batch,
@@ -246,10 +249,10 @@ pub mod dispatch_service {
     };
     pub use super::super::agent_task_dispatch_service::{
         build_controller_dispatch_plan, controller_resolved_execution_policy, dispatch,
-        dispatch_with_provider_requirements, resolve_cook_initial_provider_route,
+        preflight_dispatch_provider_admission, resolve_cook_initial_provider_route,
         resolve_cook_initial_provider_route_with_catalog, resolve_dispatch_request,
-        resolve_dispatch_request_with_default, run_dispatch_command,
-        run_dispatch_command_with_provider_catalog, AgentTaskDispatchCommand,
+        resolve_dispatch_request_with_default, resolve_dispatch_request_with_default_and_catalog,
+        run_dispatch_command, run_dispatch_command_with_provider_catalog, AgentTaskDispatchCommand,
         AgentTaskDispatchReport, AgentTaskDispatchRequest, DispatchCoreInputs,
         DISPATCH_RESULT_SCHEMA,
     };
@@ -305,13 +308,14 @@ pub mod gate {
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel_run, cook_index, durable_local_read,
-        fail_detached_cook_handoff_parent, list_records, load_plan, logs, persisted_status,
+        fail_detached_cook_handoff_parent, list_records, load_plan, logs,
         reconcile_terminal_artifact_projection, record_cook_finalization,
-        recover_unmaterialized_cook_input_publication, retry, run_id_for_aggregate_path,
-        run_record_exists, run_record_exists_readonly, run_status, submit_plan,
+        record_execution_placement_outcome, recover_unmaterialized_cook_input_publication, retry,
+        run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, submit_plan,
     };
     pub use super::super::agent_task_lifecycle::{
-        cancel, claim_cook_operation_in_store, claim_local_cook_retry_launch_in_store,
+        cancel, canonical_control_plane_identities, canonical_control_plane_identities_for_run,
+        claim_cook_operation_in_store, claim_local_cook_retry_launch_in_store,
         complete_cook_operation_in_store, consume_unmaterialized_cook_replay_claim,
         cook_attempt_run_id, cook_index_exists_in_store, cook_index_in_store,
         cook_terminal_notification_outcome, durable_local_read_in_store,
@@ -322,7 +326,8 @@ pub mod lifecycle {
         pinned_runtime_for_mutation, precheck_unmaterialized_cook_admission,
         prepare_unmaterialized_cook_admission, prune_controller_runtime_pins,
         quarantine_queued_run_exact_in_store, rearm_quarantined_run_in_store,
-        rearm_unmaterialized_cook_admission, reconcile_record_health_in_store,
+        rearm_unmaterialized_cook_admission, reconcile_record_health_in_store, reconcile_status,
+        reconcile_status_in_store, reconcile_status_with_options,
         record_acceptance_verdict_with_feedback_in_store, record_cook_attempt_in_store,
         record_cook_finalization_in_store, record_cook_force_with_lease_receipt_in_store,
         record_detached_cook_handoff_child_in_store, record_detached_cook_handoff_parent_in_store,
@@ -337,21 +342,18 @@ pub mod lifecycle {
         resolve_detached_cook_materializing_attempt_in_store, resolve_promotion_patch_artifact_id,
         run_record_exists_resolved_in_store, runner_diagnostic_probe,
         runner_pinned_runtime_for_mutation, runner_probe_plan, select_cook_candidate_from_attempts,
-        status_in_store, status_with_options,
         transition_execution_placement_for_continuation_in_store, AgentTaskAcceptanceAttestation,
         AgentTaskAcceptanceRecord, AgentTaskAcceptanceRequirement, AgentTaskAcceptanceVerdict,
         AgentTaskAcceptanceVerificationRequest, AgentTaskAcceptanceVerifier,
-        AgentTaskAcceptanceVerifierProvenance, AgentTaskActionAvailability,
-        AgentTaskActionConfirmation, AgentTaskArtifactRef, AgentTaskCookIndex,
+        AgentTaskAcceptanceVerifierProvenance, AgentTaskArtifactRef, AgentTaskCookIndex,
         AgentTaskCookIndexAttempt, AgentTaskDurableLocalRead, AgentTaskDurableReadUnavailable,
-        AgentTaskEventEnvelope, AgentTaskLifecycleAction, AgentTaskLifecycleActionEligibility,
-        AgentTaskLifecycleActionEligibilityReport, AgentTaskLifecycleStore,
-        AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem, AgentTaskRecordHealthReason,
-        AgentTaskRecordHealthSummary, AgentTaskRecordReconciliationItem,
-        AgentTaskRecordReconciliationReport, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
-        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
-        AgentTaskRunStatus, AgentTaskRunTask, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
-        AgentTaskRunnerProbePlan, AgentTaskStatusOptions, AgentTaskStatusOutcome, ClaimOutcome,
+        AgentTaskLifecycleStore, AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem,
+        AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
+        AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
+        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunProviderHandle,
+        AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask, AgentTaskRunnerDiagnosticProbe,
+        AgentTaskRunnerProbe, AgentTaskRunnerProbePlan, AgentTaskStatusOptions,
+        AgentTaskStatusOutcome, CanonicalControlPlaneIdentities, ClaimOutcome,
         ControllerRuntimePruneResult, DetachedCookMaterializingAttempt, DetachedLabRunRecord,
         LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
         RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
@@ -401,8 +403,8 @@ pub mod loop_controller {
 /// Declarative loop definitions compiled into scheduler plans.
 pub mod loop_definition {
     pub use super::super::agent_task_loop_definition::{
-        compile_loop_definition, compile_loop_spec_value, AgentTaskLoopDefinition,
-        AgentTaskLoopDefinitionTask, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
+        compile_loop_definition, AgentTaskLoopDefinition, AgentTaskLoopDefinitionTask,
+        AGENT_TASK_LOOP_DEFINITION_SCHEMA,
     };
 }
 
@@ -428,10 +430,10 @@ pub mod provider {
         default_backend, default_backend_for_component, dependency_failure_patterns,
         provider_capability_contract, provider_requires_cwd_git_checkout,
         provider_runner_readiness_contracts, provider_runner_secret_env_for_plan,
-        provider_runner_source_contracts, provider_secret_sources_for_backend,
-        provider_secret_sources_for_plan, provider_secret_sources_for_providers,
-        required_extension_ids_for_plan, resolve_provider_for_backend,
-        validate_provider_runner_readiness_for_backend,
+        provider_runner_source_contracts, provider_secret_env_scopes,
+        provider_secret_sources_for_backend, provider_secret_sources_for_plan,
+        provider_secret_sources_for_providers, required_extension_ids_for_plan,
+        resolve_provider_for_backend, validate_provider_runner_readiness_for_backend,
         validate_provider_runner_readiness_for_backend_with_catalog, AgentTaskExecutorProvider,
         AgentTaskProviderCapabilityContract, AgentTaskProviderCatalog,
         AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
@@ -449,14 +451,16 @@ pub mod provider {
     /// *dispatchable* here, and the pre-dispatch preflight that enforces it
     /// before a workspace or a provider execution is spent (#11479).
     pub use crate::agent_task_provider::{
-        evaluate_provider_dispatchability, preflight_discovered_provider_credentials_for_backend,
+        evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_cache,
+        evaluate_provider_dispatchability_with_config,
+        preflight_discovered_provider_credentials_for_backend,
         preflight_plan_provider_dispatchability_with_providers, preflight_provider_credentials,
         preflight_provider_credentials_for_backend, preflight_provider_dispatchability,
         preflight_provider_dispatchability_with_config,
         preflight_provider_dispatchability_without_runtime_with_config,
         provider_credential_readiness, AgentTaskProviderCredentialReadiness,
-        AgentTaskProviderCredentialRequirement, AgentTaskProviderDispatchability,
-        AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
+        AgentTaskProviderCredentialRequirement, AgentTaskProviderCredentialStatus,
+        AgentTaskProviderDispatchability, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
     };
     pub use crate::agent_task_provider::{
         probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
@@ -492,61 +496,75 @@ pub mod secrets {
     pub use super::super::agent_task_secrets::{
         legacy_secrets_file, map_secret_to_env, map_secret_to_keychain_bundle,
         remove_secret_mapping, resolve_secret_env, resolve_secret_env_with_fallbacks,
-        secret_env_status, secret_env_status_for_scope, secret_env_status_with_fallbacks,
-        set_config_secret, set_keychain_bundle, set_keychain_secret, validate_secret_env,
+        secret_env_status, secret_env_status_for_scope, secret_env_status_for_scopes,
+        secret_env_status_with_fallbacks, set_config_secret, set_keychain_bundle,
+        set_keychain_secret, validate_secret_env, AgentTaskSecretEnvScope,
         AgentTaskSecretEnvStatus, AgentTaskSecretResolutionError,
     };
 }
 
 /// High-level service entry points combining lifecycle and scheduling.
 pub mod service {
-    pub use super::super::agent_task_service::status;
     pub use super::super::agent_task_service::{
         adopt_cook_candidate, adopt_cook_candidate_with_dispatcher,
         adopt_cook_candidate_with_options_and_dispatcher,
         adopt_cook_candidate_with_options_dispatcher_and_executor,
         adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt, aggregate_exit_code,
-        authorize_cook_continue_route, authorize_cook_continue_route_with_artifact, cancel,
-        claim_continuation_for, claim_continuation_for_recovery_in_store, compile_cook_attempt,
+        attempt_primary_failure_diagnostic, authorize_cook_continue_route,
+        authorize_cook_continue_route_with_artifact, claim_continuation_for,
+        claim_continuation_for_recovery_and_clear_failure_in_store,
+        claim_continuation_for_recovery_in_store, compile_cook_attempt,
         compile_cook_attempt_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
-        consume_claimed_with_dispatcher, continuation_state_in_store, cook_batch_job_submission,
-        cook_continuation_requires_model_provenance, detached_batch_coordinator_control,
-        discover_runs, enqueue_terminal_continuation, evidence_ref_task_id, execute_promotion,
-        execute_promotion_with_progress, hydrate_evidence_ref, hydrate_evidence_summary,
-        load_recipe, load_recipe_for_attempt, local_pre_execution_runtime_recovery_is_eligible,
+        consume_claimed_with_dispatcher, continuation_state_in_store, control_plane_run,
+        cook_batch_job_submission, cook_continuation_replays_provider,
+        cook_continuation_requires_model_provenance, cook_request_is_review_form_only,
+        detached_batch_coordinator_control, discover_runs, enqueue_terminal_continuation,
+        evidence_ref_task_id, execute_promotion, execute_promotion_with_progress,
+        hydrate_evidence_ref, hydrate_evidence_summary, liveness_for_record, load_recipe,
+        load_recipe_for_attempt, local_pre_execution_runtime_recovery_is_eligible,
         normalize_plan_workspaces, offloaded_status_remediation,
         persist_manual_finalization_intent, persist_manual_finalization_receipt,
         persist_manual_finalization_retry_intent, persist_provider_boundary_replay_evidence,
-        preflight_cook_continuation_admission, preflight_recipe_attempt_for_continuation,
-        prepare_manual_finalization_identity, promotion_is_resumable, read_plan,
-        reconcile_recipe_attempt_for_continuation, reconstruct_adoption_options_with_dispatcher,
+        preflight_continuation_claim, preflight_continuation_claim_in_store,
+        preflight_cook_continuation_admission,
+        preflight_cook_continuation_admission_for_observation,
+        preflight_cook_promotion_for_observation_in_store, preflight_cook_promotion_in_store,
+        preflight_recipe_attempt_for_continuation,
+        preflight_recipe_attempt_for_continuation_in_store, prepare_manual_finalization_identity,
+        promotion_is_resumable, read_plan, reconcile_recipe_attempt_for_continuation,
+        reconstruct_adoption_options_with_dispatcher,
         reconstruct_options_for_pre_execution_recovery, reconstruct_options_with_dispatcher,
         reconstruct_options_with_local_placement_override, record_replacement_gate_proof,
-        recover_cook_pr, recover_terminal_transport_proxy_evidence, register_cook_batch_job_driver,
-        register_promotion_job_driver, resolve_supervision_policy, resume, resume_cook,
-        resume_cook_batch, retry_with_timeout_override, run_cook, run_cook_batch,
-        run_cook_batch_with_control, run_loaded_plan, run_next, run_next_with_cook_dispatcher,
-        run_submitted, run_submitted_with_timeout, run_terminal_cook_continuation,
+        recover_cook_pr, recover_missing_promotion_aggregate,
+        recover_terminal_transport_proxy_evidence, register_cook_batch_work_handler,
+        register_cook_work_handler, register_promotion_job_driver, resolve_cook_budget,
+        resolve_supervision_policy, resume, resume_cook, resume_cook_batch,
+        retry_with_provider_route_override, retry_with_timeout_override, review_form_timeout_ms,
+        run_cook_batch, run_cook_batch_with_control, run_loaded_plan, run_next,
+        run_next_with_cook_dispatcher, run_submitted, run_submitted_with_timeout,
         source_worktree_path, submit_plan_spec, terminal_review_form_continuation_is_eligible,
+        terminal_review_form_continuation_is_eligible_for_observation_readonly,
+        terminal_review_form_continuation_is_eligible_readonly,
         terminal_transport_recovery_required, validate_recipe_attempt_record,
         verify_replacement_gates, AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptReport,
         AgentTaskCookBatchCellReport, AgentTaskCookBatchControl, AgentTaskCookBatchJob,
         AgentTaskCookBatchJobPhase, AgentTaskCookBatchJobRequest, AgentTaskCookBatchOptions,
         AgentTaskCookBatchReport, AgentTaskCookCellError, AgentTaskCookReport,
-        AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts,
-        AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport, AgentTaskDiscoveryRun,
-        AgentTaskHydratedEvidence, AgentTaskPromotionJob, AgentTaskPromotionJobDriver,
+        AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter,
+        AgentTaskDiscoveryReport, AgentTaskDiscoveryRun, AgentTaskHydratedEvidence,
+        AgentTaskLiveness, AgentTaskPromotionJob, AgentTaskPromotionJobDriver,
         AgentTaskPromotionJobPhase, AgentTaskPromotionRequest, AgentTaskRetryServiceResult,
-        AgentTaskRunResult, CookActivityProbe, CookBatchJobDriver, CookContext,
-        CookContinuationState, CookProgressEvent, CookProviderActivity, CookRecipeStore,
-        CookSupervisionTick, CookSupervisor, AGENT_TASK_COOK_BATCH_JOB_TYPE,
+        AgentTaskRunResult, CookActivityProbe, CookContinuationState, CookMode, CookProgressEvent,
+        CookProviderActivity, CookProviderRouteOverride, CookRecipeStore, CookRequest, CookRuntime,
+        CookService, CookSupervisionTick, CookSupervisor, AGENT_TASK_COOK_BATCH_JOB_TYPE,
         AGENT_TASK_COOK_BATCH_JOB_VERSION, AGENT_TASK_PROMOTION_JOB_TYPE,
-        AGENT_TASK_PROMOTION_JOB_VERSION, DETACHED_BATCH_COORDINATOR_ENV,
+        AGENT_TASK_PROMOTION_JOB_VERSION, DEFAULT_REVIEW_FORM_TIMEOUT_MS,
+        DETACHED_BATCH_COORDINATOR_ENV, MAX_REVIEW_FORM_TIMEOUT_MS,
     };
     pub use super::super::agent_task_service::{
-        artifacts, logs, persist_initial_recipe, persisted_status, promotion_source,
+        artifacts, logs, persist_initial_recipe, promotion_source,
         reconcile_terminal_artifact_projection, resolve_cook_continuation_run_id, retry,
-        run_status, validate_initial_recipe_compatibility,
+        validate_initial_recipe_compatibility,
     };
 }

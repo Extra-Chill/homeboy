@@ -24,7 +24,7 @@ fn run_snapshot_fence_test_hook() {
 
 use super::harvest::{
     git_is_repository, git_output_raw, git_output_with_env, git_status_ignoring_runner_metadata,
-    RUNNER_METADATA_EXCLUDE_PATHSPECS,
+    git_status_ignoring_snapshot_excludes, RUNNER_METADATA_EXCLUDE_PATHSPECS,
 };
 use super::*;
 
@@ -116,6 +116,13 @@ impl HarvestExecutionContext {
         self.source_snapshot.is_some() || self.lab_offload.is_some()
     }
 
+    fn snapshot_sync_excludes(&self) -> &[String] {
+        self.source_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.sync_excludes.as_slice())
+            .unwrap_or(&[])
+    }
+
     fn source_snapshot(
         &self,
     ) -> Result<homeboy_core::source_snapshot::SourceSnapshot, HarvestError> {
@@ -134,6 +141,78 @@ impl HarvestExecutionContext {
                 "is missing Lab dispatch transport metadata".to_string(),
             )
         })
+    }
+
+    fn transport_for_workspace(
+        &self,
+        workspace: &Path,
+    ) -> Result<
+        (
+            homeboy_core::source_snapshot::SourceSnapshot,
+            serde_json::Value,
+        ),
+        HarvestError,
+    > {
+        let source_snapshot = self.source_snapshot()?;
+        let mut lab_offload = self.lab_offload()?;
+        let observed_path = workspace.display().to_string();
+        let entries = lab_offload
+            .pointer("/workspace_provenance/entries")
+            .and_then(serde_json::Value::as_array);
+        let Some(entries) = entries else {
+            return Ok((source_snapshot, lab_offload));
+        };
+        let matches = entries
+            .iter()
+            .filter(|entry| {
+                entry.get("remote_path").and_then(serde_json::Value::as_str)
+                    == Some(observed_path.as_str())
+            })
+            .collect::<Vec<_>>();
+        let [entry] = matches.as_slice() else {
+            let expected_paths = entries
+                .iter()
+                .filter_map(|entry| entry.get("remote_path").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(snapshot_harvest_error(
+                workspace,
+                format!(
+                    "workspace provenance mapping is ambiguous or missing (expected one of [{expected_paths}], observed {observed_path})"
+                ),
+            ));
+        };
+        let snapshot = entry
+            .get("source_snapshot")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                snapshot_harvest_error(
+                    workspace,
+                    "workspace provenance entry has invalid source snapshot".to_string(),
+                )
+            })?;
+        let verification = entry
+            .get("workspace_verification")
+            .cloned()
+            .ok_or_else(|| {
+                snapshot_harvest_error(
+                    workspace,
+                    "workspace provenance entry is missing verification".to_string(),
+                )
+            })?;
+        let materialization_mode = entry.get("materialization_mode").cloned().ok_or_else(|| {
+            snapshot_harvest_error(
+                workspace,
+                "workspace provenance entry is missing materialization mode".to_string(),
+            )
+        })?;
+        lab_offload["remote_workspace"] = serde_json::json!(observed_path);
+        lab_offload["sync_mode"] = materialization_mode;
+        lab_offload["source_snapshot"] =
+            serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+        lab_offload["workspace_verification"] = verification;
+        Ok((snapshot, lab_offload))
     }
 }
 
@@ -257,8 +336,7 @@ pub(super) fn prepare_committed_harvest(
             "parent_snapshot": capability.parent_snapshot(),
         }))
     } else if snapshot_signaled {
-        let source_snapshot = context.source_snapshot()?;
-        let lab_offload = context.lab_offload()?;
+        let (source_snapshot, lab_offload) = context.transport_for_workspace(root)?;
         let provenance =
             homeboy_core::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
                 p.verify_lab_workspace(
@@ -322,8 +400,7 @@ pub(super) fn prepare_committed_harvest(
         None
     };
     if !is_repository {
-        let source_snapshot = context.source_snapshot()?;
-        let lab_offload = context.lab_offload()?;
+        let (source_snapshot, lab_offload) = context.transport_for_workspace(root)?;
         homeboy_core::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
             p.materialize_verified_lab_snapshot_git_baseline(
                 &root.display().to_string(),
@@ -359,7 +436,7 @@ pub(super) fn prepare_committed_harvest(
             message: "Git top-level does not exactly match the managed workspace root".to_string(),
         });
     }
-    let status = git_status_ignoring_runner_metadata(root)?;
+    let status = git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
     let candidate_baseline = if status.trim().is_empty() {
         None
     } else if let Some(baseline) = verified_initial_cook_candidate_baseline(root, request)? {
@@ -376,7 +453,8 @@ pub(super) fn prepare_committed_harvest(
     // observation is only a candidate baseline, never authorization to create
     // the provider attempt worktree.
     let source_head = git_output(root, &["rev-parse", "HEAD"])?;
-    let snapshot_status = git_status_ignoring_runner_metadata(root)?;
+    let snapshot_status =
+        git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
     let base_sha =
         pinned_cook_workspace_base_snapshot(request, root, &source_head, &snapshot_status)?
             .unwrap_or(source_head);
@@ -651,7 +729,7 @@ fn validate_derived_cook_baseline(
             "derived baseline capability does not bind this workspace and task".to_string(),
         ));
     }
-    let status = git_status_ignoring_runner_metadata(root)?;
+    let status = git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
     if !status.is_empty() {
         return Err(HarvestError::DirtyWorkspace { status });
     }
@@ -1157,6 +1235,53 @@ mod tests {
         assert!(
             status.contains("user-output.txt"),
             "unrelated untracked files must still fail the cleanliness check: {status}"
+        );
+    }
+
+    #[test]
+    fn excluded_tracked_context_is_clean_but_real_drift_is_not() {
+        let workspace = tempfile::tempdir().expect("workspace repository");
+        git(workspace.path(), &["init", "-b", "main"]);
+        fs::write(workspace.path().join("tracked.txt"), "base").expect("base file");
+        fs::write(workspace.path().join("AGENTS.md"), "injected").expect("context file");
+        git(workspace.path(), &["add", "tracked.txt", "AGENTS.md"]);
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        fs::remove_file(workspace.path().join("AGENTS.md")).expect("omit excluded context");
+        let excludes = vec!["AGENTS.md".to_string()];
+        assert!(
+            git_status_ignoring_snapshot_excludes(workspace.path(), &excludes)
+                .expect("excluded context status")
+                .is_empty(),
+            "omitted tracked context must not dirty an exclusion-aware snapshot"
+        );
+
+        fs::write(workspace.path().join("tracked.txt"), "changed").expect("tracked drift");
+        let status = git_status_ignoring_snapshot_excludes(workspace.path(), &excludes)
+            .expect("tracked drift status");
+        assert!(
+            status.contains("tracked.txt"),
+            "tracked source drift must still fail closed: {status}"
+        );
+        git(workspace.path(), &["checkout", "--", "tracked.txt"]);
+
+        fs::write(workspace.path().join("provider-output.txt"), "unexpected")
+            .expect("untracked drift");
+        let status = git_status_ignoring_snapshot_excludes(workspace.path(), &excludes)
+            .expect("untracked drift status");
+        assert!(
+            status.contains("provider-output.txt"),
+            "untracked source drift must still fail closed: {status}"
         );
     }
 

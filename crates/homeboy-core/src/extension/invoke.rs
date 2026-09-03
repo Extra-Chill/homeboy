@@ -1,0 +1,1427 @@
+use homeboy_core::component::{self, Component};
+use homeboy_core::engine::{template, validation};
+use homeboy_core::error::{Error, Result};
+use homeboy_core::project::Project;
+
+use homeboy_core::server::{
+    execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
+    execute_local_command_interactive, execute_local_command_passthrough,
+    execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,
+    execute_local_command_stderr_passthrough_with_timeout, CommandOutput,
+};
+use homeboy_engine_primitives::command::CapturedOutput;
+use homeboy_engine_primitives::shell;
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Duration;
+
+mod action;
+pub mod action_api;
+mod api;
+mod context;
+pub(crate) mod deadline_process;
+pub(crate) mod env_provider;
+mod environment;
+mod environment_api;
+mod runner;
+mod runtime_helper;
+mod scenario_runner;
+mod scope;
+mod settings;
+mod tool;
+
+use crate::extension::catalog::load_extension;
+use homeboy_core::extension::resolve::ExtensionExecutionContext;
+use homeboy_extension_contract::exec_context;
+use homeboy_extension_contract::manifest_action_config::RuntimeConfig;
+use homeboy_extension_contract::runner_contract::RunnerStepFilter;
+use homeboy_extension_contract::ExtensionManifest;
+
+pub use api::invoke_api;
+pub use context::ResolvedExtensionInvocationContext;
+pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
+use environment::{build_action_env, execute_extension_runtime};
+pub(crate) use environment::{build_exec_env, execute_extension_command, prepare_capability_run};
+pub use environment_api::{
+    declared_environment_secret_names as declared_secret_names, resolve_environment_api,
+    EnvironmentResolutionContext,
+};
+pub(crate) use runner::{read_extension_phase_timings, tail_lines};
+pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
+pub(crate) use runtime_helper::WRITE_TEST_RESULTS_ENV;
+pub use runtime_helper::{
+    declared_helper_env_names, helper_path, provision_declared_helpers, RuntimeHelperProvision,
+    BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
+    RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
+};
+pub use scenario_runner::{build_scenario_runner, ScenarioRunnerOptions};
+pub(crate) use settings::build_settings_json;
+use settings::serialize_settings;
+pub use tool::exec_tool;
+
+/// Result of executing a extension.
+pub struct ExtensionRunResult {
+    pub exit_code: i32,
+    pub project_id: Option<String>,
+    pub output: Option<CapturedOutput>,
+}
+
+pub(crate) struct ExtensionExecutionResult {
+    pub output: CapturedOutput,
+    pub exit_code: i32,
+}
+
+pub(crate) struct ExtensionExecutionOutcome {
+    pub project_id: Option<String>,
+    pub result: ExtensionExecutionResult,
+}
+
+pub enum ExtensionExecutionMode {
+    Interactive,
+    Captured,
+}
+
+/// Result of running extension setup.
+pub struct ExtensionSetupResult {
+    pub exit_code: i32,
+}
+
+const DEFAULT_EXTENSION_SETUP_TIMEOUT_SECONDS: u64 = 300;
+const MAX_EXTENSION_SETUP_TIMEOUT_SECONDS: u64 = 3600;
+const EXTENSION_SETUP_TIMEOUT_ENV: &str = "HOMEBOY_EXTENSION_SETUP_TIMEOUT_SECONDS";
+
+fn resolve_setup_timeout(
+    runtime: &RuntimeConfig,
+    override_seconds: Option<&str>,
+) -> Result<Duration> {
+    let seconds = match override_seconds {
+        Some(value) => value.parse::<u64>().map_err(|_| {
+            Error::validation_invalid_argument(
+                EXTENSION_SETUP_TIMEOUT_ENV,
+                "Extension setup timeout override must be an integer number of seconds",
+                Some(value.to_string()),
+                None,
+            )
+        })?,
+        None => runtime
+            .setup_timeout_seconds
+            .unwrap_or(DEFAULT_EXTENSION_SETUP_TIMEOUT_SECONDS),
+    };
+    if !(1..=MAX_EXTENSION_SETUP_TIMEOUT_SECONDS).contains(&seconds) {
+        return Err(Error::validation_invalid_argument(
+            "setup_timeout_seconds",
+            format!(
+                "Extension setup timeout must be between 1 and {MAX_EXTENSION_SETUP_TIMEOUT_SECONDS} seconds"
+            ),
+            Some(seconds.to_string()),
+            None,
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+/// Run a extension's setup command (if defined).
+pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
+    let extension = load_extension(extension_id)?;
+
+    let runtime = match extension.runtime() {
+        Some(r) => r,
+        None => {
+            return Ok(ExtensionSetupResult { exit_code: 0 });
+        }
+    };
+
+    let setup_command = match &runtime.setup_command {
+        Some(cmd) => cmd,
+        None => {
+            return Ok(ExtensionSetupResult { exit_code: 0 });
+        }
+    };
+
+    let extension_path = validation::require(
+        extension.extension_path.as_ref(),
+        "extension",
+        "extension_path not set",
+    )?;
+
+    let entrypoint = runtime.entrypoint.clone().unwrap_or_default();
+    let vars: Vec<(&str, &str)> = vec![
+        ("extension_path", extension_path.as_str()),
+        ("entrypoint", entrypoint.as_str()),
+    ];
+
+    let command = template::render(setup_command, &vars);
+    let timeout_override = std::env::var(EXTENSION_SETUP_TIMEOUT_ENV).ok();
+    let setup_timeout = resolve_setup_timeout(runtime, timeout_override.as_deref())?;
+    let output = execute_local_command_passthrough_with_timeout(
+        &command,
+        Some(extension_path),
+        None,
+        setup_timeout,
+    );
+    let exit_code = output.exit_code;
+
+    if exit_code != 0 {
+        return Err(Error::internal_io(
+            if output.timed_out {
+                format!("Setup command timed out after {}s", setup_timeout.as_secs())
+            } else {
+                format!("Setup command failed with exit code {}", exit_code)
+            },
+            Some("extension setup".to_string()),
+        ));
+    }
+
+    // Persist the runtime env the extension's provider discovers now that setup
+    // has run. On a Lab runner, setup configures runner-local state (e.g. a
+    // freshly built Managed Sandbox core module path); persisting the resolved env
+    // lets a later capability execution (`homeboy fuzz run`) replay the same
+    // effective runtime env without manual operator injection. Persistence is
+    // best-effort: a discovery failure must not fail an otherwise-successful
+    // setup.
+    persist_setup_runtime_env(&extension, extension_id);
+
+    Ok(ExtensionSetupResult { exit_code })
+}
+
+/// Capture and persist the runtime env an extension's env provider discovers
+/// after a successful setup, so later capability executions on the same runner
+/// replay the same effective env. Best-effort: failures are swallowed.
+fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) {
+    let Some(extension_path) = extension.extension_path.as_deref() else {
+        return;
+    };
+    if extension.env_provider_script().is_none() {
+        return;
+    }
+
+    // Seed the provider with the canonical exec-context vars so the discovery
+    // script sees the same baseline a capability execution would. We resolve the
+    // env against the extension path itself because setup has no component
+    // context; env providers that depend on runner-local setup state (rather
+    // than a specific component checkout) resolve correctly here.
+    let extension_dir = Path::new(extension_path);
+    let base_env = build_exec_env(
+        extension_id,
+        None,
+        None,
+        "{}",
+        Some(extension_path),
+        None,
+        None,
+        None,
+    );
+
+    match env_provider::env_vars(
+        &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
+        extension_id,
+        Some(extension_dir),
+        extension_dir,
+        &base_env,
+    ) {
+        Ok(discovered) if !discovered.is_empty() => {
+            let _ = super::setup_env::persist(extension_id, &discovered);
+        }
+        // No discovered env (or a discovery error): clear any stale persisted
+        // document so a previous run's values never leak into fuzz execution.
+        _ => {
+            let _ = super::setup_env::persist(extension_id, &[]);
+        }
+    }
+}
+
+/// Backward-compatible alias for existing command API usage.
+pub type ExtensionStepFilter = RunnerStepFilter;
+
+/// Execute a extension with optional project context.
+pub fn run_extension(
+    extension_id: &str,
+    project_id: Option<&str>,
+    component_id: Option<&str>,
+    inputs: Vec<(String, String)>,
+    args: Vec<String>,
+    mode: ExtensionExecutionMode,
+    filter: ExtensionStepFilter,
+) -> Result<ExtensionRunResult> {
+    let is_captured = matches!(mode, ExtensionExecutionMode::Captured);
+    let execution = execute_extension_runtime(
+        extension_id,
+        project_id,
+        component_id,
+        inputs,
+        args,
+        None,
+        None,
+        mode,
+        &filter,
+    )?;
+
+    let output = if is_captured && !execution.result.output.is_empty() {
+        Some(execution.result.output)
+    } else {
+        None
+    };
+
+    Ok(ExtensionRunResult {
+        exit_code: execution.result.exit_code,
+        project_id: execution.project_id,
+        output,
+    })
+}
+
+/// Execute a extension action (API call).
+pub fn run_action(
+    extension_id: &str,
+    action_id: &str,
+    project_id: Option<&str>,
+    data: Option<&str>,
+) -> Result<serde_json::Value> {
+    use homeboy_extension_contract::api::v1::{
+        ExtensionApiActionInvokeRequest, EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
+        EXTENSION_API_V1,
+    };
+
+    let selected = data
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| Error::internal_json(error.to_string(), Some("parse action data".into())))?
+        .unwrap_or_default();
+    action_api::response_value(action_api::invoke_action_api(
+        &ExtensionApiActionInvokeRequest {
+            schema: EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: extension_id.to_string(),
+            action_id: action_id.to_string(),
+            project_id: project_id.map(str::to_string),
+            selected,
+            payload: None,
+        },
+    ))
+}
+
+fn extension_runtime(extension: &ExtensionManifest) -> Result<&RuntimeConfig> {
+    extension.runtime().ok_or_else(|| {
+        Error::config(format!(
+            "Extension '{}' does not have a runtime configuration and cannot be executed",
+            extension.id
+        ))
+    })
+}
+
+fn build_args_string(
+    extension: &ExtensionManifest,
+    inputs: Vec<(String, String)>,
+    args: Vec<String>,
+) -> String {
+    let input_values: HashMap<String, String> = inputs.into_iter().collect();
+    let mut argv = Vec::new();
+    for input in extension.inputs() {
+        if let Some(value) = input_values.get(&input.id) {
+            if !value.is_empty() {
+                argv.push(input.arg.clone());
+                argv.push(value.clone());
+            }
+        }
+    }
+    argv.extend(args);
+    argv.join(" ")
+}
+
+pub(crate) fn validate_capability_script_exists(
+    extension_path: &Path,
+    script_path: &str,
+    capability: homeboy_extension_contract::ExtensionCapability,
+) -> Result<()> {
+    let script_path = extension_path.join(script_path);
+    if !script_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension at {} does not have {} infrastructure (missing {})",
+                extension_path.display(),
+                capability.label(),
+                script_path.display()
+            ),
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn build_capability_env(
+    extension_name: &str,
+    component_id: &str,
+    extension_path: &Path,
+    component_path: &Path,
+    settings_json: &str,
+    extra_env: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    build_capability_env_with_additional_providers(
+        extension_name,
+        component_id,
+        extension_path,
+        component_path,
+        settings_json,
+        &[],
+        extra_env,
+    )
+}
+
+pub(crate) fn build_capability_env_with_additional_providers(
+    extension_name: &str,
+    component_id: &str,
+    extension_path: &Path,
+    component_path: &Path,
+    settings_json: &str,
+    additional_env_provider_paths: &[(String, std::path::PathBuf)],
+    extra_env: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let component_path_value = component_path.to_string_lossy();
+    let mut env = build_exec_env(
+        extension_name,
+        None,
+        Some(component_id),
+        settings_json,
+        Some(&extension_path.to_string_lossy()),
+        None,
+        None,
+        Some(&component_path_value),
+    );
+    // Replay the runtime env discovered during extension setup before invoking
+    // the live env provider. On a Lab runner, fuzz execution runs in a fresh
+    // process from the one that ran setup; the persisted setup env guarantees
+    // capability execution receives the same effective runtime env (e.g. the
+    // configured Managed Sandbox core module path) without manual injection. Live
+    // provider discovery below still overrides any value it can re-resolve.
+    let persisted_setup_env = super::setup_env::load(extension_name);
+    env.extend(persisted_setup_env.iter().cloned());
+
+    let mut provider_env = env.clone();
+    provider_env.extend(extra_env.iter().cloned());
+    env.extend(env_provider::env_vars(
+        &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
+        extension_name,
+        Some(extension_path),
+        component_path,
+        &provider_env,
+    )?);
+    for (extension_id, provider_path) in additional_env_provider_paths {
+        env.extend(env_provider::env_vars(
+            &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                "homeboy",
+            ),
+            extension_id,
+            Some(provider_path),
+            component_path,
+            &provider_env,
+        )?);
+    }
+    env.extend(extra_env.iter().cloned());
+    Ok(env)
+}
+
+pub(crate) fn execute_capability_script(
+    extension_path: &Path,
+    script_path: &str,
+    script_args: &[String],
+    env_vars: &[(String, String)],
+    working_dir: Option<&str>,
+    command_override: Option<&str>,
+    options: CapabilityScriptOptions,
+) -> Result<CommandOutput> {
+    let command = if let Some(cmd) = command_override {
+        cmd.to_string()
+    } else {
+        let resolved = extension_path.join(script_path);
+        let mut cmd = shell::quote_path(&resolved.to_string_lossy());
+        if !script_args.is_empty() {
+            cmd.push(' ');
+            cmd.push_str(&shell::quote_args(script_args));
+        }
+        cmd
+    };
+
+    let env_refs: Vec<(&str, &str)> = env_vars
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let env_opt = if env_refs.is_empty() {
+        None
+    } else {
+        Some(env_refs.as_slice())
+    };
+
+    let current_dir = working_dir;
+
+    // Select the timeout-aware vs plain variant of the chosen execution mode,
+    // keeping the `options.timeout` dispatch in one place rather than repeating
+    // it per passthrough mode.
+    let dispatch = |with_timeout: &dyn Fn(Duration) -> CommandOutput,
+                    without_timeout: &dyn Fn() -> CommandOutput| {
+        match options.timeout {
+            Some(timeout) => with_timeout(timeout),
+            None => without_timeout(),
+        }
+    };
+
+    if options.passthrough {
+        Ok(dispatch(
+            &|timeout| {
+                execute_local_command_passthrough_with_timeout(
+                    &command,
+                    current_dir,
+                    env_opt,
+                    timeout,
+                )
+            },
+            &|| execute_local_command_passthrough(&command, current_dir, env_opt),
+        ))
+    } else if options.stderr_passthrough {
+        Ok(dispatch(
+            &|timeout| {
+                execute_local_command_stderr_passthrough_with_timeout(
+                    &command,
+                    current_dir,
+                    env_opt,
+                    timeout,
+                )
+            },
+            &|| execute_local_command_stderr_passthrough(&command, current_dir, env_opt),
+        ))
+    } else {
+        Ok(dispatch(
+            &|timeout| {
+                execute_local_command_in_dir_with_timeout(&command, current_dir, env_opt, timeout)
+            },
+            &|| execute_local_command_in_dir(&command, current_dir, env_opt),
+        ))
+    }
+}
+
+pub(crate) struct CapabilityScriptOptions {
+    pub passthrough: bool,
+    pub stderr_passthrough: bool,
+    pub timeout: Option<Duration>,
+}
+
+pub(crate) struct PreparedCapabilityRun {
+    pub execution: ExtensionExecutionContext,
+    pub settings_json: String,
+}
+
+pub(crate) fn resolve_capability_component(
+    execution_context: &ExtensionExecutionContext,
+    pre_loaded_component: Option<&Component>,
+    path_override: Option<&str>,
+) -> Result<Component> {
+    let mut comp = if let Some(pre_loaded) = pre_loaded_component {
+        pre_loaded.clone()
+    } else {
+        component::resolve_effective(Some(&execution_context.component.id), path_override, None)?
+    };
+
+    if let Some(path) = path_override {
+        comp.local_path = absolutize_path_override(path);
+    }
+
+    Ok(comp)
+}
+
+pub(crate) fn build_capability_execution_context(
+    execution_context: &ExtensionExecutionContext,
+    component: Component,
+    path_override: Option<&str>,
+) -> ExtensionExecutionContext {
+    let mut execution = execution_context.clone();
+    execution.component = component;
+
+    if let Some(path) = path_override {
+        execution.component.local_path = absolutize_path_override(path);
+    }
+
+    execution
+}
+
+/// Resolve a `--path` override to an absolute, canonical path so downstream
+/// consumers receive a stable component root regardless of the caller's working
+/// directory.
+///
+/// The override is published verbatim to extension runners via
+/// `HOMEBOY_COMPONENT_PATH`. A relative override such as `--path .` would
+/// otherwise reach a runner as-is; any tool that composes a config file from the
+/// component root and then executes from a different working directory (for
+/// example a generated config in a temp dir that references files relative to
+/// the component) cannot resolve those references, so an otherwise-clean run
+/// fails (Extra-Chill/homeboy#6818). Absolutizing here makes a relative `--path`
+/// behave identically to an absolute one. This is framework-agnostic: core
+/// guarantees an absolute component root and leaves all language/tool specifics
+/// to the component's own extension runner.
+fn absolutize_path_override(path: &str) -> String {
+    let candidate = Path::new(path);
+    if let Ok(canonical) = candidate.canonicalize() {
+        return canonical.to_string_lossy().into_owned();
+    }
+    if candidate.is_absolute() {
+        return path.to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(candidate).to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extension::resolve::extract_component_extension_settings;
+    use homeboy_core::component::Component;
+    use homeboy_extension_contract::manifest_action_config::SettingConfig;
+
+    fn runtime_with_setup_timeout(setup_timeout_seconds: Option<u64>) -> RuntimeConfig {
+        RuntimeConfig {
+            run_command: None,
+            setup_command: Some("true".to_string()),
+            setup_timeout_seconds,
+            ready_check: None,
+            env: None,
+            entrypoint: None,
+            args: None,
+        }
+    }
+
+    fn setting(id: &str, default: serde_json::Value) -> SettingConfig {
+        SettingConfig {
+            id: id.to_string(),
+            setting_type: "json".to_string(),
+            label: id.to_string(),
+            placeholder: None,
+            default: Some(default),
+        }
+    }
+
+    #[test]
+    fn extension_setup_timeout_defaults_and_accepts_bounded_declarations() {
+        let default = resolve_setup_timeout(&runtime_with_setup_timeout(None), None)
+            .expect("default setup timeout");
+        let declared = resolve_setup_timeout(&runtime_with_setup_timeout(Some(900)), None)
+            .expect("declared setup timeout");
+        let overridden =
+            resolve_setup_timeout(&runtime_with_setup_timeout(Some(900)), Some("1200"))
+                .expect("operator setup timeout override");
+
+        assert_eq!(default, Duration::from_secs(300));
+        assert_eq!(declared, Duration::from_secs(900));
+        assert_eq!(overridden, Duration::from_secs(1200));
+    }
+
+    #[test]
+    fn extension_setup_timeout_rejects_invalid_or_unbounded_values() {
+        assert!(resolve_setup_timeout(&runtime_with_setup_timeout(Some(0)), None).is_err());
+        assert!(resolve_setup_timeout(&runtime_with_setup_timeout(Some(3601)), None).is_err());
+        assert!(resolve_setup_timeout(&runtime_with_setup_timeout(None), Some("slow")).is_err());
+    }
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(path)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("make script executable");
+        }
+    }
+
+    fn write_extension(home: &Path, id: &str, manifest: serde_json::Value, script: &str) {
+        let dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&dir).expect("extension dir");
+        std::fs::write(dir.join(format!("{id}.json")), manifest.to_string()).expect("manifest");
+        let script_path = dir.join("run.sh");
+        std::fs::write(&script_path, script).expect("script");
+        make_executable(&script_path);
+    }
+
+    #[test]
+    fn extension_run_preserves_project_attachment_component_path() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let attachment = tempfile::tempdir().expect("attachment");
+            std::fs::write(
+                attachment.path().join("homeboy.json"),
+                r#"{"id":"fixture","extensions":{"fixture-extension":{"settings":{"source":"component"}}}}"#,
+            )
+            .expect("portable component");
+            write_extension(
+                home.path(),
+                "fixture-extension",
+                serde_json::json!({
+                    "name": "fixture-extension", "version": "1.0.0",
+                    "requires": { "components": ["fixture"] },
+                    "executable": { "runtime": { "run_command": "sh {{extension_path}}/run.sh" } }
+                }),
+                "#!/bin/sh\nprintf '%s' \"$HOMEBOY_COMPONENT_PATH\"\n",
+            );
+            homeboy_core::project::save(&homeboy_core::project::Project {
+                id: "site".to_string(),
+                components: vec![homeboy_core::project::ProjectComponentAttachment {
+                    id: "fixture".to_string(),
+                    local_path: attachment.path().to_string_lossy().to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .expect("project");
+
+            let result = run_extension(
+                "fixture-extension",
+                Some("site"),
+                Some("fixture"),
+                vec![],
+                vec![],
+                ExtensionExecutionMode::Captured,
+                ExtensionStepFilter::default(),
+            )
+            .expect("extension run");
+
+            assert_eq!(
+                result.output.expect("output").stdout,
+                attachment.path().to_string_lossy()
+            );
+        });
+    }
+
+    #[test]
+    fn extension_run_with_component_exports_component_identity_and_path() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let component = tempfile::tempdir().expect("component");
+            homeboy_core::component::write_standalone_component_config(&Component::new(
+                "fixture".to_string(),
+                component.path().to_string_lossy().to_string(),
+                "fixture-extension".to_string(),
+                None,
+            ))
+            .expect("component config");
+            write_extension(
+                home.path(),
+                "fixture-extension",
+                serde_json::json!({
+                    "name": "fixture-extension", "version": "1.0.0",
+                    "executable": { "runtime": { "run_command": "sh {{extension_path}}/run.sh" } }
+                }),
+                "#!/bin/sh\nprintf '%s|%s' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"\n",
+            );
+
+            let result = run_extension(
+                "fixture-extension",
+                None,
+                Some("fixture"),
+                vec![],
+                vec![],
+                ExtensionExecutionMode::Captured,
+                ExtensionStepFilter::default(),
+            )
+            .expect("extension run");
+
+            assert_eq!(
+                result.output.expect("output").stdout,
+                format!("fixture|{}", component.path().to_string_lossy()),
+            );
+        });
+    }
+
+    #[test]
+    fn build_exec_env_includes_runtime_runner_helper_paths() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
+
+            for (env_var, filename) in [
+                (runtime_helper::RUNNER_STEPS_ENV, "runner-steps.sh"),
+                (runtime_helper::RUNNER_PRELUDE_ENV, "runner-prelude.sh"),
+                (runtime_helper::COMMAND_CAPTURE_ENV, "command-capture.sh"),
+                (runtime_helper::BASH_PREFLIGHT_ENV, "bash-preflight.sh"),
+            ] {
+                let helper = env
+                    .iter()
+                    .find(|(k, _)| k == env_var)
+                    .map(|(_, v)| v.clone());
+
+                assert!(helper.is_some(), "expected env to include {env_var}");
+                assert!(helper.unwrap().ends_with(filename));
+            }
+        });
+    }
+
+    /// The toolchain PATH is forwarded from the rig provider, never fabricated.
+    ///
+    /// This used to assert only `PATH.is_some()`. That was true while this code
+    /// reached into rig directly, but `0f2193b78` put a provider registry
+    /// between them, and this crate does not depend on `homeboy-rig` and so can
+    /// never register one. The assertion became unsatisfiable in its own test
+    /// binary: it could only pass by borrowing a provider some other test had
+    /// registered into the process-global slot, which is the leak, not the
+    /// contract.
+    ///
+    /// The contract at this layer is conditional forwarding, so both directions
+    /// are asserted against a stub.
+    #[test]
+    fn build_exec_env_forwards_the_rig_toolchain_path_only_when_a_provider_supplies_one() {
+        use homeboy_core::rig_toolchain_provider::{
+            register_rig_toolchain_provider, RigToolchainProvider,
+        };
+        use std::ffi::OsString;
+
+        struct StubToolchain(Option<OsString>);
+        impl RigToolchainProvider for StubToolchain {
+            fn command_step_path(&self, _rig_id: Option<&str>) -> Option<OsString> {
+                self.0.clone()
+            }
+        }
+
+        fn exec_env_path() -> Option<String> {
+            build_exec_env(
+                "fixture-extension",
+                None,
+                None,
+                "{}",
+                Some("/tmp/ext"),
+                None,
+                None,
+                None,
+            )
+            .into_iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value)
+        }
+
+        // The provider slot is process-global, so this must not race another
+        // test reading PATH out of the same slot.
+        let _lock = homeboy_core::test_support::env_lock();
+
+        register_rig_toolchain_provider(Box::new(StubToolchain(Some(OsString::from(
+            "/rig/toolchain/bin",
+        )))));
+        assert_eq!(
+            exec_env_path().as_deref(),
+            Some("/rig/toolchain/bin"),
+            "a registered rig toolchain must reach the extension environment verbatim"
+        );
+
+        // Restored to the no-provider behaviour on the way out: a provider that
+        // supplies nothing is indistinguishable from the default no-op, so this
+        // leaves the slot semantically where it found it.
+        register_rig_toolchain_provider(Box::new(StubToolchain(None)));
+        assert_eq!(
+            exec_env_path(),
+            None,
+            "with no toolchain to forward, PATH must be left to the OS rather than \
+             invented -- an empty or fabricated PATH would hide the host's own"
+        );
+    }
+
+    #[test]
+    fn build_capability_env_includes_extension_provider_output() {
+        let extension = homeboy_core::test_support::exec_capable_tempdir();
+        let component = tempfile::tempdir().expect("component dir");
+        let extension_id = extension.path().file_name().unwrap().to_string_lossy();
+        std::fs::write(
+            extension.path().join(format!("{extension_id}.json")),
+            r#"{
+                "name": "Fixture",
+                "version": "1.0.0",
+                "env_provider": { "script": "env.sh" }
+            }"#,
+        )
+        .expect("manifest");
+        std::fs::write(
+            extension.path().join("env.sh"),
+            "#!/bin/sh\nprintf '{\"FIXTURE_ENV\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\"\n",
+        )
+        .expect("env provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(extension.path().join("env.sh"))
+                .expect("env provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(extension.path().join("env.sh"), permissions)
+                .expect("env provider executable");
+        }
+
+        let env = build_capability_env(
+            &extension_id,
+            "fixture-component",
+            extension.path(),
+            component.path(),
+            "{}",
+            &[],
+        )
+        .expect("capability env");
+
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "FIXTURE_ENV" && value == "fixture-component"));
+    }
+
+    #[test]
+    fn build_capability_env_replays_persisted_setup_runtime_env() {
+        // Regression for #5919: a Lab runner that discovers runtime env during
+        // extension setup (e.g. the Managed Sandbox core module path) must replay
+        // that same effective env into capability execution (fuzz) — without
+        // manual operator injection — even when the env provider does not
+        // re-resolve the value in the fresh capability process.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let extension = homeboy_core::test_support::exec_capable_tempdir();
+            let component = tempfile::tempdir().expect("component dir");
+            let extension_id = extension.path().file_name().unwrap().to_string_lossy();
+            // No env provider script: the only source of the runtime env is the
+            // value persisted during setup.
+            std::fs::write(
+                extension.path().join(format!("{extension_id}.json")),
+                r#"{ "name": "Fixture", "version": "1.0.0" }"#,
+            )
+            .expect("manifest");
+
+            super::super::setup_env::persist(
+                &extension_id,
+                &[(
+                    "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+                    "/runner/sample-runtime/core.mjs".to_string(),
+                )],
+            )
+            .expect("persist setup env");
+
+            let env = build_capability_env(
+                &extension_id,
+                "fixture-component",
+                extension.path(),
+                component.path(),
+                "{}",
+                &[],
+            )
+            .expect("capability env");
+
+            assert!(
+                env.iter()
+                    .any(|(key, value)| key == "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE"
+                        && value == "/runner/sample-runtime/core.mjs"),
+                "fuzz capability env must replay persisted extension setup runtime env"
+            );
+        });
+    }
+
+    #[test]
+    fn build_capability_env_lets_live_provider_override_persisted_setup_env() {
+        // Live env-provider discovery is freshest: when both a persisted setup
+        // value and a live provider value exist for the same key, the live
+        // value must win so a rebuilt runner checkout is honored.
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let extension = homeboy_core::test_support::exec_capable_tempdir();
+            let component = tempfile::tempdir().expect("component dir");
+            let extension_id = extension.path().file_name().unwrap().to_string_lossy();
+            std::fs::write(
+                extension.path().join(format!("{extension_id}.json")),
+                r#"{
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "env_provider": { "script": "env.sh" }
+                }"#,
+            )
+            .expect("manifest");
+            std::fs::write(
+                extension.path().join("env.sh"),
+                "#!/bin/sh\nprintf '{\"SHARED_KEY\":\"live\"}'\n",
+            )
+            .expect("env provider");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(extension.path().join("env.sh"))
+                    .expect("env provider metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(extension.path().join("env.sh"), permissions)
+                    .expect("env provider executable");
+            }
+
+            super::super::setup_env::persist(
+                &extension_id,
+                &[("SHARED_KEY".to_string(), "persisted".to_string())],
+            )
+            .expect("persist setup env");
+
+            let env = build_capability_env(
+                &extension_id,
+                "fixture-component",
+                extension.path(),
+                component.path(),
+                "{}",
+                &[],
+            )
+            .expect("capability env");
+
+            // Both entries are present; std Command applies env last-wins, so the
+            // live provider value (appended after the persisted value) wins.
+            let last_shared = env
+                .iter()
+                .filter(|(key, _)| key == "SHARED_KEY")
+                .next_back()
+                .map(|(_, value)| value.clone());
+            assert_eq!(last_shared.as_deref(), Some("live"));
+        });
+    }
+
+    #[test]
+    fn build_settings_json_preserves_array_values() {
+        // Regression test for #844: array values in extension settings
+        // were serialized as empty strings.
+        let manifest_settings = vec![
+            setting("string_setting", serde_json::json!("hello")),
+            setting("array_default", serde_json::json!(["a", "b"])),
+            setting("null_default", serde_json::Value::Null),
+        ];
+
+        let extension_settings: Vec<(String, serde_json::Value)> = vec![
+            (
+                "validation_dependencies".to_string(),
+                serde_json::json!(["sample-plugin"]),
+            ),
+            (
+                "plain_string".to_string(),
+                serde_json::Value::String("value".to_string()),
+            ),
+        ];
+
+        let overrides: Vec<(String, String)> = vec![];
+        let json_overrides: Vec<(String, serde_json::Value)> = vec![];
+
+        let json = build_settings_json(
+            &manifest_settings,
+            &extension_settings,
+            &overrides,
+            &json_overrides,
+        )
+        .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        // Array from extension settings is preserved
+        assert_eq!(
+            parsed["validation_dependencies"],
+            serde_json::json!(["sample-plugin"]),
+            "Array setting should be preserved, not flattened to empty string"
+        );
+
+        // String from extension settings is preserved
+        assert_eq!(parsed["plain_string"], serde_json::json!("value"));
+
+        // String default from manifest is preserved
+        assert_eq!(parsed["string_setting"], serde_json::json!("hello"));
+
+        // Array default from manifest is preserved
+        assert_eq!(parsed["array_default"], serde_json::json!(["a", "b"]));
+        assert_eq!(parsed["null_default"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_settings_json_includes_nested_homeboy_json_extension_settings() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "roadie",
+            "local_path": "/tmp/roadie",
+            "extensions": {
+                "sample-runtime": {
+                    "settings": {
+                        "test_backend": "host-smoke"
+                    }
+                }
+            }
+        }))
+        .expect("component config");
+        let manifest_settings = vec![setting(
+            "test_backend",
+            serde_json::json!("custom-provider"),
+        )];
+        let extension_settings = extract_component_extension_settings(&component, "sample-runtime");
+
+        let json = build_settings_json(&manifest_settings, &extension_settings, &[], &[])
+            .expect("settings json");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse settings json");
+
+        assert_eq!(parsed["test_backend"], serde_json::json!("host-smoke"));
+        assert!(parsed.get("settings").is_none());
+    }
+
+    #[test]
+    fn build_settings_json_cli_overrides_replace_values() {
+        let extension_settings: Vec<(String, serde_json::Value)> =
+            vec![("key".to_string(), serde_json::json!(["original"]))];
+        let overrides = vec![("key".to_string(), "override_value".to_string())];
+        let json_overrides: Vec<(String, serde_json::Value)> = vec![];
+
+        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
+            .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        // CLI override replaces the array value with a string
+        assert_eq!(parsed["key"], serde_json::json!("override_value"));
+    }
+
+    #[test]
+    fn build_settings_json_typed_overrides_preserve_objects() {
+        // The whole point of --setting-json: object values stay objects,
+        // unlike --setting which would coerce them to a JSON-string-of-an-
+        // object. Mirrors the wp_config_defines / bench_env use case
+        // (homeboy-extensions #248 / #250).
+        let manifest_settings = vec![setting("bench_env", serde_json::json!({}))];
+        let extension_settings: Vec<(String, serde_json::Value)> = vec![];
+        let overrides: Vec<(String, String)> = vec![];
+        let json_overrides = vec![(
+            "bench_env".to_string(),
+            serde_json::json!({"BENCH_CORPUS_SIZE": "1000"}),
+        )];
+
+        let json = build_settings_json(
+            &manifest_settings,
+            &extension_settings,
+            &overrides,
+            &json_overrides,
+        )
+        .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        // The override is the actual JSON object, not a string-encoded one.
+        assert_eq!(
+            parsed["bench_env"],
+            serde_json::json!({"BENCH_CORPUS_SIZE": "1000"})
+        );
+        assert!(parsed["bench_env"].is_object());
+    }
+
+    #[test]
+    fn build_settings_json_typed_override_wins_on_conflict() {
+        // When the same key is targeted by both --setting and --setting-json,
+        // the typed override wins (strictly more expressive, applied later).
+        let extension_settings: Vec<(String, serde_json::Value)> = vec![];
+        let overrides = vec![("key".to_string(), "string_value".to_string())];
+        let json_overrides = vec![("key".to_string(), serde_json::json!({"nested": true}))];
+
+        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
+            .expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
+
+        assert_eq!(parsed["key"], serde_json::json!({"nested": true}));
+    }
+
+    #[test]
+    fn build_exec_env_preserves_step_filter_contract() {
+        let filter = RunnerStepFilter {
+            step: Some("lint,test".to_string()),
+            skip: Some("lint".to_string()),
+        };
+
+        let mut env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
+        env.extend(filter.to_env_pairs());
+
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "HOMEBOY_STEP" && v == "lint,test"));
+        assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "lint"));
+    }
+
+    #[test]
+    fn test_execute_capability_script_supports_stderr_only_passthrough() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = execute_capability_script(
+            dir.path(),
+            "unused.sh",
+            &[],
+            &[],
+            None,
+            Some("printf '{\"ok\":true}\n'; printf 'progress turn=1\n' >&2"),
+            CapabilityScriptOptions {
+                passthrough: false,
+                stderr_passthrough: true,
+                timeout: None,
+            },
+        )
+        .expect("script should run");
+
+        assert!(output.success);
+        assert_eq!(output.stdout, "{\"ok\":true}\n");
+        assert_eq!(output.stderr, "progress turn=1\n");
+    }
+
+    #[test]
+    fn execute_capability_script_timeout_returns_partial_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = execute_capability_script(
+            dir.path(),
+            "unused.sh",
+            &[],
+            &[],
+            None,
+            Some("printf 'started\\n'; sleep 2"),
+            CapabilityScriptOptions {
+                passthrough: false,
+                stderr_passthrough: false,
+                timeout: Some(Duration::from_millis(50)),
+            },
+        )
+        .expect("script should run until timeout");
+
+        assert!(!output.success);
+        assert!(output.timed_out);
+        assert_eq!(output.exit_code, 124);
+        assert_eq!(output.stdout, "started\n");
+        assert!(output.stderr.contains("Homeboy command timed out"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capability_script_reaps_session_escaping_pipe_holders_before_returning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("descendant.pid");
+        let command = format!(
+            "setsid sh -c 'printf %s $$ > {pid}; sleep 30' & while [ ! -s {pid} ]; do :; done; printf '{{\"status\":\"passed\"}}\\n'",
+            pid = homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy())
+        );
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let extension_path = dir.path().to_path_buf();
+        let run = std::thread::spawn(move || {
+            let output = execute_capability_script(
+                &extension_path,
+                "unused.sh",
+                &[],
+                &[],
+                None,
+                Some(&command),
+                CapabilityScriptOptions {
+                    passthrough: false,
+                    stderr_passthrough: false,
+                    timeout: Some(Duration::from_secs(5)),
+                },
+            );
+            let _ = sent.send(output);
+        });
+
+        let output = received
+            .recv_timeout(Duration::from_secs(3))
+            .expect("capability owner must not wait on an escaped descendant's output pipe")
+            .expect("script should run");
+        run.join().expect("capability execution");
+        assert!(output.success, "script failed: {}", output.stderr);
+        assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        assert!(
+            !homeboy_core::process::pid_is_running(pid),
+            "session-escaping descendant {pid} outlived its capability owner"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capability_script_returns_partial_output_when_an_escapee_removes_its_scope_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("descendant.pid");
+        let command = format!(
+            "env -u HOMEBOY_PROCESS_SCOPE setsid sh -c 'printf %s $$ > {pid}; sleep 30' & while [ ! -s {pid} ]; do :; done; printf '{{\"status\":\"passed\"}}\\n'",
+            pid = homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy())
+        );
+        let extension_path = dir.path().to_path_buf();
+        let started = std::time::Instant::now();
+        let output = execute_capability_script(
+            &extension_path,
+            "unused.sh",
+            &[],
+            &[],
+            None,
+            Some(&command),
+            CapabilityScriptOptions {
+                passthrough: false,
+                stderr_passthrough: false,
+                timeout: Some(Duration::from_secs(5)),
+            },
+        )
+        .expect("script should run");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "an unverified descendant must not hold capability completion open"
+        );
+        assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
+        assert!(!output.success);
+        assert!(output.timed_out);
+        // The escapee unset HOMEBOY_PROCESS_SCOPE, so marker discovery is blind
+        // to it by construction. What it cannot hide is the stdout/stderr it
+        // inherited: the pipes stay open past teardown, and that is what fails
+        // this command. Asserting on a marker-discovery message instead would
+        // pass for the wrong reason, because a clean run produced the identical
+        // message (#13128).
+        assert!(output.stderr.contains("output pipes remained open"));
+        assert!(
+            homeboy_core::process::pid_is_running(pid as u32),
+            "fixture escapee must outlive marker cleanup to prove incomplete discovery"
+        );
+
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capability_script_teardown_stays_silent_for_a_clean_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = execute_capability_script(
+            dir.path(),
+            "unused.sh",
+            &[],
+            &[],
+            None,
+            Some("printf '{\"status\":\"passed\"}\\n'"),
+            CapabilityScriptOptions {
+                passthrough: false,
+                stderr_passthrough: false,
+                timeout: Some(Duration::from_secs(5)),
+            },
+        )
+        .expect("script should run");
+
+        assert!(output.success);
+        assert!(!output.timed_out);
+        assert_eq!(output.stdout, "{\"status\":\"passed\"}\n");
+        // Every process this command owned has exited, which is precisely what
+        // containment teardown exists to achieve. An empty scope is success, so
+        // teardown has nothing to say. Before #13128 this path accused a clean
+        // run of leaking an escaped descendant on every invocation.
+        assert_eq!(output.stderr, "");
+    }
+
+    fn lint_execution_context() -> crate::extension::resolve::ExtensionExecutionContext {
+        crate::extension::resolve::ExtensionExecutionContext {
+            component: Component::new(
+                "fixture".to_string(),
+                "/configured/path".to_string(),
+                "fixture-extension".to_string(),
+                None,
+            ),
+            capability: homeboy_extension_contract::ExtensionCapability::Lint,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: std::path::PathBuf::from("/tmp/fixture-extension"),
+            script_path: "lint.sh".to_string(),
+            settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn absolutize_path_override_makes_relative_paths_absolute() {
+        // A non-existent relative override still resolves to an absolute path so
+        // it never reaches a runner verbatim.
+        let resolved = absolutize_path_override("some/relative/component");
+        assert!(
+            Path::new(&resolved).is_absolute(),
+            "expected absolute path, got {resolved}"
+        );
+        assert!(resolved.ends_with("some/relative/component"));
+    }
+
+    #[test]
+    fn absolutize_path_override_canonicalizes_existing_dir() {
+        let dir = tempfile::tempdir().expect("component dir");
+        let resolved = absolutize_path_override(&dir.path().to_string_lossy());
+        let canonical = dir.path().canonicalize().expect("canonical dir");
+        assert_eq!(Path::new(&resolved), canonical.as_path());
+    }
+
+    #[test]
+    fn absolutize_path_override_preserves_absolute_nonexistent_path() {
+        // An absolute path that does not exist yet stays exactly as supplied
+        // instead of being rebased onto the working directory.
+        let resolved = absolutize_path_override("/does/not/exist/component");
+        assert_eq!(resolved, "/does/not/exist/component");
+    }
+
+    #[test]
+    fn path_override_resolves_to_absolute_component_root() {
+        // Regression for Extra-Chill/homeboy#6818: a non-absolute / non-canonical
+        // `--path` must be normalized so the component root handed to the runner
+        // resolves regardless of the working directory the runner (or a tool it
+        // invokes) ultimately executes from. A non-canonical absolute override
+        // (`<root>/sub/..`) exercises the same `canonicalize` normalization that
+        // a relative `--path .` triggers, without mutating the process-global
+        // working directory. The assertion stays framework-agnostic: core only
+        // guarantees an absolute component root and that a config file living at
+        // that root is locatable from the normalized path.
+        let component_root = tempfile::tempdir().expect("component dir");
+        std::fs::create_dir(component_root.path().join("sub")).expect("nested dir");
+        std::fs::write(component_root.path().join("config.toml"), "")
+            .expect("component-root config file");
+
+        // Non-canonical absolute override pointing back at the component root.
+        let noncanonical = component_root.path().join("sub").join("..");
+
+        let result = build_capability_execution_context(
+            &lint_execution_context(),
+            Component::new(
+                "fixture".to_string(),
+                "/configured/path".to_string(),
+                "fixture-extension".to_string(),
+                None,
+            ),
+            Some(&noncanonical.to_string_lossy()),
+        );
+
+        let resolved_root = Path::new(&result.component.local_path);
+        assert!(
+            resolved_root.is_absolute(),
+            "--path must resolve to an absolute component root, got {}",
+            result.component.local_path
+        );
+        assert_eq!(
+            resolved_root,
+            component_root
+                .path()
+                .canonicalize()
+                .expect("canonical root")
+        );
+        assert!(
+            resolved_root.join("config.toml").is_file(),
+            "normalized component root must locate component-root files"
+        );
+    }
+
+    #[test]
+    fn resolve_capability_component_normalizes_override() {
+        let component_root = tempfile::tempdir().expect("component dir");
+        std::fs::create_dir(component_root.path().join("sub")).expect("nested dir");
+        let noncanonical = component_root.path().join("sub").join("..");
+
+        let preloaded = Component::new(
+            "fixture".to_string(),
+            "/configured/path".to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let resolved = resolve_capability_component(
+            &lint_execution_context(),
+            Some(&preloaded),
+            Some(&noncanonical.to_string_lossy()),
+        )
+        .expect("resolve component");
+
+        assert_eq!(
+            Path::new(&resolved.local_path),
+            component_root
+                .path()
+                .canonicalize()
+                .expect("canonical root")
+        );
+    }
+}

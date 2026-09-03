@@ -46,6 +46,8 @@ mod daemon_health;
 mod daemon_http_get;
 mod daemon_repair;
 pub use daemon_repair::codes as daemon_repair_codes;
+mod discovery;
+pub use discovery::RunnerDiscoveryService;
 pub mod direct_lab_handoff;
 mod evidence;
 mod execution;
@@ -348,7 +350,7 @@ pub use connection::{
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
     reconcile_status_with_outcome, reconcile_terminal_jobs, reconnect_job_log_owner,
     reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, statuses_indexed, submit_reverse_broker_job,
+    runner_artifact_content, status, statuses, statuses_indexed, submit_runner_api_request,
     PeerSessionMaintenanceReport,
 };
 pub(crate) use connection::{
@@ -372,7 +374,7 @@ pub use evidence::{
 };
 pub(crate) use execution::exec_with_status_snapshot;
 pub use execution::{
-    daemon_api_get, daemon_api_post, ensure_runner_extension_parity, exec,
+    daemon_api_get, daemon_api_post, ensure_runner_extension_parity, exec, exec_request,
     finish_scheduled_terminal_runner_exec_recovery, probe_extension_parity_from_show,
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
     promote_runner_exec_artifacts_in_store, promote_runner_exec_summaries_in_store,
@@ -385,7 +387,7 @@ pub use execution::{
     runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, ExtensionParityProbe,
     ExtensionShowOutput, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
     RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule,
-    RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
+    RunnerExecRecoveryDiagnostic, RunnerExecRequest, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;
@@ -460,16 +462,18 @@ pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWo
 pub use workspace::reap_run_workspace;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,
-    prune_workspaces, pull_workspace, reuse_compatible_snapshot_workspace, sync_workspace,
-    update_workspace, workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary,
-    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
+    prune_workspaces, pull_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
+    sync_workspace, sync_workspace_before, update_workspace, verify_workspace_ref_hydration_source,
+    workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
+    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
-    RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
-    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
-    RunnerWorkspaceUpdateOutput, WorkspaceContentManifest, WorkspaceContentManifestEntry,
+    RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotAppliedFilters,
+    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, WorkspaceContentManifest,
+    WorkspaceContentManifestEntry,
 };
 pub(crate) use workspace::{
     workspace_content_hash, workspace_content_hash_algorithm,
@@ -477,10 +481,7 @@ pub(crate) use workspace::{
 };
 pub use workspace_root_provider::register as register_runner_workspace_root_provider;
 
-// RunnerKind now lives in the shared runner-contract crate so core code can
-// name it without a core -> runner edge. Re-exported here so the many
-// `runner::RunnerKind` call sites (and the CLI) keep resolving unchanged.
-pub use homeboy_lab_runner_contract::RunnerKind;
+use homeboy_runner_contract::RunnerKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Runner {
@@ -910,6 +911,31 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
         preferred.as_deref(),
         candidates,
     ))
+}
+
+/// Admit one connected runner for a bounded readiness repair without treating
+/// its missing capability as workload readiness. Transport freshness, idle
+/// ownership, and active-job evidence remain mandatory.
+pub fn runner_readiness_repair_admitted(runner_id: &str) -> Result<bool> {
+    let runner = load(runner_id)?;
+    let status = status(runner_id)?;
+    let mode = status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+    let candidate = lab_runner_admission_candidate(
+        runner_id,
+        mode,
+        runner.settings.concurrency_limit,
+        &status,
+        false,
+        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    );
+    Ok(candidate.connected
+        && !candidate.stale_daemon
+        && candidate.admission_fresh
+        && candidate.active_jobs_available
+        && candidate.active_jobs == 0)
 }
 
 /// Refresh a bounded set of connected-runner admission observations before a

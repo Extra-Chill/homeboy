@@ -19,8 +19,8 @@ use serde::Serialize;
 use homeboy_core::component::{self, Component};
 use homeboy_core::deps::{self, DependencyStackPlanStep};
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension;
 use homeboy_core::git;
-use homeboy_extension as extension;
 
 use super::types::ReleaseCommandInput;
 
@@ -263,11 +263,11 @@ fn update_dependency(
         upstream,
     );
 
-    extension::execute_action(
+    extension::invoke::action_api::invoke_action(
         &extension_id,
         UPDATE_DEPENDENCY_ACTION,
         None,
-        None,
+        &[],
         Some(&payload),
     )
 }
@@ -277,13 +277,8 @@ fn find_update_dependency_extension(downstream: &Component) -> Result<String> {
     let extensions = super::context::resolve_extensions(downstream)?;
     extensions
         .into_iter()
-        .find(|manifest| {
-            manifest
-                .actions
-                .iter()
-                .any(|action| action.id == UPDATE_DEPENDENCY_ACTION)
-        })
-        .map(|manifest| manifest.id)
+        .find(|extension| extension.provides_action(UPDATE_DEPENDENCY_ACTION))
+        .map(|extension| extension.id)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "cascade.update_dependency",

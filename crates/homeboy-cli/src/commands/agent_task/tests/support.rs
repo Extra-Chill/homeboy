@@ -5,10 +5,8 @@
 
 pub(crate) use std::process::Command;
 
-pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch::{
-    DispatchArgs, DispatchCoreArgs,
-};
 pub(in crate::commands::agent_task) use super::super::args::CookContinueArgs;
+pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerDispatchArgs,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
@@ -16,8 +14,8 @@ pub(in crate::commands::agent_task) use super::super::args::{
 };
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, LogsArgs,
-    ReplayProviderBoundaryArgs, ReviewArgs, RunArgs, StatusArgs, SubmitArgs, ValidatePlanArgs,
-    VerifyGateArgs,
+    ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, SubmitArgs,
+    ValidatePlanArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
@@ -27,11 +25,11 @@ pub(in crate::commands::agent_task) use super::super::controller::{
 pub(in crate::commands::agent_task) use super::super::run::{
     continue_cook_with, resume, retry, retry_with, run_cook_with_executor,
     run_cook_with_executor_and_dispatcher, run_loaded_plan, run_next_with_executor_and_fanout,
-    run_resume_with_executor_and_bridge, run_submitted, run_submitted_with_executor, submit,
+    run_resume_with_executor, run_submitted, run_submitted_with_executor, submit,
     validate_cook_request, validate_plan,
 };
 pub(in crate::commands::agent_task) use super::super::status::{
-    cancel, diagnose, evidence, logs, replay_provider_boundary, status,
+    cancel, diagnose, evidence, logs, reconcile_run, replay_provider_boundary, status,
 };
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,
@@ -43,7 +41,6 @@ pub(crate) use homeboy::agents::agent_tasks::controller_service::{
 pub(crate) use homeboy::agents::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerFromSpecRequest,
 };
-pub(crate) use homeboy::agents::agent_tasks::gate::AgentTaskGateRevealPolicy;
 pub(crate) use homeboy::agents::agent_tasks::provider::{
     ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
@@ -55,7 +52,8 @@ pub(crate) use homeboy::agents::agent_tasks::scheduler::{
 pub(crate) use crate::test_support::{controller_runtime_test_executable, with_isolated_home};
 pub(crate) use homeboy::agents::agent_tasks::controller_service as agent_task_controller_service;
 pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
-    self as agent_task_lifecycle, status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
+    self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
+    AgentTaskRunState,
 };
 pub(crate) use homeboy::agents::agent_tasks::loop_controller::{
     self as agent_task_loop_controller, AgentTaskLoopActionStatus, AgentTaskLoopPolicyAction,

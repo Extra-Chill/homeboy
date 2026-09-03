@@ -50,27 +50,21 @@ pub struct ValidatePlanArgs {
 pub struct LifecycleReadArgs {
     /// Durable run or Cook ID to inspect.
     pub run_id: String,
-    /// Inspect this exact lifecycle record instead of resolving a Cook ID to its
-    /// current attempt.
-    #[arg(long, conflicts_with = "bridge")]
-    pub exact: bool,
-    /// Read through the runner bridge instead of controller-only state.
-    #[arg(long)]
-    pub bridge: bool,
-    /// Resume bridged events after this cursor.
-    #[arg(long, value_name = "CURSOR", requires = "bridge")]
-    pub since_cursor: Option<u64>,
     /// Return complete lifecycle details instead of the bounded summary.
-    #[arg(long, conflicts_with = "bridge")]
+    #[arg(long)]
     pub full: bool,
-    /// Answer from durable controller state only, without reaching the runner.
-    ///
-    /// Read-only inspection must stay usable while a Lab runner is wedged
-    /// (#10418). A controller-local run is always answered locally; this flag
-    /// extends that to runner-backed runs, returning a partial result labelled
-    /// with `runner_probe.skipped_reason` instead of blocking on the runner.
-    #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
-    pub no_runner_probe: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ResumeArgs {
+    /// Durable run or Cook ID to resume.
+    pub run_id: String,
+    /// Return complete lifecycle details instead of the bounded summary.
+    #[arg(long)]
+    pub full: bool,
+    /// Stable key used to replay this resume without executing it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 
 #[cfg_attr(test, derive(Default))]
@@ -79,30 +73,15 @@ pub struct StatusArgs {
     /// Durable run or Cook ID whose status to inspect.
     pub run_id: String,
     /// Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt.
-    #[arg(long, conflicts_with = "bridge")]
-    pub exact: bool,
-    /// Read status through the runner bridge.
     #[arg(long)]
-    pub bridge: bool,
-    /// Resume bridged status events after this cursor.
-    #[arg(long, value_name = "CURSOR", requires = "bridge")]
-    pub since_cursor: Option<u64>,
-    /// Return complete status details instead of the bounded summary.
-    #[arg(long, conflicts_with = "bridge")]
-    pub full: bool,
-    /// Present `--full` as a bounded, outcome-first summary with drill-down refs.
-    #[arg(long, requires = "full", conflicts_with = "bridge")]
-    pub bounded: bool,
+    pub exact: bool,
     /// Exit nonzero when the inspected Cook needs follow-up action.
     ///
     /// Normal status reads report their own success independently from the
     /// subject lifecycle state. This preserves the former exit-code behavior
     /// for scripts that deliberately gate on an actionable Cook.
-    #[arg(long, conflicts_with = "bridge")]
+    #[arg(long)]
     pub strict_subject_exit: bool,
-    /// Answer from durable controller state only, without reaching the runner.
-    #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
-    pub no_runner_probe: bool,
     /// Follow this durable status until it reaches a terminal state or the timeout expires.
     #[arg(long)]
     pub watch: bool,
@@ -124,25 +103,13 @@ pub struct StatusArgs {
     pub timeout: String,
 }
 
-impl From<StatusArgs> for LifecycleReadArgs {
-    fn from(args: StatusArgs) -> Self {
-        Self {
-            run_id: args.run_id,
-            exact: args.exact,
-            bridge: args.bridge,
-            since_cursor: args.since_cursor,
-            full: args.full,
-            no_runner_probe: args.no_runner_probe,
-        }
-    }
-}
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     /// Durable run or Cook ID whose logs to retrieve.
     pub run_id: String,
-    /// Include unprojected runner transport frames under `raw_events` for diagnostics.
-    #[arg(long)]
-    pub raw: bool,
+    /// Resume events after this opaque cursor.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct EvidenceArgs {
@@ -341,24 +308,29 @@ mod tests {
     }
 
     #[test]
-    fn bridge_status_accepts_a_positional_attempt_without_exact() {
-        let cli = Cli::try_parse_from([
+    fn status_rejects_the_removed_bridge_flag() {
+        assert!(Cli::try_parse_from([
             "homeboy",
             "agent-task",
             "status",
             "cook-attempt-2",
             "--bridge",
         ])
-        .expect("bridge status with positional attempt parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Status(args) = agent_task.command else {
-            panic!("expected status command");
-        };
-        assert_eq!(args.run_id, "cook-attempt-2");
-        assert!(args.bridge);
-        assert!(!args.exact);
+        .is_err());
+    }
+
+    #[test]
+    fn status_rejects_removed_projection_flags() {
+        for flag in ["--full", "--bounded", "--no-runner-probe", "--since-cursor"] {
+            let mut argv = vec!["homeboy", "agent-task", "status", "run-a", flag];
+            if flag == "--since-cursor" {
+                argv.push("1");
+            }
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "accepted removed {flag}"
+            );
+        }
     }
 
     #[test]
@@ -438,33 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn promotion_provider_help_documents_argv_contract_for_cook_review_and_promote() {
-        for command in ["cook", "review", "promote"] {
-            let Err(error) = Cli::try_parse_from(["homeboy", "agent-task", command, "--help"])
-            else {
-                panic!("help exits after rendering");
-            };
-            let help = error.to_string();
-
-            assert!(help.contains("promotion apply-provider"), "{help}");
-            assert!(
-                help.contains("Repeat once per exact argv element"),
-                "{help}"
-            );
-            assert!(help.contains("never shell-split"), "{help}");
-            assert!(
-                help.contains("homeboy/agent-task-promotion-apply-request/v1"),
-                "{help}"
-            );
-            assert!(
-                help.contains("homeboy/agent-task-promotion-apply-response/v1"),
-                "{help}"
-            );
-            assert!(help.contains("Migrate `--provider-command"), "{help}");
-        }
-    }
-
-    #[test]
     fn promote_and_finalize_pr_parse_full_output() {
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -474,6 +419,8 @@ mod tests {
             "--to-worktree",
             "repo@task",
             "--full",
+            "--idempotency-key",
+            "promote-1",
         ])
         .expect("promote full parses");
         let Commands::AgentTask(agent_task) = cli.command else {
@@ -483,6 +430,7 @@ mod tests {
             panic!("promote")
         };
         assert!(args.full);
+        assert_eq!(args.idempotency_key.as_deref(), Some("promote-1"));
 
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -523,7 +471,73 @@ pub struct RetryArgs {
     /// Permit a new retry after every prior retry in this lineage is terminal.
     #[arg(long, visible_alias = "allow-duplicate")]
     pub force: bool,
+    /// Stable caller key for safely replaying this retry reservation.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
+    /// Backend for the next Cook attempt. This explicit route change is recorded
+    /// with its prior route and operator authority in the Cook lineage.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
+    /// Provider-specific selector for the next Cook attempt.
+    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR")]
+    pub selector: Option<String>,
+    /// Model for the next Cook attempt. A model override pins provider rotation
+    /// unless --allow-provider-rotation or a positive --provider-rotations is also supplied.
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
+    /// Re-enable configured provider/model rotation for this overridden route.
+    #[arg(long)]
+    pub allow_provider_rotation: bool,
+    /// Explicit cross-provider/model rotations available after this override.
+    #[arg(long, value_name = "N")]
+    pub provider_rotations: Option<u32>,
 }
+
+#[cfg(test)]
+mod retry_tests {
+    use clap::{CommandFactory, Parser};
+
+    use crate::{
+        cli_surface::{Cli, Commands},
+        commands::agent_task::AgentTaskCommand,
+    };
+
+    #[test]
+    fn retry_help_and_parser_expose_cook_route_recovery() {
+        let help = Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("retry")
+            .expect("retry command")
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--backend"), "{help}");
+        assert!(help.contains("--allow-provider-rotation"), "{help}");
+        assert!(help.contains("operator authority"), "{help}");
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "retry",
+            "cook-a",
+            "--model",
+            "replacement-model",
+            "--provider-rotations",
+            "2",
+        ])
+        .expect("route override parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Retry(args) = agent_task.command else {
+            panic!("expected retry command");
+        };
+        assert_eq!(args.model.as_deref(), Some("replacement-model"));
+        assert_eq!(args.provider_rotations, Some(2));
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct CancelArgs {
     /// Durable run or Cook ID to cancel.
@@ -531,6 +545,9 @@ pub struct CancelArgs {
     /// Optional explanation recorded with the cancellation.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// Stable caller key for safely replaying this cancellation request.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct QuarantineArgs {
@@ -609,6 +626,9 @@ pub struct PromoteArgs {
     /// Include complete promotion and gate evidence.
     #[arg(long)]
     pub full: bool,
+    /// Stable key used to replay this promotion without applying it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
     /// Replay the exact gate policy from the source run's durable Cook recipe.
     /// Homeboy-generated review commands use this reference so private gate
     /// programs remain outside reviewer-facing command output.

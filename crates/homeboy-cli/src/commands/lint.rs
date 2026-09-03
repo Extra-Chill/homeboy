@@ -2,11 +2,11 @@ use clap::Args;
 
 use homeboy::core::ci_profile;
 use homeboy::core::git;
-use homeboy_extension::lint::{
+use homeboy_core::extension::lint::{
     report, run_main_lint_workflow, run_self_check_lint_workflow_with_progress, LintCommandOutput,
     LintRunWorkflowArgs,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 /// Build the slim `LintFixInput` the core lint report consumes from a full
 /// refactor source-run, so core does not depend on the refactor engine's
@@ -90,7 +90,7 @@ pub struct LintArgs {
     #[arg(long)]
     pub fix: bool,
 
-    /// Allow --fix to edit the current dirty working tree for unbounded runs
+    /// Override dirty-tree and foreign live worktree-holder write protection
     #[arg(long)]
     pub force: bool,
 
@@ -363,7 +363,7 @@ impl LintObservationAdapter {
     }
 }
 
-impl WorkflowObservationAdapter<homeboy_extension::lint::LintRunWorkflowResult>
+impl WorkflowObservationAdapter<homeboy_core::extension::lint::LintRunWorkflowResult>
     for LintObservationAdapter
 {
     fn start_record(&self) -> NewRunRecord {
@@ -380,7 +380,7 @@ impl WorkflowObservationAdapter<homeboy_extension::lint::LintRunWorkflowResult>
 
     fn success_status(
         &self,
-        workflow: &homeboy_extension::lint::LintRunWorkflowResult,
+        workflow: &homeboy_core::extension::lint::LintRunWorkflowResult,
     ) -> RunStatus {
         if workflow.status == "passed" {
             RunStatus::Pass
@@ -391,7 +391,7 @@ impl WorkflowObservationAdapter<homeboy_extension::lint::LintRunWorkflowResult>
 
     fn success_metadata(
         &self,
-        workflow: &homeboy_extension::lint::LintRunWorkflowResult,
+        workflow: &homeboy_core::extension::lint::LintRunWorkflowResult,
     ) -> serde_json::Value {
         serde_json::json!({
             "exit_code": workflow.exit_code,
@@ -403,7 +403,7 @@ impl WorkflowObservationAdapter<homeboy_extension::lint::LintRunWorkflowResult>
     fn success_findings(
         &self,
         run_id: &str,
-        workflow: &homeboy_extension::lint::LintRunWorkflowResult,
+        workflow: &homeboy_core::extension::lint::LintRunWorkflowResult,
     ) -> Vec<NewFindingRecord> {
         workflow
             .findings
@@ -416,7 +416,7 @@ impl WorkflowObservationAdapter<homeboy_extension::lint::LintRunWorkflowResult>
 fn finish_lint_observation(
     active: ActiveObservation,
     adapter: &LintObservationAdapter,
-    workflow: &homeboy_extension::lint::LintRunWorkflowResult,
+    workflow: &homeboy_core::extension::lint::LintRunWorkflowResult,
 ) {
     let mut metadata = merge_metadata(
         active.initial_metadata().clone(),
@@ -536,8 +536,8 @@ mod tests {
     use homeboy::refactor::{
         lint_refactor_request, LintSourceOptions, RefactorSourceRun, SourceTotals,
     };
-    use homeboy_extension::lint as extension_lint;
-    use homeboy_extension::lint::report;
+    use homeboy_core::extension::lint as extension_lint;
+    use homeboy_core::extension::lint::report;
 
     #[derive(Parser)]
     struct TestCli {
@@ -743,7 +743,7 @@ mod tests {
                 summary: false,
                 file: None,
                 glob: Some("/tmp/demo/src/lib.rs".to_string()),
-                sniff_filters: homeboy_extension::lint::LintSniffFilters {
+                sniff_filters: homeboy_core::extension::lint::LintSniffFilters {
                     errors_only: true,
                     sniffs: Some("Generic.Security".to_string()),
                     exclude_sniffs: Some("Generic.WhiteSpace".to_string()),

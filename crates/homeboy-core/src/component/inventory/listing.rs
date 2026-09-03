@@ -2,7 +2,10 @@ use crate::component::{discover_from_portable, portable::read_portable_config, C
 use crate::error::{Error, Result};
 use crate::project;
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+const MAX_BASE_REGISTRATION_BYTES: u64 = 1024 * 1024;
 
 // ============================================================================
 // Config-root boundary (#7505)
@@ -211,7 +214,7 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
             if seen.contains(id) {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
+            let Some(content) = read_bounded_base_registration(&path) else {
                 continue;
             };
             let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
@@ -226,6 +229,29 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
 
     components.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(components)
+}
+
+fn read_bounded_base_registration(path: &Path) -> Option<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_BASE_REGISTRATION_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_BASE_REGISTRATION_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_BASE_REGISTRATION_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// Resolve one persisted component without reconstructing the full inventory.
@@ -337,20 +363,6 @@ fn registered_by_local_path_core(
 /// If the standalone file has a `local_path` and that directory contains a
 /// `homeboy.json`, the portable config is merged on top (portable config is
 /// the source of truth for version_targets, changelog_target, etc.).
-/// Ambient sibling of [`load_standalone_components_in_root`], retained for the
-/// inventory tests that still resolve their root from the process.
-///
-/// `#[cfg(test)]` rather than deleted: the eight callers in this module's test
-/// file are the only ones left, so in a lib build it is dead code under
-/// `-D warnings`. Migrating those tests onto the rooted sibling is the honest
-/// follow-up; gating it keeps that a separate, reviewable change instead of a
-/// rider on the rooting slice (#7505).
-#[cfg(test)]
-pub(super) fn load_standalone_components() -> Result<Vec<Component>> {
-    load_standalone_components_core(None)
-}
-
-/// [`load_standalone_components`] at the active config-root boundary.
 fn load_standalone_components_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
     let dir = components_dir(config_root)?;
     if !dir.exists() {
@@ -595,11 +607,14 @@ fn extension_provides_artifact_pattern_core(
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                crate::extension_store::load_extension_in_optional_root(config_root, extension_id)
-                    .ok()
-                    .and_then(|m| m.build)
-                    .and_then(|b| b.artifact_pattern)
-                    .is_some()
+                crate::extension::catalog::load_extension_in_optional_root(
+                    config_root,
+                    extension_id,
+                )
+                .ok()
+                .and_then(|m| m.build)
+                .and_then(|b| b.artifact_pattern)
+                .is_some()
             })
         })
         .unwrap_or(false)
@@ -613,7 +628,7 @@ pub(in crate::component) fn build_cleanup_paths(component: &Component) -> Vec<(S
     };
 
     for extension_id in extensions.keys() {
-        let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
+        let Ok(manifest) = crate::extension::catalog::load_extension(extension_id) else {
             continue;
         };
         let Some(build) = manifest.build.as_ref() else {

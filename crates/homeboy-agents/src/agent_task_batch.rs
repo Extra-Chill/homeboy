@@ -16,6 +16,9 @@ use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_service;
 use homeboy_core::{paths, Error, ErrorCode, Result};
+use homeboy_lab_runner_contract::{
+    ExecutionPlacementDecision, ExecutionPlacementOutcome, RunnerSelectionSource,
+};
 
 mod types;
 
@@ -121,6 +124,7 @@ where
                 task_id: task.task_id.clone(),
                 run_id: run_id.clone(),
                 state: AgentTaskRunState::Queued,
+                placement: None,
             })
             .collect(),
         metadata: batch_metadata(plan),
@@ -244,6 +248,7 @@ pub fn persist_fanout_run_batch_in_store(
                     task_id: child.task_id.clone(),
                     run_id: child.run_id.clone(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 })
                 .collect(),
             metadata,
@@ -274,7 +279,9 @@ pub fn claim_fanout_run_batch_in_store(
         if !matches!(
             batch.state,
             AgentTaskBatchState::Planning | AgentTaskBatchState::Failed
-        ) && !abandoned
+        ) && !(batch.state == AgentTaskBatchState::Queued
+            && batch.metadata["admission_blocker"].is_object())
+            && !abandoned
         {
             return Ok(None);
         }
@@ -283,6 +290,7 @@ pub fn claim_fanout_run_batch_in_store(
         }
         let metadata = batch.metadata.as_object_mut().expect("metadata object");
         metadata.remove("terminal_failure");
+        metadata.remove("admission_blocker");
         let claim_id = Uuid::new_v4().to_string();
         let admission_deadline_at = (Utc::now() + chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS))
             .to_rfc3339();
@@ -299,6 +307,33 @@ pub fn claim_fanout_run_batch_in_store(
 
 pub fn heartbeat_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> {
     AgentTaskBatchStore::from_current_data_root()?.heartbeat_fanout_run_batch(batch_id, claim_id)
+}
+
+/// Leave admission once child execution is ready to begin.
+pub fn start_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> {
+    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, |batch| {
+        if batch.metadata["coordinator"]["claim_id"].as_str() != Some(claim_id) {
+            return Err(Error::validation_invalid_argument(
+                "claim_id",
+                "fanout coordinator claim is stale",
+                Some(batch_id.to_string()),
+                None,
+            ));
+        }
+        if batch.state != AgentTaskBatchState::Admitting {
+            return Ok(());
+        }
+        let coordinator = batch
+            .metadata
+            .get_mut("coordinator")
+            .and_then(Value::as_object_mut)
+            .expect("validated coordinator object");
+        coordinator.insert("stage".to_string(), json!("running"));
+        coordinator.insert("heartbeat_at".to_string(), json!(now_timestamp()));
+        batch.state = AgentTaskBatchState::Running;
+        batch.updated_at = Some(now_timestamp());
+        Ok(())
+    })
 }
 
 pub fn heartbeat_fanout_run_batch_in_store(
@@ -335,7 +370,12 @@ pub fn heartbeat_fanout_run_batch_in_store(
     })
 }
 
-/// Persist a terminal controller failure after durable batch planning.
+/// Persist a controller failure after durable batch planning.
+///
+/// A failure while the coordinator is still admitting has not executed a child.
+/// Keep that roster queued so the same fanout identity can be claimed again when
+/// the readiness problem is repaired. Once admission has started, ordinary
+/// terminal failure semantics still apply.
 pub fn record_fanout_run_batch_failure(
     batch_id: &str,
     claim_id: &str,
@@ -366,21 +406,59 @@ pub fn record_fanout_run_batch_failure_in_store(
         if !batch.metadata.is_object() {
             batch.metadata = Value::Object(serde_json::Map::new());
         }
+        let failure_key = if batch.state == AgentTaskBatchState::Admitting {
+            "admission_blocker"
+        } else {
+            "terminal_failure"
+        };
         batch
             .metadata
             .as_object_mut()
             .expect("metadata object")
             .insert(
-                "terminal_failure".to_string(),
+                failure_key.to_string(),
                 json!({ "stage": stage, "failure": failure }),
             );
+        if failure_key == "admission_blocker" {
+            batch.state = AgentTaskBatchState::Queued;
+            batch.updated_at = Some(now_timestamp());
+            return store.write_batch(&batch);
+        }
         for child in &mut batch.child_runs {
             child.state = AgentTaskRunState::Failed;
         }
+        project_terminal_failure_dependency_graph(&mut batch.metadata);
         batch.state = AgentTaskBatchState::Failed;
         batch.updated_at = Some(now_timestamp());
         store.write_batch(&batch)
     })
+}
+
+/// A coordinator rejection means no child can be dispatched. Keep the durable
+/// graph projection aligned with the failed child rows rather than preserving a
+/// stale pre-admission `ready` frontier.
+fn project_terminal_failure_dependency_graph(metadata: &mut Value) {
+    let Some(nodes) = metadata
+        .get("dependency_graph")
+        .and_then(|graph| graph.get("nodes"))
+        .cloned()
+        .and_then(|nodes| serde_json::from_value::<Vec<AgentTaskDependencyNode>>(nodes).ok())
+    else {
+        return;
+    };
+    let states = nodes
+        .iter()
+        .map(|node| (node.id.clone(), AgentTaskDependencyState::Failed))
+        .collect::<BTreeMap<_, _>>();
+    let Ok((edges, readiness)) = dependency_graph_readiness(&nodes, &states) else {
+        return;
+    };
+    metadata["dependency_graph"] = json!({
+        "schema": "homeboy/agent-task-fanout-dependency-graph/v1",
+        "nodes": nodes,
+        "edges": edges,
+        "readiness": readiness,
+    });
 }
 
 /// Record child failures that occurred before Cook could create a lifecycle
@@ -392,6 +470,43 @@ pub fn record_fanout_run_batch_failed_admissions<'a>(
 ) -> Result<()> {
     AgentTaskBatchStore::from_current_data_root()?
         .record_fanout_run_batch_failed_admissions(batch_id, failed_run_ids)
+}
+
+/// Move a fanout child to the canonical durable run that replaced its current
+/// Cook attempt. The batch lock makes concurrent status and coordinator reads
+/// observe either complete roster identity, never a partially rewritten child.
+pub fn record_fanout_child_run_replacement_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    replaced_run_id: &str,
+    replacement_run_id: &str,
+) -> Result<()> {
+    store.mutate_batch(batch_id, |batch| {
+        if batch
+            .child_runs
+            .iter()
+            .any(|child| child.run_id == replacement_run_id)
+        {
+            return Ok(());
+        }
+        let child = batch
+            .child_runs
+            .iter_mut()
+            .find(|child| child.run_id == replaced_run_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_id",
+                    "replacement Cook run is not the canonical durable fanout child",
+                    Some(replaced_run_id.to_string()),
+                    None,
+                )
+            })?;
+        child.run_id = replacement_run_id.to_string();
+        child.state = AgentTaskRunState::Queued;
+        child.placement = None;
+        batch.updated_at = Some(now_timestamp());
+        Ok(())
+    })
 }
 
 pub fn record_fanout_run_batch_failed_admissions_in_store<'a>(
@@ -506,7 +621,7 @@ pub fn expire_stalled_fanout_admission_in_store(
             batch.metadata = Value::Object(serde_json::Map::new());
         }
         batch.metadata.as_object_mut().expect("metadata object").insert(
-            "terminal_failure".to_string(),
+            "admission_blocker".to_string(),
             json!({
                 "stage": stage,
                 "failure": {
@@ -516,10 +631,7 @@ pub fn expire_stalled_fanout_admission_in_store(
                 }
             }),
         );
-        for child in &mut batch.child_runs {
-            child.state = AgentTaskRunState::Failed;
-        }
-        batch.state = AgentTaskBatchState::Failed;
+        batch.state = AgentTaskBatchState::Queued;
         batch.updated_at = Some(now_timestamp());
         store.write_batch(&batch)?;
         Ok(true)
@@ -563,7 +675,7 @@ fn stalled_admission_recovery_command_with(
         })
 }
 
-fn status_in_store<S, P, E>(
+fn reconcile_status_in_store<S, P, E>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     mut child_status: S,
@@ -581,11 +693,15 @@ where
         let commands = commands(&batch.batch_id);
         let admission_blocker = batch.metadata["terminal_failure"].clone();
         let expected = batch.child_runs.len();
-        let admitted = batch
-            .child_runs
-            .iter()
-            .filter(|child| lifecycle_record_exists(&child.run_id).unwrap_or(false))
-            .count();
+        let mut admitted = 0;
+        for child in &mut batch.child_runs {
+            if lifecycle_record_exists(&child.run_id).unwrap_or(false) {
+                admitted += 1;
+                if let Ok(record) = child_status(&child.run_id) {
+                    child.placement = child_placement(&record);
+                }
+            }
+        }
         let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
         if let Some(command) = admission_blocker
             .pointer("/failure/next_action")
@@ -615,6 +731,40 @@ where
             commands,
         });
     }
+    if batch.metadata["admission_blocker"].is_object() {
+        let commands = commands(&batch.batch_id);
+        let admission_blocker = batch.metadata["admission_blocker"].clone();
+        let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
+        if let Some(command) = admission_blocker
+            .pointer("/failure/next_action")
+            .and_then(Value::as_str)
+        {
+            next_actions.insert(0, command.to_string());
+        } else if let Some(command) = batch.metadata.get("replan_command").and_then(Value::as_str) {
+            next_actions.insert(0, command.to_string());
+        }
+        return Ok(AgentTaskBatchStatusReport {
+            schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
+            status: AgentTaskBatchState::Queued.outcome_status().to_string(),
+            observation_fresh: true,
+            totals: totals_for_children(&batch.child_runs),
+            admission: AgentTaskBatchAdmission {
+                expected: batch.child_runs.len(),
+                admitted: 0,
+                rejected: 0,
+                absent: batch.child_runs.len(),
+            },
+            batch,
+            unavailable_child_runs: Vec::new(),
+            admission_blocker: Some(admission_blocker),
+            projection_pending_child_runs: Vec::new(),
+            resumable_child_runs: Vec::new(),
+            resumable: true,
+            dependency_graph: None,
+            next_actions,
+            commands,
+        });
+    }
     let mut unavailable_child_runs = Vec::new();
     let mut projection_pending_child_runs = Vec::new();
     let mut resumable_child_runs = Vec::new();
@@ -631,6 +781,7 @@ where
                 if child.state != record.state {
                     child.state = record.state;
                 }
+                child.placement = child_placement(&record);
                 if record
                     .totals
                     .as_ref()
@@ -655,7 +806,7 @@ where
                 if error.code == ErrorCode::ObservationStoreBusy {
                     observation_fresh = false;
                 }
-                if !child.state.is_terminal() {
+                if batch.state != AgentTaskBatchState::Admitting && !child.state.is_terminal() {
                     unavailable_child_runs.push(child_issue(
                         child,
                         format!("unable to read child run status: {}", error.message),
@@ -673,12 +824,21 @@ where
         }
     }
     totals.unavailable = unavailable_child_runs.len();
-    let mut state = aggregate_state(&totals);
+    let expected = batch.child_runs.len();
+    let admission_pending = batch.state == AgentTaskBatchState::Admitting && admitted < expected;
+    let mut state = if admission_pending {
+        AgentTaskBatchState::Admitting
+    } else {
+        aggregate_state(&totals)
+    };
     if batch.state != state {
         batch.state = state;
     }
-    let dependency_graph =
-        refresh_dependency_graph_with_finalization_statuses(&mut batch, None, &mut child_status)?;
+    let dependency_graph = if admission_pending {
+        batch.metadata.get("dependency_graph").cloned()
+    } else {
+        refresh_dependency_graph_with_finalization_statuses(&mut batch, None, &mut child_status)?
+    };
     if let Some(graph) = &dependency_graph {
         state = aggregate_state_after_graph_refresh(&totals, graph, state);
         if batch.state != state {
@@ -704,7 +864,6 @@ where
     next_actions.truncate(8);
     let resumable = !resumable_child_runs.is_empty();
     let commands = commands(&batch.batch_id);
-    let expected = batch.child_runs.len();
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         status: state.outcome_status().to_string(),
@@ -747,7 +906,7 @@ pub fn fanout_dependency_graph_with_finalization_statuses_in_store(
     refresh_dependency_graph_with_finalization_statuses(
         &mut batch,
         Some(statuses),
-        &mut agent_task_lifecycle::persisted_status,
+        &mut agent_task_lifecycle::status,
     )
 }
 
@@ -889,12 +1048,6 @@ where
     Ok(Some(graph))
 }
 
-/// Read the graph-projected executable frontier. Resume callers use this to
-/// avoid finalizing a dependent before its upstream candidate is accepted.
-pub(crate) fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
-    AgentTaskBatchStore::from_current_data_root()?.fanout_ready_child_run_ids(batch_id)
-}
-
 pub fn fanout_ready_child_run_ids_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
@@ -915,6 +1068,37 @@ pub fn fanout_ready_child_run_ids_in_store(
             .child_runs
             .into_iter()
             .filter(|child| ready.contains(child.task_id.as_str()))
+            .map(|child| child.run_id)
+            .collect(),
+    ))
+}
+
+pub(crate) fn fanout_blocked_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
+    AgentTaskBatchStore::from_current_data_root()?.fanout_blocked_child_run_ids(batch_id)
+}
+
+pub fn fanout_blocked_child_run_ids_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+) -> Result<Option<HashSet<String>>> {
+    let report = store.status(batch_id)?;
+    let Some(graph) = report.dependency_graph else {
+        return Ok(None);
+    };
+    let blocked = graph["readiness"]["states"]
+        .as_object()
+        .into_iter()
+        .flat_map(|states| states.iter())
+        .filter_map(|(task_id, state)| {
+            (state.as_str() == Some("blocked_by_dependency")).then_some(task_id.as_str())
+        })
+        .collect::<HashSet<_>>();
+    Ok(Some(
+        report
+            .batch
+            .child_runs
+            .into_iter()
+            .filter(|child| blocked.contains(child.task_id.as_str()))
             .map(|child| child.run_id)
             .collect(),
     ))
@@ -1007,10 +1191,10 @@ fn artifacts_in_store(
     // projection-readiness probes are the ambient `persisted_status` and
     // `terminal_artifact_projection_readiness_bounded`. Naming their rooted
     // siblings here is what keeps the whole report in one home.
-    let report = status_in_store(
+    let report = reconcile_status_in_store(
         store,
         batch_id,
-        |run_id| agent_task_lifecycle::persisted_status_in_store(lifecycle_store, run_id),
+        |run_id| agent_task_lifecycle::status_in_store(lifecycle_store, run_id),
         |run_id| {
             agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
                 lifecycle_store,
@@ -1141,6 +1325,53 @@ fn child_plan(
     });
     child.rebuild_homeboy_plan();
     child
+}
+
+fn child_placement(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<AgentTaskBatchChildPlacement> {
+    let decision: ExecutionPlacementDecision =
+        serde_json::from_value(record.metadata.get("execution_placement_decision")?.clone())
+            .ok()?;
+    let outcome = record
+        .metadata
+        .get("execution_placement_outcome")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ExecutionPlacementOutcome>(value).ok())
+        .filter(|outcome| outcome.decision_id == decision.decision_id);
+    let authority = if decision.override_authorization.authorized {
+        "operator_overridable"
+    } else if decision.runner.as_ref().map(|runner| runner.source)
+        == Some(RunnerSelectionSource::Explicit)
+    {
+        "operator_pinned"
+    } else if decision.requested == homeboy_lab_runner_contract::Placement::Auto
+        || decision.runner.as_ref().map(|runner| runner.source)
+            == Some(RunnerSelectionSource::Policy)
+    {
+        "policy_pinned"
+    } else {
+        "recipe_pinned"
+    };
+    Some(AgentTaskBatchChildPlacement {
+        requested: decision.requested,
+        required: decision.required,
+        selected: decision.selected,
+        effective: outcome.as_ref().map(|outcome| outcome.effective),
+        runner_id: outcome
+            .as_ref()
+            .and_then(|outcome| outcome.runner_id.clone())
+            .or_else(|| {
+                decision
+                    .runner
+                    .as_ref()
+                    .map(|runner| runner.runner_id.clone())
+            }),
+        runner_source: decision.runner.as_ref().map(|runner| runner.source),
+        authority: authority.to_string(),
+        decision_id: decision.decision_id,
+        outcome_decision_id: outcome.map(|outcome| outcome.decision_id),
+    })
 }
 
 fn batch_metadata(plan: &AgentTaskPlan) -> Value {
@@ -1346,7 +1577,7 @@ impl AgentTaskBatchStore {
     pub fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         self.status_with(
             batch_id,
-            agent_task_lifecycle::persisted_status,
+            agent_task_lifecycle::status,
             agent_task_lifecycle::terminal_artifact_projection_readiness_bounded,
             agent_task_lifecycle::run_record_exists_readonly,
         )
@@ -1373,7 +1604,7 @@ impl AgentTaskBatchStore {
         P: FnMut(&str) -> Result<Option<String>>,
         E: FnMut(&str) -> Result<bool>,
     {
-        status_in_store(
+        reconcile_status_in_store(
             self,
             batch_id,
             child_status,
@@ -1419,9 +1650,13 @@ impl AgentTaskBatchStore {
         record_dependency_action_receipt_in_store(self, batch_id, key, receipt)
     }
 
-    /// Read the graph-projected executable frontier.
+    /// Read the graph-projected dependency blocks.
     pub fn fanout_ready_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
         fanout_ready_child_run_ids_in_store(self, batch_id)
+    }
+
+    pub fn fanout_blocked_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
+        fanout_blocked_child_run_ids_in_store(self, batch_id)
     }
 
     /// Resolve the durable child runs owned by a fanout.
@@ -1455,9 +1690,7 @@ impl AgentTaskBatchStore {
     pub fn write_batch(&self, record: &AgentTaskBatchRecord) -> Result<()> {
         let path = self.batch_path(&record.batch_id);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-            })?;
+            homeboy_core::engine::local_files::create_dir_all_durably(parent)?;
         }
         let raw = serde_json::to_string_pretty(record).map_err(|error| {
             Error::internal_json(
@@ -1465,13 +1698,12 @@ impl AgentTaskBatchStore {
                 Some(format!("serialize agent-task batch {}", record.batch_id)),
             )
         })?;
-        let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-        fs::write(&temporary, raw).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-        })?;
-        fs::rename(&temporary, &path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
-        })
+        homeboy_core::io::write_output_file_atomically(
+            &path,
+            raw,
+            homeboy_core::io::OutputWriteOptions::file(),
+        )
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
     }
 
     pub fn with_batch_lock<T>(
@@ -1481,9 +1713,7 @@ impl AgentTaskBatchStore {
     ) -> Result<T> {
         let path = self.batch_path(batch_id).with_extension("lock");
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-            })?;
+            homeboy_core::engine::local_files::create_dir_all_durably(parent)?;
         }
         let lock = OpenOptions::new()
             .create(true)
@@ -1541,6 +1771,230 @@ pub fn read_batch_record_in_store(
     store.read_batch(batch_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchProviderWorktreeFinalization {
+    Finalized,
+    Replayed,
+    Unsupported,
+    NotFound,
+}
+
+pub fn finalize_provider_worktree_for_child(
+    batch_id: &str,
+    child_run_id: &str,
+    handle: &str,
+    lifecycle: &homeboy_core::worktree_provider::WorktreeProvisionLifecycle,
+    disposition: homeboy_core::worktree_provider::WorktreeTerminalDisposition,
+) -> Result<BatchProviderWorktreeFinalization> {
+    let store = AgentTaskBatchStore::from_current_data_root()?;
+    store.with_batch_lock(batch_id, || {
+        let mut batch = store.read_batch(batch_id)?;
+        if !batch.metadata.is_object() {
+            batch.metadata = json!({});
+        }
+        let operations = batch
+            .metadata
+            .as_object_mut()
+            .expect("metadata object")
+            .entry("provider_worktree_finalizations")
+            .or_insert_with(|| json!({}));
+        if !operations.is_object() {
+            *operations = json!({});
+        }
+        let cleanup_policy = match lifecycle.cleanup_policy {
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess => {
+                "remove_on_success"
+            }
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::PreserveOnFailure => {
+                "preserve_on_failure"
+            }
+        };
+        let idempotency_key = format!(
+            "{}:{}:{}",
+            lifecycle.purpose, lifecycle.owner_run_ref, cleanup_policy
+        );
+        let exact = |operation: &Value| {
+            operation["schema"] == "homeboy/agent-task-provider-worktree-finalization/v2"
+                && operation["handle"] == handle
+                && operation["purpose"] == lifecycle.purpose
+                && operation["owner_run_ref"] == lifecycle.owner_run_ref
+                && operation["cleanup_policy"] == cleanup_policy
+                && operation["disposition"] == disposition.as_str()
+                && operation["idempotency_key"] == idempotency_key
+                && operation["provider_id"] == "native"
+        };
+        if matches!(
+            operations[child_run_id]["status"].as_str(),
+            Some("preflight_failed" | "deferred")
+        ) {
+            operations
+                .as_object_mut()
+                .expect("provider worktree finalization operations object")
+                .remove(child_run_id);
+        }
+        if let Some(existing) = operations.get(child_run_id) {
+            if !exact(existing) {
+                return Err(Error::validation_invalid_argument(
+                    "provider_worktree_finalization",
+                    "provider worktree finalization conflicts with the durable child operation",
+                    Some(child_run_id.to_string()),
+                    None,
+                ));
+            }
+            if existing["status"] == "completed" {
+                return Ok(BatchProviderWorktreeFinalization::Replayed);
+            }
+            if existing["status"] == "unsupported" {
+                return Ok(BatchProviderWorktreeFinalization::Unsupported);
+            }
+        }
+
+        let replaying_mutation = operations
+            .get(child_run_id)
+            .and_then(|operation| operation["mutation_attempted"].as_bool())
+            .unwrap_or(false);
+
+        if operations.get(child_run_id).is_none() {
+            operations
+                .as_object_mut()
+                .expect("provider worktree finalization operations object")
+                .insert(
+                    child_run_id.to_string(),
+                    json!({
+                        "schema": "homeboy/agent-task-provider-worktree-finalization/v2",
+                        "status": "pending",
+                        "fencing_token": Uuid::new_v4().to_string(),
+                        "handle": handle,
+                        "purpose": lifecycle.purpose,
+                        "owner_run_ref": lifecycle.owner_run_ref,
+                        "cleanup_policy": cleanup_policy,
+                        "disposition": disposition.as_str(),
+                        "idempotency_key": idempotency_key,
+                        "provider_id": "native",
+                        "mutation_attempted": false,
+                    }),
+                );
+            store.write_batch(&batch)?;
+        }
+
+        let outcome = match homeboy_core::worktree_provider::finalize_worktree_with_effect_fence(
+            handle,
+            lifecycle,
+            disposition,
+            || {
+                batch.metadata["provider_worktree_finalizations"][child_run_id]
+                    ["mutation_attempted"] = Value::Bool(true);
+                store.write_batch(&batch)
+            },
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let operation = batch.metadata["provider_worktree_finalizations"]
+                    .get_mut(child_run_id)
+                    .expect("durable finalization intent exists");
+                operation["last_error"] = json!({
+                    "message": error.message,
+                    "details": error.details,
+                    "recorded_at": chrono::Utc::now().to_rfc3339(),
+                });
+                store.write_batch(&batch)?;
+                return Err(error);
+            }
+        };
+        let operation = batch.metadata["provider_worktree_finalizations"]
+            .get_mut(child_run_id)
+            .expect("durable finalization intent exists");
+        match outcome {
+            homeboy_core::worktree_provider::WorktreeFinalizationLookup::Finalized(finalized) => {
+                operation["status"] = Value::String("completed".to_string());
+                operation["inspection_path"] = Value::String(finalized.inspection_path);
+                store.write_batch(&batch)?;
+                Ok(BatchProviderWorktreeFinalization::Finalized)
+            }
+            homeboy_core::worktree_provider::WorktreeFinalizationLookup::NotFound
+                if replaying_mutation =>
+            {
+                // The durable intent predates the external mutation. A destructive
+                // provider may remove its active lookup before Homeboy can publish
+                // the receipt, so absence completes this same fenced operation.
+                operation["status"] = Value::String("completed".to_string());
+                operation["recovered_from_not_found"] = Value::Bool(true);
+                store.write_batch(&batch)?;
+                Ok(BatchProviderWorktreeFinalization::Replayed)
+            }
+            homeboy_core::worktree_provider::WorktreeFinalizationLookup::NotFound => {
+                operation["last_error"] = json!({
+                    "message": "provider workspace was not found on the first finalization attempt",
+                    "recorded_at": chrono::Utc::now().to_rfc3339(),
+                });
+                store.write_batch(&batch)?;
+                Ok(BatchProviderWorktreeFinalization::NotFound)
+            }
+            homeboy_core::worktree_provider::WorktreeFinalizationLookup::Unsupported => {
+                operation["status"] = Value::String("unsupported".to_string());
+                store.write_batch(&batch)?;
+                Ok(BatchProviderWorktreeFinalization::Unsupported)
+            }
+        }
+    })
+}
+
+pub fn record_provider_worktree_finalization_preflight_error(
+    batch_id: &str,
+    child_run_id: &str,
+    error: &Error,
+) -> Result<()> {
+    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, |batch| {
+        let operations = batch
+            .metadata
+            .as_object_mut()
+            .expect("batch metadata is validated as an object")
+            .entry("provider_worktree_finalizations")
+            .or_insert_with(|| json!({}));
+        let diagnostic = json!({
+            "message": error.message,
+            "details": error.details,
+            "recorded_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Some(existing) = operations.get_mut(child_run_id) {
+            if existing["status"] != "completed" {
+                existing["preflight_error"] = diagnostic;
+            }
+            return Ok(());
+        }
+        operations[child_run_id] = json!({
+            "schema": "homeboy/agent-task-provider-worktree-finalization/v2",
+            "status": "preflight_failed",
+            "fencing_token": Uuid::new_v4().to_string(),
+            "last_error": diagnostic,
+        });
+        Ok(())
+    })?;
+    Ok(())
+}
+
+pub fn record_provider_worktree_finalization_deferred(
+    batch_id: &str,
+    child_run_id: &str,
+    lifecycle_status: &str,
+) -> Result<()> {
+    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, |batch| {
+        let deferrals = batch
+            .metadata
+            .as_object_mut()
+            .expect("batch metadata is validated as an object")
+            .entry("provider_worktree_finalization_deferrals")
+            .or_insert_with(|| json!({}));
+        deferrals[child_run_id] = json!({
+            "schema": "homeboy/agent-task-provider-worktree-finalization-deferral/v1",
+            "lifecycle_status": lifecycle_status,
+            "recorded_at": chrono::Utc::now().to_rfc3339(),
+        });
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// Persist a child's resume-time finalization outcome into the durable batch
 /// record's metadata, keyed by the child run id. Repeated resume calls overwrite
 /// the same key so the batch record stays a single, convergent view of what has
@@ -1564,6 +2018,36 @@ pub fn record_child_finalization_in_store(
     finalization: Value,
 ) -> Result<()> {
     store.mutate_batch(batch_id, |batch| {
+        let terminal_state = finalization
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .filter(|terminal| *terminal)
+            .and_then(|_| finalization.get("lifecycle_status"))
+            .cloned()
+            .and_then(|state| {
+                serde_json::from_value::<homeboy_core::run_lifecycle_status::RunLifecycleStatus>(
+                    state,
+                )
+                .ok()
+            })
+            .and_then(|state| {
+                use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
+                Some(match state {
+                    RunLifecycleStatus::Succeeded => AgentTaskRunState::Succeeded,
+                    RunLifecycleStatus::CandidateRecoverable => {
+                        AgentTaskRunState::CandidateRecoverable
+                    }
+                    RunLifecycleStatus::PartialRecoverable => AgentTaskRunState::PartialRecoverable,
+                    RunLifecycleStatus::PartialFailure => AgentTaskRunState::PartialFailure,
+                    RunLifecycleStatus::Cancelled => AgentTaskRunState::Cancelled,
+                    RunLifecycleStatus::Failed
+                    | RunLifecycleStatus::TimedOut
+                    | RunLifecycleStatus::Stale => AgentTaskRunState::Failed,
+                    RunLifecycleStatus::Queued
+                    | RunLifecycleStatus::Running
+                    | RunLifecycleStatus::Unknown => return None,
+                })
+            });
         let metadata = match &mut batch.metadata {
             Value::Object(map) => map,
             other => {
@@ -1581,6 +2065,34 @@ pub fn record_child_finalization_in_store(
             .as_object_mut()
             .expect("child_finalizations is an object")
             .insert(child_run_id.to_string(), finalization);
+        if let Some(state) = terminal_state {
+            if let Some(child) = batch
+                .child_runs
+                .iter_mut()
+                .find(|child| child.run_id == child_run_id)
+            {
+                child.state = state;
+            }
+            let all_terminal = batch
+                .child_runs
+                .iter()
+                .all(|child| child.state.is_terminal());
+            batch.state = aggregate_state(&totals_for_children(&batch.child_runs));
+            if let Some(coordinator) = batch
+                .metadata
+                .get_mut("coordinator")
+                .and_then(Value::as_object_mut)
+            {
+                coordinator.insert(
+                    "stage".to_string(),
+                    json!(if all_terminal {
+                        "completed"
+                    } else {
+                        "terminalizing"
+                    }),
+                );
+            }
+        }
         batch.updated_at = Some(now_timestamp());
         Ok(())
     })
@@ -1929,6 +2441,7 @@ mod tests {
             task_id: "orphan".to_string(),
             run_id: "batch_restart-orphan".to_string(),
             state: AgentTaskRunState::Running,
+            placement: None,
         });
         batch.task_count = batch.child_runs.len();
         batch_store
@@ -2491,6 +3004,88 @@ mod tests {
     }
 
     #[test]
+    fn fanout_status_reports_admitting_when_child_records_are_absent() {
+        let (_temp, store) = batch_store();
+        store
+            .persist_fanout_run_batch(
+                "admission-wave",
+                "admission-wave",
+                &[FanoutRunBatchChild {
+                    task_id: "issue-1419".to_string(),
+                    run_id: "cook-issue-1419".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist planned roster");
+        store
+            .claim_fanout_run_batch("admission-wave")
+            .expect("claim")
+            .expect("claim id");
+
+        let report = store
+            .status_with(
+                "admission-wave",
+                |_| {
+                    Err(Error::validation_invalid_argument(
+                        "run_id",
+                        "agent-task run record not found: cook-issue-1419",
+                        Some("cook-issue-1419".to_string()),
+                        None,
+                    ))
+                },
+                |_| Ok(None),
+                |_| Ok(false),
+            )
+            .expect("admission window remains readable");
+
+        assert_eq!(report.status, "admitting");
+        assert_eq!(report.batch.state, AgentTaskBatchState::Admitting);
+        assert_eq!(report.admission.expected, 1);
+        assert_eq!(report.admission.admitted, 0);
+        assert_eq!(report.admission.absent, 1);
+        assert!(report.unavailable_child_runs.is_empty());
+    }
+
+    #[test]
+    fn fanout_child_run_replacement_updates_canonical_lineage() {
+        let (_temp, store) = batch_store();
+        store
+            .persist_fanout_run_batch(
+                "retry-wave",
+                "retry-wave",
+                &[FanoutRunBatchChild {
+                    task_id: "issue-1419".to_string(),
+                    run_id: "cook-issue-1419".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist planned roster");
+
+        record_fanout_child_run_replacement_in_store(
+            &store,
+            "retry-wave",
+            "cook-issue-1419",
+            "cook-issue-1419-transport-retry",
+        )
+        .expect("replace canonical child run");
+        record_fanout_child_run_replacement_in_store(
+            &store,
+            "retry-wave",
+            "cook-issue-1419",
+            "cook-issue-1419-transport-retry",
+        )
+        .expect("replacement is idempotent");
+
+        let batch = store.read_batch("retry-wave").expect("updated roster");
+        assert_eq!(batch.child_runs[0].task_id, "issue-1419");
+        assert_eq!(
+            batch.child_runs[0].run_id,
+            "cook-issue-1419-transport-retry"
+        );
+        assert_eq!(batch.child_runs[0].state, AgentTaskRunState::Queued);
+    }
+
+    #[test]
     fn fanout_run_plan_persists_batch_record_readable_by_status() {
         let (_temp, store) = batch_store();
         let children = vec![
@@ -2559,7 +3154,7 @@ mod tests {
     }
 
     #[test]
-    fn fanout_run_plan_reuses_a_repaired_preflight_roster_without_overwriting_it() {
+    fn pre_admission_failure_preserves_queued_roster_for_idempotent_retry() {
         let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "repair".to_string(),
@@ -2579,22 +3174,43 @@ mod tests {
                 "worktree_preflight",
                 json!({ "message": "worktree missing" }),
             )
-            .expect("record preflight failure");
-        let failed = store
+            .expect("record preflight blocker");
+        let blocked = store
             .status("repair-wave")
-            .expect("preflight failure remains observable");
-        assert_eq!(failed.batch.state, AgentTaskBatchState::Failed);
-        assert_eq!(failed.status, "failed");
-        assert_eq!(failed.totals.failed, 1);
-        assert!(failed.unavailable_child_runs.is_empty());
+            .expect("preflight blocker remains observable");
+        assert_eq!(blocked.batch.state, AgentTaskBatchState::Queued);
+        assert_eq!(blocked.status, "queued");
+        assert_eq!(blocked.totals.queued, 1);
+        assert_eq!(blocked.admission.admitted, 0);
+        assert_eq!(blocked.admission.absent, 1);
+        assert!(blocked.resumable);
+        assert_eq!(
+            blocked.admission_blocker.expect("pre-admission blocker")["stage"],
+            "worktree_preflight"
+        );
+        assert!(blocked.unavailable_child_runs.is_empty());
 
         let replay = store
             .persist_fanout_run_batch("repair-wave", "repair-wave", &children, json!({}))
             .expect("replay repaired roster");
 
-        assert_eq!(replay.state, AgentTaskBatchState::Failed);
-        assert!(replay.metadata.get("terminal_failure").is_some());
+        assert_eq!(replay.state, AgentTaskBatchState::Queued);
+        assert!(replay.metadata.get("admission_blocker").is_some());
         assert_eq!(replay.child_runs[0].run_id, "repair-run");
+
+        let retry_claim = store
+            .claim_fanout_run_batch("repair-wave")
+            .expect("claim repaired fanout")
+            .expect("retry claim");
+        let retried = store.read_batch("repair-wave").expect("retried roster");
+        assert_eq!(retried.child_runs.len(), 1);
+        assert_eq!(retried.child_runs[0].run_id, "repair-run");
+        assert!(retried.metadata["admission_blocker"].is_null());
+        assert!(store
+            .claim_fanout_run_batch("repair-wave")
+            .expect("second retry claim check")
+            .is_none());
+        assert!(!retry_claim.is_empty());
     }
 
     #[test]
@@ -2686,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_admission_is_a_durable_terminal_blocker_with_a_recovery_command() {
+    fn expired_admission_is_a_retryable_blocker_with_a_recovery_command() {
         let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "stuck".to_string(),
@@ -2713,16 +3329,17 @@ mod tests {
         assert!(store
             .expire_stalled_fanout_admission("stuck-wave")
             .expect("terminalize stalled admission"));
-        let status = store.status("stuck-wave").expect("read failed batch");
+        let status = store.status("stuck-wave").expect("read blocked batch");
 
-        assert_eq!(status.batch.state, AgentTaskBatchState::Failed);
-        assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Failed);
+        assert_eq!(status.batch.state, AgentTaskBatchState::Queued);
+        assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Queued);
+        assert!(status.resumable);
         assert_eq!(
-            status.batch.metadata["terminal_failure"]["failure"]["code"],
+            status.batch.metadata["admission_blocker"]["failure"]["code"],
             "coordinator_admission_timeout"
         );
         assert_eq!(
-            status.batch.metadata["terminal_failure"]["failure"]["next_action"],
+            status.batch.metadata["admission_blocker"]["failure"]["next_action"],
             "homeboy agent-task fanout run-plan --input @plan.json"
         );
     }
@@ -2742,11 +3359,13 @@ mod tests {
                     task_id: "a".to_string(),
                     run_id: "a-run".to_string(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 },
                 AgentTaskBatchChildRun {
                     task_id: "b".to_string(),
                     run_id: "b-run".to_string(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 },
             ],
             metadata: json!({
@@ -2940,9 +3559,9 @@ mod tests {
         let expired = batch_store
             .read_batch("rooted-expiry-wave")
             .expect("expired batch");
-        assert_eq!(expired.state, AgentTaskBatchState::Failed);
+        assert_eq!(expired.state, AgentTaskBatchState::Queued);
         assert_eq!(
-            expired.metadata["terminal_failure"]["failure"]["code"],
+            expired.metadata["admission_blocker"]["failure"]["code"],
             "coordinator_admission_timeout"
         );
 
@@ -3076,7 +3695,19 @@ mod tests {
             run_id: "source-run".to_string(),
         }];
         store
-            .persist_fanout_run_batch("source-wave", "source-wave", &children, json!({}))
+            .persist_fanout_run_batch(
+                "source-wave",
+                "source-wave",
+                &children,
+                json!({
+                    "dependency_graph": {
+                        "nodes": [{
+                            "id": "source",
+                            "depends_on": []
+                        }]
+                    }
+                }),
+            )
             .expect("persist");
         let claim_id = store
             .claim_fanout_run_batch("source-wave")
@@ -3107,6 +3738,10 @@ mod tests {
         assert_eq!(
             status.next_actions[0],
             "homeboy agent-task fanout resume source-wave"
+        );
+        assert!(
+            status.batch.metadata["dependency_graph"]["readiness"].is_null(),
+            "a pre-admission blocker must not terminalize the dependency frontier"
         );
     }
 

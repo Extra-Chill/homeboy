@@ -1,4 +1,4 @@
-use homeboy_extension as extension;
+use crate::refactor_provider::ParsedItem;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use homeboy_core::Result;
-use homeboy_extension::{self, grammar, grammar_items, ParsedItem};
+use homeboy_core::{self};
+use homeboy_engine_primitives::grammar::items as grammar_items;
 
 use super::move_items::{MoveOptions, MoveResult};
 
@@ -70,7 +71,7 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
     })?;
 
     let mut warnings = Vec::new();
-    let items = parse_items(file, &content).unwrap_or_else(|| {
+    let items = parse_items(file, &content, root).unwrap_or_else(|| {
         warnings.push("No refactor parser available for file type; plan may be sparse".to_string());
         vec![]
     });
@@ -85,7 +86,8 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
         "Review projected audit impact before applying".to_string(),
         "Apply grouped extraction in one deterministic pass (homeboy refactor decompose --write)"
             .to_string(),
-        "Run cargo test and homeboy review audit --changed-since origin/main".to_string(),
+        "Run homeboy review test <component> and homeboy review audit --changed-since origin/main"
+            .to_string(),
     ];
 
     Ok(DecomposePlan {
@@ -204,7 +206,7 @@ fn generate_source_module_index(plan: &DecomposePlan, root: &Path) {
             let stem = target.file_stem()?.to_str()?;
             Some(super::move_items::ModuleIndexEntry {
                 name: stem.to_string(),
-                pub_items: public_items_for_group(plan, group),
+                pub_items: public_items_for_group(plan, group, root),
             })
         })
         .collect();
@@ -219,9 +221,12 @@ fn generate_source_module_index(plan: &DecomposePlan, root: &Path) {
     let submodule_names: Vec<&str> = submodules.iter().map(|s| s.name.as_str()).collect();
     let cleaned_content = remove_conflicting_use_imports(&remaining_content, &submodule_names);
 
-    if let Some(content) =
-        super::move_items::ext_generate_module_index(&plan.file, &submodules, &cleaned_content)
-    {
+    if let Some(content) = super::move_items::ext_generate_module_index(
+        root,
+        &plan.file,
+        &submodules,
+        &cleaned_content,
+    ) {
         if let Err(e) = std::fs::write(&source_path, content) {
             eprintln!(
                 "Warning: failed to write module index to {}: {}",
@@ -386,7 +391,7 @@ fn source_to_test_file(target: &str) -> Option<String> {
     Some(format!("tests/{}_test.rs", without_ext))
 }
 
-fn parse_items(file: &str, content: &str) -> Option<Vec<ParsedItem>> {
+fn parse_items(file: &str, content: &str, root: &Path) -> Option<Vec<ParsedItem>> {
     let ext = Path::new(file).extension()?.to_str()?;
 
     // Prefer the language extension's structural parser when available.
@@ -394,14 +399,16 @@ fn parse_items(file: &str, content: &str) -> Option<Vec<ParsedItem>> {
     // authoritative source of item boundaries/source extraction. The core
     // grammar parser remains the fallback for languages without a dedicated
     // refactor parser.
-    if let Some(manifest) = extension::find_extension_for_file_ext(ext, "refactor") {
+    if let Some(provider) = crate::move_items::find_refactor_extension_for_extension(root, ext) {
         // Try extension script first
         let command = serde_json::json!({
             "command": "parse_items",
             "file_path": file,
             "content": content,
         });
-        if let Some(result) = extension::run_refactor_script(&manifest, &command) {
+        if let Some(result) =
+            crate::refactor_provider::invoke_refactor_value(&provider, root, ext, command)
+        {
             if let Some(items) = result
                 .get("items")
                 .and_then(|value| serde_json::from_value::<Vec<ParsedItem>>(value.clone()).ok())
@@ -411,16 +418,8 @@ fn parse_items(file: &str, content: &str) -> Option<Vec<ParsedItem>> {
                 }
             }
         }
-
-        // Fall back to core grammar parser
-        if let Some(ext_path) = &manifest.extension_path {
-            let grammar = grammar::load_for_extension_path(Path::new(ext_path), ext);
-            if let Some(grammar) = grammar {
-                let items = grammar_items::parse_items(content, &grammar);
-                if !items.is_empty() {
-                    return Some(items.into_iter().map(ParsedItem::from).collect());
-                }
-            }
+        if let Some(items) = crate::move_items::core_parse_items(&provider, ext, content) {
+            return Some(items);
         }
     }
 
@@ -439,9 +438,8 @@ fn validate_plan_sources(plan: &DecomposePlan, root: &Path) -> Result<()> {
 
     let ext = Path::new(&plan.file).extension().and_then(|e| e.to_str());
     let grammar = ext.and_then(|ext| {
-        let manifest = extension::find_extension_for_file_ext(ext, "refactor")?;
-        let ext_path = manifest.extension_path.as_deref()?;
-        grammar::load_for_extension_path(Path::new(ext_path), ext)
+        let provider = crate::move_items::find_refactor_extension_for_extension(root, ext)?;
+        homeboy_core::extension::grammar::extension_grammar(&provider.extension_id, ext)
     });
 
     if let Some(grammar) = grammar {
@@ -511,16 +509,19 @@ fn filter_extractable_items(
     filtered
 }
 
-fn public_items_for_group(plan: &DecomposePlan, group: &DecomposeGroup) -> Vec<String> {
+fn public_items_for_group(
+    plan: &DecomposePlan,
+    group: &DecomposeGroup,
+    root: &Path,
+) -> Vec<String> {
     let source_path = Path::new(&plan.file);
     let ext = source_path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("rs");
 
-    let root = Path::new(".");
-    let content = std::fs::read_to_string(source_path).unwrap_or_default();
-    let items = parse_items_for_group_export(ext, &content, &plan.file).unwrap_or_default();
+    let content = std::fs::read_to_string(root.join(source_path)).unwrap_or_default();
+    let items = parse_items_for_group_export(root, ext, &content, &plan.file).unwrap_or_default();
 
     let group_names: HashSet<&str> = group.item_names.iter().map(|name| name.as_str()).collect();
     let mut pub_items: Vec<String> = items
@@ -545,14 +546,18 @@ fn public_items_for_group(plan: &DecomposePlan, group: &DecomposeGroup) -> Vec<S
             .collect();
     }
 
-    let _ = root;
     pub_items
 }
 
-fn parse_items_for_group_export(ext: &str, content: &str, file: &str) -> Option<Vec<ParsedItem>> {
-    let manifest = homeboy_extension::find_extension_for_file_ext(ext, "refactor")?;
-    crate::move_items::ext_parse_items(&manifest, content, file)
-        .or_else(|| crate::move_items::core_parse_items(&manifest, content))
+fn parse_items_for_group_export(
+    root: &Path,
+    ext: &str,
+    content: &str,
+    file: &str,
+) -> Option<Vec<ParsedItem>> {
+    let provider = crate::move_items::find_refactor_extension_for_extension(root, ext)?;
+    crate::move_items::ext_parse_items(&provider, root, content, file)
+        .or_else(|| crate::move_items::core_parse_items(&provider, ext, content))
 }
 
 fn export_name_for_item(item: &ParsedItem) -> Option<String> {

@@ -8,9 +8,6 @@ description = "Core engine for homeboy: build/deploy/test/triage orchestration, 
 repository = "https://github.com/Extra-Chill/homeboy"
 publish = false
 
-[package.metadata.cargo-machete]
-ignored = ["homeboy-extension"] # Imported by an out-of-tree included test fixture.
-
 [lib]
 name = "homeboy_core"
 path = "src/lib.rs"
@@ -24,16 +21,19 @@ slow-tests = []
 
 [dependencies]
 homeboy-artifact-ref-contract = { version = "0.1.0", path = "../contracts/homeboy-artifact-ref-contract" }
+homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-api-jobs-contract = { version = "0.1.0", path = "../contracts/homeboy-api-jobs-contract" }
 homeboy-source-snapshot-contract = { version = "0.1.0", path = "../contracts/homeboy-source-snapshot-contract" }
 homeboy-component-contract = { version = "0.1.0", path = "../contracts/homeboy-component-contract" }
+homeboy-resource-topology-contract = { version = "0.1.0", path = "../contracts/homeboy-resource-topology-contract" }
 homeboy-gate-contract = { version = "0.1.0", path = "../contracts/homeboy-gate-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
+homeboy-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-runner-contract" }
 homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
 homeboy-refactor-contract = { version = "0.1.0", path = "../contracts/homeboy-refactor-contract" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
@@ -76,4 +76,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 homeboy-serde-pin = { version = "0.1.0", path = "../homeboy-serde-pin" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }
-homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }

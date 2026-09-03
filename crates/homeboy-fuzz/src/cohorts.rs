@@ -2,10 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-// Only the `#[cfg(test)]`-gated hotspot-set comparison below consumes this. See #11791.
-#[cfg(test)]
-use super::FuzzHotspotSet;
-
 const CONVERGENCE_TOP_WINDOW: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,22 +69,6 @@ pub struct FuzzHotspotCohortDelta {
     pub baseline_run_count: usize,
     pub candidate_run_count: usize,
     pub run_count_delta: i64,
-}
-
-/// Test-only. Hotspot-set comparison has no production caller; the live
-/// cohort path is `fuzz_hotspot_cohorts`. Gated rather than deleted so the
-/// surviving tests keep documenting the contract. See #11791.
-#[cfg(test)]
-pub(crate) fn compare_fuzz_hotspot_sets(
-    baseline: &FuzzHotspotSet,
-    candidate: &FuzzHotspotSet,
-) -> FuzzHotspotCohortComparison {
-    compare_fuzz_hotspot_cohorts(
-        baseline.id.clone(),
-        candidate.id.clone(),
-        &cohort_items_from_hotspot_set(baseline),
-        &cohort_items_from_hotspot_set(candidate),
-    )
 }
 
 pub fn compare_fuzz_hotspot_cohorts(
@@ -201,23 +181,6 @@ pub fn compare_fuzz_hotspot_cohorts(
         emerging_top_items,
         items,
     }
-}
-
-/// Test-only helper for `compare_fuzz_hotspot_sets`. See #11791.
-#[cfg(test)]
-fn cohort_items_from_hotspot_set(set: &FuzzHotspotSet) -> Vec<FuzzHotspotCohortItem> {
-    set.items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| FuzzHotspotCohortItem {
-            key: item.id.clone(),
-            label: item.label.clone(),
-            score: item.relative_score.unwrap_or(item.value),
-            occurrences: item.sample_count.unwrap_or(1),
-            run_count: 1,
-            rank: item.rank.unwrap_or(index as u64 + 1) as usize,
-        })
-        .collect()
 }
 
 fn cohort_delta(

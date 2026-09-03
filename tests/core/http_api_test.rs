@@ -1,10 +1,24 @@
 use crate::api_jobs::{JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
+use crate::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use crate::http_api::{
     self, AnalysisJobRunOutput, AnalysisJobRunner, HttpApiRequest, HttpEndpoint, HttpMethod,
     JobReadyRunKind,
 };
 use crate::observation::{
     ArtifactRecord, NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
+};
+use homeboy_control_plane_contract::{
+    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCapabilities,
+    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
+    ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
+    ControlPlaneRun, ControlPlaneRunState, EventCursor, EventId, MissionId, RunId, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+};
+use homeboy_resource_topology_contract::{
+    ResourceTopologyResourceKind, ResourceTopologyResourceRef,
 };
 
 use crate::test_support::with_isolated_home;
@@ -76,6 +90,36 @@ fn routes_component_endpoints() {
             id: "homeboy".to_string()
         }
     );
+}
+
+#[test]
+fn topology_inspection_route_and_response_are_read_only() {
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/topology/fleet/production").expect("route"),
+        HttpEndpoint::ResourceTopology {
+            root: ResourceTopologyResourceRef {
+                kind: ResourceTopologyResourceKind::Fleet,
+                id: "production".to_string(),
+            },
+        }
+    );
+
+    with_isolated_home(|_| {
+        crate::fleet::save(&crate::fleet::Fleet::new("production".to_string(), vec![]))
+            .expect("fleet config");
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/topology/fleet/production".to_string(),
+            body: None,
+        })
+        .expect("topology response");
+
+        assert_eq!(response.endpoint, "resource_topology.show");
+        assert_eq!(
+            response.body["snapshot"]["schema"],
+            "homeboy/resource-topology-snapshot/v1"
+        );
+    });
 }
 
 #[test]
@@ -236,79 +280,341 @@ fn routes_activity_endpoints() {
     );
 }
 
-#[test]
-fn routes_agent_task_run_endpoint() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/agent-task/runs/cook-abc").expect("route"),
-        HttpEndpoint::AgentTaskRun {
-            id: "cook-abc".to_string()
+const CONTROL_PLANE_FIXTURE_RUN: &str =
+    "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+const CONTROL_PLANE_FIXTURE_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
+
+fn fixture_control_plane_run() -> ControlPlaneRun {
+    let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
+    let mut resource = ControlPlaneRun::new(run.clone());
+    resource.mission = Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"));
+    resource.state = ControlPlaneRunState::Succeeded;
+    resource.created_at = "2026-01-01T00:00:00Z".to_string();
+    resource
+}
+
+fn fixture_control_plane_events(cursor: Option<&EventCursor>) -> ControlPlaneEventPage {
+    let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
+    let after = cursor
+        .map(|cursor| cursor.as_str().parse::<u64>().expect("fixture cursor"))
+        .unwrap_or(0);
+    let events = ["running", "succeeded"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| {
+            let sequence = (index + 1) as u64;
+            ControlPlaneEvent {
+                schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
+                event: EventId::new(format!("{CONTROL_PLANE_FIXTURE_RUN}:event:{sequence}"))
+                    .expect("event"),
+                sequence,
+                occurred_at: Some(format!("2026-01-01T00:00:0{sequence}Z")),
+                mission: Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission")),
+                run: run.clone(),
+                task: Some(TaskId::new("task-a").expect("task")),
+                attempt: None,
+                execution: None,
+                kind: "task.state_changed".to_string(),
+                source: ControlPlaneEventSource {
+                    component: "fixture".to_string(),
+                    instance: None,
+                },
+                data: serde_json::json!({ "state": state }),
+                artifacts: Vec::new(),
+                evidence: Vec::new(),
+            }
+        })
+        .filter(|event| event.sequence > after)
+        .collect::<Vec<_>>();
+    let next_cursor = events
+        .last()
+        .map(|event| EventCursor::new(event.sequence.to_string()).expect("cursor"))
+        .or_else(|| cursor.cloned());
+    ControlPlaneEventPage {
+        schema: CONTROL_PLANE_EVENT_PAGE_SCHEMA.to_string(),
+        run,
+        events,
+        next_cursor,
+        has_more: false,
+    }
+}
+
+struct FixtureControlPlaneProvider;
+
+impl ControlPlaneProvider for FixtureControlPlaneProvider {
+    fn capabilities(&self) -> ControlPlaneCapabilities {
+        ControlPlaneCapabilities::new(
+            vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
+            vec![
+                ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::GetRun,
+                ControlPlaneOperation::GetRunEvents,
+                ControlPlaneOperation::ExecuteRunAction,
+            ],
+        )
+    }
+
+    fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
+        if requested_id.as_str() == CONTROL_PLANE_FIXTURE_RUN {
+            Ok(fixture_control_plane_run())
+        } else {
+            Err(ControlPlaneError::not_found(format!(
+                "agent-task run not found: {requested_id}"
+            )))
         }
-    );
-    // Trailing slashes and query strings are stripped by the shared segment
-    // parser, exactly as they are for every neighbouring route.
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/agent-task/runs/cook-abc/?x=1").expect("route"),
-        HttpEndpoint::AgentTaskRun {
-            id: "cook-abc".to_string()
+    }
+
+    fn events(
+        &self,
+        requested_id: &RunId,
+        cursor: Option<&EventCursor>,
+    ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found(format!(
+                "agent-task run not found: {requested_id}"
+            )));
         }
-    );
+        if cursor.is_some_and(|cursor| cursor.as_str().parse::<u64>().is_err()) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event cursor is invalid",
+            ));
+        }
+        Ok(fixture_control_plane_events(cursor))
+    }
+
+    fn execute_action(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("fixture run not found"));
+        }
+        Ok(ControlPlaneActionAcknowledgement {
+            schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
+            acknowledgement: format!("fixture:{}", request.idempotency_key),
+            run: requested_id.clone(),
+            action: request.action,
+            idempotency_key: request.idempotency_key.clone(),
+            actor: request.actor.clone(),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: "2026-01-01T00:00:01Z".to_string(),
+            outcome: ControlPlaneActionOutcome::AlreadySatisfied,
+            resource: fixture_control_plane_run(),
+            result: ControlPlaneActionPayload::empty(),
+            message: None,
+        })
+    }
+}
+
+fn register_fixture_control_plane_provider() {
+    register_control_plane_provider(Box::new(FixtureControlPlaneProvider));
 }
 
 #[test]
-fn agent_task_run_route_is_read_only_and_exact() {
-    // This change adds a read route and nothing else. Submission and retry have
-    // their own safety review, so nothing under /agent-task may be reachable by
-    // POST, and the collection path must not resolve.
-    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc")
-        .expect_err("agent-task runs are not writable through this route");
-    http_api::route(HttpMethod::Post, "/agent-task/runs")
-        .expect_err("there is no agent-task submit route");
-    http_api::route(HttpMethod::Get, "/agent-task/runs")
-        .expect_err("there is no agent-task run collection route");
-    http_api::route(HttpMethod::Get, "/agent-task").expect_err("there is no agent-task root route");
-    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc/cancel")
-        .expect_err("cancellation stays on the controller-job surface");
-    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc/retry")
-        .expect_err("retry is out of scope for this change");
+fn routes_versioned_control_plane_endpoints() {
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/v1/control-plane/capabilities").expect("route"),
+        HttpEndpoint::ControlPlaneCapabilities
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/v1/control-plane/runs/run-abc").expect("route"),
+        HttpEndpoint::ControlPlaneRun {
+            id: "run-abc".to_string()
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/events?cursor=event-page-2",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRunEvents {
+            id: "run-abc".to_string(),
+            cursor: Some(EventCursor::new("event-page-2").expect("cursor")),
+        }
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc/actions").expect("route"),
+        HttpEndpoint::ControlPlaneRunActions {
+            id: "run-abc".to_string()
+        }
+    );
+    http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc")
+        .expect_err("only the canonical actions route mutates runs");
+    http_api::route(HttpMethod::Get, "/agent-task/runs/run-abc")
+        .expect_err("the unversioned compatibility route is removed");
+    http_api::route(HttpMethod::Get, "/v1/control-plane/missions")
+        .expect_err("no extra resource family");
 }
 
 #[test]
-fn agent_task_run_lookup_miss_is_a_structured_not_found() {
-    // No agent-task provider is registered in this process, so the probe is the
-    // no-op and every id misses. That is the 404 path, and it must carry the
-    // same structured validation error shape as its neighbours rather than an
-    // opaque failure.
-    let error = http_api::handle(HttpApiRequest {
+fn control_plane_capabilities_advertise_only_wired_operations() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
-        path: "/agent-task/runs/no-such-agent-task-run".to_string(),
+        path: "/v1/control-plane/capabilities".to_string(),
         body: None,
     })
-    .expect_err("an unknown agent-task run is not found");
-
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert_eq!(error.details["field"], "run_id");
-    assert!(
-        error.message.contains("no-such-agent-task-run"),
-        "the caller's own id is echoed back: {}",
-        error.message
+    .expect("capabilities");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.capabilities");
+    let result: ControlPlaneResult<ControlPlaneCapabilities> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(result.ok);
+    assert_eq!(result.schema, CONTROL_PLANE_RESULT_SCHEMA);
+    let capabilities = result.resource.expect("resource");
+    assert_eq!(
+        capabilities.operations,
+        vec![
+            ControlPlaneOperation::GetCapabilities,
+            ControlPlaneOperation::GetRun,
+            ControlPlaneOperation::GetRunEvents,
+            ControlPlaneOperation::ExecuteRunAction,
+        ]
     );
 }
 
 #[test]
-fn agent_task_run_id_is_bounded_before_the_record_lookup() {
-    // The id is a raw URL path segment handed to a durable-store lookup. An
-    // oversized segment is rejected by length alone, before the probe runs, and
-    // the rejection must not echo the oversized value back into the response.
+fn control_plane_action_http_uses_the_typed_provider_contract() {
+    register_fixture_control_plane_provider();
+    let request = ControlPlaneActionRequest {
+        schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+        action: ControlPlaneAction::Cancel,
+        idempotency_key: "http-request-1".to_string(),
+        actor: "test-client".to_string(),
+        expected_updated_at: None,
+        parameters: ControlPlaneActionPayload {
+            schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+            data: serde_json::json!({ "reason": "stop" }),
+        },
+        confirmed: true,
+    };
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Post,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/actions"),
+        body: Some(serde_json::to_value(&request).expect("request")),
+    })
+    .expect("action");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.actions");
+    let result: ControlPlaneResult<ControlPlaneActionAcknowledgement> =
+        serde_json::from_value(response.body).expect("result");
+    let acknowledgement = result.resource.expect("acknowledgement");
+    assert_eq!(acknowledgement.idempotency_key, "http-request-1");
+    assert_eq!(
+        acknowledgement.outcome,
+        ControlPlaneActionOutcome::AlreadySatisfied
+    );
+}
+
+#[test]
+fn control_plane_http_run_matches_the_service_fixture() {
+    register_fixture_control_plane_provider();
+    let expected = fixture_control_plane_run();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
+        body: None,
+    })
+    .expect("run");
+    assert_eq!(response.status, 200);
+    let result: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(result.ok);
+    let resource = result.resource.expect("resource");
+    assert_eq!(resource, expected);
+    assert_eq!(resource.schema, CONTROL_PLANE_RUN_SCHEMA);
+    assert_eq!(resource.run.as_str(), CONTROL_PLANE_FIXTURE_RUN);
+}
+
+#[test]
+fn control_plane_run_lookup_miss_is_a_structured_not_found() {
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: "/v1/control-plane/runs/no-such-agent-task-run".to_string(),
+        body: None,
+    })
+    .expect("typed not-found envelope");
+    assert_eq!(response.status, 404);
+    let result: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(!result.ok);
+    let error = result.error.expect("error");
+    assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
+    assert!(!error.retryable);
+    assert!(error.message.contains("no-such-agent-task-run"));
+}
+
+#[test]
+fn control_plane_http_events_resume_from_an_opaque_typed_cursor() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/events?cursor=1"),
+        body: None,
+    })
+    .expect("events");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.events");
+    let result: ControlPlaneResult<ControlPlaneEventPage> =
+        serde_json::from_value(response.body).expect("result");
+    let page = result.resource.expect("resource");
+    assert_eq!(page.schema, CONTROL_PLANE_EVENT_PAGE_SCHEMA);
+    assert_eq!(page.run.as_str(), CONTROL_PLANE_FIXTURE_RUN);
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].sequence, 2);
+    assert_eq!(page.events[0].data["state"], "succeeded");
+    assert_eq!(
+        page.next_cursor.as_ref().map(EventCursor::as_str),
+        Some("2")
+    );
+}
+
+#[test]
+fn control_plane_event_errors_are_typed() {
+    register_fixture_control_plane_provider();
+    for (path, status, class) in [
+        (
+            "/v1/control-plane/runs/no-such-agent-task-run/events",
+            404,
+            ControlPlaneErrorClass::NotFound,
+        ),
+        (
+            "/v1/control-plane/runs/agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751/events?cursor=invalid",
+            400,
+            ControlPlaneErrorClass::InvalidArgument,
+        ),
+    ] {
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: path.to_string(),
+            body: None,
+        })
+        .expect("typed error");
+        assert_eq!(response.status, status);
+        let result: ControlPlaneResult<ControlPlaneEventPage> =
+            serde_json::from_value(response.body).expect("result");
+        assert_eq!(result.error.expect("error").class, class);
+    }
+}
+
+#[test]
+fn control_plane_run_id_is_bounded_before_the_record_lookup() {
     let oversized = "a".repeat(4096);
-    let error = http_api::handle(HttpApiRequest {
+    let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
-        path: format!("/agent-task/runs/{oversized}"),
+        path: format!("/v1/control-plane/runs/{oversized}"),
         body: None,
     })
-    .expect_err("an oversized agent-task run id is rejected");
-
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert_eq!(error.details["field"], "run_id");
+    .expect("typed invalid-argument envelope");
+    assert_eq!(response.status, 400);
+    let result: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(!result.ok);
+    let error = result.error.expect("error");
+    assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+    assert!(!error.retryable);
     assert!(
         !error.message.contains(&oversized),
         "an oversized id must not be reflected into the error message",
@@ -648,7 +954,7 @@ fn runs_list_includes_active_runner_jobs() {
         ObservationStore::open_initialized().expect("store");
         let store = JobStore::default();
         let job = store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "homeboy-lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),

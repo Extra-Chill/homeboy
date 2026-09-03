@@ -1,9 +1,9 @@
 use super::{
     action, is_active, ms_to_rfc3339, ActivityCollector, ActivityContext, ActivityCrossRefs,
-    ActivityEvidenceRef, ActivityFilter, ActivityItem, ActivityNextAction, ActivityRunnerRefs,
-    ActivityState,
+    ActivityEvidenceRef, ActivityFailure, ActivityFilter, ActivityItem, ActivityNextAction,
+    ActivityRunnerRefs, ActivityState,
 };
-use crate::api_jobs::{self, Job, JobEvent};
+use crate::api_jobs::{self, Job, JobEvent, JobEventKind};
 use crate::{paths, Result};
 
 /// Resolve a single daemon-job activity item by id without listing every
@@ -43,7 +43,9 @@ pub(super) fn collect(collector: &mut ActivityCollector, filter: &ActivityFilter
 pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<ActivityItem> {
     let state = ActivityState::from(job.status);
     let job_id = job.id.to_string();
-    let (durable_run_id, agent_task_run_id) = job_run_refs(store, &job);
+    let events = store.events(job.id).unwrap_or_default();
+    let durable_run_id = job_run_id(&events);
+    let failure = job_failure(&events);
     Ok(ActivityItem {
         id: job_id.clone(),
         kind: job.operation.clone(),
@@ -64,7 +66,6 @@ pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<Acti
         },
         refs: ActivityCrossRefs {
             run_id: durable_run_id,
-            agent_task_run_id,
             runner_job_id: Some(job_id.clone()),
         },
         context: ActivityContext::default(),
@@ -84,19 +85,36 @@ pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<Acti
         source_projections: Vec::new(),
         state_conflicts: Vec::new(),
         next_actions: actions_for_job(None, &job_id, state),
+        failure,
     })
 }
 
-fn job_run_refs(store: &api_jobs::JobStore, job: &Job) -> (Option<String>, Option<String>) {
-    store.events(job.id).unwrap_or_default().iter().fold(
-        (None, None),
-        |(durable, agent_task), event| {
-            (
-                durable.or_else(|| event_metadata_string(event, &["durable_run_id", "run_id"])),
-                agent_task.or_else(|| event_metadata_string(event, &["agent_task_run_id"])),
-            )
-        },
-    )
+fn job_run_id(events: &[JobEvent]) -> Option<String> {
+    events.iter().fold(None, |durable, event| {
+        durable.or_else(|| {
+            event_metadata_string(event, &["durable_run_id", "run_id", "agent_task_run_id"])
+        })
+    })
+}
+
+fn job_failure(events: &[JobEvent]) -> Option<ActivityFailure> {
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == JobEventKind::Error)?;
+    let details = event.data.clone();
+    Some(ActivityFailure {
+        message: event
+            .message
+            .clone()
+            .unwrap_or_else(|| "job failed".to_string()),
+        code: details
+            .as_ref()
+            .and_then(|value| value.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        details,
+    })
 }
 
 fn event_metadata_string(event: &JobEvent, keys: &[&str]) -> Option<String> {
@@ -127,4 +145,33 @@ pub(super) fn actions_for_job(
         actions.push(action("daemon status", "homeboy daemon status"));
     }
     actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_error_event_projects_typed_activity_failure() {
+        let event = JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::new_v4(),
+            kind: JobEventKind::Error,
+            timestamp_ms: 1,
+            message: Some("Lab staging failed to resolve a rig package".to_string()),
+            data: Some(serde_json::json!({
+                "classification": "lab_staging",
+                "code": "validation.invalid_argument",
+                "details": { "field": "rig" }
+            })),
+        };
+
+        let failure = job_failure(&[event]).expect("failure projection");
+        assert_eq!(
+            failure.message,
+            "Lab staging failed to resolve a rig package"
+        );
+        assert_eq!(failure.code.as_deref(), Some("validation.invalid_argument"));
+        assert_eq!(failure.details.expect("details")["details"]["field"], "rig");
+    }
 }

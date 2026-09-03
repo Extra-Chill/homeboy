@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::component;
 use crate::deps::{self, DependencyInstallResult};
-use crate::extension_store::is_extension_linked;
+use crate::extension::catalog::is_extension_linked;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize)]

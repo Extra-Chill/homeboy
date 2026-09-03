@@ -53,7 +53,7 @@ pub(crate) fn run_command_output(
             let bounded_operation = agent_task_bounded_operation(&args);
             if matches!(
                 &args.command,
-                crate::commands::agent_task::AgentTaskCommand::Cook(_)
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) if !cook_args.preview
             ) {
                 if let Some(path) = output_file {
                     let full = agent_task_requests_full_output(&args);
@@ -231,7 +231,6 @@ pub(crate) fn run_command_output(
             let summarize = matches!(
                 args.command,
                 Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
-                    | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
                     | Some(crate::commands::cleanup::CleanupCommand::AutomaticRetention)
             ) && !homeboy::core::lab_routing::is_lab_offload_subprocess();
             command_run_with_summary(
@@ -248,9 +247,11 @@ pub(crate) fn run_command_output(
             let summarize_show = args.show_summary_eligible() && operator_output;
             let summarize_dossier = args.dossier_summary_eligible() && operator_output;
             let summarize_proof = args.proof_summary_eligible() && operator_output;
-            command_run_with_summary(
-                dispatch(Commands::Runs(args), spec, placement),
-                |payload, _| {
+            let result = dispatch(Commands::Runs(args), spec, placement);
+            if summarize_show {
+                runs_show_command_run(result)
+            } else {
+                command_run_with_summary(result, |payload, _| {
                     if let Some(rendered) =
                         super::runs_summary::render_runs_field_selection(payload)
                     {
@@ -264,8 +265,8 @@ pub(crate) fn run_command_output(
                     } else {
                         None
                     }
-                },
-            )
+                })
+            }
         }
         Commands::Release(args) => {
             let full = args.requests_full_output();
@@ -285,6 +286,22 @@ pub(crate) fn run_command_output(
     };
 
     run.with_command(spec.name)
+}
+
+fn runs_show_command_run((output_file_result, exit_code): JsonRun) -> CommandRun {
+    let stdout_result = output_file_result
+        .clone()
+        .map(|payload| super::runs_summary::project_runs_show_output(&payload));
+    let summary_stdout = output_file_result
+        .as_ref()
+        .ok()
+        .and_then(super::runs_summary::render_runs_show_summary);
+    CommandRun::from_command_stdout_result("runs", stdout_result, exit_code)
+        .with_output_file_result(output_file_result)
+        .with_presentation(CommandPresentation {
+            stdout: summary_stdout,
+            stderr: None,
+        })
 }
 
 /// Release payloads contain execution plans and step transcripts that can be
@@ -328,6 +345,16 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         })
     };
     let step_data = |name: &str| step(name).and_then(|step| step.get("data"));
+    // A rolled-back release still created real artifacts. The pipeline records
+    // them here, so the operator summary must read them instead of reporting
+    // null just because the owning step's data is gone.
+    let rollback = run_result.and_then(|value| value.get("rollback"));
+    let rollback_str = |key: &str| {
+        rollback
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(bounded_release_text)
+    };
     let version = step_data("version");
     let artifacts = step_data("artifacts.authority")
         .and_then(|data| data.get("artifacts"))
@@ -415,7 +442,7 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         "phase": result.get("phase").and_then(Value::as_str).map(bounded_release_text),
         "old_version": version.and_then(|data| data.get("old_version")).and_then(Value::as_str).map(bounded_release_text),
         "new_version": result.get("new_version").and_then(Value::as_str).map(bounded_release_text),
-        "release_commit": step_data("git.commit").and_then(|data| data.get("commit").or_else(|| data.get("sha"))).or_else(|| step_data("git.tag").and_then(|data| data.get("head"))).and_then(Value::as_str).map(bounded_release_text),
+        "release_commit": step_data("git.commit").and_then(|data| data.get("commit").or_else(|| data.get("sha"))).or_else(|| step_data("git.tag").and_then(|data| data.get("head"))).and_then(Value::as_str).map(bounded_release_text).or_else(|| rollback_str("release_commit")),
         "tag": result.get("tag").and_then(Value::as_str).map(bounded_release_text),
         "push_target": step_data("git.push").and_then(|data| data.get("target").or_else(|| data.get("remote"))).and_then(Value::as_str).map(bounded_release_text),
         "artifacts": artifacts,
@@ -423,6 +450,13 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         "gates": run_result.and_then(|value| value.get("summary")).map(|summary| serde_json::json!({
             "total": summary.get("total_steps"), "succeeded": summary.get("succeeded"),
             "failed": summary.get("failed"), "skipped": summary.get("skipped"), "missing": summary.get("missing"),
+        })),
+        "rollback": rollback.map(|_| serde_json::json!({
+            "status": rollback_str("status"),
+            "tag_state": rollback_str("tag_state"),
+            "release_commit": rollback_str("release_commit"),
+            "original_head": rollback_str("original_head"),
+            "final_head": rollback_str("final_head"),
         })),
         "warnings": warnings,
         "evidence_refs": evidence_refs,
@@ -866,8 +900,8 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
     match &args.command {
         AgentTaskCommand::Cook(args) => args.full,
         AgentTaskCommand::CookContinue(args) => args.full,
-        AgentTaskCommand::Status(args) => args.full,
-        AgentTaskCommand::Artifacts(args) | AgentTaskCommand::Resume(args) => args.full,
+        AgentTaskCommand::Artifacts(args) => args.full,
+        AgentTaskCommand::Resume(args) => args.full,
         AgentTaskCommand::Evidence(args) => args.full,
         AgentTaskCommand::Diagnose(args) => args.full,
         AgentTaskCommand::Review(args) => args.full,
@@ -1055,6 +1089,96 @@ fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_show_stdout_is_compact_while_output_file_payload_stays_lossless() {
+        let payload = serde_json::json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "run-output-detail",
+                    "kind": "runner-exec",
+                    "status": "failed",
+                    "metadata": {
+                        "runner_terminal_projection": { "state": "terminal_checkpointed", "status": "failed" },
+                        "source_snapshot": { "marker": "full-source-snapshot", "body": "x".repeat(256 * 1024) },
+                    },
+                    "artifacts": [],
+                },
+            },
+        });
+
+        let run = runs_show_command_run((Ok(payload.clone()), 1));
+        let stdout = run.stdout_result.expect("compact stdout");
+        let output = run
+            .output_file_result
+            .expect("lossless output result")
+            .expect("lossless output");
+
+        assert!(stdout
+            .pointer("/payload/run/metadata/source_snapshot")
+            .is_none());
+        assert_eq!(
+            stdout.pointer("/payload/run/metadata/operator_projection/authoritative_runner_terminal_state/status"),
+            Some(&Value::String("failed".to_string()))
+        );
+        assert_eq!(
+            output.pointer("/payload/run/metadata/source_snapshot/marker"),
+            Some(&Value::String("full-source-snapshot".to_string()))
+        );
+        assert_eq!(output, payload);
+    }
+
+    /// A rolled-back release must still report the commit it created.
+    ///
+    /// Regression for #13708: `release_commit` was sourced only from the
+    /// `git.commit`/`git.tag` step data. When the pipeline rolled back, that
+    /// data was gone and the summary reported `null` while the same payload
+    /// recorded the real commit under `rollback`. Operators acting on that
+    /// summary can re-release or re-tag a version that already published.
+    #[test]
+    fn rolled_back_release_summary_reports_the_commit_it_created() {
+        let payload = serde_json::json!({
+            "result": {
+                "component_id": "data-machine-code",
+                "status": "partial",
+                "phase": "publish",
+                "run": { "result": {
+                    "status": "partial_success",
+                    "steps": [{ "id": "preflight.test", "type": "preflight.test",
+                                "status": "failed", "error": "Tests failed (exit code 1)" }],
+                    "rollback": {
+                        "status": "restored",
+                        "tag_state": "not_created",
+                        "release_commit": "1e37e68ddbdb149b12c93389dd95d14da4c8082e",
+                        "original_head": "d1c8cd8e4d0ed0064c38c56c182a1fa70906533e",
+                        "final_head": "d1c8cd8e4d0ed0064c38c56c182a1fa70906533e",
+                    },
+                }},
+            }
+        });
+
+        let projection = bounded_release_projection(&payload, 1, None);
+
+        assert_eq!(
+            projection.get("release_commit").and_then(Value::as_str),
+            Some("1e37e68ddbdb149b12c93389dd95d14da4c8082e"),
+            "a rolled-back release must surface the commit it created, not null"
+        );
+        let rollback = projection
+            .get("rollback")
+            .expect("rollback evidence must reach the operator summary");
+        assert_eq!(
+            rollback.get("status").and_then(Value::as_str),
+            Some("restored")
+        );
+        assert_eq!(
+            rollback.get("tag_state").and_then(Value::as_str),
+            Some("not_created"),
+            "operators must be able to tell what happened to the tag"
+        );
+    }
     use crate::commands::agent_task::{
         AgentTaskArgs, AgentTaskCommand, AgentTaskControllerArgs, AgentTaskControllerCommand,
         AgentTaskControllerDispatchArgs, AgentTaskControllerRunFromSpecArgs, StatusArgs,

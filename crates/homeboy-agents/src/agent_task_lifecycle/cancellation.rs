@@ -774,7 +774,7 @@ fn cancel_resolved_run_in_store(
 /// uses exactly these two rooted forms.
 ///
 /// The caller mutates `record` in place and persists it itself, so no record
-/// write happens here. There is no ambient wrapper: `status_in_store` is the
+/// write happens here. There is no ambient wrapper: `reconcile_status_in_store` is the
 /// only caller, and the store it hands down is the one its own caller
 /// injected.
 pub(super) fn reconcile_controller_job_cancellation_in_store(
@@ -900,14 +900,14 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     if record.is_runner_backed() {
         let runner_id = record.runner_id().map(str::to_string);
         let runner_job_id = record.runner_job_id().map(str::to_string);
-        if runner_id.as_deref().is_some_and(|runner_id| {
+        let runner_removed = runner_id.as_deref().is_some_and(|runner_id| {
             super::runner_continuation::with_runner_continuation(|provider| {
                 provider.runner_authority(runner_id) == RunnerAuthority::Removed
             })
-        }) {
-            // A successful registry inventory proved the original daemon
-            // authority was removed. There is no remote job left to cancel, so
-            // reclaim only the durable controller projection.
+        });
+        if runner_removed || record.is_locally_reconcilable_after_runner_idle() {
+            // Removed authority or authoritative idle evidence for exact
+            // zero-work queued residue means no remote job remains to cancel.
             return Ok(LiveCancellationOutcome::NotRunning);
         }
         if let (Some(runner_id), Some(runner_job_id)) =
@@ -967,8 +967,8 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     }
 
     // No reachable live process (stale running record, or no recorded pid): the
-    // record is being reclaimed. If a pid was recorded, still hand back recovery
-    // commands so a now-orphaned tree can be cleaned up by hand.
+    // record is being reclaimed. A dead PID is authoritative absence, so do not
+    // recommend signals that cannot execute against it.
     if let Some(pid) = owner_pid {
         return Ok(LiveCancellationOutcome::Unsupported(
             UnsupportedLiveCancellation {
@@ -976,7 +976,7 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
                 owner_pid: Some(pid),
                 runner_id: None,
                 runner_job_id: None,
-                recovery_commands: homeboy_core::process::process_tree_recovery_commands(pid),
+                recovery_commands: Vec::new(),
             },
         ));
     }

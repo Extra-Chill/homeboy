@@ -21,8 +21,7 @@ use homeboy_core::cook_status::CookDisposition;
 use homeboy_core::{Error, Result};
 
 use super::cook::{
-    AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookPrimaryFailure,
-    AgentTaskCookRecoveryAction, AgentTaskCookReport, AgentTaskCookServiceOptions,
+    AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookReport, CookRequest,
 };
 use super::cook_promotion::{cook_report, CookReportInput};
 use super::cook_recipe::CookRecipeStore;
@@ -218,9 +217,7 @@ impl<'a> CookExecutionPreparation<'a> {
 /// Persist the controller-owned initial attempt before transport preparation so
 /// runner eligibility failures remain addressable through the cook alias.
 #[cfg(test)]
-pub(crate) fn materialize_initial_cook_attempt(
-    options: &AgentTaskCookServiceOptions,
-) -> Result<()> {
+pub(crate) fn materialize_initial_cook_attempt(options: &CookRequest) -> Result<()> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, options)
@@ -233,7 +230,7 @@ pub(crate) fn materialize_initial_cook_attempt(
 pub(crate) fn materialize_initial_cook_attempt_with_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
 ) -> Result<()> {
     materialize_initial_cook_attempt_with_store_and_lifecycle(
         recipe_store,
@@ -247,7 +244,7 @@ pub(crate) fn materialize_initial_cook_attempt_with_stores(
 pub(crate) fn materialize_initial_cook_attempt_with_stores_outcome(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
     recipe_created_by_invocation: bool,
 ) -> Result<bool> {
     materialize_initial_cook_attempt_with_store_and_lifecycle(
@@ -261,13 +258,13 @@ pub(crate) fn materialize_initial_cook_attempt_with_stores_outcome(
 fn materialize_initial_cook_attempt_with_store_and_lifecycle(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
     recipe_created_by_invocation: bool,
 ) -> Result<bool> {
     CookExecutionPreparation::new(recipe_store, lifecycle_store).materialize_with_runtime(
-        &options.cook_id,
-        &options.initial_run_id,
-        &options.initial_plan,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        &options.identity.initial_plan,
         Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
@@ -452,7 +449,7 @@ fn ensure_cook_attempt_index(
 /// Record a failure for an already materialized Cook attempt using its exact
 /// recipe and lifecycle roots.
 ///
-/// `agent_task_lifecycle::status` is reconciliation, not a pure rooted read,
+/// `agent_task_lifecycle::reconcile_status` is not a pure rooted read,
 /// so it is intentionally outside this exact-store seam.
 fn record_materialized_cook_pre_execution_failure(
     recipe_store: &CookRecipeStore,
@@ -609,54 +606,7 @@ pub(crate) fn pre_execution_failure_report(
     });
     report.value.terminal_phase = failure.phase;
     report.value.terminal_failure_classification = failure.classification;
-    report.value.primary_failure = provider_primary_failure(
-        report.value.latest_run_id.as_deref(),
-        &phase,
-        &error.details,
-    );
     report
-}
-
-fn provider_primary_failure(
-    run_id: Option<&str>,
-    phase: &str,
-    details: &Value,
-) -> Option<AgentTaskCookPrimaryFailure> {
-    let run_id = run_id?.trim();
-    if run_id.is_empty() {
-        return None;
-    }
-    let compact =
-        homeboy_core::worktree_provider::compact_worktree_provider_failure_details(details)?;
-    let provider_id = compact.get("provider_id")?.as_str()?.to_string();
-    let operation = compact.get("operation")?.as_str()?.to_string();
-    let exit_code = compact.get("exit_code")?.as_i64()?;
-    let stderr_excerpt = compact.get("stderr_excerpt")?.as_str()?.to_string();
-    let repair = details
-        .get("worktree_provider_cwd_recovery_command")
-        .and_then(Value::as_str)
-        .filter(|command| !command.trim().is_empty());
-    let (action, command) = repair
-        .map(|command| ("repair", command.to_string()))
-        .unwrap_or_else(|| {
-            (
-                "diagnose",
-                format!("homeboy agent-task diagnose {run_id} --full"),
-            )
-        });
-    Some(AgentTaskCookPrimaryFailure {
-        schema: "homeboy/agent-task-cook-primary-failure/v1",
-        provider_id,
-        operation,
-        phase: phase.to_string(),
-        exit_code,
-        stderr_excerpt,
-        evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
-        next_action: AgentTaskCookRecoveryAction {
-            action: action.to_string(),
-            command,
-        },
-    })
 }
 
 /// Pre-execution failures happen before a provider can receive work. Persist a
@@ -856,95 +806,13 @@ mod tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
+    use crate::agent_task_service::cook::{
+        CookAiDisclosure, CookFinalization, CookIdentity, CookProviderTransport, CookRetryPolicy,
+        CookWorkspace,
+    };
     use crate::agent_task_service::cook_recipe::{
         AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, COOK_RECIPE_SCHEMA,
     };
-
-    #[test]
-    fn provider_primary_failure_prefers_known_repair_and_references_full_evidence() {
-        let details = serde_json::json!({
-            "worktree_provider_id": "dmc",
-            "worktree_provider_operation": "resolve",
-            "worktree_provider_cwd_recovery_command": "homeboy agent-task cook --cwd /repo --to-worktree repo@fix",
-            "command_evidence": {
-                "command": "studio wp datamachine-code workspace show repo@fix",
-                "exit_code": 1,
-                "stderr": "DMC standalone identity does not provide tracker ownership.\nfull context remains durable",
-            },
-        });
-
-        let failure = provider_primary_failure(
-            Some("agent-task-provider-failure"),
-            "transport_dispatcher_prepare",
-            &details,
-        )
-        .expect("typed provider failure");
-
-        assert_eq!(failure.provider_id, "dmc");
-        assert_eq!(failure.operation, "resolve");
-        assert_eq!(failure.phase, "transport_dispatcher_prepare");
-        assert_eq!(failure.exit_code, 1);
-        assert_eq!(
-            failure.stderr_excerpt,
-            "DMC standalone identity does not provide tracker ownership."
-        );
-        assert_eq!(
-            failure.evidence_ref,
-            "homeboy://agent-task/run/agent-task-provider-failure/status"
-        );
-        assert_eq!(failure.next_action.action, "repair");
-        assert_eq!(
-            failure.next_action.command,
-            "homeboy agent-task cook --cwd /repo --to-worktree repo@fix"
-        );
-        let projected = serde_json::to_string(&failure).expect("serialize primary failure");
-        assert!(!projected.contains("full context remains durable"));
-        assert!(!projected.contains("command_evidence"));
-    }
-
-    #[test]
-    fn provider_primary_failure_falls_back_to_exact_diagnosis() {
-        let details = serde_json::json!({
-            "worktree_provider_id": "dmc",
-            "worktree_provider_operation": "resolve",
-            "command_evidence": {
-                "exit_code": 1,
-                "stderr": "",
-            },
-        });
-
-        let failure = provider_primary_failure(
-            Some("agent-task-provider-failure"),
-            "worktree_provider_lookup",
-            &details,
-        )
-        .expect("typed provider failure");
-
-        assert_eq!(failure.stderr_excerpt, "");
-        assert_eq!(failure.next_action.action, "diagnose");
-        assert_eq!(
-            failure.next_action.command,
-            "homeboy agent-task diagnose agent-task-provider-failure --full"
-        );
-    }
-
-    #[test]
-    fn non_provider_pre_execution_failure_has_no_provider_primary_failure() {
-        let details = serde_json::json!({
-            "field": "gate_declaration",
-            "command_evidence": {
-                "exit_code": 1,
-                "stderr": "not a provider failure",
-            },
-        });
-
-        assert!(provider_primary_failure(
-            Some("agent-task-preflight-failure"),
-            "gate_declaration_preflight",
-            &details,
-        )
-        .is_none());
-    }
 
     #[test]
     fn retryable_pre_execution_terminal_does_not_cancel_runtime_admission() {
@@ -1080,34 +948,40 @@ mod tests {
         )
     }
 
-    fn options_for(
-        cook_id: &str,
-        run_id: &str,
-        initial_plan: AgentTaskPlan,
-    ) -> AgentTaskCookServiceOptions {
-        AgentTaskCookServiceOptions {
-            cook_id: cook_id.to_string(),
-            initial_run_id: run_id.to_string(),
-            initial_plan,
-            to_worktree: format!("fixture@{cook_id}"),
-            source_worktree_path: None,
-            provider_command: None,
-            provider_invocation: None,
+    fn options_for(cook_id: &str, run_id: &str, initial_plan: AgentTaskPlan) -> CookRequest {
+        CookRequest {
+            identity: CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan,
+            },
+            workspace: CookWorkspace {
+                to_worktree: format!("fixture@{cook_id}"),
+                source_worktree_path: None,
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            retry_policy: CookRetryPolicy { max_attempts: 1 },
+            finalization: CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "Paired-store materialization".to_string(),
+                commit_message: "test".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: CookAiDisclosure {
+                ai_tool: "test".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
-            max_attempts: 1,
-            no_finalize: true,
-            draft_pr: false,
-            base: "main".to_string(),
-            task_base_sha: None,
-            head: None,
-            title: "Paired-store materialization".to_string(),
-            commit_message: "test".to_string(),
-            source_refs: Vec::new(),
-            protected_branches: Vec::new(),
-            ai_tool: "test".to_string(),
-            ai_model: None,
-            ai_used_for: "test".to_string(),
-            attempt_dispatcher: None,
             harvest_context: Default::default(),
         }
     }

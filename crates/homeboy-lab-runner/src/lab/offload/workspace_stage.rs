@@ -7,9 +7,11 @@ use crate::offload_changed_since::{
     degrade_changed_since_to_full_scope, remove_controller_changed_since_args,
 };
 use homeboy_core::runner_execution_envelope::{
-    PathMaterializationEntry, PathMaterializationPlan,
+    PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+};
+use homeboy_lab_contract::path_materialization::{
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
 };
 use std::path::{Path, PathBuf};
 
@@ -64,6 +66,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) workspace_mapping: Vec<LabWorkspaceMappingEntry>,
     pub(crate) path_materialization_plan: PathMaterializationPlan,
     pub(crate) source_snapshot: SourceSnapshot,
+    pub(crate) workspace_snapshots: Vec<SourceSnapshot>,
     pub(crate) remapped_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
     pub(crate) runner_required_extensions: Vec<String>,
@@ -494,6 +497,22 @@ fn prepare_lab_offload_workspace_stage_inner(
     source_snapshot.synthetic_checkout_tree =
         synced.current_workspace.synthetic_checkout_tree.clone();
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
+    let mut workspace_snapshots = vec![source_snapshot.clone()];
+    for extra in &synced_extra_workspaces {
+        let mut snapshot = homeboy_core::source_snapshot::collect_local(
+            runner_id,
+            Path::new(&extra.local_path),
+            Some(&extra.remote_path),
+            "lab_offload",
+        );
+        snapshot.sync_excludes = extra.excludes.clone();
+        snapshot.workspace_snapshot_identity = Some(extra.snapshot_identity.clone());
+        snapshot.synthetic_checkout_commit =
+            extra.current_workspace.synthetic_checkout_commit.clone();
+        snapshot.synthetic_checkout_ref = extra.current_workspace.synthetic_checkout_ref.clone();
+        snapshot.synthetic_checkout_tree = extra.current_workspace.synthetic_checkout_tree.clone();
+        workspace_snapshots.push(snapshot);
+    }
     if contract.requires_extension_parity {
         plan = with_step(
             plan,
@@ -669,14 +688,8 @@ fn prepare_lab_offload_workspace_stage_inner(
     );
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
-    // The target worktree is already materialized on the runner. Give portable
-    // cooks and promotions a local adapter so applying patches and verification
-    // stay on that workspace instead of requiring a controller-side provider.
-    let remapped_args = inject_materialized_promotion_provider(
-        remapped_args,
-        command_prefix_argv.first().map(String::as_str),
-        &remote_cwd,
-    );
+    // Runner execution context binds native promotion to this materialized
+    // checkout while preserving the controller's worktree identity in argv.
     let (remapped_args, agent_task_run_id) = ensure_agent_task_lifecycle_identity_with(
         &remapped_args,
         run_isolation_token.as_deref(),
@@ -718,6 +731,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         workspace_mapping,
         path_materialization_plan,
         source_snapshot,
+        workspace_snapshots,
         remapped_args,
         agent_task_run_id,
         runner_required_extensions,
@@ -784,19 +798,8 @@ fn materialize_agent_task_evidence_inputs_on_runner(
                 None,
             )
         })?;
-        let relative = canonical.strip_prefix(&source).map_err(|_| {
-            Error::validation_invalid_argument(
-                "provider_evidence",
-                "Lab offload evidence must be projected inside the Cook workspace",
-                Some(path.clone()),
-                None,
-            )
-        })?;
-        let remote = format!(
-            "{}/{}",
-            remote_cwd.trim_end_matches('/'),
-            relative.display()
-        );
+        let remote =
+            runner_provider_evidence_path(&source, &canonical, remote_cwd, &declared.sha256)?;
         let parent = remote.rsplit_once('/').map_or("/", |(parent, _)| parent);
         transfer.ensure_directory(parent)?;
         transfer.upload_private_evidence_atomic(
@@ -810,11 +813,39 @@ fn materialize_agent_task_evidence_inputs_on_runner(
         )?;
         entries.push(workspace_mapping_entry_for_materialized_file(
             "provider_evidence",
-            "<controller-projected-evidence>",
+            canonical.display().to_string(),
             remote,
         ));
     }
     Ok(entries)
+}
+
+fn runner_provider_evidence_path(
+    source: &Path,
+    evidence: &Path,
+    remote_cwd: &str,
+    digest: &str,
+) -> Result<String> {
+    if let Ok(relative) = evidence.strip_prefix(source) {
+        return Ok(format!(
+            "{}/{}",
+            remote_cwd.trim_end_matches('/'),
+            relative.display()
+        ));
+    }
+    let digest = digest.trim_start_matches("sha256:");
+    if digest.is_empty() || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab evidence SHA-256 cannot identify a runner staging path",
+            Some(digest.to_string()),
+            None,
+        ));
+    }
+    Ok(format!(
+        "{}-homeboy-artifacts/provider-evidence/{digest}",
+        remote_cwd.trim_end_matches('/'),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -891,16 +922,21 @@ fn declared_agent_task_evidence_inputs(
 pub(crate) fn workspace_path_materialization_plan(
     workspace_mapping: &[LabWorkspaceMappingEntry],
     owner: &str,
-    materialization_mode: impl Into<String>,
+    primary_materialization_mode: impl Into<String>,
 ) -> PathMaterializationPlan {
-    let materialization_mode = materialization_mode.into();
+    let primary_materialization_mode = primary_materialization_mode.into();
     PathMaterializationPlan::new(workspace_mapping.iter().map(|entry| {
+        let materialization_mode = if entry.role() == "primary" {
+            primary_materialization_mode.as_str()
+        } else {
+            entry.sync_mode()
+        };
         PathMaterializationEntry::new(
             entry.role(),
             owner,
             (!entry.local_path().trim().is_empty()).then(|| entry.local_path().to_string()),
             entry.remote_path(),
-            &materialization_mode,
+            materialization_mode,
             PATH_MATERIALIZATION_STATUS_MATERIALIZED,
         )
     }))
@@ -1064,45 +1100,6 @@ fn build_lab_offload_remote_command(
     let remote_args = inject_required_extension_args(remote_args, &plan.command_extensions);
     command.extend(remote_args.into_iter().skip(1));
     command
-}
-
-fn inject_materialized_promotion_provider(
-    mut args: Vec<String>,
-    homeboy_path: Option<&str>,
-    workspace: &str,
-) -> Vec<String> {
-    let Some(agent_task_index) = args.iter().position(|arg| arg == "agent-task") else {
-        return args;
-    };
-    if !matches!(
-        args.get(agent_task_index + 1).map(String::as_str),
-        Some("cook" | "promote")
-    ) || args.iter().any(|arg| {
-        arg == "--provider-command"
-            || arg.starts_with("--provider-command=")
-            || arg == "--provider-argv"
-            || arg.starts_with("--provider-argv=")
-    }) {
-        return args;
-    }
-    let Some(homeboy_path) = homeboy_path.filter(|path| !path.trim().is_empty()) else {
-        return args;
-    };
-
-    let insert_at = args
-        .iter()
-        .position(|arg| arg == "--")
-        .unwrap_or(args.len());
-    args.splice(
-        insert_at..insert_at,
-        [
-            format!("--provider-argv={homeboy_path}"),
-            "--provider-argv=agent-task".to_string(),
-            "--provider-argv=promotion-provider".to_string(),
-            format!("--provider-argv=--workspace={workspace}"),
-        ],
-    );
-    args
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1429,6 +1426,27 @@ mod tests {
     }
 
     #[test]
+    fn controller_owned_evidence_stages_outside_runner_candidate_by_digest() {
+        assert_eq!(
+            runner_provider_evidence_path(
+                Path::new("/controller/candidate"),
+                Path::new("/controller/artifacts/provider-evidence/blobs/abc"),
+                "/runner/candidate",
+                "sha256:abc",
+            )
+            .expect("external controller evidence"),
+            "/runner/candidate-homeboy-artifacts/provider-evidence/abc"
+        );
+        assert!(runner_provider_evidence_path(
+            Path::new("/controller/candidate"),
+            Path::new("/controller/artifacts/evidence"),
+            "/runner/candidate",
+            "sha256:../escape",
+        )
+        .is_err());
+    }
+
+    #[test]
     fn same_rig_jobs_derive_distinct_registry_roots_from_unique_workspaces() {
         let first = remote_lab_rig_registry_root("/runner/_lab_workspaces/app-job-one");
         let second = remote_lab_rig_registry_root("/runner/_lab_workspaces/app-job-two");
@@ -1531,8 +1549,12 @@ mod tests {
             "wordpress-fixture".to_string(),
         ];
 
+        let command_prefix = lab_offload_command_prefix(
+            Path::new("/runner/workspaces/node-project"),
+            "/runner/bin/homeboy",
+        );
         let command = build_lab_offload_remote_command(
-            &["/runner/bin/homeboy".to_string()],
+            &command_prefix.argv,
             &args,
             "/runner/workspaces/node-project",
             &[],
@@ -1544,6 +1566,8 @@ mod tests {
             command,
             vec![
                 "/runner/bin/homeboy".to_string(),
+                "--placement".to_string(),
+                "local".to_string(),
                 "bench".to_string(),
                 "--extension".to_string(),
                 "wordpress".to_string(),
@@ -2175,7 +2199,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_cook_gets_materialized_workspace_promotion_provider() {
+    fn detached_cook_preserves_the_controller_worktree_identity() {
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -2191,11 +2215,7 @@ mod tests {
 
         let command = build_lab_offload_remote_command(
             &["/runner/bin/homeboy".to_string()],
-            &inject_materialized_promotion_provider(
-                args,
-                Some("/runner/bin/homeboy"),
-                "/runner/workspaces/homeboy",
-            ),
+            &args,
             "/runner/workspaces/homeboy",
             &[],
             None,
@@ -2216,30 +2236,7 @@ mod tests {
                 "homeboy@fix-7913",
                 "--verify",
                 "cargo test --lib",
-                "--provider-argv=/runner/bin/homeboy",
-                "--provider-argv=agent-task",
-                "--provider-argv=promotion-provider",
-                "--provider-argv=--workspace=/runner/workspaces/homeboy",
             ]
-        );
-    }
-
-    #[test]
-    fn detached_cook_preserves_explicit_promotion_provider() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--provider-command=custom-provider".to_string(),
-        ];
-
-        assert_eq!(
-            inject_materialized_promotion_provider(
-                args.clone(),
-                Some("/runner/bin/homeboy"),
-                "/runner/workspaces/homeboy",
-            ),
-            args
         );
     }
 
@@ -2262,11 +2259,7 @@ mod tests {
 
             let command = build_lab_offload_remote_command(
                 &["/runner/bin/homeboy".to_string()],
-                &inject_materialized_promotion_provider(
-                    args,
-                    Some("/runner/bin/homeboy"),
-                    "/runner/workspaces/homeboy-fix-7964",
-                ),
+                &args,
                 "/runner/workspaces/homeboy-fix-7964",
                 &[],
                 None,
@@ -2274,13 +2267,10 @@ mod tests {
             );
 
             assert!(command.contains(&"/runner/artifacts/detached/aggregate.json".to_string()));
-            assert!(command.windows(4).any(|args| args
-                == [
-                    "--provider-argv=/runner/bin/homeboy",
-                    "--provider-argv=agent-task",
-                    "--provider-argv=promotion-provider",
-                    "--provider-argv=--workspace=/runner/workspaces/homeboy-fix-7964",
-                ]));
+            assert!(command
+                .windows(2)
+                .any(|args| args == ["--to-worktree", "homeboy@fix-7964"]));
+            assert!(!command.iter().any(|arg| arg.starts_with("--provider-")));
             assert!(!command.iter().any(|arg| arg.contains("/Users/")));
         }
     }
@@ -2679,6 +2669,33 @@ mod tests {
         assert_eq!(plan.entries[0].remote_path, "/runner/workspaces/homeboy");
         assert_eq!(plan.entries[0].materialization_mode, "snapshot");
         assert_eq!(plan.entries[0].validation_status, "materialized");
+    }
+
+    #[test]
+    fn workspace_path_materialization_plan_preserves_each_extra_workspace_mode() {
+        let primary = test_synced_workspace(
+            "/controller/workspaces/primary",
+            "/runner/workspaces/primary",
+        );
+        let mut provider = test_synced_workspace(
+            "/controller/workspaces/provider@issue",
+            "/runner/workspaces/provider@issue",
+        );
+        provider.sync_mode = RunnerWorkspaceSyncMode::SnapshotGit;
+        let workspace_mapping = vec![
+            workspace_mapping_entry("primary", &primary),
+            workspace_mapping_entry("agent_task_plan_config", &provider),
+        ];
+
+        let plan = workspace_path_materialization_plan(
+            &workspace_mapping,
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            RunnerWorkspaceSyncMode::Git.as_str(),
+        );
+
+        assert_eq!(plan.entries[0].materialization_mode, "git");
+        assert_eq!(plan.entries[1].role, "agent_task_plan_config");
+        assert_eq!(plan.entries[1].materialization_mode, "snapshot-git");
     }
 
     #[test]
@@ -3322,6 +3339,7 @@ mod tests {
             ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot:primary".to_string(),
+            workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
             prepared_workspace_lease: None,
             counts: crate::ByteFileCounts::default(),
             excludes: Vec::new(),

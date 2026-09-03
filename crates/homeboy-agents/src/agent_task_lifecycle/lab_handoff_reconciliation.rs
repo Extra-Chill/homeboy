@@ -8,6 +8,7 @@
 
 use super::*;
 use homeboy_core::api_jobs::RemoteRunnerJobRequest;
+use homeboy_runner_contract::RunnerApiSubmitRequest;
 
 // The ambient `reconcile_active_lab_runner_handoffs()` shim that used to sit
 // above this resolved a root and delegated straight here. It had no callers, so
@@ -32,7 +33,7 @@ use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 ///   key and binds the acceptance it gets back;
 /// * `expire_unaccepted_lab_handoff_in_store` takes `LabHandoffLock` on this
 ///   store's `run_dir` and terminalizes;
-/// * `status_in_store` takes two advisory locks of its own and has roughly
+/// * `reconcile_status_in_store` takes two advisory locks of its own and has roughly
 ///   twenty durable write sites.
 ///
 /// Selecting a run from one installation's queue and then expiring or
@@ -78,7 +79,7 @@ pub fn reconcile_active_lab_runner_handoffs_in_store(
         // ambient `status` entry point delegates to, with its own defaults:
         // `AgentTaskStatusOptions::default()` and a Cook-alias-resolving
         // (non-exact) read, which is exactly what `status` passed.
-        if status_in_store(
+        if reconcile_status_in_store(
             lifecycle_store,
             &run_id,
             AgentTaskStatusOptions::default(),
@@ -184,15 +185,88 @@ fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) ->
     else {
         return false;
     };
-    let Ok(request) = serde_json::from_value::<RemoteRunnerJobRequest>(
-        intent.get("replay_request").cloned().unwrap_or(Value::Null),
-    ) else {
+    let Ok(replay) = pending_runner_replay(intent) else {
         return false;
     };
-    request.runner_id == runner_id
-        && request.submission_key() == Some(submission_key)
+    replay.runner_id() == runner_id
+        && replay.submission_key() == Some(submission_key)
         && handoff.runner_id == runner_id
         && handoff.submission_key.as_deref() == Some(submission_key)
+}
+
+enum PendingRunnerReplay {
+    Envelope(RunnerApiSubmitRequest),
+    Legacy(RemoteRunnerJobRequest),
+}
+
+impl PendingRunnerReplay {
+    fn runner_id(&self) -> &str {
+        match self {
+            Self::Envelope(request) => request
+                .envelope
+                .dispatch
+                .as_ref()
+                .map(|dispatch| dispatch.runner_id.as_str())
+                .unwrap_or_default(),
+            Self::Legacy(request) => &request.runner_id,
+        }
+    }
+
+    fn submission_key(&self) -> Option<&str> {
+        match self {
+            Self::Envelope(request) => Some(request.submission_key.trim())
+                .filter(|submission_key| !submission_key.is_empty()),
+            Self::Legacy(request) => request.submission_key(),
+        }
+    }
+
+    fn cwd(&self) -> Option<&str> {
+        match self {
+            Self::Envelope(request) => request
+                .envelope
+                .dispatch
+                .as_ref()
+                .and_then(|dispatch| dispatch.cwd.as_deref()),
+            Self::Legacy(request) => request.cwd.as_deref(),
+        }
+    }
+
+    fn command(&self) -> &[String] {
+        match self {
+            Self::Envelope(request) => request
+                .envelope
+                .dispatch
+                .as_ref()
+                .map(|dispatch| dispatch.command.as_slice())
+                .unwrap_or_default(),
+            Self::Legacy(request) => &request.command,
+        }
+    }
+}
+
+fn pending_runner_replay(intent: &serde_json::Map<String, Value>) -> Result<PendingRunnerReplay> {
+    if let Some(envelope) = intent.get("replay_envelope_request") {
+        return serde_json::from_value(envelope.clone())
+            .map(PendingRunnerReplay::Envelope)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse envelope runner replay request".to_string()),
+                )
+            });
+    }
+    serde_json::from_value(intent.get("replay_request").cloned().ok_or_else(|| {
+        Error::internal_unexpected(
+            "pending runner submission intent has no complete replay request",
+        )
+    })?)
+    .map(PendingRunnerReplay::Legacy)
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse runner replay request".to_string()),
+        )
+    })
 }
 
 /// The replay decision and its consequence must name one installation. This
@@ -235,35 +309,32 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     let submission_key = string("submission_key").ok_or_else(|| {
         Error::internal_unexpected("pending runner submission intent has no submission key")
     })?;
-    let mut request: RemoteRunnerJobRequest =
-        serde_json::from_value(intent.get("replay_request").cloned().ok_or_else(|| {
-            Error::internal_unexpected(
-                "pending runner submission intent has no complete replay request",
-            )
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse runner replay request".to_string()),
-            )
-        })?;
-    if request.runner_id != runner_id {
+    let replay = pending_runner_replay(intent)?;
+    if replay.runner_id() != runner_id || replay.submission_key() != Some(&submission_key) {
         return Err(Error::internal_unexpected(
-            "runner replay request does not match pending runner",
+            "runner replay request does not match pending submission authority",
         ));
     }
-    let cwd = request.cwd.clone().unwrap_or_default();
-    let command = request.command.clone();
-    let mut metadata = request.metadata.take().unwrap_or_else(|| json!({}));
-    if !metadata.is_object() {
-        metadata = json!({});
-    }
-    metadata["submission_key"] = json!(submission_key);
-    metadata["durable_run_id"] = json!(run_id);
-    metadata["reconciled_from"] = json!("durable_detached_handoff_intent");
-    request.metadata = Some(metadata);
+    let cwd = replay.cwd().unwrap_or_default().to_string();
+    let command = replay.command().to_vec();
+    let submission = match replay {
+        PendingRunnerReplay::Envelope(request) => {
+            runner_continuation::RunnerContinuationSubmission::RunnerApi(request)
+        }
+        PendingRunnerReplay::Legacy(mut request) => {
+            let mut metadata = request.metadata.take().unwrap_or_else(|| json!({}));
+            if !metadata.is_object() {
+                metadata = json!({});
+            }
+            metadata["submission_key"] = json!(submission_key);
+            metadata["durable_run_id"] = json!(run_id);
+            metadata["reconciled_from"] = json!("durable_detached_handoff_intent");
+            request.metadata = Some(metadata);
+            runner_continuation::RunnerContinuationSubmission::LegacyReplay(request)
+        }
+    };
     match runner_continuation::with_runner_continuation(|provider| {
-        provider.submit_reverse_broker_job(&runner_id, request)
+        provider.submit_runner_api_request(&runner_id, submission)
     }) {
         Ok(job) => {
             record_detached_lab_run_in_store(
@@ -291,6 +362,67 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
             Ok(false)
         }
     }
+}
+
+/// Bind a direct-daemon job whose accepted response was lost after the daemon
+/// admitted it. Direct Lab admission records the reservation before `/exec`,
+/// and the daemon indexes active jobs by the durable run id, so this lookup
+/// recovers only that exact admitted handoff without submitting replacement
+/// work.
+pub(crate) fn recover_reserved_lab_runner_job_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let run_id = sanitize_run_id(run_id);
+    let record = lifecycle_store.read_record(&run_id)?;
+    if record.runner_job_id().is_some() || !record.has_planned_runner_execution() {
+        return Ok(false);
+    }
+    let Some(runner_id) = record.runner_id().map(str::to_string) else {
+        return Ok(false);
+    };
+    if record
+        .metadata
+        .pointer("/lab_admission_reservation/state")
+        .and_then(Value::as_str)
+        != Some("reserved")
+        || record
+            .metadata
+            .pointer("/lab_admission_reservation/runner_id")
+            .and_then(Value::as_str)
+            != Some(runner_id.as_str())
+    {
+        return Ok(false);
+    }
+    let Some(runner_job_id) = super::runner_continuation::with_runner_continuation(|provider| {
+        provider.runner_job_id_for_durable_run(&runner_id, &run_id)
+    })
+    .ok()
+    .flatten() else {
+        return Ok(false);
+    };
+    let remote_workspace = record
+        .metadata
+        .get("remote_workspace")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let remote_command = record
+        .metadata
+        .get("remote_command")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+        .unwrap_or_default();
+    record_detached_lab_run_in_store(
+        lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: &run_id,
+            runner_id: &runner_id,
+            runner_job_id: &runner_job_id,
+            remote_workspace,
+            remote_command: &remote_command,
+        },
+    )?;
+    Ok(true)
 }
 
 /// Resolve a possibly accepted submission without replaying it. This is used
@@ -337,21 +469,10 @@ pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
     let submission_key = string("submission_key").ok_or_else(|| {
         Error::internal_unexpected("pending runner submission intent has no submission key")
     })?;
-    let request: RemoteRunnerJobRequest =
-        serde_json::from_value(intent.get("replay_request").cloned().ok_or_else(|| {
-            Error::internal_unexpected(
-                "pending runner submission intent has no complete replay request",
-            )
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse runner replay request".to_string()),
-            )
-        })?;
-    if request.runner_id != runner_id {
+    let replay = pending_runner_replay(intent)?;
+    if replay.runner_id() != runner_id || replay.submission_key() != Some(&submission_key) {
         return Err(Error::internal_unexpected(
-            "runner replay request does not match pending runner",
+            "runner replay request does not match pending submission authority",
         ));
     }
     let lookup = runner_continuation::with_runner_continuation(|provider| {
@@ -365,8 +486,8 @@ pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
                     run_id: &run_id,
                     runner_id: &runner_id,
                     runner_job_id: &job.id.to_string(),
-                    remote_workspace: request.cwd.as_deref().unwrap_or_default(),
-                    remote_command: &request.command,
+                    remote_workspace: replay.cwd().unwrap_or_default(),
+                    remote_command: replay.command(),
                 },
             )?;
             Ok(true)
@@ -526,7 +647,7 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
 /// There is deliberately no ambient wrapper. Both outcomes this dispatches to
 /// write: the snapshot branch commits a binding, a live-progress update, or a
 /// terminal aggregate, and the confirmed-absence branch replaces the record
-/// with a terminal pre-execution failure. Its only caller is `status_in_store`
+/// with a terminal pre-execution failure. Its only caller is `reconcile_status_in_store`
 /// in `lifecycle_ops`, which already holds the store whose record it is
 /// reconciling. An ambient form would exist only to let a rooted status decide
 /// liveness against one installation's record and commit the result into

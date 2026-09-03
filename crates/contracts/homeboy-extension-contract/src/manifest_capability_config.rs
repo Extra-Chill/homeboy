@@ -187,3 +187,51 @@ pub struct RuntimeRequirementsConfig {
 pub struct RuntimeRequirementConfig {
     pub version: String,
 }
+
+/// Extension-owned remote recipe execution descriptor.
+///
+/// Typed since #13724. While this rode in `ExtensionManifest::extra` it had two
+/// readers that disagreed: one `.ok()`-discarded malformed entries, the other
+/// retained them so `runner recipe-providers` could report which declaration was
+/// broken and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecipeRunProviderDescriptor {
+    pub id: String,
+    pub version: String,
+    pub executable: String,
+    pub command: Vec<String>,
+}
+
+/// One declared recipe-run provider, retaining entries that do not satisfy the
+/// descriptor shape.
+///
+/// Rejecting a malformed entry at manifest load would fail the whole manifest
+/// and collapse a precise per-provider diagnostic ("requires id, version,
+/// executable, and argv beginning with executable") into "this extension's
+/// manifest is invalid". The malformed value is preserved so inventory can name
+/// the offending declaration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RecipeRunProviderDeclaration {
+    Descriptor(Box<RecipeRunProviderDescriptor>),
+    Malformed(serde_json::Value),
+}
+
+impl RecipeRunProviderDeclaration {
+    /// Best-effort string field read that works for both variants, so
+    /// diagnostics can name a provider that failed to satisfy the shape.
+    pub fn declared_str(&self, field: &str) -> Option<String> {
+        match self {
+            RecipeRunProviderDeclaration::Descriptor(descriptor) => match field {
+                "id" => Some(descriptor.id.clone()),
+                "version" => Some(descriptor.version.clone()),
+                "executable" => Some(descriptor.executable.clone()),
+                _ => None,
+            },
+            RecipeRunProviderDeclaration::Malformed(value) => value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        }
+    }
+}

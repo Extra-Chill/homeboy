@@ -60,7 +60,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
         let provider_secret_names = request
             .extension_env_providers
             .iter()
-            .map(|id| homeboy_extension::env_provider_secret_names(id))
+            .map(|id| homeboy_core::extension::invoke::declared_secret_names(id))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()

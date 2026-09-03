@@ -3,11 +3,11 @@ use super::{
     ActivityItem, ActivityRunnerRefs, ActivityState, ActivityTaskIdentity,
     WORKTREE_RESOURCE_SOURCE_STORE,
 };
-use crate::worktree_provider::{self, WorktreeProviderIdentity, WorktreeProviderWorkspace};
+use crate::worktree_provider::{self, WorktreeWorkspace};
 use crate::Result;
 
 pub(super) fn collect(collector: &mut ActivityCollector, filter: &ActivityFilter) -> Result<()> {
-    for workspace in worktree_provider::list_worktree_provider_inventory()? {
+    for workspace in worktree_provider::list_worktree_inventory()? {
         let item = item_from_workspace(workspace);
         if filter.matches(&item) {
             collector.insert(item);
@@ -16,11 +16,8 @@ pub(super) fn collect(collector: &mut ActivityCollector, filter: &ActivityFilter
     Ok(())
 }
 
-fn item_from_workspace(workspace: WorktreeProviderWorkspace) -> ActivityItem {
-    let provider_id = match &workspace.ownership.provider {
-        WorktreeProviderIdentity::Native => "native".to_string(),
-        WorktreeProviderIdentity::Configured(provider_id) => provider_id.clone(),
-    };
+fn item_from_workspace(workspace: WorktreeWorkspace) -> ActivityItem {
+    let provider_id = "native";
     let state = match workspace.terminal_disposition.as_deref() {
         Some("succeeded") => ActivityState::Succeeded,
         Some("failed") => ActivityState::Failed,
@@ -65,13 +62,14 @@ fn item_from_workspace(workspace: WorktreeProviderWorkspace) -> ActivityItem {
         },
         artifacts: Vec::new(),
         evidence: vec![ActivityEvidenceRef {
-            id: provider_id.clone(),
-            kind: "worktree-provider".to_string(),
-            uri: format!("homeboy://worktree-provider/{provider_id}"),
+            id: provider_id.to_string(),
+            kind: "worktree-registry".to_string(),
+            uri: "homeboy://worktree-registry/native".to_string(),
         }],
         source_projections: Vec::new(),
         state_conflicts: Vec::new(),
         next_actions: Vec::new(),
+        failure: None,
     }
 }
 
@@ -80,17 +78,16 @@ mod tests {
     use super::*;
     use crate::activity::ActivityWorkClass;
     use crate::worktree_provider::{
-        WorktreeOwnership, WorktreeProviderSafety, WorktreeProviderWorkspace, WorktreeWorkspaceKind,
+        WorktreeOwnership, WorktreeSafety, WorktreeWorkspace, WorktreeWorkspaceKind,
     };
 
     #[test]
-    fn provider_workspace_projects_owner_and_identity_into_activity() {
-        let item = item_from_workspace(WorktreeProviderWorkspace {
+    fn native_workspace_projects_owner_and_identity_into_activity() {
+        let item = item_from_workspace(WorktreeWorkspace {
             ownership: WorktreeOwnership {
-                provider: WorktreeProviderIdentity::Configured("fixture".to_string()),
                 handle: "repo@branch".to_string(),
                 path: "/workspace".to_string(),
-                kind: WorktreeWorkspaceKind::Configured,
+                kind: WorktreeWorkspaceKind::TaskWorktree,
                 branch: Some("branch".to_string()),
                 task_url: Some("https://example.test/issues/8017".to_string()),
                 provenance: None,
@@ -99,7 +96,7 @@ mod tests {
             owner_run_ref: Some("run-8017".to_string()),
             created_at: Some("2026-08-25T00:00:00Z".to_string()),
             terminal_disposition: None,
-            safety: WorktreeProviderSafety {
+            safety: WorktreeSafety {
                 dirty: false,
                 unpushed: false,
                 primary: false,
@@ -110,7 +107,7 @@ mod tests {
         assert_eq!(item.state, ActivityState::Running);
         assert_eq!(item.refs.run_id.as_deref(), Some("run-8017"));
         assert_eq!(item.context.worktree.as_deref(), Some("repo@branch"));
-        assert_eq!(item.evidence[0].id, "fixture");
+        assert_eq!(item.evidence[0].id, "native");
     }
 
     /// #13620: an open worktree stays visible with its held state, but the
@@ -118,9 +115,8 @@ mod tests {
     /// separate it from executing work.
     #[test]
     fn open_worktree_classifies_as_resource_not_executing_work() {
-        let workspace = |handle: &str, disposition: Option<&str>| WorktreeProviderWorkspace {
+        let workspace = |handle: &str, disposition: Option<&str>| WorktreeWorkspace {
             ownership: WorktreeOwnership {
-                provider: WorktreeProviderIdentity::Native,
                 handle: handle.to_string(),
                 path: format!("/workspace/{handle}"),
                 kind: WorktreeWorkspaceKind::AdoptedWorkspace,
@@ -132,7 +128,7 @@ mod tests {
             owner_run_ref: None,
             created_at: None,
             terminal_disposition: disposition.map(str::to_string),
-            safety: WorktreeProviderSafety {
+            safety: WorktreeSafety {
                 dirty: false,
                 unpushed: false,
                 primary: false,

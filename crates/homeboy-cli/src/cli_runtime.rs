@@ -21,13 +21,24 @@ use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
-use homeboy::extension::{
-    list_summaries_with, load_all_extensions, CliConfig,
-    ExtensionManifest as InstalledExtensionManifest, ExtensionReadinessMode, ExtensionSummary,
-};
 use homeboy_agents::agent_task_service::cook_continue_command;
+use homeboy_core::extension::catalog::{is_extension_linked, load_all_extensions};
+use homeboy_core::extension::readiness::ExtensionReadinessMode;
 #[cfg(test)]
-use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
+use homeboy_core::extension::readiness::READY_CHECK_SKIPPED_REASON;
+use homeboy_core::extension::resolve::is_extension_compatible;
+use homeboy_extension_contract::{
+    api::v1::{
+        ExtensionApiCatalogDiagnosticCode, ExtensionApiCatalogEntry, ExtensionApiCatalogRequest,
+        ExtensionApiReadinessState, ExtensionApiReadinessStatus,
+        EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_V1,
+    },
+    CliConfig, ExtensionCapability, ExtensionManifest as InstalledExtensionManifest,
+};
+use homeboy_runner_contract::{
+    RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerCapabilities,
+    RUNNER_API_CAPABILITIES_REQUEST_SCHEMA, RUNNER_API_V1,
+};
 use homeboy_upgrade::upgrade;
 
 /// A typed command package installed by a product composition root.
@@ -138,14 +149,47 @@ pub(crate) fn runner_satisfies_admission_capabilities(
     if required.is_empty() {
         return Ok(true);
     }
-    let inventory = crate::runner::runners::runner_capability_inventory(runner_id)?;
+    let inventory = capabilities_from_response(
+        crate::runner::runners::RunnerDiscoveryService::capabilities_api(
+            &RunnerApiCapabilitiesRequest {
+                schema: RUNNER_API_CAPABILITIES_REQUEST_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                runner_id: runner_id.to_string(),
+            },
+        )?,
+    )?;
     Ok(runner_inventory_satisfies_admission_capabilities(
         &inventory, required,
     ))
 }
 
+fn capabilities_from_response(
+    response: RunnerApiCapabilitiesResponse,
+) -> crate::core::Result<RunnerCapabilities> {
+    if let Some(failure) = response.failure {
+        let failure_code = serde_json::to_value(failure.code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string));
+        return Err(crate::core::Error::validation_invalid_argument(
+            "runner_api.capabilities",
+            failure.message,
+            failure_code,
+            None,
+        ));
+    }
+
+    response.capabilities.ok_or_else(|| {
+        crate::core::Error::validation_invalid_argument(
+            "runner_api.capabilities",
+            "Runner API capabilities response omitted both capabilities and failure",
+            None,
+            None,
+        )
+    })
+}
+
 pub(crate) fn runner_inventory_satisfies_admission_capabilities(
-    inventory: &crate::runner::runners::RunnerCapabilityInventory,
+    inventory: &crate::runner::runners::RunnerCapabilities,
     required: &BTreeSet<&str>,
 ) -> bool {
     required.iter().all(|required| {
@@ -379,16 +423,16 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // behavior through the hook. Moves out with deploy/release when they
     // become the homeboy-release crate.
     crate::release::provider_impl::register();
-    homeboy_extension::audit_manifest_provider::register();
-    homeboy_extension::component_script::register_component_script_runner();
-    homeboy_extension::build::register_component_build_runner();
-    homeboy_extension::lifecycle::register_component_install_runner();
+    homeboy_core::extension::audit_manifest_provider::register();
+    homeboy_core::extension::component_script::register_component_script_runner();
+    homeboy_core::extension::build::register_component_build_runner();
+    homeboy_core::extension::lifecycle::register_component_install_runner();
     // Register extension-backed audit providers so code_audit can load
     // grammars, run fallback fingerprint scripts, and collect compiler
     // warnings without depending on the extension registry or script runner.
-    homeboy_extension::audit_fingerprint_script_provider::register();
-    homeboy_extension::audit_grammar_source_provider::register();
-    homeboy_extension::audit_compiler_warning_provider::register();
+    homeboy_core::extension::audit_fingerprint_script_provider::register();
+    homeboy_core::extension::audit_grammar_source_provider::register();
+    homeboy_core::extension::audit_compiler_warning_provider::register();
     // Register the audit recorded-artifact provider so the artifact-portability
     // detector can read past runs' artifacts from the observation store without
     // code_audit depending on observation — the last seam before audit becomes
@@ -455,18 +499,16 @@ fn register_startup_providers_after_reconcile(
     crate::agents::agent_task_service::register_orchestration_driver();
     crate::commands::route::register_unmaterialized_cook_replay_driver();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
-    // New orchestration submissions share one versioned lifecycle driver. The
-    // domain registrations below also retain their v1 recovery adapters for
-    // persisted jobs admitted before the migration.
+    // New orchestration submissions share one versioned lifecycle driver.
     crate::agents::agent_task_service::register_work_job_driver();
     // A locally-placed detached Cook is a daemon-owned durable job: the daemon
     // owns its record, checkpointing, cancellation and HTTP inspection, while
     // the launcher-spawned child keeps the operator's execution environment.
-    crate::agents::agent_task_service::register_cook_job_driver();
+    crate::agents::agent_task_service::register_cook_work_handler();
     // A locally-placed detached fanout wave is daemon-owned on the same terms:
     // the daemon supervises a coordinator it did not spawn, so no branch of its
     // lifecycle can re-run a child that already completed.
-    crate::agents::agent_task_service::register_cook_batch_job_driver();
+    crate::agents::agent_task_service::register_cook_batch_work_handler();
     crate::agents::agent_task_service::register_loop_work_job_handler();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
@@ -515,6 +557,9 @@ fn register_startup_providers_after_reconcile(
     // includes durable agent-task records and their health summary without
     // depending on the agent-task subsystem.
     crate::agents::agent_task_lifecycle::activity_provider::register();
+    // Register the orchestration service behind daemon HTTP control-plane
+    // routes without making core depend on the agent-task subsystem.
+    crate::agents::orchestration::register();
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
     // without depending on the agent-task subsystem.
@@ -527,7 +572,6 @@ fn register_startup_providers_after_reconcile(
     crate::agents::agent_task_secrets::register();
     // Register the extension provider-discovery validator so core's
     // extension install/repair can verify declared agent-runtime providers.
-    crate::agents::agent_task_provider::discovery::register();
     // Register the command-label resolver so core::runner can map dispatched
     // argv to a hot-command label without depending on the full CLI parser.
     crate::runner::set_command_label_resolver(|argv| {
@@ -1172,15 +1216,7 @@ impl CliRuntime {
             }
         }
 
-        if matches!(
-            &cli.command,
-            Commands::AgentTask(agent_task)
-                if matches!(
-                    &agent_task.command,
-                    crate::commands::agent_task::AgentTaskCommand::Cook(_)
-                )
-        ) && notification_route.is_none()
-        {
+        if Self::admits_ambient_notification_route(&cli.command) && notification_route.is_none() {
             notification_resolution =
                 match crate::core::notification_route_resolver::resolve_installed_with_evidence() {
                     Ok(resolution) => resolution,
@@ -1297,7 +1333,9 @@ impl CliRuntime {
                     resource_admission_evidence:
                         crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
                     resource_policy: None,
-                    lab_readiness: lab_readiness.as_ref().map(resource_policy::lab_readiness_snapshot),
+                    lab_readiness: lab_readiness
+                        .as_ref()
+                        .map(|readiness| parsed_lab_readiness_snapshot(&cli, readiness)),
                     selected_runner_id: selected_runner_id.clone(),
                     generic_route: generic_route_policy_snapshot(&cli, selected_runner_id.clone()),
                     deferred_pressure_refusal: false,
@@ -1366,28 +1404,40 @@ impl CliRuntime {
             })
         )
         .then(|| self.command_surface_doctor_report());
-        let exit_code = crate::cli_surface::with_command_surface_doctor_report(
-            command_surface_doctor_report,
-            || {
-                crate::core::notification_route::with_current_resolution(
-                    Some(notification_resolution.evidence),
-                    || {
-                        crate::core::notification_route::with_current(notification_route, || {
-                            #[cfg(test)]
-                            record_marker_context_before_run_command();
-                            commands::output_runtime::run_command(
-                                cli.command,
-                                command_spec,
-                                output_file.as_deref(),
-                                &command_identity,
-                                command_provenance,
-                                cli.placement,
+        let docs_command = matches!(
+            &cli.command,
+            Commands::SelfCmd(crate::commands::self_cmd::SelfArgs {
+                command: crate::commands::self_cmd::SelfCommand::Docs(_),
+            })
+        )
+        .then(|| self.build_augmented_command());
+        let exit_code = crate::help_topics::with_command(docs_command, || {
+            crate::cli_surface::with_command_surface_doctor_report(
+                command_surface_doctor_report,
+                || {
+                    crate::core::notification_route::with_current_resolution(
+                        Some(notification_resolution.evidence),
+                        || {
+                            crate::core::notification_route::with_current(
+                                notification_route,
+                                || {
+                                    #[cfg(test)]
+                                    record_marker_context_before_run_command();
+                                    commands::output_runtime::run_command(
+                                        cli.command,
+                                        command_spec,
+                                        output_file.as_deref(),
+                                        &command_identity,
+                                        command_provenance,
+                                        cli.placement,
+                                    )
+                                },
                             )
-                        })
-                    },
-                )
-            },
-        );
+                        },
+                    )
+                },
+            )
+        });
         // The command's initial outcome is now durable and returned. Historical
         // runner evidence is a separately owned
         // best-effort recovery concern and cannot delay that boundary.
@@ -1395,6 +1445,23 @@ impl CliRuntime {
             schedule_runner_exec_recovery();
         }
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
+    }
+
+    /// Commands that create a Cook-owned durable route may ask installed extensions
+    /// to resolve an ambient destination. Previews remain entirely side-effect-free.
+    fn admits_ambient_notification_route(command: &Commands) -> bool {
+        let Commands::AgentTask(agent_task) = command else {
+            return false;
+        };
+        match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => !cook.preview,
+            crate::commands::agent_task::AgentTaskCommand::Fanout(fanout) => matches!(
+                &fanout.command,
+                crate::commands::agent_task::args::AgentTaskFanoutCommand::CookBatch(cook_batch)
+                    if !cook_batch.preview
+            ),
+            _ => false,
+        }
     }
 
     fn build_augmented_command(&self) -> Command {
@@ -1865,15 +1932,18 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(args.run_id.clone()),
             crate::commands::agent_task::AgentTaskCommand::Resume(args)
-                if args.bridge
-                    && crate::agents::agent_tasks::service::terminal_transport_recovery_required(
-                        &args.run_id,
-                    ) =>
+                if crate::agents::agent_tasks::service::terminal_transport_recovery_required(
+                    &args.run_id,
+                ) =>
             {
                 None
             }
-            crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(args.run_id.clone()),
-            crate::commands::agent_task::AgentTaskCommand::Accept(args) => Some(args.run_id.clone()),
+            crate::commands::agent_task::AgentTaskCommand::Resume(args) => {
+                Some(args.run_id.clone())
+            }
+            crate::commands::agent_task::AgentTaskCommand::Accept(args) => {
+                Some(args.run_id.clone())
+            }
             // Promotion mutates the durable source run (checkpointing apply and
             // final reports) and must therefore execute under the controller
             // runtime that admitted that run. Without this branch a promoted
@@ -1881,15 +1951,24 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             // and any live stderr progress would be stranded behind a later
             // routing boundary.
             crate::commands::agent_task::AgentTaskCommand::Promote(args) => {
-                crate::agents::agent_tasks::lifecycle::status(&args.source)
-                    .ok()
-                    .map(|record| record.run_id)
+                let record = crate::agents::agent_tasks::lifecycle::status(&args.source).ok();
+                if let Some(record) = record.as_ref() {
+                    // Repair immutable evidence before handing mutation back to
+                    // the historical controller that admitted this run.
+                    crate::agents::agent_tasks::service::recover_missing_promotion_aggregate(
+                        &record.run_id,
+                    )?;
+                }
+                record.map(|record| record.run_id)
             }
             crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
-                if matches!(cli.placement, crate::cli_surface::Placement::Local) {
+                if args.preflight || matches!(cli.placement, crate::cli_surface::Placement::Local) {
                     return Ok(None);
                 }
-                return delegate_cook_continue_to_pinned_runtime(&args.cook_or_attempt_id, normalized_args);
+                return delegate_cook_continue_to_pinned_runtime(
+                    &args.cook_or_attempt_id,
+                    normalized_args,
+                );
             }
             _ => None,
         },
@@ -2012,7 +2091,7 @@ fn current_runtime_owns_terminal_cook_continuation(run_id: &str) -> homeboy::cor
     let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(run_id)? else {
         return Ok(false);
     };
-    let record = crate::agents::agent_tasks::service::persisted_status(run_id)?;
+    let record = crate::agents::agent_tasks::lifecycle::status(run_id)?;
     if !matches!(
         record.state,
         crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded
@@ -2176,13 +2255,22 @@ fn collect_extension_cli_info_metadata_only() -> ExtensionCliDiscovery {
 }
 
 fn collect_extension_cli_info_with(readiness: ExtensionReadinessMode) -> ExtensionCliDiscovery {
-    let summaries = list_summaries_with(None, readiness);
-    let mut broken_link_ids: Vec<String> = summaries
+    let catalog = homeboy_core::extension::catalog::list_api(&ExtensionApiCatalogRequest {
+        schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+    });
+    let readiness_by_id =
+        commands::extension::extension_inventory_readiness(&catalog.entries, readiness);
+    let broken_link_ids: Vec<String> = catalog
+        .entries
         .iter()
-        .filter(|summary| summary.error.as_deref() == Some("target_missing"))
-        .map(|summary| summary.id.clone())
+        .filter(|entry| {
+            entry.diagnostic.as_ref().is_some_and(|diagnostic| {
+                diagnostic.code == ExtensionApiCatalogDiagnosticCode::BrokenInstallation
+            })
+        })
+        .map(|entry| entry.id.clone())
         .collect();
-    broken_link_ids.sort();
 
     let (extensions, load_error) = match load_all_extensions() {
         Ok(extensions) => (extensions, None),
@@ -2199,13 +2287,21 @@ fn collect_extension_cli_info_with(readiness: ExtensionReadinessMode) -> Extensi
                 let args_help = help.args_help.clone();
                 let examples = help.examples.clone();
                 let about = format!("Run {} commands via {}", cli.display_name, m.name);
+                let health = catalog
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == m.id)
+                    .map(|entry| {
+                        extension_command_health_from_api(&m, entry, readiness_by_id.get(&m.id))
+                    })
+                    .unwrap_or_else(extension_command_health_missing);
                 let extension_manifest = extension_command_manifest(
                     &m,
                     &cli,
                     project_id_help.clone(),
                     args_help.clone(),
                     examples.clone(),
-                    &summaries,
+                    health,
                 );
                 ExtensionCliInfo {
                     descriptor: DynamicCommandDescriptor::installed_extension_command(
@@ -2238,22 +2334,10 @@ fn extension_command_manifest(
     project_id_help: Option<String>,
     args_help: Option<String>,
     examples: Vec<String>,
-    summaries: &[ExtensionSummary],
+    health: ExtensionCommandHealth,
 ) -> ExtensionCommandManifest {
     let project_id_help = project_id_help.unwrap_or_else(|| "Project ID".to_string());
     let args_help = args_help.unwrap_or_else(|| "Command arguments".to_string());
-    let summary = summaries.iter().find(|summary| summary.id == extension.id);
-    let health = summary
-        .map(extension_command_health_from_summary)
-        .unwrap_or_else(|| ExtensionCommandHealth {
-            status: "unknown".to_string(),
-            ready: false,
-            compatible: false,
-            linked: false,
-            reason: Some("summary_missing".to_string()),
-            detail: Some("Extension loaded, but no extension summary was available".to_string()),
-        });
-
     ExtensionCommandManifest {
         extension_id: extension.id.clone(),
         extension_name: extension.name.clone(),
@@ -2281,22 +2365,31 @@ fn extension_command_manifest(
     }
 }
 
-fn extension_command_health_from_summary(summary: &ExtensionSummary) -> ExtensionCommandHealth {
+fn extension_command_health_from_api(
+    extension: &InstalledExtensionManifest,
+    entry: &ExtensionApiCatalogEntry,
+    readiness: Option<&ExtensionApiReadinessStatus>,
+) -> ExtensionCommandHealth {
     // An extension whose `ready_check` was never run is `unknown`, not `ready`.
     // A command-health contract that treated an absent measurement as ready
     // would reproduce the fail-open defect class in #10685. (#10616)
-    let readiness_unknown =
-        summary.readiness == homeboy_extension::ExtensionReadinessState::Unknown;
+    let readiness_state = readiness.map(|status| status.state);
+    let readiness_unknown = readiness_state == Some(ExtensionApiReadinessState::Unknown);
+    let error = entry
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.category.clone());
+    let compatible = is_extension_compatible(extension, None);
 
-    let status = if summary.error.is_some() {
+    let status = if error.is_some() {
         "error"
-    } else if !summary.compatible {
+    } else if !compatible {
         "incompatible"
     } else if readiness_unknown {
         "unknown"
-    } else if summary.ready == Some(true) {
+    } else if readiness.is_some_and(|status| status.ready == Some(true)) {
         "ready"
-    } else if summary.readiness == homeboy_extension::ExtensionReadinessState::TimedOut {
+    } else if readiness_state == Some(ExtensionApiReadinessState::TimedOut) {
         "timed_out"
     } else {
         "not_ready"
@@ -2304,14 +2397,22 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
 
     ExtensionCommandHealth {
         status: status.to_string(),
-        ready: summary.ready == Some(true),
-        compatible: summary.compatible,
-        linked: summary.linked,
-        reason: summary
-            .error
-            .clone()
-            .or_else(|| summary.ready_reason.clone()),
-        detail: summary.ready_detail.clone(),
+        ready: readiness.is_some_and(|status| status.ready == Some(true)),
+        compatible,
+        linked: is_extension_linked(&extension.id),
+        reason: error.or_else(|| readiness.and_then(|status| status.reason.clone())),
+        detail: readiness.and_then(|status| status.detail.clone()),
+    }
+}
+
+fn extension_command_health_missing() -> ExtensionCommandHealth {
+    ExtensionCommandHealth {
+        status: "unknown".to_string(),
+        ready: false,
+        compatible: false,
+        linked: false,
+        reason: Some("summary_missing".to_string()),
+        detail: Some("Extension loaded, but no extension catalog entry was available".to_string()),
     }
 }
 
@@ -2709,6 +2810,7 @@ fn resolve_composed_capability_preflight(
             available_runner_ids: context.runner_selection.available_runner_ids.clone(),
             reasons: context.runner_selection.readiness_reasons.clone(),
             remediation_commands: context.runner_selection.remediation_commands.clone(),
+            repair_admitted_runner_ids: Vec::new(),
         })
         .or_else(|| {
             (options.placement != crate::cli_surface::Placement::Local)
@@ -2807,17 +2909,12 @@ fn preflight_hot_command_with_input(
             // A cached/projection-based inventory is enough for normal routing,
             // but not for a terminal local-resource refusal. A stale inventory
             // receives exactly one bounded runner-owned refresh before placement.
-            if hot_command.lab_offload_supported
-                && cli.runner.is_none()
-                && !matches!(cli.placement, crate::cli_surface::Placement::Local)
-                && !detached_cook_unmaterialized_admission_eligible(cli)
-                && resource_policy::evaluate_with_runner_hint(
-                    hot_command,
-                    &resources,
-                    lab_readiness.as_ref(),
-                )
-                .is_some()
-            {
+            if should_refresh_terminal_lab_inventory(
+                cli,
+                hot_command,
+                &resources,
+                lab_readiness.as_ref(),
+            ) {
                 if let Some(observed) = lab_readiness.take() {
                     let (resolved, diagnostic) = resolve_terminal_lab_inventory(
                         observed,
@@ -2956,7 +3053,7 @@ fn preflight_hot_command_with_input(
                         resource_policy: Some(resource_policy_context),
                         lab_readiness: lab_readiness
                             .as_ref()
-                            .map(resource_policy::lab_readiness_snapshot),
+                            .map(|readiness| parsed_lab_readiness_snapshot(cli, readiness)),
                         selected_runner_id: selected_runner_id.clone(),
                         generic_route: generic_route_policy_snapshot(
                             cli,
@@ -2993,7 +3090,14 @@ fn preflight_hot_command_with_input(
                     warning,
                     cli.placement.is_explicit_local_override() || runner_hosted,
                     is_interactive_shell(),
-                    resource_policy::admission_recovery(normalized_args, lab_readiness.as_ref()),
+                    (!nonlocal_cook_requires_durable_admission(cli))
+                        .then(|| {
+                            resource_policy::admission_recovery(
+                                normalized_args,
+                                lab_readiness.as_ref(),
+                            )
+                        })
+                        .flatten(),
                     runner_admits_offload || auto_local_capacity_fallback,
                 ) {
                     if let Some(diagnostic) = lab_inventory_diagnostic {
@@ -3001,7 +3105,7 @@ fn preflight_hot_command_with_input(
                             .expect("Lab inventory admission diagnostic serializes");
                     }
                     if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload)
-                        || detached_cook_unmaterialized_admission_eligible(cli)
+                        || nonlocal_cook_requires_durable_admission(cli)
                     {
                         return None;
                     }
@@ -3018,6 +3122,37 @@ fn preflight_hot_command_with_input(
     }
 
     None
+}
+
+fn should_refresh_terminal_lab_inventory(
+    cli: &Cli,
+    hot_command: resource_policy::HotCommand,
+    resources: &crate::commands::resources::DoctorOutput,
+    lab_readiness: Option<&crate::runner::runners::LabRunnerReadiness>,
+) -> bool {
+    hot_command.lab_offload_supported
+        && cli.runner.is_none()
+        && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+        && lab_readiness.is_some_and(|readiness| {
+            readiness.state == crate::runner::runners::LabRunnerReadinessState::Stale
+        })
+        && resource_policy::evaluate_with_runner_hint(hot_command, resources, lab_readiness)
+            .is_some()
+}
+
+fn parsed_lab_readiness_snapshot(
+    cli: &Cli,
+    readiness: &crate::runner::runners::LabRunnerReadiness,
+) -> crate::core::parsed_command_preflight::LabReadinessSnapshot {
+    let mut snapshot = resource_policy::lab_readiness_snapshot(readiness);
+    if let (Some(runner_id), Commands::Extension(args)) = (&cli.runner, &cli.command) {
+        if args.is_readiness_repair_command()
+            && crate::runner::runners::runner_readiness_repair_admitted(runner_id).unwrap_or(false)
+        {
+            snapshot.repair_admitted_runner_ids.push(runner_id.clone());
+        }
+    }
+    snapshot
 }
 
 #[cfg(test)]
@@ -3042,6 +3177,7 @@ pub(crate) fn placement_directive(
                     available_runner_ids: vec![runner_id.to_string()],
                     reasons: Vec::new(),
                     remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
                 }
             }),
             selected_runner_id: selected_runner_id.map(str::to_string),
@@ -3089,13 +3225,12 @@ fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
     })
 }
 
-/// A detached non-local Cook owns a durable queue boundary. Resource pressure
-/// may influence its Lab placement, but must not prevent routing from creating
-/// that boundary. Explicit local placement remains the only authorization for
-/// controller provider execution.
-fn detached_cook_unmaterialized_admission_eligible(cli: &Cli) -> bool {
-    cli.detach_after_handoff
-        && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+/// A non-local Cook owns a durable admission boundary. Resource pressure may
+/// influence Lab placement, but cannot prevent creating an inspectable Cook.
+/// Explicit local placement remains the only authorization for controller
+/// provider execution.
+fn nonlocal_cook_requires_durable_admission(cli: &Cli) -> bool {
+    !matches!(cli.placement, crate::cli_surface::Placement::Local)
         && matches!(
             cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
@@ -3125,9 +3260,7 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.args,
     );
     if args.should_use_self_check_dispatch(&passthrough_args)
-        && source
-            .component
-            .has_script(homeboy_extension::ExtensionCapability::Test)
+        && source.component.has_script(ExtensionCapability::Test)
     {
         return Ok(());
     }
@@ -3136,12 +3269,12 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_extension::ExtensionCapability::Test),
+        Some(ExtensionCapability::Test),
     )
 	.and_then(|context| {
-		homeboy::core::extension_execution::resolve_execution_context(
+		homeboy::core::extension::resolve::resolve_execution_context(
 			&context.component,
-			homeboy_extension::ExtensionCapability::Test,
+            ExtensionCapability::Test,
 		)
 		.map(|_| ())
 	})
@@ -3239,7 +3372,7 @@ fn run_startup_update_checks(command: &Commands) {
         Commands::Upgrade(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
         homeboy_upgrade::upgrade::update_check::run_startup_check();
-        homeboy_extension::update_check::run_startup_check();
+        homeboy_upgrade::upgrade::extension_update_check::run_startup_check();
     }
 }
 
@@ -3414,7 +3547,7 @@ const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
     command_path: &["agent-task", "cook"],
     historical_flags: &["--provider", "--provider-id", "--dispatch-selector"],
     diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
-Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'cargo test' --no-finalize`\n\
+Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
 List available executor providers: `homeboy agent-task providers`\n\
 `--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.",
 }];
@@ -3490,6 +3623,13 @@ fn try_augment_clap_error(
 /// generic runner surface and deliberately require discovery before selecting
 /// a runner ID.
 fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<String>> {
+    if parent_command.is_empty() && unrecognized.eq_ignore_ascii_case("init") {
+        return Some(vec![
+            "`init` is no longer a top-level command. Discover extension lifecycle commands with `homeboy extension --help`".to_string(),
+            "Converge installed extensions with `homeboy extension converge`, or refresh Homeboy and extensions with `homeboy upgrade`".to_string(),
+        ]);
+    }
+
     if !parent_command.is_empty()
         || !(unrecognized.eq_ignore_ascii_case("lab")
             || homeboy::core::engine::text::levenshtein(&unrecognized.to_lowercase(), "runner")
@@ -3637,6 +3777,60 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[test]
+    fn empty_admission_requirements_avoid_runner_lookup() {
+        assert!(runner_satisfies_admission_capabilities(
+            "runner-that-does-not-exist",
+            &BTreeSet::new()
+        )
+        .expect("empty requirements"));
+    }
+
+    #[test]
+    fn capability_admission_rejects_unknown_runners() {
+        let error = runner_satisfies_admission_capabilities(
+            "runner-that-does-not-exist",
+            &BTreeSet::from(["homeboy"]),
+        )
+        .expect_err("unknown runner must fail admission");
+
+        assert_eq!(error.details["id"], "runner_not_found");
+    }
+
+    #[test]
+    fn capability_admission_rejects_empty_api_envelopes() {
+        let error = capabilities_from_response(RunnerApiCapabilitiesResponse {
+            schema: homeboy_runner_contract::RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "runner-a".to_string(),
+            capabilities: None,
+            failure: None,
+        })
+        .expect_err("empty envelope must fail admission");
+
+        assert!(error
+            .message
+            .contains("omitted both capabilities and failure"));
+    }
+
+    #[test]
+    fn cook_continue_preflight_never_delegates_to_a_pinned_runtime() {
+        let argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook-continue".to_string(),
+            "missing-attempt".to_string(),
+            "--preflight".to_string(),
+        ];
+        let cli = Cli::try_parse_from(&argv).expect("parse continuation preflight");
+
+        assert_eq!(
+            delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &argv)
+                .expect("preflight remains in the current read-only runtime"),
+            None
+        );
+    }
 
     struct AdmissionFixtureCapability;
 
@@ -3941,6 +4135,87 @@ mod tests {
                 "{placement:?}"
             );
         }
+    }
+
+    #[test]
+    fn metadata_extension_show_bypasses_hot_admission_without_lab_inventory() {
+        use crate::core::parsed_command_preflight::{
+            resolve_parsed_command_preflight, LabReadinessSnapshot, ParsedCommandPolicySnapshot,
+            ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
+        };
+
+        let cli = Cli::parse_from(["homeboy", "extension", "show", "fixture"]);
+        let normalized_args = vec!["homeboy".to_string()];
+        let input = resource_policy::parsed_command_preflight_input(&cli, &normalized_args);
+
+        assert_eq!(
+            input.resource_admission,
+            crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Exempt
+        );
+        assert_eq!(
+            input.lab_route,
+            crate::core::parsed_command_preflight::LabRouteIntent::Unsupported
+        );
+
+        for state in ["stale", "absent"] {
+            let result = resolve_parsed_command_preflight(
+                normalized_args.clone(),
+                input.clone(),
+                ParsedCommandPolicySnapshot {
+                    resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                        pressure: ResourceHeat::Hot,
+                    },
+                    resource_policy: None,
+                    lab_readiness: Some(LabReadinessSnapshot {
+                        state: state.to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: vec!["inventory is unavailable".to_string()],
+                        remediation_commands: Vec::new(),
+                        repair_admitted_runner_ids: Vec::new(),
+                    }),
+                    selected_runner_id: None,
+                    generic_route: generic_route_policy_snapshot(&cli, None),
+                    deferred_pressure_refusal: false,
+                    runner_admitted: false,
+                    runner_incompatible: false,
+                    auto_local_capacity_fallback: false,
+                },
+            )
+            .expect("metadata inspection must remain admitted locally");
+
+            assert_eq!(
+                result.resource_admission,
+                ResourceAdmissionDecision::NotRequired
+            );
+        }
+    }
+
+    #[test]
+    fn nonlocal_cook_persists_before_hot_resource_admission() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "fixture@durable-admission",
+            "--verify",
+            "true",
+        ]);
+
+        assert!(nonlocal_cook_requires_durable_admission(&cli));
+        assert_eq!(
+            preflight_hot_command_with(
+                &cli,
+                None,
+                &output::CommandIdentity::with_operation("agent-task", "cook"),
+                || Ok((hot_resources(), 0)),
+            ),
+            None,
+            "Cook must reach its durable admission lifecycle before resource placement"
+        );
     }
 
     #[test]
@@ -4255,6 +4530,156 @@ mod tests {
         assert_eq!(diagnostic.source_freshness.as_deref(), Some("stale"));
         assert_eq!(diagnostic.refreshed_at_ms, Some(200));
         assert_eq!(diagnostic.terminal_reason, "ready_after_refresh");
+    }
+
+    #[test]
+    fn auto_cook_refreshes_stale_disconnected_inventory_then_uses_local_fallback() {
+        use crate::core::parsed_command_preflight::{
+            FallbackDirective, ParsedCommandPolicySnapshot,
+        };
+        use homeboy_lab_runner_contract::EffectiveExecutionPlacement;
+
+        let auto = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "route after runner refresh",
+            "--to-worktree",
+            "fixture@stale-disconnected",
+            "--verify",
+            "true",
+        ]);
+        let explicit_runner = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "do not substitute local execution",
+            "--to-worktree",
+            "fixture@explicit-disconnected",
+            "--verify",
+            "true",
+        ]);
+        let mut resources = hot_resources();
+        resources.load.one = Some(0.5);
+        resources.load.five = Some(0.5);
+        resources.load.cpu_count = 2;
+        let command = cook_hot_command();
+
+        // Fresh inventory is authoritative, while stale auto placement gets one
+        // bounded refresh before the durable placement decision is captured.
+        assert!(should_refresh_terminal_lab_inventory(
+            &auto,
+            command,
+            &resources,
+            Some(&lab_readiness(
+                crate::runner::runners::LabRunnerReadinessState::Stale
+            )),
+        ));
+        for state in [
+            crate::runner::runners::LabRunnerReadinessState::ConnectedReady,
+            crate::runner::runners::LabRunnerReadinessState::Disconnected,
+        ] {
+            assert!(!should_refresh_terminal_lab_inventory(
+                &auto,
+                command,
+                &resources,
+                Some(&lab_readiness(state)),
+            ));
+        }
+        assert!(!should_refresh_terminal_lab_inventory(
+            &explicit_runner,
+            command,
+            &resources,
+            Some(&lab_readiness(
+                crate::runner::runners::LabRunnerReadinessState::Stale
+            )),
+        ));
+
+        let (disconnected, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
+            100,
+            || {
+                Ok((
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::Disconnected),
+                    200,
+                ))
+            },
+        );
+        assert!(diagnostic.refresh_attempted);
+        assert_eq!(diagnostic.refreshed_state.as_deref(), Some("disconnected"));
+        assert!(disconnected.selected_runner_id.is_none());
+        assert!(resource_policy::admits_auto_local_capacity_fallback(
+            command,
+            &resources,
+            Some(&disconnected),
+            auto.placement,
+        ));
+
+        let context = resource_policy::resource_policy_context_from_evaluation(
+            command,
+            &resources,
+            None,
+            false,
+            true,
+            Some(&disconnected),
+            false,
+        );
+        let input = resource_policy::parsed_command_preflight_input(&auto, &[]);
+        let result = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+            Vec::new(),
+            input,
+            ParsedCommandPolicySnapshot {
+                resource_admission_evidence: resource_policy::resource_admission_evidence(
+                    &resources,
+                ),
+                resource_policy: Some(context),
+                lab_readiness: Some(parsed_lab_readiness_snapshot(&auto, &disconnected)),
+                selected_runner_id: None,
+                generic_route: generic_route_policy_snapshot(&auto, None),
+                deferred_pressure_refusal: false,
+                runner_admitted: false,
+                runner_incompatible: false,
+                auto_local_capacity_fallback: true,
+            },
+        )
+        .expect("auto placement permits its audited local fallback");
+        assert_eq!(
+            result.placement.selected,
+            EffectiveExecutionPlacement::Local
+        );
+        assert!(result.placement.runner.is_none());
+        assert_eq!(result.fallback, FallbackDirective::LocalCapacity);
+
+        let input = resource_policy::parsed_command_preflight_input(&explicit_runner, &[]);
+        let error = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+            Vec::new(),
+            input,
+            ParsedCommandPolicySnapshot {
+                resource_admission_evidence: resource_policy::resource_admission_evidence(
+                    &resources,
+                ),
+                resource_policy: None,
+                lab_readiness: Some(parsed_lab_readiness_snapshot(
+                    &explicit_runner,
+                    &disconnected,
+                )),
+                selected_runner_id: Some("homeboy-lab".to_string()),
+                generic_route: generic_route_policy_snapshot(
+                    &explicit_runner,
+                    Some("homeboy-lab".to_string()),
+                ),
+                deferred_pressure_refusal: false,
+                runner_admitted: false,
+                runner_incompatible: false,
+                auto_local_capacity_fallback: false,
+            },
+        )
+        .expect_err("an explicit disconnected runner must fail closed");
+        assert_eq!(error.details["field"], "selected_runner_id");
     }
 
     #[test]
@@ -4667,6 +5092,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ambient_notification_discovery_admission_is_shared_by_cook_and_cook_batch() {
+        let cook =
+            Cli::try_parse_from(["homeboy", "agent-task", "cook", "--to-worktree", "fixture"])
+                .expect("parse Cook invocation");
+        let cook_preview = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "fixture",
+            "--preview",
+        ])
+        .expect("parse Cook preview");
+        let cook_batch = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "fixture",
+            "https://github.com/Extra-Chill/homeboy/issues/14195",
+        ])
+        .expect("parse cook-batch invocation");
+        let cook_batch_preview = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "fixture",
+            "--preview",
+            "https://github.com/Extra-Chill/homeboy/issues/14195",
+        ])
+        .expect("parse cook-batch preview");
+
+        assert!(CliRuntime::admits_ambient_notification_route(&cook.command));
+        assert!(CliRuntime::admits_ambient_notification_route(
+            &cook_batch.command
+        ));
+        assert!(!CliRuntime::admits_ambient_notification_route(
+            &cook_preview.command
+        ));
+        assert!(!CliRuntime::admits_ambient_notification_route(
+            &cook_batch_preview.command
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ambient_notification_discovery_is_gated_to_valid_cook_execution() {
         crate::test_support::with_isolated_home(|home| {
             let sentinel = home.path().join("resolver-invoked");
@@ -5013,6 +5487,30 @@ mod tests {
                 "{command}: {output}"
             );
         }
+    }
+
+    #[test]
+    fn removed_init_command_uses_extension_lifecycle_guidance_not_extension_id_matching() {
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "rust", "rust");
+            entity_suggest::reset_entity_suggestion_cache_for_test();
+            let err = build_augmented_command(&[], &ExtensionCliHealth::default())
+                .try_get_matches_from(["homeboy", "init"])
+                .expect_err("init is not a top-level command");
+
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", "init"]),
+                &ExtensionCliHealth::default(),
+            )
+            .expect("init should have lifecycle recovery guidance");
+
+            assert!(output.contains("homeboy extension --help"));
+            assert!(output.contains("homeboy extension converge"));
+            assert!(output.contains("homeboy upgrade"));
+            assert!(!output.contains("extension 'rust'"), "{output}");
+            assert!(!output.contains("homeboy extension rust"), "{output}");
+        });
     }
 
     #[test]
@@ -5613,29 +6111,41 @@ mod tests {
 
             let cook_id = "cook-runtime-a";
             let run_id = "cook-runtime-a-attempt-1";
-            let options = crate::agents::agent_tasks::service::AgentTaskCookServiceOptions {
-                cook_id: cook_id.to_string(),
-                initial_run_id: run_id.to_string(),
-                initial_plan: plan.clone(),
-                to_worktree: target.display().to_string(),
-                source_worktree_path: Some(target.clone()),
-                provider_command: None,
-                provider_invocation: None,
+            let options = crate::agents::agent_tasks::service::CookRequest {
+                identity: crate::agents::agent_task_service::CookIdentity {
+                    cook_id: cook_id.to_string(),
+                    initial_run_id: run_id.to_string(),
+                    initial_plan: plan.clone(),
+                },
+                workspace: crate::agents::agent_task_service::CookWorkspace {
+                    to_worktree: target.display().to_string(),
+                    source_worktree_path: Some(target.clone()),
+                    task_base_sha: None,
+                    source_refs: Vec::new(),
+                },
+                provider_transport: crate::agents::agent_task_service::CookProviderTransport {
+                    provider_command: None,
+                    provider_invocation: None,
+                    attempt_dispatcher: None,
+                },
                 gates: Default::default(),
-                max_attempts: 1,
-                no_finalize: true,
-                draft_pr: false,
-                base: "main".to_string(),
-                task_base_sha: None,
-                head: None,
-                title: "runtime continuation fixture".to_string(),
-                commit_message: "runtime continuation fixture".to_string(),
-                source_refs: Vec::new(),
-                protected_branches: Vec::new(),
-                ai_tool: "test".to_string(),
-                ai_model: None,
-                ai_used_for: "test".to_string(),
-                attempt_dispatcher: None,
+                retry_policy: crate::agents::agent_task_service::CookRetryPolicy {
+                    max_attempts: 1,
+                },
+                finalization: crate::agents::agent_task_service::CookFinalization {
+                    no_finalize: true,
+                    draft_pr: false,
+                    base: "main".to_string(),
+                    head: None,
+                    title: "runtime continuation fixture".to_string(),
+                    commit_message: "runtime continuation fixture".to_string(),
+                    protected_branches: Vec::new(),
+                },
+                ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
+                    ai_tool: "test".to_string(),
+                    ai_model: None,
+                    ai_used_for: "test".to_string(),
+                },
                 harvest_context: Default::default(),
             };
             crate::agents::agent_tasks::service::persist_initial_recipe(&options)
@@ -5726,29 +6236,41 @@ mod tests {
 
             let cook_id = "cook-runtime-legacy-terminal";
             let run_id = "cook-runtime-legacy-terminal-attempt-1";
-            let options = crate::agents::agent_tasks::service::AgentTaskCookServiceOptions {
-                cook_id: cook_id.to_string(),
-                initial_run_id: run_id.to_string(),
-                initial_plan: plan.clone(),
-                to_worktree: target.display().to_string(),
-                source_worktree_path: Some(target),
-                provider_command: None,
-                provider_invocation: None,
+            let options = crate::agents::agent_tasks::service::CookRequest {
+                identity: crate::agents::agent_task_service::CookIdentity {
+                    cook_id: cook_id.to_string(),
+                    initial_run_id: run_id.to_string(),
+                    initial_plan: plan.clone(),
+                },
+                workspace: crate::agents::agent_task_service::CookWorkspace {
+                    to_worktree: target.display().to_string(),
+                    source_worktree_path: Some(target),
+                    task_base_sha: None,
+                    source_refs: Vec::new(),
+                },
+                provider_transport: crate::agents::agent_task_service::CookProviderTransport {
+                    provider_command: None,
+                    provider_invocation: None,
+                    attempt_dispatcher: None,
+                },
                 gates: Default::default(),
-                max_attempts: 1,
-                no_finalize: true,
-                draft_pr: false,
-                base: "main".to_string(),
-                task_base_sha: None,
-                head: None,
-                title: "legacy terminal continuation fixture".to_string(),
-                commit_message: "legacy terminal continuation fixture".to_string(),
-                source_refs: Vec::new(),
-                protected_branches: Vec::new(),
-                ai_tool: "test".to_string(),
-                ai_model: None,
-                ai_used_for: "test".to_string(),
-                attempt_dispatcher: None,
+                retry_policy: crate::agents::agent_task_service::CookRetryPolicy {
+                    max_attempts: 1,
+                },
+                finalization: crate::agents::agent_task_service::CookFinalization {
+                    no_finalize: true,
+                    draft_pr: false,
+                    base: "main".to_string(),
+                    head: None,
+                    title: "legacy terminal continuation fixture".to_string(),
+                    commit_message: "legacy terminal continuation fixture".to_string(),
+                    protected_branches: Vec::new(),
+                },
+                ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
+                    ai_tool: "test".to_string(),
+                    ai_model: None,
+                    ai_used_for: "test".to_string(),
+                },
                 harvest_context: Default::default(),
             };
             crate::agents::agent_tasks::service::persist_initial_recipe(&options)

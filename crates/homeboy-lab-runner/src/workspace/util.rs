@@ -1,5 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -108,6 +109,82 @@ pub(crate) fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Confirm a materialized workspace has a Git representation Git itself can
+/// use: a `.git` directory, or a gitdir pointer file whose target exists, with
+/// a resolvable HEAD. Linked worktrees use the pointer-file form; a copied
+/// gitfile whose gitdir was not materialized is not valid.
+pub(crate) fn verify_valid_git_representation(workspace: &Path) -> Result<()> {
+    let git_path = workspace.join(".git");
+    let metadata = std::fs::symlink_metadata(&git_path).map_err(|error| {
+        Error::internal_io(
+            format!("workspace is missing a valid .git representation: {error}"),
+            Some(git_path.display().to_string()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "workspace .git must be a regular pointer file or directory",
+            Some(git_path.display().to_string()),
+            None,
+        ));
+    }
+    if metadata.file_type().is_file() {
+        let content = std::fs::read_to_string(&git_path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(git_path.display().to_string()))
+        })?;
+        let target = content
+            .strip_prefix("gitdir:")
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "workspace .git pointer must reference an existing Git directory",
+                    Some(git_path.display().to_string()),
+                    None,
+                )
+            })?;
+        let resolved = if Path::new(target).is_absolute() {
+            PathBuf::from(target)
+        } else {
+            workspace.join(target)
+        };
+        let canonical = std::fs::canonicalize(&resolved).map_err(|error| {
+            Error::validation_invalid_argument(
+                "workspace",
+                format!("workspace .git pointer must reference an existing Git directory: {error}"),
+                Some(git_path.display().to_string()),
+                None,
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                "workspace .git pointer must reference an existing Git directory",
+                Some(git_path.display().to_string()),
+                None,
+            ));
+        }
+    } else if !metadata.file_type().is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "workspace .git must be a regular pointer file or directory",
+            Some(git_path.display().to_string()),
+            None,
+        ));
+    }
+    if git_output(workspace, &["rev-parse", "--is-inside-work-tree"])? != "true" {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "workspace .git representation is not a Git work tree",
+            Some(workspace.display().to_string()),
+            None,
+        ));
+    }
+    git_output(workspace, &["rev-parse", "--verify", "-q", "HEAD"]).map(|_| ())
+}
+
 pub(super) fn owner_capture_shell(reference: &str) -> String {
     format!(
         "owner_path={reference}; while [ ! -e \"$owner_path\" ] && [ \"$owner_path\" != \"/\" ]; do owner_path=$(dirname \"$owner_path\"); done; owner=\"\"; if [ -e \"$owner_path\" ]; then owner=$(stat -c '%u:%g' \"$owner_path\" 2>/dev/null || stat -f '%u:%g' \"$owner_path\" 2>/dev/null || true); fi",
@@ -190,6 +267,84 @@ pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
     )))
 }
 
+/// Execute a workspace transport command within the runner-exec preparation
+/// deadline. Reusable workspace callers pass no deadline and retain their
+/// existing unbounded semantics.
+pub(crate) fn run_shell_command_before(
+    command: &str,
+    action: &str,
+    deadline: Option<Instant>,
+) -> Result<()> {
+    let Some(timeout) = deadline.map(remaining_timeout).transpose()? else {
+        return run_shell_command(command, action);
+    };
+    let output = server::execute_local_command_in_dir_with_timeout(command, None, None, timeout);
+    if output.success {
+        return Ok(());
+    }
+    if output.timed_out {
+        return Err(workspace_preparation_timeout(action, timeout));
+    }
+    let stdout = bounded_command_output(output.stdout.as_bytes());
+    let stderr = bounded_command_output(output.stderr.as_bytes());
+    if output.exit_code == 255
+        || output.exit_code == -1
+        || TRANSIENT_SSH_STDERR_PATTERNS
+            .iter()
+            .any(|pattern| stderr.to_lowercase().contains(pattern))
+    {
+        return Err(Error::new(
+            ErrorCode::RunnerLabTransportFailure,
+            format!(
+                "{action} failed (exit status {}): {stderr}",
+                output.exit_code
+            ),
+            serde_json::json!({
+                "action": action,
+                "exit_code": output.exit_code,
+                "signal_death": output.exit_code == -1,
+                "stdout": stdout,
+                "stderr": stderr,
+            }),
+        )
+        .with_retryable(true));
+    }
+    let evidence = match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => "the command exited without stdout or stderr".to_string(),
+        (false, true) => format!("stdout: {stdout}"),
+        (true, false) => format!("stderr: {stderr}"),
+        (false, false) => format!("stdout: {stdout}; stderr: {stderr}"),
+    };
+    Err(Error::internal_unexpected(format!(
+        "{action} failed during command execution (exit status {}): {evidence}",
+        output.exit_code
+    )))
+}
+
+fn remaining_timeout(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| workspace_preparation_timeout("workspace synchronization", Duration::ZERO))
+}
+
+fn workspace_preparation_timeout(action: &str, timeout: Duration) -> Error {
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "{action} timed out before runner command dispatch after {} ms",
+            timeout.as_millis()
+        ),
+        serde_json::json!({
+            "workspace_sync": {
+                "action": action,
+                "timeout_ms": timeout.as_millis(),
+                "timed_out": true,
+            }
+        }),
+    )
+    .with_retryable(true)
+}
+
 /// Return a retryable [`ErrorCode::RunnerLabTransportFailure`] when a piped
 /// materialization command failed because its SSH transport dropped, or `None`
 /// when the failure is an ordinary non-transport command error.
@@ -266,6 +421,52 @@ fn bounded_command_output(output: &[u8]) -> String {
         Err(_) => String::from_utf8_lossy(&output[..COMMAND_FAILURE_OUTPUT_LIMIT]).into_owned(),
     };
     format!("{}... [truncated]", prefix.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_kills_workspace_transport_process_group() {
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().to_string();
+        let command = format!(
+            "sleep 30 & child=$!; printf '%s' \"$child\" > {}; wait",
+            shell::quote_arg(&pid_path)
+        );
+        let error = run_shell_command_before(
+            &command,
+            "materialize local workspace snapshot",
+            Some(Instant::now() + Duration::from_millis(50)),
+        )
+        .expect_err("stalled transport must time out");
+
+        assert_eq!(error.details["workspace_sync"]["timed_out"], true);
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .expect("transport recorded descendant pid")
+            .parse()
+            .expect("numeric descendant pid");
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            !homeboy_core::process::pid_is_running(pid),
+            "timed workspace transport leaked descendant {pid}"
+        );
+    }
+
+    #[test]
+    fn deadline_path_preserves_retryable_ssh_transport_classification() {
+        let error = run_shell_command_before(
+            "sh -c 'printf \"connection reset\\n\" >&2; exit 255'",
+            "materialize SSH workspace snapshot",
+            Some(Instant::now() + Duration::from_secs(1)),
+        )
+        .expect_err("dropped SSH transport must fail");
+
+        assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+        assert_eq!(error.retryable, Some(true));
+    }
 }
 
 pub(crate) fn shell_command_for_runner(runner: &Runner, command: &str) -> Result<String> {

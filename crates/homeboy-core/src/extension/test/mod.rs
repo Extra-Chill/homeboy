@@ -1,0 +1,2239 @@
+pub use homeboy_extension_contract::test_result::TestScopeOutput;
+
+pub mod analyze;
+pub mod baseline;
+pub mod differential;
+pub mod drift;
+pub mod durations;
+pub mod parsing;
+pub mod report;
+pub mod run;
+pub mod workflow;
+
+use crate::extension::invoke::ExtensionRunner;
+use crate::extension::resolve::ExtensionExecutionContext;
+use crate::extension::test::drift::DriftOptions;
+use homeboy_core::component::Component;
+use homeboy_core::git;
+use homeboy_extension_contract::manifest_toolchain_config::{
+    TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
+};
+use homeboy_extension_contract::{
+    ExtensionCapability, TestPassthroughFilter, TestPassthroughFilterStrategy,
+    TestSecretEnvProjection,
+};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+pub use analyze::{FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure};
+pub use baseline::{
+    compare as compare_baseline, load_baseline, load_baseline_from_ref, save_baseline,
+    TestBaseline, TestBaselineComparison, TestCounts,
+};
+pub use differential::{
+    classify as classify_differential, classify_against_cache,
+    measurement_from_terminal_test_evidence, measurement_from_test_output,
+    normalize_terminal_test_evidence, render_report, resolve_baseline_revision, BaselineCache,
+    BaselineCacheKey, BaselineEvidence, ComparisonBasis, DifferentialInput, DifferentialReport,
+    DifferentialVerdict, MetricKind, RunOutcome, TerminalTestEvidence, TerminalTestInventoryItem,
+    TerminalTestOutcome, TerminalTestOutcomeKind, TestMeasurement,
+};
+pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
+pub use durations::{
+    build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestFinding,
+    SlowTestPolicy, TestDurationSamples, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
+};
+pub use parsing::{
+    build_test_summary, parse_coverage_file, parse_failures_file, parse_test_failures_from_text,
+    parse_test_results_failures_file, parse_test_results_file, parse_test_results_file_with_spec,
+    parse_test_results_text, parse_test_results_text_with_spec, test_failure_summary_items,
+    CoverageOutput, TestSummaryOutput,
+};
+pub use report::TestCommandOutput;
+pub use run::{
+    ensure_clean_review_checkout, finalize_test_result_after_artifact_hydration,
+    run_main_test_workflow, run_self_check_test_workflow,
+    run_self_check_test_workflow_with_progress, RawTestOutput, TestRunWorkflowArgs,
+    TestRunWorkflowResult,
+};
+pub use workflow::{
+    auto_fix_test_drift, detect_test_drift, AutoFixDriftOutput, AutoFixDriftWorkflowResult,
+    DriftWorkflowResult, MainTestWorkflowResult,
+};
+
+pub fn resolve_test_command(
+    component: &Component,
+) -> homeboy_core::error::Result<ExtensionExecutionContext> {
+    crate::extension::resolve::resolve_execution_context(component, ExtensionCapability::Test)
+}
+
+/// Resolve only the process environment explicitly declared portable by the
+/// selected test extension. Values are intentionally absent when unset.
+pub struct PortableTestEnv {
+    pub public_env: Vec<(String, String)>,
+    pub secret_env: BTreeMap<String, String>,
+}
+
+/// Resolve the public process environment and runner-resolved secret identities
+/// explicitly declared by the selected test extension.
+pub fn portable_env(component: &Component) -> homeboy_core::Result<PortableTestEnv> {
+    let context = resolve_test_command(component)?;
+    let manifest = crate::extension::catalog::load_extension(&context.extension_id)?;
+    let Some(test) = manifest.test else {
+        return Ok(PortableTestEnv {
+            public_env: Vec::new(),
+            secret_env: BTreeMap::new(),
+        });
+    };
+    let config = test.portable_env;
+    let secret_env = test.secret_env;
+    let mut names = BTreeSet::new();
+    for key in config.keys {
+        if std::env::var_os(&key).is_some() {
+            names.insert(key);
+        }
+    }
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if config
+            .prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            names.insert(name.into_owned());
+        }
+    }
+    Ok(PortableTestEnv {
+        public_env: names
+            .into_iter()
+            // Prefix declarations remain public-only even when an ambient
+            // controller happens to expose a credential-shaped variable.
+            .filter(|name| !looks_like_secret_env_name(name))
+            .filter_map(|name| std::env::var(&name).ok().map(|value| (name, value)))
+            .collect(),
+        secret_env,
+    })
+}
+
+fn looks_like_secret_env_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    [
+        "PASSWORD",
+        "PASSWD",
+        "SECRET",
+        "TOKEN",
+        "API_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
+/// Resolve the secret identity *names* the component's test capability
+/// declares, composing static `test.secret_env` with settings-conditional
+/// `test.secret_env_projections` against the merged effective settings.
+///
+/// This is the same declaration the test runner resolves immediately before it
+/// spawns the extension child, exposed so callers can validate resolvability
+/// ahead of expensive work (release dependency hydration) instead of
+/// discovering an unresolvable declaration as a test-gate failure. Only names
+/// are produced here; no secret value is ever read.
+///
+/// Returns an empty list when the component runs its own `scripts.test` (the
+/// extension runner, and therefore the declaration, is bypassed) or when no
+/// test extension resolves.
+pub fn declared_secret_env_names(component: &Component) -> homeboy_core::Result<Vec<String>> {
+    if component.has_script(ExtensionCapability::Test) {
+        return Ok(Vec::new());
+    }
+
+    let Ok(context) = resolve_test_command(component) else {
+        return Ok(Vec::new());
+    };
+    let Some(test) = crate::extension::catalog::load_extension(&context.extension_id)?.test else {
+        return Ok(Vec::new());
+    };
+
+    let static_names = test.secret_env.into_keys().collect::<Vec<_>>();
+    let projections = test.secret_env_projections;
+    if static_names.is_empty() && projections.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let prepared = crate::extension::invoke::prepare_capability_run(
+        &context,
+        Some(component),
+        None,
+        &[],
+        &[],
+        false,
+    )?;
+
+    effective_secret_env_names(&static_names, &projections, &prepared.settings_json)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_test_runner(
+    component: &Component,
+    path_override: Option<String>,
+    settings: &[(String, String)],
+    settings_json: &[(String, serde_json::Value)],
+    skip_lint: bool,
+    coverage_enabled: bool,
+    coverage_min: Option<f64>,
+    changed_test_files: Option<&[String]>,
+    run_dir: &homeboy_core::engine::run_dir::RunDir,
+) -> homeboy_core::Result<ExtensionRunner> {
+    let resolved = resolve_test_command(component)?;
+    let extension_id = resolved.extension_id.clone();
+    let test_config = crate::extension::catalog::load_extension(&extension_id)?.test;
+    let (secret_env_names, secret_env_projections) = test_config
+        .map(|test| {
+            (
+                test.secret_env.into_keys().collect::<Vec<_>>(),
+                test.secret_env_projections,
+            )
+        })
+        .unwrap_or_default();
+
+    let mut runner = ExtensionRunner::for_context(resolved)
+        .component(component.clone())
+        .path_override(path_override)
+        .settings(settings)
+        .settings_json(settings_json)
+        .with_run_dir(run_dir)
+        .secret_env_names(secret_env_names)
+        .test_secret_env_projections(secret_env_projections)
+        .env_if(skip_lint, "HOMEBOY_SKIP_LINT", "1")
+        .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1");
+
+    if let Some(min) = coverage_min {
+        runner = runner.env("HOMEBOY_COVERAGE_MIN", &format!("{}", min));
+    }
+
+    if let Some(files) = changed_test_files {
+        runner = runner.env("HOMEBOY_CHANGED_TEST_FILES", &files.join("\n"));
+
+        if let Some(routing) = test_changed_file_routing(&extension_id)? {
+            for (name, value) in build_changed_test_routing_env(component, files, &routing) {
+                if name == "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON" {
+                    if let Some(selection_path) = write_rust_changed_selection(run_dir, &value) {
+                        runner =
+                            runner.env("HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE", &selection_path);
+                    } else {
+                        runner = runner
+                            .env("HOMEBOY_TEST_SCOPE_KIND", "full")
+                            .env(
+                                "HOMEBOY_TEST_SCOPE_MESSAGE",
+                                "Rust changed-test selection could not be materialized; running the full test command.",
+                            );
+                    }
+                } else {
+                    runner = runner.env(&name, &value);
+                }
+            }
+        }
+    }
+
+    Ok(runner)
+}
+
+fn write_rust_changed_selection(
+    run_dir: &homeboy_core::engine::run_dir::RunDir,
+    selection: &str,
+) -> Option<String> {
+    if selection.len() > 1024 * 1024 {
+        return None;
+    }
+    let path = run_dir.step_file("rust-changed-test-selection.json");
+    std::fs::write(&path, selection)
+        .ok()
+        .map(|()| path.to_string_lossy().to_string())
+}
+
+pub(crate) fn effective_secret_env_names(
+    static_names: &[String],
+    projections: &[TestSecretEnvProjection],
+    settings_json: &str,
+) -> homeboy_core::Result<Vec<String>> {
+    let settings: serde_json::Value = serde_json::from_str(settings_json).map_err(|error| {
+        homeboy_core::error::Error::validation_invalid_json(
+            error,
+            Some("evaluate test.secret_env_projections".to_string()),
+            None,
+        )
+    })?;
+    if !settings.is_object() {
+        return Err(projection_error(
+            "effective component settings must be an object",
+        ));
+    }
+
+    let mut names = BTreeSet::new();
+    for name in static_names {
+        if !names.insert(name.clone()) {
+            return Err(projection_error(&format!(
+                "duplicate static secret identity: {name}"
+            )));
+        }
+    }
+
+    for projection in projections {
+        let Some(predicate) = settings_path(&settings, &projection.when.path)? else {
+            continue;
+        };
+        let Some(predicate) = predicate.as_str() else {
+            return Err(projection_error(
+                "conditional predicate setting must resolve to a string",
+            ));
+        };
+        if predicate != projection.when.equals {
+            continue;
+        }
+
+        let Some(projected) = settings_path(&settings, &projection.names_path)? else {
+            if projection.optional {
+                continue;
+            }
+            return Err(projection_error("required secret identity path is absent"));
+        };
+        let Some(projected) = projected.as_object() else {
+            return Err(projection_error(
+                "secret identity path must resolve to an object of environment names",
+            ));
+        };
+        if projected.is_empty() && !projection.optional {
+            return Err(projection_error(
+                "required secret identity object must not be empty",
+            ));
+        }
+        for value in projected.values() {
+            let Some(name) = value.as_str() else {
+                return Err(projection_error(
+                    "projected secret identities must be strings",
+                ));
+            };
+            if !valid_env_identity(name) {
+                return Err(projection_error(
+                    "projected values must be ASCII uppercase environment identities",
+                ));
+            }
+            if !names.insert(name.to_string()) {
+                return Err(projection_error(&format!(
+                    "duplicate or conflicting projected secret identity: {name}"
+                )));
+            }
+        }
+    }
+
+    Ok(names.into_iter().collect())
+}
+
+fn settings_path<'a>(
+    settings: &'a serde_json::Value,
+    path: &[String],
+) -> homeboy_core::Result<Option<&'a serde_json::Value>> {
+    let mut current = settings;
+    for segment in path {
+        let Some(object) = current.as_object() else {
+            return Err(projection_error(
+                "settings path traverses a value that is not an object",
+            ));
+        };
+        let Some(next) = object.get(segment) else {
+            return Ok(None);
+        };
+        current = next;
+    }
+    Ok(Some(current))
+}
+
+fn valid_env_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+}
+
+fn projection_error(message: &str) -> homeboy_core::error::Error {
+    homeboy_core::error::Error::validation_invalid_argument(
+        "test.secret_env_projections",
+        message,
+        None,
+        None,
+    )
+}
+
+pub fn normalize_test_passthrough_args(
+    component: &Component,
+    args: &[String],
+) -> homeboy_core::error::Result<Vec<String>> {
+    let Some(filter) = test_passthrough_filter(component)? else {
+        return Ok(args.to_vec());
+    };
+
+    Ok(normalize_filter_passthrough_args(args, &filter))
+}
+
+fn test_passthrough_filter(
+    component: &Component,
+) -> homeboy_core::error::Result<Option<TestPassthroughFilter>> {
+    let context = resolve_test_command(component)?;
+    let manifest = crate::extension::catalog::load_extension(&context.extension_id)?;
+    Ok(manifest
+        .test
+        .and_then(|test| test.passthrough_filter.clone()))
+}
+
+fn normalize_filter_passthrough_args(
+    args: &[String],
+    filter: &TestPassthroughFilter,
+) -> Vec<String> {
+    match filter.strategy {
+        TestPassthroughFilterStrategy::RunnerPositional => positional_filter_args(args),
+    }
+}
+
+fn positional_filter_args(args: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut iter = args.iter();
+
+    while let Some(arg) = iter.next() {
+        if let Some(filter) = arg.strip_prefix("--filter=") {
+            if !filter.is_empty() {
+                normalized.push(filter.to_string());
+            }
+            continue;
+        }
+
+        if arg == "--filter" {
+            if let Some(filter) = iter.next() {
+                normalized.push(filter.clone());
+            }
+            continue;
+        }
+
+        normalized.push(arg.clone());
+    }
+
+    normalized
+}
+
+fn test_changed_file_routing(
+    extension_id: &str,
+) -> homeboy_core::error::Result<Option<TestChangedFileRouting>> {
+    let manifest = crate::extension::catalog::load_extension(extension_id)?;
+    Ok(manifest
+        .test
+        .and_then(|test| test.changed_file_routing.clone()))
+}
+
+fn build_changed_test_routing_env(
+    component: &Component,
+    files: &[String],
+    routing: &TestChangedFileRouting,
+) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "HOMEBOY_TEST_SCOPE_STRATEGY".to_string(),
+        changed_test_strategy_name(&routing.strategy).to_string(),
+    )];
+
+    match routing.strategy {
+        TestChangedFileRoutingStrategy::FileArgs => {
+            env.push(("HOMEBOY_TEST_SCOPE_KIND".to_string(), "args".to_string()));
+            env.push(("HOMEBOY_TEST_RUNNER_ARGS".to_string(), files.join("\n")));
+        }
+        TestChangedFileRoutingStrategy::RustCargo => {
+            env.extend(rust_cargo_changed_test_env(component, files));
+        }
+        TestChangedFileRoutingStrategy::ExclusiveEnv => {
+            if let Some(exclusive_env) = routing.exclusive_env.as_ref() {
+                env.extend(exclusive_changed_test_env(files, exclusive_env));
+            }
+        }
+    }
+
+    env
+}
+
+fn changed_test_strategy_name(strategy: &TestChangedFileRoutingStrategy) -> &'static str {
+    match strategy {
+        TestChangedFileRoutingStrategy::FileArgs => "file_args",
+        TestChangedFileRoutingStrategy::RustCargo => "rust_cargo",
+        TestChangedFileRoutingStrategy::ExclusiveEnv => "exclusive_env",
+    }
+}
+
+fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(String, String)> {
+    let mut candidates = BTreeSet::new();
+    let mut fallback_message = None;
+
+    for test_file in files {
+        let Some(routing_file) = cargo_relative_test_path(component, test_file) else {
+            fallback_message = Some(
+                "Changed Rust test path has no owning Cargo package; running the full test command."
+                    .to_string(),
+            );
+            continue;
+        };
+
+        // Git scopes intentionally omit deletions, but callers may provide a
+        // precomputed list. A removed test cannot name a current inventory
+        // identity, so it contributes no candidate rather than a stale filter.
+        let file_exists = component_source_path(component).join(test_file).is_file();
+        if !file_exists && routing_file.starts_with("tests/") {
+            continue;
+        }
+
+        let package = owning_cargo_package(component, test_file);
+        let Some(package) = package else {
+            fallback_message = Some(
+                "Changed Rust test path has no owning Cargo package; running the full test command."
+                    .to_string(),
+            );
+            continue;
+        };
+
+        if routing_file.starts_with("tests/") && routing_file.ends_with(".rs") {
+            let rest = routing_file.trim_start_matches("tests/");
+            if !rest.contains('/') {
+                candidates.insert((
+                    package,
+                    "test".to_string(),
+                    rest.trim_end_matches(".rs").to_string(),
+                    None,
+                    test_file.clone(),
+                ));
+                continue;
+            }
+        }
+
+        let mut module_path = routing_file
+            .strip_prefix("src/")
+            .unwrap_or(&routing_file)
+            .strip_prefix("tests/")
+            .unwrap_or_else(|| routing_file.strip_prefix("src/").unwrap_or(&routing_file))
+            .trim_end_matches(".rs")
+            .trim_end_matches("/mod")
+            .to_string();
+
+        if routing_file.starts_with("tests/") && routing_file.ends_with("_test.rs") {
+            let test_module = module_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&module_path)
+                .to_string();
+            let source_module = module_path.trim_end_matches("_test");
+            let source_file =
+                component_source_path(component).join(format!("src/{source_module}.rs"));
+            let source_mod =
+                component_source_path(component).join(format!("src/{source_module}/mod.rs"));
+
+            if source_file.is_file() || source_mod.is_file() {
+                module_path = format!("{source_module}::{test_module}");
+            } else if routing_file.starts_with("tests/")
+                && routing_file["tests/".len()..].contains('/')
+            {
+                fallback_message = Some(
+                    "Changed files include nested tests without a direct target; running the full test command."
+                        .to_string(),
+                );
+                continue;
+            }
+        } else if routing_file.starts_with("tests/") && routing_file["tests/".len()..].contains('/')
+        {
+            fallback_message = Some(
+                "Changed files include nested tests without a direct target; running the full test command."
+                    .to_string(),
+            );
+            continue;
+        }
+
+        // A changed `src/**/tests/**` inline-test module that defines no test
+        // functions (e.g. a shared `support.rs`/fixture helper) would compile a
+        // cargo filter that matches zero tests. The runner treats "ran 0 tests"
+        // as a failure, producing a spurious test-phase failure with no counts.
+        // Fall back to the full suite instead of emitting an empty filter.
+        if is_inline_test_support_file(component, test_file, &routing_file) {
+            fallback_message = Some(
+                "Changed files include an inline test support module without test functions; running the full test command."
+                    .to_string(),
+            );
+            continue;
+        }
+
+        // A test file mounted with `#[path = "..."] mod <name>;` lives at the
+        // module path of whichever module declares it, not the one its file
+        // name implies. Deriving the filter from the file name emits a filter
+        // that matches zero tests, and the runner fails closed on "ran 0
+        // tests". Resolve the real mount point before falling back to the file
+        // name. (#10179)
+        if let Some(mounted) = path_attr_mounted_module_path(component, test_file, &routing_file) {
+            let Some(target) = cargo_lib_target(component, test_file, &package) else {
+                fallback_message = Some(
+                    "Changed Rust inline test has no resolvable lib target; running the full test command."
+                        .to_string(),
+                );
+                continue;
+            };
+            candidates.insert((
+                package,
+                "lib".to_string(),
+                target,
+                Some(mounted),
+                test_file.clone(),
+            ));
+            continue;
+        }
+
+        module_path = module_path.replace('/', "::");
+        if !module_path.is_empty() {
+            let Some(target) = cargo_lib_target(component, test_file, &package) else {
+                fallback_message = Some(
+                    "Changed Rust inline test has no resolvable lib target; running the full test command."
+                        .to_string(),
+                );
+                continue;
+            };
+            candidates.insert((
+                package,
+                "lib".to_string(),
+                target,
+                Some(module_path),
+                test_file.clone(),
+            ));
+        }
+    }
+
+    if let Some(message) = fallback_message {
+        return vec![
+            ("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string()),
+            ("HOMEBOY_TEST_SCOPE_MESSAGE".to_string(), message),
+        ];
+    }
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let candidates = candidates
+        .into_iter()
+        .map(|(package, target_kind, target, module, path)| {
+            serde_json::json!({
+                "package": package,
+                "target_kind": target_kind,
+                "target": target,
+                "module": module,
+                "path": path,
+            })
+        })
+        .collect::<Vec<_>>();
+    let selection = serde_json::json!({
+        "schema": "homeboy/rust-changed-test-selection/v2",
+        "candidates": candidates,
+    });
+    vec![
+        (
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_changed_union".to_string(),
+        ),
+        (
+            "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON".to_string(),
+            selection.to_string(),
+        ),
+        (
+            "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
+            "Scoped to the exact union of changed Rust test identities.".to_string(),
+        ),
+    ]
+}
+
+fn owning_cargo_package(component: &Component, test_file: &str) -> Option<String> {
+    let component_root = component_source_path(component);
+    let file_path = component_root.join(test_file);
+    let mut directory = file_path.parent()?;
+    loop {
+        let manifest = directory.join("Cargo.toml");
+        if manifest.is_file() {
+            return cargo_manifest_package_name(&manifest);
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(&component_root) {
+            return None;
+        }
+    }
+}
+
+fn cargo_lib_target(component: &Component, test_file: &str, package: &str) -> Option<String> {
+    let component_root = component_source_path(component);
+    let file_path = component_root.join(test_file);
+    let mut directory = file_path.parent()?;
+    loop {
+        if directory.join("Cargo.toml").is_file() {
+            return directory
+                .join("src/lib.rs")
+                .is_file()
+                .then(|| package.replace('-', "_"));
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(&component_root) {
+            return None;
+        }
+    }
+}
+
+/// Return a changed file path relative to its Cargo package.
+///
+/// Changed-file selection is repository-relative for workspace components, but
+/// Cargo test filters are module-relative to the owning package. Component
+/// relative `src/` and `tests/` paths already satisfy that contract. For other
+/// paths, locate the nearest package manifest rather than treating directory
+/// names above `src/` as Rust modules.
+fn cargo_relative_test_path(component: &Component, test_file: &str) -> Option<String> {
+    if test_file.starts_with("src/") || test_file.starts_with("tests/") {
+        return Some(test_file.to_string());
+    }
+
+    let component_root = component_source_path(component);
+    let file_path = component_root.join(test_file);
+    let mut directory = file_path.parent()?;
+
+    loop {
+        if directory.join("Cargo.toml").is_file() {
+            return file_path
+                .strip_prefix(directory)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"));
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(&component_root) {
+            return None;
+        }
+    }
+}
+
+/// Extract the `[package] name` from a `Cargo.toml`.
+///
+/// Returns `None` for virtual-workspace manifests (no `[package]`) or when the
+/// name cannot be read; callers then fall back to an unscoped filter.
+fn cargo_manifest_package_name(manifest: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(manifest).ok()?;
+    let mut in_package_section = false;
+
+    for raw in contents.lines() {
+        let line = raw.trim();
+        if let Some(section) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            in_package_section = section.trim() == "package";
+            continue;
+        }
+        if !in_package_section {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("name") {
+            let value = rest.trim_start().strip_prefix('=')?.trim();
+            let name = value.trim_matches(|c| c == '"' || c == '\'').trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Returns `true` when `test_file` is an inline test module (lives under a
+/// `tests/` directory inside `src/`) that defines no test functions and would
+/// therefore produce a cargo filter matching zero tests.
+///
+/// Only files that exist on disk and contain no `#[test]`/`#[*::test]` attribute
+/// are treated as support modules; if the file is missing or cannot be read we
+/// conservatively return `false` so normal filter routing is preserved.
+fn is_inline_test_support_file(component: &Component, test_file: &str, routing_file: &str) -> bool {
+    // Restrict to inline test modules: `src/.../tests/....rs`. Integration
+    // tests under the top-level `tests/` dir are handled separately above.
+    let Some(relative) = routing_file.strip_prefix("src/") else {
+        return false;
+    };
+    if !relative.ends_with(".rs") {
+        return false;
+    }
+    let is_inline_test_module = relative
+        .split('/')
+        .any(|segment| segment == "tests" || segment == "test");
+    if !is_inline_test_module {
+        return false;
+    }
+
+    let path = component_source_path(component).join(test_file);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+
+    !file_declares_test_function(&contents)
+}
+
+/// Detects whether Rust source `contents` declares at least one test function
+/// via a `#[test]` or `#[<path>::test]` (e.g. `#[tokio::test]`) attribute.
+///
+/// Inline-test selection asks the same question, so the detection lives in
+/// `drift` and both callers share it.
+fn file_declares_test_function(contents: &str) -> bool {
+    drift::declares_test_function(contents)
+}
+
+/// Resolves the module path a test file is actually mounted at when a sibling
+/// module declares it with `#[path = "..."] mod <name>;`.
+///
+/// `src/agent_task_service/cook_tests.rs` mounted from `cook.rs` as
+/// `#[path = "cook_tests.rs"] mod tests;` lives at
+/// `agent_task_service::cook::tests`, not the `agent_task_service::cook_tests`
+/// its file name implies. Returns `None` when no declaring module is found, so
+/// callers keep the file-name derivation.
+fn path_attr_mounted_module_path(
+    component: &Component,
+    test_file: &str,
+    routing_file: &str,
+) -> Option<String> {
+    let target = component_source_path(component).join(test_file);
+    let target = target.canonicalize().unwrap_or(target);
+    let search_dir = component_source_path(component)
+        .join(test_file)
+        .parent()?
+        .to_path_buf();
+    let routing_dir = routing_file
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("");
+
+    for entry in std::fs::read_dir(&search_dir).ok()? {
+        let Ok(entry) = entry else { continue };
+        let declaring = entry.path();
+        if declaring.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let declaring_canonical = declaring
+            .canonicalize()
+            .unwrap_or_else(|_| declaring.clone());
+        if declaring_canonical == target {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&declaring) else {
+            continue;
+        };
+
+        for (value, module) in path_attr_mod_declarations(&contents) {
+            // `#[path]` on a module outside an inline `mod` block resolves
+            // relative to the directory holding the declaring file. A non
+            // `mod.rs` file also owns a directory named after it, so accept
+            // either anchor rather than guessing which form the crate uses.
+            let mut anchors = vec![search_dir.clone()];
+            if let Some(stem) = declaring.file_stem().and_then(|stem| stem.to_str()) {
+                if stem != "mod" && stem != "lib" && stem != "main" {
+                    anchors.push(search_dir.join(stem));
+                }
+            }
+
+            let mounted = anchors.into_iter().any(|anchor| {
+                let candidate = anchor.join(&value);
+                candidate.canonicalize().unwrap_or(candidate) == target
+            });
+            if !mounted {
+                continue;
+            }
+
+            let declaring_name = declaring.file_name()?.to_str()?;
+            let declaring_routing = if routing_dir.is_empty() {
+                declaring_name.to_string()
+            } else {
+                format!("{routing_dir}/{declaring_name}")
+            };
+            let owner = module_path_from_routing_file(&declaring_routing);
+            return Some(if owner.is_empty() {
+                module
+            } else {
+                format!("{owner}::{module}")
+            });
+        }
+    }
+
+    None
+}
+
+/// Converts a package-relative source path into its cargo module path,
+/// returning an empty string for crate roots (`src/lib.rs`, `src/main.rs`).
+fn module_path_from_routing_file(routing_file: &str) -> String {
+    let relative = routing_file
+        .strip_prefix("src/")
+        .unwrap_or(routing_file)
+        .trim_end_matches(".rs")
+        .trim_end_matches("/mod");
+    if relative == "lib" || relative == "main" || relative == "mod" {
+        return String::new();
+    }
+    relative.replace('/', "::")
+}
+
+/// Extracts `(path_value, module_name)` pairs from `#[path = "..."] mod x;`
+/// declarations. Intervening attributes such as `#[cfg(test)]`, comments, and
+/// blank lines are tolerated between the attribute and the `mod` item.
+fn path_attr_mod_declarations(contents: &str) -> Vec<(String, String)> {
+    let mut declarations = Vec::new();
+    let mut pending: Option<String> = None;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#[path") {
+            pending = trimmed
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(value, _)| value.to_string());
+            continue;
+        }
+        if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
+            continue;
+        }
+        if let Some(value) = pending.take() {
+            if let Some(module) = parse_mod_declaration_ident(trimmed) {
+                declarations.push((value, module));
+            }
+        }
+    }
+
+    declarations
+}
+
+/// Parses the module name out of a `mod x;` item, tolerating visibility
+/// modifiers. Returns `None` for inline `mod x { ... }` blocks and non-module
+/// lines.
+fn parse_mod_declaration_ident(line: &str) -> Option<String> {
+    let mut rest = line.trim();
+    if let Some(after) = rest.strip_prefix("pub") {
+        let after = after.trim_start();
+        rest = match after.strip_prefix('(') {
+            Some(inner) => inner.split_once(')')?.1.trim_start(),
+            None => after,
+        };
+    }
+    let rest = rest.strip_prefix("mod")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let ident = rest.trim().strip_suffix(';')?.trim();
+    if ident.is_empty() || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(ident.to_string())
+}
+
+fn exclusive_changed_test_env(
+    files: &[String],
+    config: &TestChangedFileExclusiveEnv,
+) -> Vec<(String, String)> {
+    if files.is_empty()
+        || files
+            .iter()
+            .any(|file| !exclusive_route_matches(config, file))
+    {
+        return Vec::new();
+    }
+
+    vec![
+        (
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "exclusive_env".to_string(),
+        ),
+        (
+            "HOMEBOY_TEST_SCOPE_ENV_NAME".to_string(),
+            config.name.clone(),
+        ),
+        ("HOMEBOY_TEST_SCOPE_ENV_VALUE".to_string(), files.join("\n")),
+    ]
+}
+
+fn exclusive_route_matches(config: &TestChangedFileExclusiveEnv, file: &str) -> bool {
+    if !config.extensions.is_empty() && has_extension(file, &config.extensions) {
+        return true;
+    }
+
+    config
+        .globs
+        .iter()
+        .any(|pattern| glob_match::glob_match(pattern, file))
+}
+
+fn has_extension(file: &str, extensions: &[String]) -> bool {
+    Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extensions.iter().any(|expected| expected == extension))
+}
+
+fn component_source_path(component: &Component) -> PathBuf {
+    let expanded = shellexpand::tilde(&component.local_path);
+    PathBuf::from(expanded.as_ref())
+}
+
+/// Resolve drift detection options from the component's linked test extension.
+///
+/// `test.drift` is the manifest contract for extension-owned drift behavior.
+pub fn resolve_drift_options(
+    component: &Component,
+    since: &str,
+) -> homeboy_core::error::Result<DriftOptions> {
+    let source_path = component_source_path(component);
+
+    if let Some(extensions) = &component.extensions {
+        for extension_id in extensions.keys() {
+            let manifest = crate::extension::catalog::load_extension(extension_id)?;
+            if let Some(config) = manifest.test_drift() {
+                return Ok(DriftOptions::from_config(
+                    &source_path,
+                    since,
+                    &config,
+                    manifest.provided_file_extensions(),
+                ));
+            }
+        }
+    }
+
+    Ok(DriftOptions::from_config(
+        &source_path,
+        since,
+        &homeboy_core::defaults::extension_provided_test_drift_config(),
+        &[],
+    ))
+}
+
+/// Compute which test files are impacted by changes since a git ref.
+///
+/// Combines two sources: (1) changed files that are test paths, and
+/// (2) test files flagged by drift detection as needing re-runs.
+/// This is the single source of truth — used by test scope, refactor
+/// planning, and verification smoke tests.
+pub fn compute_changed_test_files(
+    component: &Component,
+    git_ref: &str,
+) -> homeboy_core::error::Result<Vec<String>> {
+    let source_path = component_source_path(component);
+
+    let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
+
+    compute_changed_test_files_for_files(component, git_ref, &changed_files)
+}
+
+pub fn compute_changed_test_files_for_files(
+    component: &Component,
+    git_ref: &str,
+    changed_files: &[String],
+) -> homeboy_core::error::Result<Vec<String>> {
+    let opts = resolve_drift_options(component, git_ref)?;
+
+    let changed_files = component_relative_changed_files(component, changed_files);
+    compute_changed_test_files_with_drift_options(component, &changed_files, &opts)
+}
+
+/// Git reports paths relative to the repository root, while extension test
+/// contracts operate relative to the component root. Restrict a nested
+/// component's changed scope to its subtree and remove that shared prefix.
+fn component_relative_changed_files(component: &Component, files: &[String]) -> Vec<String> {
+    let prefix = git::get_component_path_prefix(&component.local_path)
+        .map(|prefix| prefix.replace('\\', "/").trim_matches('/').to_string());
+
+    files
+        .iter()
+        .filter_map(|file| {
+            let file = file.replace('\\', "/");
+            match prefix.as_deref() {
+                // The separator check avoids treating sibling paths such as
+                // `wordpress-tools/**` as belonging to `wordpress/**`.
+                Some(prefix) => file
+                    .strip_prefix(prefix)
+                    .and_then(|path| path.strip_prefix('/'))
+                    .map(str::to_string),
+                None => Some(file),
+            }
+        })
+        .collect()
+}
+
+/// Return the subset of `changed_files` that are production or test source per
+/// the component's drift source/test patterns.
+///
+/// This is the "should have selected a test" signal: if any such file changed
+/// but the computed test scope is empty, the changed-scope gate is producing a
+/// false green (source changed, zero tests run). Documentation, config, and
+/// other non-source changes are excluded so a legitimate no-test scope is not
+/// forced to fail. (#8340)
+pub fn source_relevant_changed_files(opts: &DriftOptions, changed_files: &[String]) -> Vec<String> {
+    changed_files
+        .iter()
+        .filter(|file| drift::is_source_relevant_change(opts, file))
+        .cloned()
+        .collect()
+}
+
+fn compute_changed_test_files_with_drift_options(
+    component: &Component,
+    changed_files: &[String],
+    opts: &DriftOptions,
+) -> homeboy_core::error::Result<Vec<String>> {
+    let report = drift::detect_drift_for_changed_files(&component.id, opts, changed_files)?;
+    let mut selected: BTreeSet<String> = BTreeSet::new();
+
+    for file in changed_files {
+        if let Some(test_file) = changed_test_file_for_path(file) {
+            selected.insert(test_file);
+        }
+    }
+
+    for drifted in &report.drifted_tests {
+        selected.insert(drifted.test_file.clone());
+    }
+
+    for file in inline_test_sources(opts, changed_files) {
+        selected.insert(file);
+    }
+
+    Ok(selected.into_iter().collect())
+}
+
+/// Select changed source files that carry their own unit tests.
+///
+/// Languages with inline tests (Rust's `#[cfg(test)] mod tests`) keep the tests
+/// that cover a change inside the changed file itself. Drift only ever maps a
+/// change to *separate* files that reference its symbols, so without this the
+/// tests sitting directly beside an edit are the ones least likely to run —
+/// which is how two regressions shipped in `76c8c99a8` with their covering
+/// tests untouched. (#10465)
+///
+/// Only files that actually declare a test function are selected: emitting a
+/// filter for a file with no tests would match zero tests, which the runner
+/// treats as a failure.
+fn inline_test_sources(opts: &DriftOptions, changed_files: &[String]) -> Vec<String> {
+    if !opts.inline_tests {
+        return Vec::new();
+    }
+
+    changed_files
+        .iter()
+        .filter(|file| drift::is_inline_test_source(opts, file))
+        .cloned()
+        .collect()
+}
+
+pub fn compute_changed_test_scope_for_files(
+    component: &Component,
+    git_ref: &str,
+    changed_files: &[String],
+) -> homeboy_core::error::Result<TestScopeOutput> {
+    let opts = resolve_drift_options(component, git_ref)?;
+    let changed_files = component_relative_changed_files(component, changed_files);
+    let selected_files =
+        compute_changed_test_files_with_drift_options(component, &changed_files, &opts)?;
+    let source_changes_without_tests = if selected_files.is_empty() {
+        // A relocation refactor (symbol moved between files, unchanged name and
+        // behavior) is coverage-neutral: it introduces no new untested surface,
+        // so it must not force the changed-scope gate to fail closed. Exclude
+        // files whose entire source change is a pure cross-file relocation
+        // before flagging the rest as false-green. (#8927)
+        let relocation_only = drift::relocation_only_source_files(&opts, &changed_files);
+
+        // Guard against silently-disabled source relevance. If the component's
+        // drift config resolves no source/test glob patterns (e.g. a language
+        // extension that declares no file extensions), pattern-based relevance
+        // would pass every change as a false green. Warn loudly and fall back
+        // to a conservative docs/config heuristic so real source changes still
+        // fail closed. (#8927)
+        let relevant: Vec<String> = if opts.has_usable_patterns() {
+            source_relevant_changed_files(&opts, &changed_files)
+        } else {
+            homeboy_core::log_status!(
+                "drift",
+                "component '{}' resolved no source/test drift patterns; \
+                 falling back to conservative source-relevance for the \
+                 changed-scope test gate. Configure a language extension with \
+                 file_extensions to restore precise scoping.",
+                component.id
+            );
+            changed_files
+                .iter()
+                .filter(|file| drift::is_source_relevant_change_unconfigured(file))
+                .cloned()
+                .collect()
+        };
+
+        relevant
+            .into_iter()
+            .filter(|file| !relocation_only.contains(file))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(TestScopeOutput {
+        mode: "changed".to_string(),
+        changed_since: Some(git_ref.to_string()),
+        selected_count: selected_files.len(),
+        selected_files,
+        source_changes_without_tests,
+    })
+}
+
+/// Compute changed test scope with metadata for command-layer output.
+///
+/// Wraps [`compute_changed_test_files`] with the `TestScopeOutput` envelope
+/// that the test command uses for JSON output.
+pub fn compute_changed_test_scope(
+    component: &Component,
+    git_ref: &str,
+) -> homeboy_core::error::Result<TestScopeOutput> {
+    let source_path = component_source_path(component);
+    let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
+
+    compute_changed_test_scope_for_files(component, git_ref, &changed_files)
+}
+
+fn changed_test_file_for_path(file: &str) -> Option<String> {
+    if file.starts_with("tests/fixtures/output_contracts/errors/") {
+        return Some("tests/output_errors.rs".to_string());
+    }
+
+    if file.starts_with("tests/fixtures/golden_json_contracts/") {
+        return Some("src/command_contract/public_variants.rs".to_string());
+    }
+
+    if is_direct_changed_test_path(file) && !file.starts_with("tests/fixtures/") {
+        return Some(file.to_string());
+    }
+
+    None
+}
+
+fn is_direct_changed_test_path(file: &str) -> bool {
+    let path_lower = file.to_lowercase();
+    if path_lower.starts_with("tests/")
+        || path_lower.starts_with("test/")
+        || path_lower.starts_with("__tests__/")
+        || path_lower.contains("/tests/")
+        || path_lower.contains("/test/")
+        || path_lower.contains("/__tests__/")
+    {
+        return true;
+    }
+
+    let file_name = file.rsplit('/').next().unwrap_or(file);
+    homeboy_core::defaults::extension_provided_direct_test_file_suffixes()
+        .iter()
+        .any(|suffix| file_name.ends_with(suffix))
+        || (file_name.starts_with("test_") && file_name.ends_with(".py"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy_extension_contract::{TestDriftConfig, TestSettingStringPredicate};
+    use std::fs;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn projection(optional: bool) -> TestSecretEnvProjection {
+        TestSecretEnvProjection {
+            when: TestSettingStringPredicate {
+                path: vec!["service".to_string(), "mode".to_string()],
+                equals: "remote".to_string(),
+            },
+            names_path: vec!["service".to_string(), "secret_env".to_string()],
+            optional,
+        }
+    }
+
+    fn assert_union_candidates(env: &[(String, String)], expected: &[&str]) {
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_changed_union".to_string()
+        )));
+        let selection = env
+            .iter()
+            .find(|(key, _)| key == "HOMEBOY_RUST_CHANGED_TEST_SELECTION_JSON")
+            .map(|(_, value)| value)
+            .expect("changed Rust selection");
+        let candidates = serde_json::from_str::<serde_json::Value>(selection)
+            .expect("selection JSON")["candidates"]
+            .as_array()
+            .expect("selection candidates")
+            .iter()
+            .map(|candidate| {
+                let module = candidate["module"].as_str().unwrap_or_default();
+                format!(
+                    "{}::{}::{}::{}",
+                    candidate["package"].as_str().unwrap(),
+                    candidate["target_kind"].as_str().unwrap(),
+                    candidate["target"].as_str().unwrap(),
+                    module
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(candidates, expected);
+    }
+
+    #[test]
+    fn rust_changed_selection_is_bounded_and_written_in_the_run_dir() {
+        let run_dir = homeboy_core::engine::run_dir::RunDir::create().expect("run dir");
+        let selection = r#"{"schema":"homeboy/rust-changed-test-selection/v2","candidates":[]}"#;
+        let path = write_rust_changed_selection(&run_dir, selection).expect("selection artifact");
+        assert_eq!(
+            std::fs::read_to_string(path).expect("selection contents"),
+            selection
+        );
+        assert!(write_rust_changed_selection(&run_dir, &"x".repeat(1024 * 1024 + 1)).is_none());
+        std::fs::remove_dir_all(run_dir.path()).expect("remove run dir");
+        assert!(write_rust_changed_selection(&run_dir, selection).is_none());
+    }
+
+    #[test]
+    fn conditional_secret_projection_composes_static_and_matching_names() {
+        let names = effective_secret_env_names(
+            &["STATIC_SECRET".to_string()],
+            &[projection(false)],
+            r#"{"service":{"mode":"remote","secret_env":{"password":"REMOTE_PASSWORD","user":"REMOTE_USER"}}}"#,
+        )
+        .expect("matching projection");
+
+        assert_eq!(names, ["REMOTE_PASSWORD", "REMOTE_USER", "STATIC_SECRET"]);
+        assert_eq!(
+            effective_secret_env_names(
+                &["STATIC_SECRET".to_string()],
+                &[projection(false)],
+                r#"{"service":{"mode":"local"}}"#,
+            )
+            .expect("non-matching projection"),
+            ["STATIC_SECRET"]
+        );
+    }
+
+    #[test]
+    fn conditional_secret_projection_handles_optional_and_malformed_settings() {
+        assert!(effective_secret_env_names(
+            &[],
+            &[projection(true)],
+            r#"{"service":{"mode":"remote"}}"#,
+        )
+        .expect("absent optional path")
+        .is_empty());
+
+        for settings in [
+            r#"{"service":"not-an-object"}"#,
+            r#"{"service":{"mode":7}}"#,
+            r#"{"service":{"mode":"remote","secret_env":"not-an-object"}}"#,
+            r#"{"service":{"mode":"remote","secret_env":{"password":7}}}"#,
+            r#"{"service":{"mode":"remote","secret_env":{"password":"raw-secret-value"}}}"#,
+        ] {
+            let error = effective_secret_env_names(&[], &[projection(false)], settings)
+                .expect_err("malformed projection must fail closed");
+            assert!(!error.to_string().contains("raw-secret-value"));
+        }
+    }
+
+    #[test]
+    fn conditional_secret_projection_rejects_duplicate_identities() {
+        for (static_names, settings) in [
+            (
+                vec!["REMOTE_SECRET".to_string()],
+                r#"{"service":{"mode":"remote","secret_env":{"password":"REMOTE_SECRET"}}}"#,
+            ),
+            (
+                Vec::new(),
+                r#"{"service":{"mode":"remote","secret_env":{"password":"REMOTE_SECRET","user":"REMOTE_SECRET"}}}"#,
+            ),
+        ] {
+            assert!(
+                effective_secret_env_names(&static_names, &[projection(false)], settings,).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn drift_options_use_extension_drift_config() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let config = TestDriftConfig {
+            source_dirs: vec!["src".to_string(), "inc".to_string()],
+            test_dirs: vec!["tests".to_string()],
+            file_extensions: vec!["php".to_string()],
+            inline_tests: false,
+        };
+
+        let opts = DriftOptions::from_config(dir.path(), "HEAD~1", &config, &["rs".to_string()]);
+
+        // Each configured directory contributes a root-anchored pattern and an
+        // any-depth pattern so monorepo members (`packages/<pkg>/src`, ...) are
+        // recognized as source instead of silently reading as non-source.
+        assert_eq!(
+            opts.source_patterns,
+            vec![
+                "src/**/*.php",
+                "**/src/**/*.php",
+                "inc/**/*.php",
+                "**/inc/**/*.php"
+            ]
+        );
+        assert_eq!(
+            opts.test_patterns,
+            vec!["tests/**/*.php", "**/tests/**/*.php"]
+        );
+    }
+
+    #[test]
+    fn drift_options_fall_back_to_extension_file_extensions() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let config = TestDriftConfig {
+            source_dirs: vec!["src".to_string()],
+            test_dirs: vec!["tests".to_string()],
+            file_extensions: Vec::new(),
+            inline_tests: true,
+        };
+
+        let opts = DriftOptions::from_config(dir.path(), "HEAD~1", &config, &["rs".to_string()]);
+
+        assert_eq!(opts.source_patterns, vec!["src/**/*.rs", "**/src/**/*.rs"]);
+        assert_eq!(
+            opts.test_patterns,
+            vec!["tests/**/*.rs", "**/tests/**/*.rs"]
+        );
+    }
+
+    #[test]
+    fn changed_scope_maps_contract_fixtures_to_regression_tests() {
+        assert_eq!(
+            changed_test_file_for_path(
+                "tests/fixtures/output_contracts/errors/runner-unsupported.json"
+            ),
+            Some("tests/output_errors.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("tests/fixtures/golden_json_contracts/runs_contract.json"),
+            Some("src/command_contract/public_variants.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("tests/fixtures/other.json"),
+            None
+        );
+        assert_eq!(
+            changed_test_file_for_path("src/core/extension/test/mod.rs"),
+            Some("src/core/extension/test/mod.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("src/core/audit_test.rs"),
+            Some("src/core/audit_test.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("crates/homeboy-core/src/extension/test/report.rs"),
+            Some("crates/homeboy-core/src/extension/test/report.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("crates/homeboy-core/src/extension/test/run.rs"),
+            Some("crates/homeboy-core/src/extension/test/run.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_emits_integration_args() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("tests")).expect("test directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.path().join("tests/integration_scope.rs"),
+            "#[test] fn runs() {}",
+        )
+        .expect("integration test");
+        std::fs::write(
+            dir.path().join("tests/another_scope.rs"),
+            "#[test] fn runs() {}",
+        )
+        .expect("integration test");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &[
+                "tests/integration_scope.rs".to_string(),
+                "tests/another_scope.rs".to_string(),
+            ],
+        );
+
+        assert_union_candidates(
+            &env,
+            &[
+                "fixture::test::another_scope::",
+                "fixture::test::integration_scope::",
+            ],
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_emits_inline_filter() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src/core")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "mod core;").expect("lib target");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &["src/core/daemon.rs".to_string()]);
+
+        assert_union_candidates(&env, &["fixture::lib::fixture::core::daemon"]);
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_unions_exact_sorted_identities() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .expect("workspace manifest");
+        for (name, module) in [("alpha-pkg", "first"), ("beta-pkg", "second")] {
+            let crate_dir = dir.path().join(format!("crates/{name}"));
+            fs::create_dir_all(crate_dir.join("src")).expect("source directory");
+            fs::write(
+                crate_dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .expect("member manifest");
+            fs::write(crate_dir.join("src/lib.rs"), "pub fn value() {}").expect("lib target");
+            fs::write(
+                crate_dir.join(format!("src/{module}.rs")),
+                "#[cfg(test)] mod tests { #[test] fn runs() {} }",
+            )
+            .expect("inline tests");
+        }
+        let alpha_tests = dir.path().join("crates/alpha-pkg/tests");
+        fs::create_dir_all(&alpha_tests).expect("integration directory");
+        fs::write(alpha_tests.join("api.rs"), "#[test] fn api_runs() {}")
+            .expect("integration test");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &[
+                "crates/beta-pkg/src/second.rs".to_string(),
+                "crates/alpha-pkg/tests/api.rs".to_string(),
+                "crates/alpha-pkg/src/first.rs".to_string(),
+                "crates/beta-pkg/src/second.rs".to_string(),
+                "crates/alpha-pkg/tests/deleted.rs".to_string(),
+            ],
+        );
+
+        assert_union_candidates(
+            &env,
+            &[
+                "alpha-pkg::lib::alpha_pkg::first",
+                "alpha-pkg::test::api::",
+                "beta-pkg::lib::beta_pkg::second",
+            ],
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_maps_repository_relative_inline_test_to_owning_package() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("homeboy-core should live in the workspace crates directory");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            workspace_root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["crates/homeboy-lab-runner/src/workspace/tests/snapshot.rs".to_string()],
+        );
+
+        assert_union_candidates(
+            &env,
+            &["homeboy-lab-runner::lib::homeboy_lab_runner::workspace::tests::snapshot"],
+        );
+    }
+
+    /// End-to-end proof for #10465: a changed workspace-member source that
+    /// carries its own `#[cfg(test)] mod tests` must route to that crate's lib
+    /// target, filtered to the changed module.
+    ///
+    /// This is the exact shape of `76c8c99a8`, whose two covering unit tests
+    /// lived inside the changed crate and never ran.
+    #[test]
+    fn changed_inline_test_source_routes_to_its_owning_crate_lib() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let workspace_root = dir.path();
+        fs::write(
+            workspace_root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .expect("workspace manifest");
+        let member = workspace_root.join("crates/homeboy-lab-runner");
+        fs::create_dir_all(member.join("src/lab/offload")).expect("member dirs");
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"homeboy-lab-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("member manifest");
+        fs::write(member.join("src/lib.rs"), "pub mod lab;").expect("member lib target");
+        fs::write(
+            member.join("src/lab/offload/hydration.rs"),
+            "pub fn hydrate() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hydrates() {}\n}\n",
+        )
+        .expect("changed source with inline tests");
+
+        let component = Component::new(
+            "homeboy".to_string(),
+            workspace_root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["crates/homeboy-lab-runner/src/lab/offload/hydration.rs".to_string()],
+        );
+
+        assert_union_candidates(
+            &env,
+            &["homeboy-lab-runner::lib::homeboy_lab_runner::lab::offload::hydration"],
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_keeps_component_root_crate_filter_unscoped() {
+        // When the component *is* the crate (its root Cargo.toml is a
+        // `[package]`), a bare module filter already runs against that package;
+        // no `-p` selector should be emitted. (#8758)
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write component Cargo.toml");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
+        let test_rel = "src/core/tests/scope.rs";
+        let test_path = dir.path().join(test_rel);
+        std::fs::create_dir_all(test_path.parent().expect("parent dir"))
+            .expect("create test module dirs");
+        std::fs::write(&test_path, "#[test]\nfn runs() { assert!(true); }\n")
+            .expect("write inline test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &[test_rel.to_string()]);
+
+        assert_union_candidates(
+            &env,
+            &["fixture-crate::lib::fixture_crate::core::tests::scope"],
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_falls_back_without_an_owning_package() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["packages/example/src/tests/scope.rs".to_string()],
+        );
+
+        assert!(
+            env.contains(&("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string())),
+            "env: {env:?}"
+        );
+        assert!(!env.iter().any(|(key, _)| key == "HOMEBOY_TEST_RUNNER_ARGS"));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_falls_back_when_inline_support_module_has_no_tests() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let support_rel = "src/commands/agent_task/tests/support.rs";
+        let support_path = dir.path().join(support_rel);
+        std::fs::create_dir_all(support_path.parent().expect("parent dir"))
+            .expect("create support module dirs");
+        std::fs::write(
+            &support_path,
+            "//! Shared helpers for the agent-task command tests.\n\npub(crate) fn fixture() {}\n",
+        )
+        .expect("write support module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &[support_rel.to_string()]);
+
+        assert!(env.contains(&("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string())));
+        assert!(!env.iter().any(|(key, _)| key == "HOMEBOY_TEST_RUNNER_ARGS"));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_keeps_filter_when_inline_module_declares_tests() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
+        let test_rel = "src/commands/agent_task/tests/lifecycle.rs";
+        let test_path = dir.path().join(test_rel);
+        std::fs::create_dir_all(test_path.parent().expect("parent dir"))
+            .expect("create test module dirs");
+        std::fs::write(
+            &test_path,
+            "#[test]\nfn runs() { assert!(true); }\n\n#[tokio::test]\nasync fn runs_async() {}\n",
+        )
+        .expect("write inline test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &[test_rel.to_string()]);
+
+        assert_union_candidates(
+            &env,
+            &["fixture::lib::fixture::commands::agent_task::tests::lifecycle"],
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_uses_path_attr_mount_instead_of_file_name() {
+        // Mirrors homeboy-agents: `cook.rs` mounts `cook_tests.rs` as its
+        // `tests` module, so the filter must target `...::cook::tests` rather
+        // than the `...::cook_tests` the file name implies.
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
+        let module_dir = dir.path().join("src/agent_task_service");
+        std::fs::create_dir_all(&module_dir).expect("create module dirs");
+        std::fs::write(
+            module_dir.join("cook.rs"),
+            "pub fn cook() {}\n\n#[cfg(test)]\n#[path = \"cook_tests.rs\"]\nmod tests;\n",
+        )
+        .expect("write owning module");
+        std::fs::write(
+            module_dir.join("cook_tests.rs"),
+            "#[test]\nfn cooks() { assert!(true); }\n",
+        )
+        .expect("write mounted test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["src/agent_task_service/cook_tests.rs".to_string()],
+        );
+
+        assert_union_candidates(
+            &env,
+            &["fixture::lib::fixture::agent_task_service::cook::tests"],
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_keeps_file_name_when_no_path_attr_mount_exists() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
+        let module_dir = dir.path().join("src/agent_task_service");
+        std::fs::create_dir_all(&module_dir).expect("create module dirs");
+        // A sibling that mounts a *different* file must not capture this one.
+        std::fs::write(
+            module_dir.join("cook.rs"),
+            "#[cfg(test)]\n#[path = \"other_tests.rs\"]\nmod tests;\n",
+        )
+        .expect("write owning module");
+        std::fs::write(
+            module_dir.join("cook_tests.rs"),
+            "#[test]\nfn cooks() { assert!(true); }\n",
+        )
+        .expect("write standalone test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["src/agent_task_service/cook_tests.rs".to_string()],
+        );
+
+        assert_union_candidates(
+            &env,
+            &["fixture::lib::fixture::agent_task_service::cook_tests"],
+        );
+    }
+
+    #[test]
+    fn path_attr_mod_declarations_pairs_attributes_with_module_items() {
+        let declarations = path_attr_mod_declarations(
+            "#[cfg(test)]\n#[path = \"cook_tests.rs\"]\nmod tests;\n\n#[path = \"a/b.rs\"]\npub(crate) mod nested;\n\nmod plain;\n",
+        );
+
+        assert_eq!(
+            declarations,
+            vec![
+                ("cook_tests.rs".to_string(), "tests".to_string()),
+                ("a/b.rs".to_string(), "nested".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn module_path_from_routing_file_maps_roots_and_nested_modules() {
+        assert_eq!(module_path_from_routing_file("src/lib.rs"), "");
+        assert_eq!(module_path_from_routing_file("src/main.rs"), "");
+        assert_eq!(
+            module_path_from_routing_file("src/agent_task_service/mod.rs"),
+            "agent_task_service"
+        );
+        assert_eq!(
+            module_path_from_routing_file("src/agent_task_service/cook.rs"),
+            "agent_task_service::cook"
+        );
+    }
+
+    #[test]
+    fn file_declares_test_function_detects_attribute_variants() {
+        assert!(file_declares_test_function("#[test]\nfn a() {}"));
+        assert!(file_declares_test_function("    #[test]\n    fn a() {}"));
+        assert!(file_declares_test_function(
+            "#[tokio::test]\nasync fn a() {}"
+        ));
+        assert!(file_declares_test_function(
+            "#[test(flavor = \"x\")]\nfn a() {}"
+        ));
+        assert!(!file_declares_test_function("pub fn helper() {}"));
+        assert!(!file_declares_test_function(
+            "#[derive(Debug)]\nstruct Latest;"
+        ));
+        assert!(!file_declares_test_function("// #[test] in a comment"));
+    }
+
+    #[test]
+    fn positional_passthrough_translates_equals_filter_to_runner_filter() {
+        let args = vec![
+            "--filter=core::daemon".to_string(),
+            "--".to_string(),
+            "--nocapture".to_string(),
+        ];
+        let filter = TestPassthroughFilter {
+            strategy: TestPassthroughFilterStrategy::RunnerPositional,
+        };
+
+        assert_eq!(
+            normalize_filter_passthrough_args(&args, &filter),
+            vec![
+                "core::daemon".to_string(),
+                "--".to_string(),
+                "--nocapture".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn positional_passthrough_translates_split_filter_to_runner_filter() {
+        let args = vec![
+            "--filter".to_string(),
+            "core::daemon".to_string(),
+            "--".to_string(),
+            "--nocapture".to_string(),
+        ];
+        let filter = TestPassthroughFilter {
+            strategy: TestPassthroughFilterStrategy::RunnerPositional,
+        };
+
+        assert_eq!(
+            normalize_filter_passthrough_args(&args, &filter),
+            vec![
+                "core::daemon".to_string(),
+                "--".to_string(),
+                "--nocapture".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn exclusive_changed_routing_only_sets_env_when_all_files_match() {
+        let config = TestChangedFileExclusiveEnv {
+            name: "HOMEBOY_FIXTURE_HOST_SMOKE_FILES".to_string(),
+            globs: vec!["tests/**/*-smoke.php".to_string()],
+            extensions: Vec::new(),
+        };
+
+        let env = exclusive_changed_test_env(
+            &[
+                "tests/import-agent-ability-smoke.php".to_string(),
+                "tests/nested/queue-routing-smoke.php".to_string(),
+            ],
+            &config,
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "exclusive_env".to_string()
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_ENV_VALUE".to_string(),
+            "tests/import-agent-ability-smoke.php\ntests/nested/queue-routing-smoke.php"
+                .to_string()
+        )));
+
+        assert!(exclusive_changed_test_env(
+            &[
+                "tests/import-agent-ability-smoke.php".to_string(),
+                "tests/Unit/FooTest.php".to_string(),
+            ],
+            &config,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn compute_changed_test_scope_detects_new_test_file() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("src")).expect("src dir should be created");
+        fs::create_dir_all(root.join("tests")).expect("tests dir should be created");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='scope-test'\nversion='0.1.0'\n",
+        )
+        .expect("Cargo.toml should be written");
+        fs::write(root.join("src/lib.rs"), "pub fn thing() {}\n").expect("lib should be written");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init should run");
+        Command::new("git")
+            .args(["config", "user.email", "tests@example.com"])
+            .current_dir(root)
+            .output()
+            .expect("git config email should run");
+        Command::new("git")
+            .args(["config", "user.name", "Tests"])
+            .current_dir(root)
+            .output()
+            .expect("git config name should run");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .output()
+            .expect("git add should run");
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(root)
+            .output()
+            .expect("git commit should run");
+
+        fs::write(root.join("tests/scope_test.rs"), "#[test]\nfn smoke(){}\n")
+            .expect("test file should be written");
+        Command::new("git")
+            .args(["add", "tests/scope_test.rs"])
+            .current_dir(root)
+            .output()
+            .expect("git add test file should run");
+        Command::new("git")
+            .args(["commit", "-m", "add test"])
+            .current_dir(root)
+            .output()
+            .expect("git commit test file should run");
+
+        let component = Component::new(
+            "scope-test".to_string(),
+            root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.mode, "changed");
+        assert_eq!(output.changed_since, Some("HEAD~1".to_string()));
+        assert!(
+            output
+                .selected_files
+                .iter()
+                .any(|f| f.ends_with("tests/scope_test.rs")),
+            "expected changed test file to be included"
+        );
+    }
+
+    #[test]
+    fn component_relative_changed_files_normalizes_separators_and_excludes_siblings() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component_root = root.join("wordpress");
+        fs::create_dir_all(&component_root).expect("component dir");
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+
+        let nested_component = Component::new(
+            "wordpress".to_string(),
+            component_root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+        assert_eq!(
+            component_relative_changed_files(
+                &nested_component,
+                &[
+                    "wordpress\\tests\\selected-smoke.mjs".to_string(),
+                    "wordpress-tools\\tests\\sibling-smoke.mjs".to_string(),
+                    "outside\\tests\\outside-smoke.mjs".to_string(),
+                ],
+            ),
+            vec!["tests/selected-smoke.mjs"]
+        );
+
+        let root_component = Component::new(
+            "root".to_string(),
+            root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+        assert_eq!(
+            component_relative_changed_files(
+                &root_component,
+                &["tests\\root-smoke.mjs".to_string()],
+            ),
+            vec!["tests/root-smoke.mjs"]
+        );
+    }
+
+    /// Initialize a git repo with a committed baseline (`src/lib.rs`,
+    /// `README.md`) so a follow-up commit can be diffed with `HEAD~1`.
+    fn init_scope_repo(root: &Path) -> Component {
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='scope-test'\nversion='0.1.0'\n",
+        )
+        .expect("Cargo.toml");
+        fs::write(root.join("src/lib.rs"), "pub fn thing() {}\n").expect("lib");
+        fs::write(root.join("README.md"), "# scope-test\n").expect("readme");
+
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "tests@example.com"],
+            vec!["config", "user.name", "Tests"],
+            vec!["add", "."],
+            vec!["commit", "-m", "init"],
+        ] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .expect("git setup command");
+        }
+
+        Component::new(
+            "scope-test".to_string(),
+            root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        )
+    }
+
+    fn commit_change(root: &Path, rel: &str, contents: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("change parent directory");
+        }
+        fs::write(path, contents).expect("write change");
+        for args in [vec!["add", rel], vec!["commit", "-m", "change"]] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .expect("git change command");
+        }
+    }
+
+    #[test]
+    fn changed_source_without_selected_tests_flags_false_green() {
+        // #8340: a production source change that maps to no tests must record
+        // the impacted files so the gate can fail closed instead of passing on
+        // zero selection.
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component = init_scope_repo(root);
+        // Change production source only; no test file changes, and the trivial
+        // edit does not drift any existing test.
+        commit_change(root, "src/lib.rs", "pub fn thing() {}\npub fn added() {}\n");
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.selected_count, 0, "no test should be selected");
+        assert!(
+            output
+                .source_changes_without_tests
+                .iter()
+                .any(|f| f.ends_with("src/lib.rs")),
+            "changed production source with zero tests must be flagged, got {:?}",
+            output.source_changes_without_tests
+        );
+    }
+
+    #[test]
+    fn docs_only_change_allows_empty_test_scope() {
+        // #8340: a documentation-only change legitimately selects zero tests and
+        // must NOT be flagged as a false green.
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component = init_scope_repo(root);
+        commit_change(root, "README.md", "# scope-test\n\nmore docs\n");
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.selected_count, 0, "docs change selects no tests");
+        assert!(
+            output.source_changes_without_tests.is_empty(),
+            "docs-only change must not be flagged as a source change, got {:?}",
+            output.source_changes_without_tests
+        );
+    }
+
+    fn commit_changes(root: &Path, files: &[(&str, &str)]) {
+        for (rel, contents) in files {
+            if let Some(parent) = Path::new(rel).parent() {
+                fs::create_dir_all(root.join(parent)).expect("mkdir");
+            }
+            fs::write(root.join(rel), contents).expect("write change");
+        }
+        for args in [vec!["add", "."], vec!["commit", "-m", "change"]] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .expect("git change command");
+        }
+    }
+
+    #[test]
+    fn pure_relocation_does_not_flag_false_green() {
+        // #8927: relocating a symbol between source files (unchanged name and
+        // behavior) is coverage-neutral and must NOT be flagged as a source
+        // change without tests, so the changed-scope gate does not fail closed
+        // on refactor/extraction commits.
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component = init_scope_repo(root);
+        // Baseline: two source files, the util lives in util.rs.
+        commit_changes(
+            root,
+            &[
+                (
+                    "src/util.rs",
+                    "pub fn is_git_url(s: &str) -> bool { s.starts_with(\"git@\") }\n",
+                ),
+                ("src/other.rs", "pub fn other_thing() {}\n"),
+            ],
+        );
+        // Relocate is_git_url from util.rs into other.rs, unchanged.
+        commit_changes(
+            root,
+            &[
+                ("src/util.rs", "// util moved out\n"),
+                (
+                    "src/other.rs",
+                    "pub fn other_thing() {}\npub fn is_git_url(s: &str) -> bool { s.starts_with(\"git@\") }\n",
+                ),
+            ],
+        );
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.selected_count, 0, "no test should be selected");
+        assert!(
+            output.source_changes_without_tests.is_empty(),
+            "pure relocation must not be flagged as a source change, got {:?}",
+            output.source_changes_without_tests
+        );
+    }
+}

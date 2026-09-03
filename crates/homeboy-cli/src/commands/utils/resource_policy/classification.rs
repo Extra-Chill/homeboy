@@ -75,6 +75,9 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Cook(cook) if cook.dispatch.core.queue_only => {
             AgentTaskResourceBehavior::LocalControl
         }
+        agent_task::AgentTaskCommand::CookContinue(args) if args.preflight => {
+            AgentTaskResourceBehavior::BoundedMetadataRead
+        }
         agent_task::AgentTaskCommand::Cook(_)
         | agent_task::AgentTaskCommand::CookContinue(_)
         | agent_task::AgentTaskCommand::RunPlan(_)
@@ -233,6 +236,17 @@ pub(super) fn is_lab_offloadable_fanout_coordinator(command: &Commands) -> bool 
                 command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
             }),
         })
+    )
+}
+
+/// Executable retries use the generic Lab route, which first materializes the
+/// persisted controller plan and then hands that replay to the selected runner.
+pub(super) fn is_executable_agent_task_retry(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Retry(retry),
+        }) if retry.run
     )
 }
 

@@ -43,8 +43,7 @@ pub(crate) struct ProcessGroupCleanupGuard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcessCleanupReport {
-    pub(crate) incomplete: Option<String>,
-    pub(crate) warning: Option<String>,
+    pub(crate) incomplete: String,
 }
 
 impl ProcessGroupCleanupGuard {
@@ -180,33 +179,19 @@ fn cleanup_process_group(
     #[cfg(target_os = "linux")]
     if let Some(containment) = containment {
         match containment.cleanup_with_grace(Duration::from_millis(200), context) {
-            Ok(cleanup) if cleanup.complete => {
-                let warning = [cleanup.diagnostic, cleanup.warning]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return (!warning.is_empty()).then_some(ProcessCleanupReport {
-                    incomplete: None,
-                    warning: Some(warning),
-                });
-            }
+            Ok(cleanup) if cleanup.complete => return None,
             Ok(cleanup) => {
-                let warning = [cleanup.diagnostic, cleanup.warning]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return cleanup.detail.map(|incomplete| ProcessCleanupReport {
-                    incomplete: Some(incomplete),
-                    warning: (!warning.is_empty()).then_some(warning),
+                return Some(ProcessCleanupReport {
+                    incomplete: cleanup.detail.unwrap_or_else(|| {
+                        "process containment cleanup could not prove the owned scope empty"
+                            .to_string()
+                    }),
                 });
             }
             Err(error) => {
                 cleanup_process_group_fallback(pgid);
                 return Some(ProcessCleanupReport {
-                    incomplete: Some(format!("process containment cleanup failed: {error}")),
-                    warning: None,
+                    incomplete: format!("process containment cleanup failed: {error}"),
                 });
             }
         }

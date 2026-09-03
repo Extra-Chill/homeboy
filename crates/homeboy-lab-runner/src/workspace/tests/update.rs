@@ -81,6 +81,167 @@ fn prepared_workspace_update_applies_delta_retains_assets_and_rotates_lease() {
 }
 
 #[test]
+fn workspace_ref_resolution_is_exact_and_reports_typed_recovery() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("workspace-ref", runner_root.path());
+        create_local_runner("other-runner", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
+        let (synced, _) =
+            sync_workspace("workspace-ref", sync_options(source.path())).expect("sync");
+
+        let resolved = crate::resolve_workspace_ref("workspace-ref", &synced.workspace_ref)
+            .expect("resolve exact workspace ref");
+        assert_eq!(resolved.remote_path, synced.remote_path);
+        assert_eq!(resolved.local_path, synced.local_path);
+        assert_eq!(
+            resolved
+                .source_snapshot
+                .workspace_snapshot_identity
+                .as_deref(),
+            Some(synced.snapshot_identity.as_str())
+        );
+
+        for (runner_id, workspace_ref, reason) in [
+            (
+                "workspace-ref",
+                "not-a-workspace-ref",
+                "workspace_ref_invalid",
+            ),
+            (
+                "workspace-ref",
+                "workspace:00000000-0000-0000-0000-000000000000",
+                "workspace_ref_missing",
+            ),
+            (
+                "other-runner",
+                synced.workspace_ref.as_str(),
+                "workspace_ref_refused",
+            ),
+        ] {
+            let error = crate::resolve_workspace_ref(runner_id, workspace_ref)
+                .expect_err("unavailable workspace ref");
+            assert_eq!(error.details["field"], "workspace_ref");
+            assert_eq!(error.details["reason"], reason);
+            assert_eq!(error.details["recovery"], "resync_workspace");
+            assert!(error.details["tried"][0]
+                .as_str()
+                .is_some_and(|suggestion| suggestion.contains("runner workspace sync")));
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_ref_resolution_accepts_macos_var_alias() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let canonical_root = runner_root.path().canonicalize().expect("canonical root");
+        let alias_root = std::path::Path::new("/").join(
+            canonical_root
+                .strip_prefix("/private")
+                .expect("macOS temporary root below /private"),
+        );
+        assert_ne!(alias_root, canonical_root);
+        assert_eq!(alias_root.canonicalize().unwrap(), canonical_root);
+        create_local_runner("workspace-ref-var-alias", &alias_root);
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
+        let (synced, _) = sync_workspace("workspace-ref-var-alias", sync_options(source.path()))
+            .expect("sync through /var alias");
+
+        let resolved =
+            crate::resolve_workspace_ref("workspace-ref-var-alias", &synced.workspace_ref)
+                .expect("resolve /var snapshot through canonical /private/var parent");
+
+        assert_eq!(resolved.remote_path, synced.remote_path);
+        assert_eq!(
+            Path::new(&resolved.remote_path).canonicalize().unwrap(),
+            Path::new(&synced.remote_path).canonicalize().unwrap()
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_ref_resolution_does_not_follow_symlinked_snapshot() {
+    use std::os::unix::fs::symlink;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("workspace-ref-symlink", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
+        let (synced, _) =
+            sync_workspace("workspace-ref-symlink", sync_options(source.path())).expect("sync");
+        let escaped_root = tempfile::tempdir().expect("escaped root");
+        let escaped_snapshot = escaped_root.path().join("snapshot");
+        fs::rename(&synced.remote_path, &escaped_snapshot).expect("move snapshot outside root");
+        symlink(&escaped_snapshot, &synced.remote_path).expect("symlink snapshot into root");
+
+        let error = crate::resolve_workspace_ref("workspace-ref-symlink", &synced.workspace_ref)
+            .expect_err("workspace ref must not follow symlink outside its root");
+
+        assert_eq!(error.details["reason"], "workspace_ref_missing");
+        assert_eq!(error.details["recovery"], "resync_workspace");
+    });
+}
+
+#[test]
+fn workspace_ref_rejects_expired_source_drift_and_metadata_redirection() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("workspace-ref-safety", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
+        let (synced, _) =
+            sync_workspace("workspace-ref-safety", sync_options(source.path())).expect("sync");
+        let resolved = crate::resolve_workspace_ref("workspace-ref-safety", &synced.workspace_ref)
+            .expect("resolve workspace ref");
+        fs::write(source.path().join("file.txt"), "drifted\n").expect("drift source");
+        let drift = crate::verify_workspace_ref_hydration_source(&resolved)
+            .expect_err("hydration source drift must fail closed");
+        assert_eq!(drift.details["reason"], "workspace_ref_source_drift");
+
+        let metadata_path = Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let original = fs::read_to_string(&metadata_path).expect("metadata");
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&original).expect("metadata JSON");
+        metadata["resource_lifecycle"]["ttl"] = serde_json::json!("2000-01-01T00:00:00Z");
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).expect("expired metadata"),
+        )
+        .expect("write expired metadata");
+        let expired = crate::resolve_workspace_ref("workspace-ref-safety", &synced.workspace_ref)
+            .expect_err("expired workspace ref must fail closed");
+        assert_eq!(expired.details["field"], "workspace_ref");
+        assert_eq!(expired.details["reason"], "workspace_ref_expired");
+        assert_eq!(expired.details["recovery"], "resync_workspace");
+        assert!(expired.details["tried"][0]
+            .as_str()
+            .is_some_and(|suggestion| suggestion.contains("runner workspace sync")));
+
+        let mut redirected: serde_json::Value =
+            serde_json::from_str(&original).expect("metadata JSON");
+        redirected["remote_path"] = serde_json::json!(runner_root
+            .path()
+            .join("_lab_workspaces/redirected")
+            .display()
+            .to_string());
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&redirected).expect("redirected metadata"),
+        )
+        .expect("write redirected metadata");
+        let refused = crate::resolve_workspace_ref("workspace-ref-safety", &synced.workspace_ref)
+            .expect_err("metadata cannot redirect workspace ref");
+        assert_eq!(refused.details["reason"], "workspace_ref_refused");
+    });
+}
+
+#[test]
 fn ssh_prepared_workspace_update_resolves_fresh_lease_without_projecting_large_root() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");

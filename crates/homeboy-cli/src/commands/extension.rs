@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
-use homeboy_extension as extension;
+use homeboy_agents::agent_task_provider::discovery::AgentTaskExecutorDiscovery;
+use homeboy_core::extension;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use serde::{Deserialize, Serialize};
 
 use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
@@ -9,11 +11,28 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
-use homeboy::runner::runners::{self, RunnerKind};
-use homeboy_extension::{
-    self, extension_ready_status_with, is_extension_linked, load_extension, run_setup,
-    ExtensionReadinessMode, ExtensionSummary, UpdateEntry,
+use homeboy::runner::runners;
+use homeboy_core::error::ExecutableAction;
+use homeboy_core::extension::catalog::{
+    broken_extension_link_repair_actions, is_extension_linked, load_extension,
 };
+use homeboy_core::extension::readiness::{
+    extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
+};
+use homeboy_core::extension::{invoke::run_setup, resolve::is_extension_compatible};
+use homeboy_extension_contract as extension_contract;
+use homeboy_extension_contract::action_types::ActionType;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiCatalogDiagnosticCode, ExtensionApiCatalogEntry, ExtensionApiCatalogEntryStatus,
+    ExtensionApiCatalogRequest, ExtensionApiReadinessMode, ExtensionApiReadinessRequest,
+    ExtensionApiReadinessState, ExtensionApiReadinessStatus, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+    EXTENSION_API_READINESS_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
+use homeboy_extension_contract::update_output::UpdateEntry;
+use homeboy_extension_contract::{
+    evaluate_core_compatibility, CoreCompatibilityReport, NotificationTransportDescriptor,
+};
+use homeboy_runner_contract::RunnerKind;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -35,11 +54,8 @@ enum ExtensionCommand {
         #[arg(short, long)]
         project: Option<String>,
         /// Run live readiness probes concurrently and refresh cached readiness
-        #[arg(long, conflicts_with = "skip_ready_check")]
+        #[arg(long)]
         live_readiness: bool,
-        /// Deprecated compatibility flag; inventory is metadata-only by default
-        #[arg(long, hide = true)]
-        skip_ready_check: bool,
     },
     /// Compare installed extension revisions with their current checkout HEADs
     DiffInstalled {
@@ -54,11 +70,8 @@ enum ExtensionCommand {
         /// Extension ID
         extension_id: String,
         /// Run the live readiness probe and refresh cached readiness
-        #[arg(long, conflicts_with = "skip_ready_check")]
+        #[arg(long)]
         live_readiness: bool,
-        /// Deprecated compatibility flag; inspection is metadata-only by default
-        #[arg(long, hide = true)]
-        skip_ready_check: bool,
     },
     /// Execute a extension
     Run {
@@ -212,8 +225,7 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
         ExtensionCommand::List {
             project,
             live_readiness,
-            skip_ready_check,
-        } => list(project, readiness_mode(live_readiness, skip_ready_check)),
+        } => list(project, readiness_mode(live_readiness)),
         ExtensionCommand::DiffInstalled {
             extension_id,
             runner,
@@ -221,11 +233,7 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
         ExtensionCommand::Show {
             extension_id,
             live_readiness,
-            skip_ready_check,
-        } => show_extension(
-            &extension_id,
-            readiness_mode(live_readiness, skip_ready_check),
-        ),
+        } => show_extension(&extension_id, readiness_mode(live_readiness)),
         ExtensionCommand::Run {
             extension_id,
             project,
@@ -304,12 +312,23 @@ impl ExtensionArgs {
     }
 
     pub(crate) fn is_runner_resident_read_command(&self) -> bool {
-        matches!(self.command, ExtensionCommand::Show { .. })
+        // The default show path only loads the controller-local manifest and
+        // cached readiness. The live probe may execute an extension command.
+        matches!(
+            self.command,
+            ExtensionCommand::Show {
+                live_readiness: true,
+                ..
+            }
+        )
     }
 
     pub(crate) fn runner_resident_read_command_label(&self) -> &'static str {
         match self.command {
-            ExtensionCommand::Show { .. } => "extension show",
+            ExtensionCommand::Show {
+                live_readiness: true,
+                ..
+            } => "extension show --live-readiness",
             _ => "extension",
         }
     }
@@ -322,6 +341,10 @@ impl ExtensionArgs {
                 | ExtensionCommand::Refresh { .. }
                 | ExtensionCommand::DevRun { .. }
         )
+    }
+
+    pub(crate) fn is_readiness_repair_command(&self) -> bool {
+        matches!(self.command, ExtensionCommand::Setup { .. })
     }
 
     pub(crate) fn update_command_label(&self) -> &'static str {
@@ -341,7 +364,7 @@ pub enum ExtensionOutput {
     List {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
-        extensions: Vec<ExtensionSummary>,
+        extensions: Vec<ExtensionInventoryEntry>,
     },
     #[serde(rename = "extension.diff_installed")]
     DiffInstalled {
@@ -364,6 +387,7 @@ pub enum ExtensionOutput {
     #[serde(rename = "extension.setup")]
     Setup {
         extension_id: String,
+        before_runtime_diagnostics: ExtensionRuntimeDiagnostics,
         runtime_diagnostics: ExtensionRuntimeDiagnostics,
     },
     #[serde(rename = "extension.install")]
@@ -417,13 +441,14 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         git_root: Option<String>,
         #[serde(flatten)]
-        source_update: homeboy_extension::ExtensionSourceUpdate,
+        source_update: extension_contract::update_output::ExtensionSourceUpdate,
         #[serde(skip_serializing_if = "Option::is_none")]
         old_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         new_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        repaired_source_metadata: Option<homeboy_extension::SourceMetadataRepair>,
+        repaired_source_metadata:
+            Option<extension_contract::source_metadata_repair::SourceMetadataRepair>,
     },
     #[serde(rename = "extension.update_all")]
     UpdateAll {
@@ -435,7 +460,7 @@ pub enum ExtensionOutput {
         controller_version: String,
         compatibility: Vec<ExtensionConvergenceCompatibility>,
         updated: Vec<UpdateEntry>,
-        skipped: Vec<homeboy_extension::UpdateSkippedEntry>,
+        skipped: Vec<extension_contract::update_output::UpdateSkippedEntry>,
         revision_evidence: Vec<ExtensionRevisionEvidence>,
         provider_catalog_before: ProviderCatalogEvidence,
         provider_catalog_after: ProviderCatalogEvidence,
@@ -473,10 +498,70 @@ pub enum ExtensionOutput {
     SetBatch { batch: homeboy::core::BatchResult },
 }
 
+/// CLI compatibility projection sourced from the stable v1 catalog and readiness services.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionInventoryEntry {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub runtime: String,
+    pub compatible: bool,
+    pub core_compatibility: CoreCompatibilityReport,
+    pub readiness: ExtensionApiReadinessState,
+    pub ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_cache_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_probe_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_follow_up_command: Option<String>,
+    pub linked: bool,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ExtensionInventoryAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repair_actions: Vec<ExecutableAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notification_transports: Vec<NotificationTransportDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_setup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_ready_check: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionInventoryAction {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub action_type: ActionType,
+}
+
 #[derive(Serialize)]
 pub struct ExtensionConvergenceCompatibility {
     pub extension_id: String,
-    pub core_compatibility: homeboy_extension::CoreCompatibilityReport,
+    pub core_compatibility: extension_contract::core_compat::CoreCompatibilityReport,
 }
 
 #[derive(Serialize)]
@@ -514,14 +599,15 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     pub runtime: String,
-    pub core_compatibility: homeboy_extension::CoreCompatibilityReport,
+    pub core_compatibility: extension_contract::core_compat::CoreCompatibilityReport,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_requirements: Option<homeboy_extension::RuntimeRequirementsConfig>,
+    pub runtime_requirements:
+        Option<extension_contract::manifest_capability_config::RuntimeRequirementsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_ready_check: Option<bool>,
-    pub readiness: homeboy_extension::ExtensionReadinessState,
+    pub readiness: ExtensionReadinessState,
     pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
@@ -545,19 +631,23 @@ pub struct ExtensionDetail {
     pub actions: Vec<ActionDetail>,
     /// Installed transport IDs and schemas, without executable argv.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub notification_transports: Vec<homeboy_extension::NotificationTransportDescriptor>,
+    pub notification_transports:
+        Vec<extension_contract::notification_transport_config::NotificationTransportDescriptor>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<homeboy_extension::InputConfig>,
+    pub inputs: Vec<extension_contract::manifest_action_config::InputConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub settings: Vec<homeboy_extension::SettingConfig>,
+    pub settings: Vec<extension_contract::manifest_action_config::SettingConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub structured_sidecars: Vec<homeboy_extension::StructuredSidecarDeclaration>,
+    pub structured_sidecars: Vec<extension_contract::sidecar_config::StructuredSidecarDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ci_cache: Option<homeboy_extension::CiCacheSpec>,
+    pub ci_cache: Option<extension_contract::ci_config::CiCacheSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialization_source: Option<homeboy_extension::ExtensionMaterializationSourceContract>,
+    pub materialization_source: Option<
+        extension_contract::extension_contract_producer::ExtensionMaterializationSourceContract,
+    >,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub contract_producers: Vec<homeboy_extension::ExtensionContractProducer>,
+    pub contract_producers:
+        Vec<extension_contract::extension_contract_producer::ExtensionContractProducer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequiresDetail>,
 }
@@ -585,11 +675,11 @@ pub struct ActionDetail {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
-    pub action_type: homeboy_extension::ActionType,
+    pub action_type: extension_contract::action_types::ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<homeboy_extension::HttpMethod>,
+    pub method: Option<extension_contract::action_types::HttpMethod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
@@ -611,6 +701,10 @@ pub struct ExtensionRuntimeDiagnostics {
     pub linked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_manifest_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_generation: Option<String>,
     pub runtime_manifest_found: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runtime_ids: Vec<String>,
@@ -663,7 +757,7 @@ pub struct InstalledExtensionDiff {
 }
 
 /// Inventory is static by default; callers must explicitly request live probes.
-fn readiness_mode(live_readiness: bool, _skip_ready_check: bool) -> ExtensionReadinessMode {
+fn readiness_mode(live_readiness: bool) -> ExtensionReadinessMode {
     if live_readiness {
         ExtensionReadinessMode::Probe
     } else {
@@ -671,9 +765,215 @@ fn readiness_mode(live_readiness: bool, _skip_ready_check: bool) -> ExtensionRea
     }
 }
 
+fn extension_inventory(
+    project: Option<&Project>,
+    readiness: ExtensionReadinessMode,
+) -> Vec<ExtensionInventoryEntry> {
+    let catalog = extension::catalog::list_api(&ExtensionApiCatalogRequest {
+        schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+    });
+    let readiness_by_id = extension_inventory_readiness(&catalog.entries, readiness);
+
+    catalog
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let readiness = readiness_by_id.get(&entry.id).cloned();
+            extension_inventory_entry(entry, project, readiness)
+        })
+        .collect()
+}
+
+pub(crate) fn extension_inventory_readiness(
+    entries: &[ExtensionApiCatalogEntry],
+    mode: ExtensionReadinessMode,
+) -> BTreeMap<String, ExtensionApiReadinessStatus> {
+    let requests = entries
+        .iter()
+        .filter(|entry| entry.status != ExtensionApiCatalogEntryStatus::Invalid)
+        .map(|entry| ExtensionApiReadinessRequest {
+            schema: EXTENSION_API_READINESS_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: entry.id.clone(),
+            mode: match mode {
+                ExtensionReadinessMode::Cached => ExtensionApiReadinessMode::Cached,
+                ExtensionReadinessMode::Probe => ExtensionApiReadinessMode::Probe,
+            },
+        })
+        .collect::<Vec<_>>();
+    let responses = extension::catalog::readiness_api_batch(&requests);
+
+    responses
+        .into_iter()
+        .filter_map(|response| {
+            response
+                .status
+                .map(|status| (response.extension_id, status))
+        })
+        .collect()
+}
+
+fn extension_inventory_entry(
+    entry: ExtensionApiCatalogEntry,
+    project: Option<&Project>,
+    readiness: Option<ExtensionApiReadinessStatus>,
+) -> ExtensionInventoryEntry {
+    if entry.descriptor.is_none() {
+        return invalid_extension_inventory_entry(entry);
+    }
+    let Ok(manifest) = load_extension(&entry.id) else {
+        return invalid_extension_inventory_entry(entry);
+    };
+    let descriptor = entry
+        .descriptor
+        .expect("v1 catalog entry descriptor checked above");
+    let readiness = readiness.unwrap_or_else(|| ExtensionApiReadinessStatus {
+        state: ExtensionApiReadinessState::Unknown,
+        ready: None,
+        reason: Some("readiness_unavailable".to_string()),
+        detail: Some("The v1 readiness service returned no status.".to_string()),
+        cache_age_seconds: None,
+        probe_duration_ms: None,
+        timeout_ms: None,
+        follow_up_command: None,
+    });
+    let (cli_tool, cli_display_name) = manifest
+        .cli
+        .as_ref()
+        .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
+        .unwrap_or((None, None));
+    let source_revision = descriptor.identity.source_revision.clone();
+    let core_compatibility = evaluate_core_compatibility(
+        descriptor.requires_homeboy.as_deref(),
+        source_revision.clone(),
+    )
+    .unwrap_or_else(|_| CoreCompatibilityReport::undeclared(source_revision.clone()));
+
+    ExtensionInventoryEntry {
+        id: entry.id,
+        name: descriptor.identity.name,
+        version: descriptor.identity.version,
+        description: manifest
+            .description
+            .as_ref()
+            .and_then(|description| description.lines().next())
+            .unwrap_or("")
+            .to_string(),
+        runtime: if manifest.executable.is_some() {
+            "executable".to_string()
+        } else {
+            "platform".to_string()
+        },
+        compatible: is_extension_compatible(&manifest, project),
+        core_compatibility,
+        readiness: readiness.state,
+        ready: readiness.ready,
+        ready_reason: readiness.reason,
+        ready_detail: readiness.detail,
+        readiness_cache_age_seconds: readiness.cache_age_seconds,
+        readiness_probe_duration_ms: readiness.probe_duration_ms,
+        readiness_timeout_ms: readiness.timeout_ms,
+        readiness_follow_up_command: readiness.follow_up_command,
+        linked: is_extension_linked(&manifest.id),
+        path: manifest.extension_path.clone().unwrap_or_default(),
+        manifest_path: None,
+        error: None,
+        diagnostic: None,
+        symlink_target: None,
+        source_revision,
+        cli_tool,
+        cli_display_name,
+        actions: manifest
+            .actions
+            .iter()
+            .map(|action| ExtensionInventoryAction {
+                id: action.id.clone(),
+                label: action.label.clone(),
+                action_type: action.action_type.clone(),
+            })
+            .collect(),
+        repair_actions: Vec::new(),
+        notification_transports: manifest
+            .notification_transports
+            .iter()
+            .map(|transport| transport.descriptor())
+            .collect(),
+        has_setup: manifest
+            .runtime()
+            .and_then(|runtime| runtime.setup_command.as_ref())
+            .map(|_| true),
+        has_ready_check: manifest
+            .runtime()
+            .and_then(|runtime| runtime.ready_check.as_ref())
+            .map(|_| true),
+    }
+}
+
+fn invalid_extension_inventory_entry(entry: ExtensionApiCatalogEntry) -> ExtensionInventoryEntry {
+    let path = extension::catalog::extension_path(&entry.id);
+    let linked =
+        std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let symlink_target = linked
+        .then(|| std::fs::read_link(&path).ok())
+        .flatten()
+        .map(|target| target.to_string_lossy().to_string());
+    let diagnostic = entry.diagnostic;
+    let broken = diagnostic.as_ref().is_some_and(|diagnostic| {
+        diagnostic.code == ExtensionApiCatalogDiagnosticCode::BrokenInstallation
+    });
+    let category = diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.category.clone())
+        .unwrap_or_else(|| "catalog_projection_failed".to_string());
+    let detail = diagnostic
+        .map(|diagnostic| diagnostic.message)
+        .unwrap_or_else(|| "The extension has no v1 catalog descriptor.".to_string());
+
+    ExtensionInventoryEntry {
+        id: entry.id.clone(),
+        name: String::new(),
+        version: String::new(),
+        description: String::new(),
+        runtime: String::new(),
+        compatible: false,
+        core_compatibility: CoreCompatibilityReport::undeclared(None),
+        readiness: ExtensionApiReadinessState::NotReady,
+        ready: Some(false),
+        ready_reason: Some(category.clone()),
+        ready_detail: Some(detail.clone()),
+        readiness_cache_age_seconds: None,
+        readiness_probe_duration_ms: None,
+        readiness_timeout_ms: None,
+        readiness_follow_up_command: None,
+        linked,
+        path: path.to_string_lossy().to_string(),
+        manifest_path: Some(
+            path.join(format!("{}.json", entry.id))
+                .to_string_lossy()
+                .to_string(),
+        ),
+        error: Some(category),
+        diagnostic: Some(detail),
+        symlink_target,
+        source_revision: None,
+        cli_tool: None,
+        cli_display_name: None,
+        actions: Vec::new(),
+        repair_actions: if broken {
+            broken_extension_link_repair_actions(&entry.id)
+        } else {
+            Vec::new()
+        },
+        notification_transports: Vec::new(),
+        has_setup: None,
+        has_ready_check: None,
+    }
+}
+
 fn list(project: Option<String>, readiness: ExtensionReadinessMode) -> CmdResult<ExtensionOutput> {
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
-    let summaries = extension::list_summaries_with(project_config.as_ref(), readiness);
+    let summaries = extension_inventory(project_config.as_ref(), readiness);
 
     Ok((
         ExtensionOutput::List {
@@ -692,7 +992,7 @@ fn diff_installed(
         return runner_diff_installed(extension_id, runner_id);
     }
 
-    let rows = extension::list_summaries_with(None, ExtensionReadinessMode::Cached)
+    let rows = extension_inventory(None, ExtensionReadinessMode::Cached)
         .into_iter()
         .filter(|summary| extension_id.is_none_or(|id| summary.id == id))
         .map(installed_extension_diff)
@@ -817,8 +1117,8 @@ fn parse_runner_diff_installed(stdout: &str) -> homeboy::core::Result<Vec<Instal
     })
 }
 
-fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff {
-    let checkout_head_revision = git::head_sha_short(Path::new(&summary.path));
+fn installed_extension_diff(summary: ExtensionInventoryEntry) -> InstalledExtensionDiff {
+    let checkout_head_revision = git::head_sha(Path::new(&summary.path));
     let manifest_path = manifest_path_for_summary(&summary);
     let source_url = read_source_url_metadata(&summary.path);
     let source_path = source_url.as_deref().and_then(local_source_path);
@@ -861,7 +1161,7 @@ fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff
     }
 }
 
-fn manifest_path_for_summary(summary: &ExtensionSummary) -> String {
+fn manifest_path_for_summary(summary: &ExtensionInventoryEntry) -> String {
     if summary.path.is_empty() {
         return String::new();
     }
@@ -875,7 +1175,7 @@ fn read_source_url_metadata(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    homeboy_core::extension_update_check::read_source_url(Path::new(path))
+    homeboy_core::extension::lifecycle::read_source_url(Path::new(path))
 }
 
 fn local_source_path(source: &str) -> Option<String> {
@@ -934,7 +1234,10 @@ fn installed_extension_diff_status(
     }
 }
 
-fn installed_extension_diff_next_command(summary: &ExtensionSummary, status: &str) -> String {
+fn installed_extension_diff_next_command(
+    summary: &ExtensionInventoryEntry,
+    status: &str,
+) -> String {
     match status {
         "current" => format!("homeboy extension show {}", shell_arg(&summary.id)),
         "stale" if summary.linked => format!(
@@ -991,8 +1294,8 @@ fn show_extension(
         components: r.components.clone(),
     });
 
-    let source_revision = homeboy_core::extension_update_check::read_source_revision(&extension.id);
-    let core_compatibility = homeboy_extension::evaluate_core_compatibility(
+    let source_revision = homeboy_core::extension::lifecycle::read_source_revision(&extension.id);
+    let core_compatibility = extension_contract::core_compat::evaluate_core_compatibility(
         extension
             .requires
             .as_ref()
@@ -1037,7 +1340,7 @@ fn show_extension(
             .collect(),
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
-        structured_sidecars: homeboy_extension::structured_sidecars(&extension),
+        structured_sidecars: homeboy_core::extension::catalog::structured_sidecars(&extension),
         ci_cache: extension.ci.as_ref().and_then(|ci| ci.cache.clone()),
         materialization_source: extension.materialization_source.clone(),
         contract_producers: extension.contract_producers.clone(),
@@ -1059,7 +1362,7 @@ fn run_extension(
     step: Option<String>,
     skip: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    use homeboy_extension::{ExtensionExecutionMode, ExtensionStepFilter};
+    use homeboy_core::extension::invoke::{ExtensionExecutionMode, ExtensionStepFilter};
 
     let mode = if no_stream {
         ExtensionExecutionMode::Captured
@@ -1071,7 +1374,7 @@ fn run_extension(
 
     let filter = ExtensionStepFilter { step, skip };
 
-    let result = homeboy_extension::run_extension(
+    let result = homeboy_core::extension::invoke::run_extension(
         extension_id,
         project.as_deref(),
         component.as_deref(),
@@ -1098,8 +1401,12 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result =
-            homeboy_extension::replace_with_revision(source, id.as_deref(), revision.as_deref())?;
+        let result = homeboy_core::extension::lifecycle::replace_with_revision(
+            source,
+            id.as_deref(),
+            revision.as_deref(),
+            ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+        )?;
         return Ok((
             ExtensionOutput::Replace {
                 extension_id: result.extension_id,
@@ -1114,8 +1421,12 @@ fn install_extension(
         ));
     }
 
-    let result =
-        homeboy_extension::install_with_revision(source, id.as_deref(), revision.as_deref())?;
+    let result = homeboy_core::extension::lifecycle::install_with_revision(
+        source,
+        id.as_deref(),
+        revision.as_deref(),
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1136,7 +1447,12 @@ fn refresh_extension(
     id: Option<&str>,
     revision: Option<&str>,
 ) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_extension::refresh(source, id, revision)?;
+    let result = homeboy_core::extension::lifecycle::refresh(
+        source,
+        id,
+        revision,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1158,7 +1474,11 @@ fn refresh_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_extension::relink(extension_id, source)?;
+    let result = homeboy_core::extension::lifecycle::relink(
+        extension_id,
+        source,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -1188,7 +1508,11 @@ fn dev_run_extension(
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy_extension::install_for_component(&component, source)?;
+    let result = homeboy_core::extension::lifecycle::install_for_component(
+        &component,
+        source,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
 
     let installed = result
         .installed
@@ -1252,7 +1576,7 @@ fn update_extension(
     // Capture version before update
     let old_version = load_extension(extension_id).ok().map(|m| m.version.clone());
 
-    let result = extension::update(extension_id, force)?;
+    let result = extension::lifecycle::update(extension_id, force)?;
 
     // Capture version after update
     let new_version = load_extension(&result.extension_id)
@@ -1281,7 +1605,7 @@ fn update_extension(
 }
 
 fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
-    let result = extension::update_all(force);
+    let result = extension::lifecycle::update_all(force);
 
     Ok((
         ExtensionOutput::UpdateAll {
@@ -1295,13 +1619,13 @@ fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
 /// Extension-only convergence intentionally has no controller-upgrade admission
 /// or runtime-promotion lease: it never replaces the controller binary.
 fn converge_extensions() -> CmdResult<ExtensionOutput> {
-    let extension_ids = extension::available_extension_ids();
+    let extension_ids = homeboy_core::extension::catalog::available_extension_ids();
     let compatibility = extension_ids
         .iter()
         .map(|id| {
-            let manifest = extension::load_extension(id)?;
-            let source_revision = homeboy_core::extension_update_check::read_source_revision(id);
-            let report = extension::evaluate_core_compatibility(
+            let manifest = homeboy_core::extension::catalog::load_extension(id)?;
+            let source_revision = homeboy_core::extension::lifecycle::read_source_revision(id);
+            let report = extension_contract::core_compat::evaluate_core_compatibility(
                 manifest
                     .requires
                     .as_ref()
@@ -1309,7 +1633,11 @@ fn converge_extensions() -> CmdResult<ExtensionOutput> {
                 source_revision,
             )?;
             if report.status == "incompatible" {
-                return Err(extension::core_incompatible_error("extension", id, report));
+                return Err(extension_contract::core_compat::core_incompatible_error(
+                    "extension",
+                    id,
+                    report,
+                ));
             }
             Ok(ExtensionConvergenceCompatibility {
                 extension_id: id.clone(),
@@ -1319,7 +1647,7 @@ fn converge_extensions() -> CmdResult<ExtensionOutput> {
         .collect::<homeboy::core::Result<Vec<_>>>()?;
 
     let provider_catalog_before = provider_catalog_evidence(AgentTaskProviderCatalog::discover());
-    let result = extension::update_all(false);
+    let result = extension::lifecycle::update_all(false);
     let changed_extension_ids = changed_extension_ids(&result.updated);
     let provider_catalog_after = provider_catalog_evidence(AgentTaskProviderCatalog::refresh());
     let (services_restarted, services_pending_restart) =
@@ -1328,7 +1656,7 @@ fn converge_extensions() -> CmdResult<ExtensionOutput> {
 
     Ok((
         ExtensionOutput::Converge {
-            controller_version: extension::installed_homeboy_version(),
+            controller_version: extension_contract::core_compat::installed_homeboy_version(),
             compatibility,
             updated: result.updated,
             skipped: result.skipped_details,
@@ -1411,7 +1739,7 @@ fn bounded_diagnostic(message: &str) -> String {
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     let was_linked = is_extension_linked(extension_id);
-    let path = homeboy_extension::uninstall(extension_id)?;
+    let path = homeboy_core::extension::lifecycle::uninstall(extension_id)?;
 
     Ok((
         ExtensionOutput::Uninstall {
@@ -1424,11 +1752,13 @@ fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
 }
 
 fn setup_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
+    let before_runtime_diagnostics = extension_runtime_diagnostics(extension_id, None);
     let result = run_setup(extension_id)?;
 
     Ok((
         ExtensionOutput::Setup {
             extension_id: extension_id.to_string(),
+            before_runtime_diagnostics,
             runtime_diagnostics: extension_runtime_diagnostics(extension_id, None),
         },
         result.exit_code,
@@ -1446,7 +1776,12 @@ fn extension_runtime_diagnostics(
         .and_then(|extension| extension.extension_path.clone())
         .unwrap_or_default();
     let source_revision = source_revision
-        .or_else(|| homeboy_core::extension_update_check::read_source_revision(extension_id));
+        .or_else(|| homeboy_core::extension::lifecycle::read_source_revision(extension_id));
+    let root_manifest_path = extension
+        .as_ref()
+        .and_then(|extension| extension.extension_path.as_ref())
+        .and_then(|path| runtime_root_manifest_path(Path::new(path)))
+        .map(|path| path.to_string_lossy().to_string());
     let matching_manifests = discover_agent_runtime_catalog()
         .manifests
         .into_iter()
@@ -1472,6 +1807,8 @@ fn extension_runtime_diagnostics(
         path,
         linked,
         source_revision,
+        root_manifest_path,
+        runtime_generation: active_runtime_generation(),
         runtime_manifest_found: !runtime_ids.is_empty(),
         runtime_ids,
         tools,
@@ -1485,6 +1822,25 @@ fn extension_runtime_diagnostics(
             refresh: format!("homeboy extension refresh <source> --id {}", shell_arg(extension_id)),
         },
     }
+}
+
+fn runtime_root_manifest_path(extension_path: &Path) -> Option<std::path::PathBuf> {
+    let extension_path = std::fs::canonicalize(extension_path).ok()?;
+    let parent = extension_path.parent()?;
+    let root = if parent.file_name()?.to_str()? == "agent-runtimes" {
+        parent.parent()?
+    } else {
+        parent
+    };
+    let manifest = root.join("homeboy-extension-root.json");
+    manifest.is_file().then_some(manifest)
+}
+
+fn active_runtime_generation() -> Option<String> {
+    homeboy_core::paths::homeboy()
+        .ok()
+        .and_then(|root| std::fs::read_link(root.join("runtime-generations/current")).ok())
+        .and_then(|generation| generation.to_str().map(str::to_string))
 }
 
 fn runtime_diagnostic_env<'a>(
@@ -1539,7 +1895,7 @@ fn run_action(
     project_id: Option<String>,
     data: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let response = homeboy_extension::run_action(
+    let response = homeboy_core::extension::invoke::run_action(
         extension_id,
         action_id,
         project_id.as_deref(),
@@ -1562,7 +1918,7 @@ fn set_extension(
     json: &str,
     replace_fields: &[String],
 ) -> CmdResult<ExtensionOutput> {
-    match homeboy_extension::merge(extension_id, json, replace_fields)? {
+    match homeboy_core::extension::catalog::merge(extension_id, json, replace_fields)? {
         homeboy::core::MergeOutput::Single(result) => Ok((
             ExtensionOutput::Set {
                 extension_id: result.id,
@@ -1582,7 +1938,7 @@ fn exec_extension_tool(
     component: Option<String>,
     args: Vec<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let exit_code = extension::exec_tool(extension_id, component.as_deref(), &args)?;
+    let exit_code = extension::invoke::exec_tool(extension_id, component.as_deref(), &args)?;
 
     Ok((
         ExtensionOutput::Exec {
@@ -1597,7 +1953,7 @@ fn exec_extension_tool(
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
-    use homeboy_extension::{ExtensionSourceUpdate, UpdateEntry};
+    use homeboy_extension_contract::update_output::{ExtensionSourceUpdate, UpdateEntry};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -1741,7 +2097,7 @@ mod tests {
             assert!(sentinel.exists(), "configured extension service restarted");
 
             let before_rollback =
-                homeboy_core::extension_update_check::read_source_revision("fixture")
+                homeboy_core::extension::lifecycle::read_source_revision("fixture")
                     .expect("current revision");
             write_convergence_manifest(&seed, ">=999.0.0");
             commit_and_push(&seed, "incompatible refresh");
@@ -1758,7 +2114,7 @@ mod tests {
             assert_eq!(skipped.len(), 1);
             assert!(skipped[0].reason.contains("requires homeboy"));
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_revision("fixture").as_deref(),
+                homeboy_core::extension::lifecycle::read_source_revision("fixture").as_deref(),
                 Some(before_rollback.as_str())
             );
             assert!(
@@ -1964,9 +2320,8 @@ mod tests {
 
     #[test]
     fn extension_inventory_defaults_to_cached_readiness() {
-        assert_eq!(readiness_mode(false, false), ExtensionReadinessMode::Cached);
-        assert_eq!(readiness_mode(false, true), ExtensionReadinessMode::Cached);
-        assert_eq!(readiness_mode(true, false), ExtensionReadinessMode::Probe);
+        assert_eq!(readiness_mode(false), ExtensionReadinessMode::Cached);
+        assert_eq!(readiness_mode(true), ExtensionReadinessMode::Probe);
     }
 
     #[test]
@@ -2031,6 +2386,48 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn extension_runtime_diagnostics_reports_durable_root_and_generation() {
+        with_isolated_home(|home| {
+            let config = home.path().join(".config/homeboy");
+            let source = config.join("extension-sources/opencode/agent-runtimes/opencode");
+            fs::create_dir_all(&source).expect("durable extension source");
+            fs::write(
+                source.join("opencode.json"),
+                r#"{"name":"OpenCode","version":"2.0.0"}"#,
+            )
+            .expect("extension manifest");
+            fs::write(
+                config.join("extension-sources/opencode/homeboy-extension-root.json"),
+                r#"{"shared_assets":["agent-runtimes"]}"#,
+            )
+            .expect("root manifest");
+            fs::create_dir_all(config.join("extensions")).expect("extensions directory");
+            symlink(&source, config.join("extensions/opencode")).expect("extension link");
+            fs::create_dir_all(config.join("runtime-generations/generation-2/agent-runtimes"))
+                .expect("runtime generation");
+            symlink("generation-2", config.join("runtime-generations/current"))
+                .expect("current generation link");
+
+            let diagnostics = extension_runtime_diagnostics("opencode", None);
+
+            assert_eq!(
+                diagnostics.root_manifest_path.as_deref(),
+                Some(
+                    config
+                        .join("extension-sources/opencode/homeboy-extension-root.json")
+                        .to_str()
+                        .expect("UTF-8 root manifest path")
+                )
+            );
+            assert_eq!(
+                diagnostics.runtime_generation.as_deref(),
+                Some("generation-2")
+            );
+        });
+    }
+
     #[test]
     fn extension_show_emits_materialization_source_contract() {
         with_isolated_home(|home| {
@@ -2071,7 +2468,7 @@ mod tests {
 
             assert_eq!(
                 source.source_kind,
-                homeboy_extension::ExtensionMaterializationSourceKind::Git
+                extension_contract::extension_contract_producer::ExtensionMaterializationSourceKind::Git
             );
             assert_eq!(source.revision.as_deref(), Some("abc1234"));
             assert_eq!(
@@ -2118,7 +2515,7 @@ mod tests {
             assert_eq!(extension.notification_transports[0].id, "example.completed");
             assert_eq!(
                 extension.notification_transports[0].schema,
-                homeboy_extension::NOTIFICATION_TRANSPORT_SCHEMA
+                extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA
             );
             assert!(
                 serde_json::to_value(&extension)
@@ -2182,11 +2579,11 @@ mod tests {
             assert_eq!(extension.contract_producers[0].id, "handoff-envelope");
             assert_eq!(
                 extension.contract_producers[0].phase,
-                homeboy_extension::ExtensionContractProducerPhase::Handoff
+                extension_contract::extension_contract_producer::ExtensionContractProducerPhase::Handoff
             );
             assert_eq!(
                 extension.contract_producers[0].produces[0].kind,
-                homeboy_extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
+                extension_contract::extension_contract_producer::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
             );
         });
     }
@@ -2232,7 +2629,7 @@ mod tests {
             assert_eq!(cache.paths.len(), 3);
             assert_eq!(
                 cache.paths[1].root,
-                homeboy_extension::CiCachePathRoot::HomeboyData
+                extension_contract::ci_config::CiCachePathRoot::HomeboyData
             );
             assert_eq!(cache.paths[1].path, "build-targets");
             assert_eq!(cache.paths[2].env.as_deref(), Some("BUILD_TARGET_DIR"));
@@ -2299,17 +2696,60 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn installed_extension_diff_is_current_for_a_linked_git_worktree() {
+        with_isolated_home(|home| {
+            let extension_id = "worktree-runtime";
+            let worktree = home.path().join("worktree");
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            fs::create_dir_all(&worktree).expect("worktree");
+            fs::write(
+                worktree.join(format!("{extension_id}.json")),
+                r#"{"name":"Worktree Runtime","version":"1.0.0"}"#,
+            )
+            .expect("manifest");
+            assert!(git(&worktree, &["init", "--quiet"]));
+            assert!(git(&worktree, &["add", "."]));
+            assert!(git(
+                &worktree,
+                &[
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "user.name=Test",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "initial"
+                ]
+            ));
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+            symlink(&worktree, extensions_dir.join(extension_id)).expect("extension link");
+
+            let summary = extension_inventory(None, ExtensionReadinessMode::Cached)
+                .into_iter()
+                .find(|summary| summary.id == extension_id)
+                .expect("worktree extension summary");
+            let diff = installed_extension_diff(summary);
+
+            assert_eq!(diff.status, "current");
+            assert_eq!(diff.installed_source_revision, diff.checkout_head_revision);
+        });
+    }
+
     #[test]
     fn installed_extension_diff_next_command_guides_stale_local_iteration() {
-        let mut summary = ExtensionSummary {
+        let mut summary = ExtensionInventoryEntry {
             id: "rust".to_string(),
             name: "Rust".to_string(),
             version: "1.0.0".to_string(),
             description: String::new(),
             runtime: "platform".to_string(),
             compatible: true,
-            core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
-            readiness: homeboy_extension::ExtensionReadinessState::Ready,
+            core_compatibility:
+                extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
+            readiness: ExtensionApiReadinessState::Ready,
             ready: Some(true),
             ready_reason: None,
             ready_detail: None,
@@ -2365,15 +2805,16 @@ mod tests {
             )
             .expect("source metadata");
 
-            let summary = ExtensionSummary {
+            let summary = ExtensionInventoryEntry {
                 id: extension_id.to_string(),
                 name: "Copied Runtime".to_string(),
                 version: "1.2.3".to_string(),
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
-                readiness: homeboy_extension::ExtensionReadinessState::Ready,
+                core_compatibility:
+                    extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
+                readiness: ExtensionApiReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,
@@ -2415,7 +2856,7 @@ mod tests {
                 .ends_with("copied-runtime/copied-runtime.json"));
             assert_eq!(diff.next_command, "homeboy extension show copied-runtime");
 
-            let stale_summary = ExtensionSummary {
+            let stale_summary = ExtensionInventoryEntry {
                 source_revision: Some("abc1234".to_string()),
                 linked: false,
                 path: extension_dir.to_string_lossy().to_string(),
@@ -2425,8 +2866,9 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
-                readiness: homeboy_extension::ExtensionReadinessState::Ready,
+                core_compatibility:
+                    extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
+                readiness: ExtensionApiReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,

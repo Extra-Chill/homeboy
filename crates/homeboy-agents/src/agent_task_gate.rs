@@ -52,6 +52,15 @@ pub(crate) struct GateSupervision {
     pub is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
+/// Process controls that differ between ordinary, durable, and immutable-base
+/// gate runs. Declared plans always supply a timeout at this boundary.
+struct GateExecution<'a> {
+    runtime_tmpdir: Option<&'a Path>,
+    timeout: Option<Duration>,
+    supervision: Option<&'a GateSupervision>,
+    baseline_timeout_diagnostic: bool,
+}
+
 /// Shared deterministic-gate verification fields used by every agent-task
 /// options/report type that runs `--verify` / `--private-verify` gates. Embed
 /// this via `#[serde(flatten)]` so the serialized JSON keeps the historical
@@ -66,6 +75,10 @@ pub struct VerifyGateOptions {
     /// gated from follow-up agents.
     #[serde(default)]
     pub private_verify: Vec<String>,
+    /// A declared adapter-owned test plan. This stays typed in Cook recipes;
+    /// `verify` and `private_verify` are the explicit legacy shell paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_execution_plan: Option<homeboy_engine_primitives::test_execution::TestExecutionPlan>,
     /// Provenance for each gate input captured by the controller before Cook
     /// becomes durable. Commands remain the execution contract for compatibility.
     #[serde(default)]
@@ -472,6 +485,7 @@ impl Default for VerifyGateOptions {
         Self {
             verify: Vec::new(),
             private_verify: Vec::new(),
+            test_execution_plan: None,
             input_sources: Vec::new(),
             private_gate_reveal: default_private_gate_reveal(),
             execution_policy: AgentTaskGateExecutionPolicy::OrderedFailFast,
@@ -584,11 +598,20 @@ pub struct AgentTaskGateReport {
     pub reveal_policy: AgentTaskGateRevealPolicy,
     pub status: AgentTaskGateStatus,
     pub command: Vec<String>,
+    /// The durable execution contract. Older reports only have `command`; they
+    /// are decoded as legacy `sh -lc` invocations by `invocation()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<AgentTaskGateInvocation>,
     pub exit_code: i32,
     /// Terminal classification distinguishes a command's semantic exit from
     /// controller wall-clock or progress-deadline termination.
     #[serde(default)]
     pub termination: AgentTaskGateTermination,
+    /// Adapter-owned terminal result for a declared test plan. Shell gates do
+    /// not set this because their result is intentionally just process status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_execution_outcome:
+        Option<homeboy_engine_primitives::test_execution::TestExecutionOutcome>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -850,6 +873,51 @@ pub enum AgentTaskGateTermination {
     Cancelled,
     TimedOut,
     NoProgress,
+}
+
+/// One replayable deterministic-gate invocation. Shell source remains the
+/// explicit legacy escape hatch while declared tests retain their typed plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentTaskGateInvocation {
+    LegacyShell {
+        command: String,
+    },
+    DeclaredTest {
+        plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
+    },
+}
+
+impl AgentTaskGateInvocation {
+    pub(crate) fn reviewer_command(&self) -> String {
+        match self {
+            Self::LegacyShell { command } => command.clone(),
+            Self::DeclaredTest { plan } => homeboy_engine_primitives::shell::quote_args(
+                plan.declared_command()
+                    .expect("declared test invocation was validated before persistence"),
+            ),
+        }
+    }
+
+    pub(crate) fn identity_digest(&self) -> Result<String> {
+        match self {
+            // Finalization receipts persisted this exact digest before typed
+            // plans existed; preserving it keeps inherited proof stable across
+            // a controller upgrade.
+            Self::LegacyShell { command } => Ok(
+                homeboy_engine_primitives::content_hash::nul_separated_digest([
+                    "sh", "-lc", command,
+                ]),
+            ),
+            Self::DeclaredTest { .. } => {
+                let encoded = serde_json::to_vec(self)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+                Ok(homeboy_engine_primitives::content_hash::sha256_hex(
+                    &encoded,
+                ))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1117,6 +1185,28 @@ fn gate_diagnostic_record_schema() -> String {
 }
 
 impl AgentTaskGateReport {
+    pub(crate) fn invocation(&self) -> Result<AgentTaskGateInvocation> {
+        if let Some(invocation) = &self.invocation {
+            if let AgentTaskGateInvocation::DeclaredTest { plan } = invocation {
+                plan.declared_command()
+                    .map_err(|message| Error::invalid_argument("gate.invocation", message))?;
+            }
+            return Ok(invocation.clone());
+        }
+        match self.command.as_slice() {
+            [shell, flag, command] if shell == "sh" && flag == "-lc" => {
+                Ok(AgentTaskGateInvocation::LegacyShell {
+                    command: command.clone(),
+                })
+            }
+            _ => Err(Error::validation_invalid_argument(
+                "gate.command",
+                "historical gate reports must contain a concrete `sh -lc` invocation",
+                Some(self.id.clone()),
+                None,
+            )),
+        }
+    }
     #[expect(
         clippy::too_many_arguments,
         reason = "constructor mirrors persisted gate result fields"
@@ -1133,6 +1223,14 @@ impl AgentTaskGateReport {
         environment: AgentTaskGateEnvironment,
     ) -> Self {
         let id = id.into();
+        let invocation = match command.as_slice() {
+            [shell, flag, source] if shell == "sh" && flag == "-lc" => {
+                Some(AgentTaskGateInvocation::LegacyShell {
+                    command: source.clone(),
+                })
+            }
+            _ => None,
+        };
         let status = if exit_code == 0 {
             AgentTaskGateStatus::Succeeded
         } else {
@@ -1171,8 +1269,10 @@ impl AgentTaskGateReport {
             reveal_policy,
             status,
             command,
+            invocation,
             exit_code,
             termination: AgentTaskGateTermination::Completed,
+            test_execution_outcome: None,
             stdout: stdout.into(),
             stderr: stderr.into(),
             capture: AgentTaskGateCapture::default(),
@@ -1195,6 +1295,14 @@ impl AgentTaskGateReport {
         blocking_gate_id: impl Into<String>,
     ) -> Self {
         let id = id.into();
+        let invocation = match command.as_slice() {
+            [shell, flag, source] if shell == "sh" && flag == "-lc" => {
+                Some(AgentTaskGateInvocation::LegacyShell {
+                    command: source.clone(),
+                })
+            }
+            _ => None,
+        };
         let skip_reason = AgentTaskGateSkipReason {
             blocking_gate_id: blocking_gate_id.into(),
             reason: "ordered_fail_fast".to_string(),
@@ -1225,8 +1333,10 @@ impl AgentTaskGateReport {
             reveal_policy,
             status: AgentTaskGateStatus::Skipped,
             command,
+            invocation,
             exit_code: 0,
             termination: AgentTaskGateTermination::Completed,
+            test_execution_outcome: None,
             stdout: String::new(),
             stderr: String::new(),
             capture: AgentTaskGateCapture::default(),
@@ -1527,6 +1637,7 @@ mod baseline_tests {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_gate_command(
     cwd: &Path,
     index: usize,
@@ -1541,6 +1652,7 @@ pub(crate) fn run_gate_command(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_gate_command_with_policy(
     cwd: &Path,
     index: usize,
@@ -1558,6 +1670,7 @@ pub(crate) fn run_gate_command_with_policy(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
     cwd: &Path,
     index: usize,
@@ -1620,7 +1733,121 @@ pub(crate) fn run_gate_command_with_supervision(
     gate_environment: &AgentTaskGateEnvironmentPolicy,
     package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
 ) -> Result<AgentTaskGateReport> {
-    let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
+    run_gate_argv_with_supervision(
+        cwd,
+        index,
+        vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+        command,
+        visibility,
+        reveal_policy,
+        runtime_tmpdir,
+        supervision,
+        gate_environment,
+        package_artifacts,
+        None,
+    )
+    .map(|mut report| {
+        report.invocation = Some(AgentTaskGateInvocation::LegacyShell {
+            command: command.to_string(),
+        });
+        report
+    })
+}
+
+/// Execute a declared test adapter as argv. This is deliberately separate from
+/// the legacy shell-gate wrapper above: persisted declared commands never pass
+/// through a shell or need their outcome reconstructed from English output.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "supervision callbacks and durable gate inputs remain independently auditable"
+)]
+pub(crate) fn run_declared_test_with_supervision(
+    cwd: &Path,
+    index: usize,
+    plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: Option<&Path>,
+    supervision: Option<&GateSupervision>,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
+) -> Result<AgentTaskGateReport> {
+    let argv = plan
+        .declared_command()
+        .map_err(|message| Error::invalid_argument("test_execution_plan", message))?
+        .to_vec();
+    let label = homeboy_engine_primitives::shell::quote_args(&argv);
+    run_gate_argv_with_supervision(
+        cwd,
+        index,
+        argv,
+        &label,
+        visibility,
+        reveal_policy,
+        runtime_tmpdir,
+        supervision,
+        gate_environment,
+        package_artifacts,
+        Some(plan),
+    )
+    .map(|mut report| {
+        report.invocation = Some(AgentTaskGateInvocation::DeclaredTest { plan: plan.clone() });
+        report
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shell and declared gates share one process supervisor"
+)]
+fn run_gate_argv_with_supervision(
+    cwd: &Path,
+    index: usize,
+    command_vec: Vec<String>,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: Option<&Path>,
+    supervision: Option<&GateSupervision>,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
+    declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
+) -> Result<AgentTaskGateReport> {
+    run_gate_argv(
+        cwd,
+        index,
+        command_vec,
+        command,
+        visibility,
+        reveal_policy,
+        GateExecution {
+            runtime_tmpdir,
+            timeout: supervision.map(|supervision| supervision.timeout),
+            supervision,
+            baseline_timeout_diagnostic: false,
+        },
+        gate_environment,
+        package_artifacts,
+        declared_plan,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shell and declared gates share one process executor"
+)]
+fn run_gate_argv(
+    cwd: &Path,
+    index: usize,
+    command_vec: Vec<String>,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    execution: GateExecution<'_>,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
+    declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
+) -> Result<AgentTaskGateReport> {
     let mut process = Command::new(&command_vec[0]);
     process
         .args(&command_vec[1..])
@@ -1629,15 +1856,19 @@ pub(crate) fn run_gate_command_with_supervision(
         .stderr(Stdio::piped());
     let (gate_environment, package_artifacts) =
         validate_package_artifacts(cwd, gate_environment, package_artifacts)?;
-    let mut selected_environment = selected_gate_environment(&gate_environment, runtime_tmpdir)?;
+    let mut selected_environment =
+        selected_gate_environment(&gate_environment, execution.runtime_tmpdir)?;
     selected_environment.configure_rust_cache(cwd)?;
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
-    // Cook's persisted gate deadline is the only deadline policy here. When a
-    // shell gate starts Cargo, propagate it into the hermetic binary runner so
-    // a hung test binary gets the same bound and process-group cleanup.
-    if let Some(supervision) = supervision {
+    if let Some(plan) = declared_plan {
+        let (name, value) = plan.suite_timeout_env();
+        process.env(name, value);
+    }
+    // Legacy shell gates inherit Cook's deadline. Declared plans already set
+    // their own deadline above, so supervision cannot silently rewrite it.
+    if let Some(supervision) = execution.supervision.filter(|_| declared_plan.is_none()) {
         let plan =
             homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
                 supervision.timeout,
@@ -1646,7 +1877,9 @@ pub(crate) fn run_gate_command_with_supervision(
         let (name, value) = plan.suite_timeout_env();
         process.env(name, value);
     }
-    if supervision.is_some() && !homeboy_core::engine::command::supports_process_tree_isolation() {
+    if execution.supervision.is_some()
+        && !homeboy_core::engine::command::supports_process_tree_isolation()
+    {
         return Err(Error::validation_invalid_argument(
             "gate_supervision",
             "durable gate cancellation requires Unix process-group isolation on this host",
@@ -1682,27 +1915,38 @@ pub(crate) fn run_gate_command_with_supervision(
             Some(format!("guard deterministic gate {command}")),
         ));
     }
-    let (output, termination) = if let Some(supervision) = supervision {
-        if let Err(error) = (supervision.on_spawn)(child.id(), command) {
-            if let Err(cleanup_error) = containment.terminate_live(&mut child) {
-                return Err(Error::internal_io(
-                    format!(
-                        "durable gate registration failed ({error}); failed to terminate and reap its child: {cleanup_error}"
-                    ),
-                    Some(format!("supervise deterministic gate {command}")),
-                ));
+    let timeout = declared_plan
+        .map(|plan| plan.suite_timeout())
+        .or(execution.timeout);
+    let (mut output, termination) = if let Some(timeout) = timeout {
+        let supervision = execution.supervision;
+        if let Some(supervision) = supervision {
+            if let Err(error) = (supervision.on_spawn)(child.id(), command) {
+                if let Err(cleanup_error) = containment.terminate_live(&mut child) {
+                    return Err(Error::internal_io(
+                        format!(
+                            "durable gate registration failed ({error}); failed to terminate and reap its child: {cleanup_error}"
+                        ),
+                        Some(format!("supervise deterministic gate {command}")),
+                    ));
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         let supervised =
             homeboy_core::engine::command::wait_with_bounded_output_supervised_with_progress(
                 &mut child,
                 65_536,
-                supervision.timeout,
-                Some(supervision.no_progress_timeout),
-                supervision.heartbeat_interval,
-                || (supervision.is_cancelled)(),
+                timeout,
+                supervision.map(|supervision| supervision.no_progress_timeout),
+                supervision
+                    .map(|supervision| supervision.heartbeat_interval)
+                    .unwrap_or(Duration::from_secs(5)),
+                || supervision.is_some_and(|supervision| (supervision.is_cancelled)()),
                 |heartbeat| {
+                    let Some(supervision) = supervision else {
+                        return Ok(());
+                    };
                     // Durable status must never become a private-gate output channel.
                     let live_status = AgentTaskGateLiveStatus {
                         visibility,
@@ -1754,6 +1998,17 @@ pub(crate) fn run_gate_command_with_supervision(
     // return path (including the ones below that can still error out before
     // the report is built).
     let _ = containment.reap_after_exit();
+    if execution.baseline_timeout_diagnostic
+        && termination == homeboy_core::engine::command::SupervisedCommandTermination::TimedOut
+    {
+        output.stderr.extend_from_slice(
+            format!(
+                "\nbaseline gate exceeded {} ms and was cancelled",
+                timeout.expect("bounded baseline gate").as_millis()
+            )
+            .as_bytes(),
+        );
+    }
     let termination = match termination {
         homeboy_core::engine::command::SupervisedCommandTermination::Completed => {
             AgentTaskGateTermination::Completed
@@ -1775,14 +2030,24 @@ pub(crate) fn run_gate_command_with_supervision(
     };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
-    let cargo_selection = cargo_selection(
-        command,
-        &command_vec,
-        &stdout,
-        &stderr,
-        test_result.as_ref(),
-    );
+    // Declared adapters own their typed result. Legacy shell gates retain the
+    // historical Cargo-output projection for compatibility.
+    let test_result = declared_plan
+        .is_none()
+        .then(|| cargo_test_result(command, runner_exit_code, &stdout, &stderr))
+        .flatten();
+    let cargo_selection = declared_plan
+        .is_none()
+        .then(|| {
+            cargo_selection(
+                command,
+                &command_vec,
+                &stdout,
+                &stderr,
+                test_result.as_ref(),
+            )
+        })
+        .flatten();
     let exit_code = effective_gate_exit_code(runner_exit_code, cargo_selection.as_ref());
     let failure_evidence = (exit_code != 0).then(|| {
         gate_failure_evidence(
@@ -1809,6 +2074,20 @@ pub(crate) fn run_gate_command_with_supervision(
     report.test_result = test_result;
     report.cargo_selection = cargo_selection;
     report.termination = termination;
+    report.test_execution_outcome = declared_plan.map(|_| match termination {
+        AgentTaskGateTermination::Completed if exit_code == 0 => {
+            homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed
+        }
+        AgentTaskGateTermination::Completed => {
+            homeboy_engine_primitives::test_execution::TestExecutionOutcome::Failed
+        }
+        AgentTaskGateTermination::TimedOut | AgentTaskGateTermination::NoProgress => {
+            homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut
+        }
+        AgentTaskGateTermination::Cancelled => {
+            homeboy_engine_primitives::test_execution::TestExecutionOutcome::Cancelled
+        }
+    });
     report.capture = AgentTaskGateCapture {
         stdout: output.capture.stdout,
         stderr: output.capture.stderr,
@@ -1834,114 +2113,67 @@ pub(crate) fn run_gate_command_with_timeout(
     gate_environment: &AgentTaskGateEnvironmentPolicy,
     package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
 ) -> Result<AgentTaskGateReport> {
-    let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
-    let mut process = Command::new("sh");
-    process
-        .args(["-lc", command])
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let (gate_environment, package_artifacts) =
-        validate_package_artifacts(cwd, gate_environment, package_artifacts)?;
-    let mut selected_environment =
-        selected_gate_environment(&gate_environment, Some(runtime_tmpdir))?;
-    selected_environment.configure_rust_cache(cwd)?;
-    selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
-    selected_environment.report.package_artifacts = package_artifacts;
-    selected_environment.apply(&mut process);
-    // See the matching comment in `run_gate_command_with_supervision`: this
-    // gate spawns build/test tooling that must not outlive an agent process
-    // killed out from under it (#13649).
-    let mut containment = AgentTaskProcessContainment::prepare(&mut process).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("contain bounded deterministic gate {command}")),
-        )
-    })?;
-    let target_started = Instant::now();
-    let mut child = process.spawn().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("run bounded deterministic gate {command}")),
-        )
-    })?;
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
-        return Err(Error::internal_io(
-            error.to_string(),
-            Some(format!("guard bounded deterministic gate {command}")),
-        ));
-    }
-    let started = std::time::Instant::now();
-    let mut timed_out = false;
-    let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled(
-        &mut child,
-        65_536,
-        || {
-            timed_out = started.elapsed() >= timeout;
-            timed_out
-        },
-    )
-    .map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("run bounded deterministic gate {command}")),
-        )
-    })?;
-    let _ = containment.reap_after_exit();
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let runner_exit_code = if timed_out {
-        stderr.push_str(&format!(
-            "\nbaseline gate exceeded {} ms and was cancelled",
-            timeout.as_millis()
-        ));
-        124
-    } else {
-        output.status.code().unwrap_or(1)
-    };
-    let test_result = cargo_test_result(command, runner_exit_code, &stdout, &stderr);
-    let cargo_selection = cargo_selection(
+    run_gate_argv(
+        cwd,
+        index,
+        vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
         command,
-        &command_vec,
-        &stdout,
-        &stderr,
-        test_result.as_ref(),
-    );
-    let exit_code = effective_gate_exit_code(runner_exit_code, cargo_selection.as_ref());
-    let failure_evidence = (exit_code != 0).then(|| {
-        gate_failure_evidence(
-            command,
-            exit_code,
-            &stdout,
-            &stderr,
-            cargo_selection.as_ref(),
-        )
-    });
-    selected_environment.finish_cargo_target(target_started.elapsed())?;
-    let mut report = AgentTaskGateReport::new(
-        format!("gate-{index}"),
-        command_vec,
-        exit_code,
-        stdout,
-        stderr,
-        failure_evidence,
         visibility,
         reveal_policy,
-        selected_environment.report,
-    );
-    report.test_result = test_result;
-    report.cargo_selection = cargo_selection;
-    report.termination = if timed_out {
-        AgentTaskGateTermination::TimedOut
-    } else {
-        AgentTaskGateTermination::Completed
-    };
-    report.capture = AgentTaskGateCapture {
-        stdout: output.capture.stdout,
-        stderr: output.capture.stderr,
-    };
-    Ok(report)
+        GateExecution {
+            runtime_tmpdir: Some(runtime_tmpdir),
+            timeout: Some(timeout),
+            supervision: None,
+            baseline_timeout_diagnostic: true,
+        },
+        gate_environment,
+        package_artifacts,
+        None,
+    )
+    .map(|mut report| {
+        report.invocation = Some(AgentTaskGateInvocation::LegacyShell {
+            command: command.to_string(),
+        });
+        report
+    })
+}
+
+pub(crate) fn run_declared_test_with_timeout(
+    cwd: &Path,
+    index: usize,
+    plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: &Path,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
+) -> Result<AgentTaskGateReport> {
+    let argv = plan
+        .declared_command()
+        .map_err(|message| Error::invalid_argument("test_execution_plan", message))?
+        .to_vec();
+    let label = homeboy_engine_primitives::shell::quote_args(&argv);
+    run_gate_argv(
+        cwd,
+        index,
+        argv,
+        &label,
+        visibility,
+        reveal_policy,
+        GateExecution {
+            runtime_tmpdir: Some(runtime_tmpdir),
+            timeout: Some(plan.suite_timeout()),
+            supervision: None,
+            baseline_timeout_diagnostic: true,
+        },
+        gate_environment,
+        package_artifacts,
+        Some(plan),
+    )
+    .map(|mut report| {
+        report.invocation = Some(AgentTaskGateInvocation::DeclaredTest { plan: plan.clone() });
+        report
+    })
 }
 
 struct SelectedGateEnvironment {
@@ -2792,7 +3024,7 @@ fn materialize_extension_inputs(
             ));
         }
         let identity = extension_tree_identity(source)?;
-        let source_revision = homeboy_core::extension_update_check::read_source_revision_at(source);
+        let source_revision = homeboy_core::extension::lifecycle::read_source_revision_at(source);
         if input
             .identity
             .as_deref()
@@ -4511,6 +4743,164 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn declared_adapter_fixture(
+        exit_code: i32,
+    ) -> (
+        tempfile::TempDir,
+        homeboy_engine_primitives::test_execution::TestExecutionPlan,
+        AgentTaskGateEnvironmentPolicy,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = workspace.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let homeboy = bin.join("homeboy");
+        std::fs::write(
+            &homeboy,
+            format!(
+                "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test && test \"$3\" = '$HOME' || exit 97\n[ -z \"$HOMEBOY_FAKE_GATE_SLEEP\" ] || sleep \"$HOMEBOY_FAKE_GATE_SLEEP\"\nprintf '%s|%s|%s|%s' \"$1\" \"$2\" \"$3\" \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\nexit {exit_code}\n"
+            ),
+        )
+        .expect("adapter");
+        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&homeboy, permissions).unwrap();
+        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "$HOME".to_string(),
+            ],
+            42,
+        )
+        .expect("declared plan");
+        let mut environment = AgentTaskGateEnvironmentPolicy::default();
+        environment
+            .variables
+            .insert("PATH".to_string(), format!("{}:/bin", bin.display()));
+        (workspace, plan, environment)
+    }
+
+    #[cfg(unix)]
+    fn declared_supervision(cancelled: bool, no_progress_timeout: Duration) -> GateSupervision {
+        GateSupervision {
+            timeout: Duration::from_millis(10),
+            no_progress_timeout,
+            heartbeat_interval: Duration::from_millis(5),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|_| Ok(())),
+            is_cancelled: Arc::new(move || cancelled),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_candidate_and_baseline_replay_identical_argv_deadline_and_outcomes() {
+        for (exit_code, outcome) in [
+            (
+                0,
+                homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed,
+            ),
+            (
+                7,
+                homeboy_engine_primitives::test_execution::TestExecutionOutcome::Failed,
+            ),
+        ] {
+            let (workspace, plan, environment) = declared_adapter_fixture(exit_code);
+            let runtime = tempfile::tempdir().expect("runtime");
+            let supervision = declared_supervision(false, Duration::from_secs(1));
+            let candidate = run_declared_test_with_supervision(
+                workspace.path(),
+                1,
+                &plan,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                Some(runtime.path()),
+                Some(&supervision),
+                &environment,
+                &[],
+            )
+            .expect("candidate execution");
+            let baseline = run_declared_test_with_timeout(
+                workspace.path(),
+                1,
+                &plan,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                runtime.path(),
+                &environment,
+                &[],
+            )
+            .expect("baseline execution");
+
+            assert_eq!(candidate.command, plan.declared_command().unwrap());
+            assert_eq!(candidate.command, baseline.command);
+            assert_eq!(candidate.stdout, "review|test|$HOME|42");
+            assert_eq!(candidate.stdout, baseline.stdout);
+            assert_eq!(candidate.test_execution_outcome, Some(outcome));
+            assert_eq!(
+                candidate.test_execution_outcome,
+                baseline.test_execution_outcome
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_supervised_cancellation_retains_its_typed_outcome() {
+        let (workspace, plan, environment) = declared_adapter_fixture(0);
+        let supervision = declared_supervision(true, Duration::from_secs(1));
+        let report = run_declared_test_with_supervision(
+            workspace.path(),
+            1,
+            &plan,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &environment,
+            &[],
+        )
+        .expect("cancelled declared execution");
+
+        assert_eq!(report.termination, AgentTaskGateTermination::Cancelled);
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Cancelled)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_supervised_no_progress_retains_timeout_outcome() {
+        let (workspace, plan, mut environment) = declared_adapter_fixture(0);
+        environment
+            .variables
+            .insert("HOMEBOY_FAKE_GATE_SLEEP".to_string(), "2".to_string());
+        let supervision = declared_supervision(false, Duration::from_millis(20));
+        let report = run_declared_test_with_supervision(
+            workspace.path(),
+            1,
+            &plan,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &environment,
+            &[],
+        )
+        .expect("stalled declared execution");
+
+        assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut)
+        );
+    }
+
     #[test]
     fn env_var_guard_restores_a_prior_value() {
         let _lock = env_mutex();
@@ -4545,6 +4935,183 @@ mod tests {
         }
 
         assert!(std::env::var_os("__HOMEBOY_TEST_ENV_GUARD_ABSENT__").is_none());
+    }
+
+    #[test]
+    fn declared_test_executor_uses_direct_argv_and_reports_a_typed_outcome() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            1,
+        )
+        .expect("declared plan");
+
+        let report = run_gate_argv_with_supervision(
+            workspace.path(),
+            1,
+            vec!["printf".to_string(), "%s".to_string(), "$HOME".to_string()],
+            "homeboy review test",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            None,
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+            Some(&plan),
+        )
+        .expect("direct argv execution");
+
+        assert_eq!(report.command, ["printf", "%s", "$HOME"]);
+        assert_eq!(report.stdout, "$HOME", "a shell would expand this argument");
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed)
+        );
+        assert!(
+            report.test_result.is_none(),
+            "declared outcomes are not parsed"
+        );
+    }
+
+    #[test]
+    fn declared_test_executor_reports_its_suite_deadline() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            1,
+        )
+        .expect("declared plan");
+        let supervision = GateSupervision {
+            timeout: Duration::from_millis(10),
+            no_progress_timeout: Duration::from_secs(1),
+            heartbeat_interval: Duration::from_millis(1),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|_| Ok(())),
+            is_cancelled: Arc::new(|| false),
+        };
+
+        let report = run_gate_argv_with_supervision(
+            workspace.path(),
+            1,
+            vec!["sleep".to_string(), "2".to_string()],
+            "homeboy review test",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+            Some(&plan),
+        )
+        .expect("timed execution report");
+
+        assert_eq!(report.termination, AgentTaskGateTermination::TimedOut);
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut)
+        );
+    }
+
+    #[test]
+    fn gate_invocation_identity_includes_declared_adapter_argv_and_deadline() {
+        let first = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            10,
+        )
+        .unwrap();
+        let changed_deadline = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            11,
+        )
+        .unwrap();
+        let changed_argv = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "component".to_string(),
+            ],
+            10,
+        )
+        .unwrap();
+        let first = AgentTaskGateInvocation::DeclaredTest { plan: first };
+        assert_ne!(
+            first.identity_digest().unwrap(),
+            AgentTaskGateInvocation::DeclaredTest {
+                plan: changed_deadline
+            }
+            .identity_digest()
+            .unwrap()
+        );
+        assert_ne!(
+            first.identity_digest().unwrap(),
+            AgentTaskGateInvocation::DeclaredTest { plan: changed_argv }
+                .identity_digest()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_shell_invocation_keeps_the_historical_gate_command_digest() {
+        let command = "cargo test --locked".to_string();
+        let invocation = AgentTaskGateInvocation::LegacyShell {
+            command: command.clone(),
+        };
+        assert_eq!(
+            invocation.identity_digest().unwrap(),
+            homeboy_engine_primitives::content_hash::nul_separated_digest([
+                "sh",
+                "-lc",
+                command.as_str(),
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_baseline_executor_exports_the_plan_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = workspace.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let homeboy = bin.join("homeboy");
+        std::fs::write(
+            &homeboy,
+            "#!/bin/sh\nprintf %s \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\n",
+        )
+        .expect("adapter");
+        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&homeboy, permissions).unwrap();
+        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            42,
+        )
+        .unwrap();
+        let mut environment = AgentTaskGateEnvironmentPolicy::default();
+        environment
+            .variables
+            .insert("PATH".to_string(), format!("{}:/bin", bin.display()));
+        let runtime = tempfile::tempdir().expect("runtime");
+
+        let report = run_declared_test_with_timeout(
+            workspace.path(),
+            1,
+            &plan,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            runtime.path(),
+            &environment,
+            &[],
+        )
+        .expect("baseline execution");
+
+        assert_eq!(report.stdout, "42");
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed)
+        );
     }
 
     #[test]
@@ -5364,7 +5931,7 @@ mod tests {
         let gate_home = worktree.path().join("tmp/gate-home");
         let _gate_home = EnvVarGuard::set(&[("HOME", gate_home.as_path())]);
         assert_eq!(
-            homeboy_core::extension_store::available_extension_ids(),
+            homeboy_core::extension::catalog::available_extension_ids(),
             vec!["selected-fixture"]
         );
         assert_eq!(

@@ -42,6 +42,152 @@ pub(super) fn adopt_with_store(
     Ok(WorktreeAdoptOutput { record })
 }
 
+pub(super) fn import_with_store(
+    options: WorktreeImportOptions,
+    store_dir: &Path,
+) -> Result<WorktreeImportOutput> {
+    with_task_worktree_registry_write_lock(|| {
+        if options.branch.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "branch",
+                "Imported worktree branch must not be empty",
+                None,
+                None,
+            ));
+        }
+        if options.base_ref.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "base_ref",
+                "Imported worktree base ref must not be empty",
+                None,
+                None,
+            ));
+        }
+        if let Some(created_at) = &options.created_at {
+            chrono::DateTime::parse_from_rfc3339(created_at).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "created_at",
+                    "Imported worktree creation timestamp must be RFC 3339",
+                    Some(format!("{created_at} ({error})")),
+                    None,
+                )
+            })?;
+        }
+        let target = component::resolve_target(TargetSpec {
+            component_id: Some(&options.component_id),
+            path_override: None,
+            project: None,
+            capability: None,
+            allow_synthetic: false,
+            accept_bare_directory: false,
+            ..TargetSpec::default()
+        })?;
+        let source_checkout = source_checkout_for_worktree(&target)?;
+        let path = PathBuf::from(&options.path)
+            .canonicalize()
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "path",
+                    "Imported worktree path must exist on the controller",
+                    Some(format!("{} ({error})", options.path)),
+                    None,
+                )
+            })?;
+        let expected_handle = format!("{}@{}", target.component_id, branch_slug(&options.branch));
+        if options.handle != expected_handle {
+            return Err(Error::validation_invalid_argument(
+                "handle",
+                "Imported worktree handle must exactly match its component and branch",
+                Some(options.handle),
+                Some(vec![format!("expected: {expected_handle}")]),
+            ));
+        }
+        let expected_path = source_checkout
+            .parent()
+            .ok_or_else(|| Error::internal_unexpected("source checkout has no parent"))?
+            .join(&expected_handle);
+        if path == source_checkout || path != normalize_missing_path(&expected_path) {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "Imported worktree must be the exact non-primary path for its native handle",
+                Some(path.display().to_string()),
+                Some(vec![format!("expected: {}", expected_path.display())]),
+            ));
+        }
+        let registration = branch_worktree_registrations(&source_checkout, &options.branch)?
+            .into_iter()
+            .find(|registration| registration.path == path && !registration.prunable)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "path",
+                    "Imported path is not the live exact Git worktree registration for its branch",
+                    Some(path.display().to_string()),
+                    None,
+                )
+            })?;
+        verify_linked_worktree_identity(&source_checkout, &path, &options.branch)?;
+
+        let identity = task_worktree_workspace_identity(&target.component_id, &expected_handle)?;
+        if record_path(store_dir, &expected_handle).exists() {
+            let record = read_record(store_dir, &expected_handle)?;
+            let exact_replay = record.component_id == target.component_id
+                && normalize_missing_path(Path::new(&record.source_checkout)) == source_checkout
+                && normalize_missing_path(Path::new(&record.worktree_path)) == path
+                && record.branch == options.branch
+                && record.base_ref == options.base_ref
+                && record.task_url == options.task_url
+                && record.run_id == options.owner_run_ref
+                && record.cleanup_policy == options.cleanup_policy
+                && options
+                    .created_at
+                    .as_ref()
+                    .is_none_or(|created_at| &record.created_at == created_at)
+                && record.state == TaskWorktreeState::Active
+                && record.terminal_disposition.is_none()
+                && record.effective_workspace_identity()? == identity;
+            if !exact_replay {
+                return Err(Error::validation_invalid_argument(
+                    "handle",
+                    "Imported worktree conflicts with the existing native lifecycle record",
+                    Some(expected_handle),
+                    None,
+                ));
+            }
+            return Ok(WorktreeImportOutput {
+                record,
+                imported: false,
+            });
+        }
+
+        let record = TaskWorktreeRecord {
+            id: expected_handle,
+            component_id: target.component_id,
+            source_checkout: source_checkout.display().to_string(),
+            worktree_path: path.display().to_string(),
+            branch: options.branch,
+            base_ref: options.base_ref,
+            workspace_identity: Some(identity),
+            task_url: options.task_url,
+            run_id: options.owner_run_ref,
+            cleanup_policy: options.cleanup_policy,
+            terminal_disposition: None,
+            branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
+            created_at: options
+                .created_at
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            state: TaskWorktreeState::Active,
+            lifecycle_revision: 0,
+            terminal_workspace_authority: None,
+        };
+        let _ = registration;
+        write_record_unlocked(store_dir, &record)?;
+        Ok(WorktreeImportOutput {
+            record,
+            imported: true,
+        })
+    })
+}
+
 pub(super) fn cleanup_with_store(
     options: WorktreeCleanupOptions,
     store: &Path,
@@ -69,7 +215,8 @@ pub(super) fn cleanup_with_store(
         };
         let branch_cleanup = branch_cleanup_report(&record)
             .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
-        let skip_reasons = cleanup_skip_reasons(&safety, options.force);
+        let live_owner_count = live_workspace_owner_count(&record, store)?;
+        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force, live_owner_count);
         if !skip_reasons.is_empty() {
             skipped.push(WorktreeCleanupSkipped {
                 record,
@@ -143,8 +290,22 @@ pub(super) fn cleanup_with_store(
     })
 }
 
-fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<String> {
+fn cleanup_skip_reasons(
+    record: &TaskWorktreeRecord,
+    safety: &WorktreeSafetyReport,
+    force: bool,
+    live_owner_count: usize,
+) -> Vec<String> {
     let mut reasons = Vec::new();
+    if let Some(owner) = record
+        .run_id
+        .as_deref()
+        .filter(|_| record.terminal_disposition.as_deref() != Some("succeeded"))
+    {
+        reasons.push(format!(
+            "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"
+        ));
+    }
     if safety.primary_checkout {
         reasons.push("refuses to remove primary checkout".to_string());
     }
@@ -153,6 +314,18 @@ fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<Strin
     }
     if safety.worktree_missing {
         reasons.push("missing active worktree requires `worktree inventory --apply` reconciliation authority".to_string());
+    }
+    if safety
+        .reasons
+        .iter()
+        .any(|reason| reason == LIVE_CWD_REASON)
+    {
+        reasons.push(LIVE_CWD_REASON.to_string());
+    }
+    if live_owner_count > 0 {
+        reasons.push(format!(
+            "refuses to remove workspace held by {live_owner_count} durable live owner(s)"
+        ));
     }
     if !force {
         if safety.dirty {
@@ -198,8 +371,8 @@ fn create_with_store_unlocked(
         path_override: None,
         project: None,
         capability: None,
-        allow_synthetic: false,
-        accept_bare_directory: false,
+        allow_synthetic: true,
+        accept_bare_directory: true,
         ..TargetSpec::default()
     })?;
     let source_checkout = source_checkout_for_worktree(&target)?;
@@ -235,6 +408,15 @@ fn create_with_store_unlocked(
     {
         return Err(branch_ownership_error(&options.branch, registration));
     }
+    let handoff_base_ref = existing
+        .as_ref()
+        .map(|record| record.base_ref.as_str())
+        .or(options.from.as_deref())
+        .unwrap_or("HEAD");
+    let handoff_observation = options
+        .require_handoff_freshness
+        .then(|| prepare_handoff_freshness(&source_checkout, handoff_base_ref))
+        .transpose()?;
     if worktree_path.exists() {
         let record = existing.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -259,6 +441,9 @@ fn create_with_store_unlocked(
             })?;
         verify_linked_worktree_identity(&source_checkout, &worktree_path, &options.branch)?;
         return Ok(WorktreeCreateOutput {
+            handoff_freshness: handoff_observation
+                .map(|observation| complete_handoff_freshness(&record, observation))
+                .transpose()?,
             record,
             reconciliation: None,
         });
@@ -317,6 +502,9 @@ fn create_with_store_unlocked(
         pin_worktree_identity(&worktree_path)?;
         let current = create_evidence(&record, "registered".to_string())?;
         return Ok(WorktreeCreateOutput {
+            handoff_freshness: handoff_observation
+                .map(|observation| complete_handoff_freshness(&record, observation))
+                .transpose()?,
             record,
             reconciliation: Some(WorktreeCreateReconciliation {
                 action: WorktreeCreateAction::Restored,
@@ -366,8 +554,123 @@ fn create_with_store_unlocked(
     record.workspace_identity = Some(record.effective_workspace_identity()?);
     write_record_unlocked(store_dir, &record)?;
     Ok(WorktreeCreateOutput {
+        handoff_freshness: handoff_observation
+            .map(|observation| complete_handoff_freshness(&record, observation))
+            .transpose()?,
         record,
         reconciliation: None,
+    })
+}
+
+#[derive(Debug)]
+struct PendingHandoffFreshness {
+    resolved_base_ref: String,
+    resolved_base_sha: String,
+    remote_default_ref: String,
+    remote_default_sha: String,
+}
+
+fn prepare_handoff_freshness(source: &Path, base_ref: &str) -> Result<PendingHandoffFreshness> {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    git::run_git_with_env_timeout(
+        source,
+        &["fetch", "origin"],
+        "git fetch origin for worktree handoff",
+        &[],
+        TIMEOUT,
+    )?;
+    let advertised = git::run_git_with_env_timeout(
+        source,
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        "git ls-remote origin HEAD for worktree handoff",
+        &[],
+        TIMEOUT,
+    )?;
+    let remote_head = advertised.lines().find_map(|line| {
+        line.strip_prefix("ref: refs/heads/")
+            .and_then(|value| value.strip_suffix("\tHEAD"))
+    });
+    let advertised_sha = advertised.lines().find_map(|line| {
+        let (sha, name) = line.split_once('\t')?;
+        (name == "HEAD"
+            && (40..=64).contains(&sha.len())
+            && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| sha.to_ascii_lowercase())
+    });
+    let (remote_head, advertised_sha) = remote_head.zip(advertised_sha).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "handoff_freshness",
+            "Remote origin did not advertise an unambiguous default branch and commit",
+            None,
+            Some(vec![
+                "Configure origin/HEAD or provide a reachable remote.".to_string()
+            ]),
+        )
+    })?;
+    let remote_default_ref = format!("refs/remotes/origin/{remote_head}");
+    let remote_default_sha = git::run_git_with_env_timeout(
+        source,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{remote_default_ref}^{{commit}}"),
+        ],
+        "resolve fetched remote default for worktree handoff",
+        &[],
+        TIMEOUT,
+    )?
+    .trim()
+    .to_ascii_lowercase();
+    if remote_default_sha != advertised_sha {
+        return Err(Error::validation_invalid_argument(
+            "handoff_freshness",
+            "Remote default changed during worktree handoff verification",
+            Some(remote_default_ref),
+            Some(vec!["Retry to verify one remote advertisement.".to_string()]),
+        ));
+    }
+    let resolved_base_sha = git::run_git_with_env_timeout(
+        source,
+        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+        "resolve worktree handoff base",
+        &[],
+        TIMEOUT,
+    )?
+    .trim()
+    .to_ascii_lowercase();
+    Ok(PendingHandoffFreshness {
+        resolved_base_ref: base_ref.to_string(),
+        resolved_base_sha,
+        remote_default_ref,
+        remote_default_sha,
+    })
+}
+
+fn complete_handoff_freshness(
+    record: &TaskWorktreeRecord,
+    observation: PendingHandoffFreshness,
+) -> Result<WorktreeHandoffFreshness> {
+    let worktree_sha = git::run_git(
+        Path::new(&record.worktree_path),
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        "resolve worktree handoff HEAD",
+    )?
+    .trim()
+    .to_ascii_lowercase();
+    Ok(WorktreeHandoffFreshness {
+        status: "verified".to_string(),
+        proof: WorktreeHandoffFreshnessProof {
+            schema: "homeboy/worktree-handoff-freshness/v1".to_string(),
+            proof_id: uuid::Uuid::new_v4().to_string(),
+            handle: record.id.clone(),
+            worktree_sha,
+            resolved_base_ref: observation.resolved_base_ref,
+            resolved_base_sha: observation.resolved_base_sha,
+            remote_default_ref: observation.remote_default_ref,
+            remote_default_sha: observation.remote_default_sha.clone(),
+            remote_default_advertised_sha: observation.remote_default_sha,
+            verified_at: chrono::Utc::now().to_rfc3339(),
+        },
     })
 }
 
@@ -619,20 +922,38 @@ fn create_evidence(
 
 pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     let mut worktrees = Vec::new();
+    let mut diagnostics = Vec::new();
     if !store_dir.exists() {
-        return Ok(WorktreeListOutput { worktrees });
+        return Ok(WorktreeListOutput {
+            worktrees,
+            diagnostics,
+        });
     }
-    for entry in fs::read_dir(store_dir)
+    let mut entries: Vec<_> = fs::read_dir(store_dir)
         .map_err(|err| Error::internal_io(err.to_string(), Some(store_dir.display().to_string())))?
-    {
-        let entry = entry.map_err(|err| Error::internal_io(err.to_string(), None))?;
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        worktrees.push(read_record_path(&entry.path())?);
+        match read_record_path(&entry.path()) {
+            Ok(record) => worktrees.push(record),
+            Err(error) => diagnostics.push(WorktreeListDiagnostic::from_error(
+                error,
+                None,
+                Some(entry.path().display().to_string()),
+            )),
+        }
     }
     worktrees.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(WorktreeListOutput { worktrees })
+    Ok(WorktreeListOutput {
+        worktrees,
+        diagnostics,
+    })
 }
 
 pub(super) fn inventory_with_store_and_authority(
@@ -1064,8 +1385,21 @@ pub(super) fn remove_with_store(
     options: WorktreeRemoveOptions,
     store_dir: &Path,
 ) -> Result<WorktreeRemoveOutput> {
+    with_task_worktree_registry_write_lock(|| remove_with_store_unlocked(options, store_dir))
+}
+
+fn remove_with_store_unlocked(
+    options: WorktreeRemoveOptions,
+    store_dir: &Path,
+) -> Result<WorktreeRemoveOutput> {
+    // The registry lease fences the complete decision and Git mutation. Always
+    // re-read under it so finalization that won the lease first is preserved.
     let mut record = read_record(store_dir, &options.id)?;
-    repair_record_source_checkout_if_needed(&mut record, store_dir)?;
+    if !Path::new(&record.source_checkout).exists() {
+        record.source_checkout = recovered_component_source_checkout(&record)?
+            .to_string_lossy()
+            .to_string();
+    }
     let safety = safety_report(&record)?;
     if !options.force && !safety.safe {
         return Err(Error::validation_invalid_argument(
@@ -1083,33 +1417,124 @@ pub(super) fn remove_with_store(
             Some(safety.reasons.clone()),
         ));
     }
+    if safety
+        .reasons
+        .iter()
+        .any(|reason| reason == LIVE_CWD_REASON)
+    {
+        return Err(Error::validation_invalid_argument(
+            "worktree",
+            "Task worktree contains the caller's live current working directory",
+            Some(record.id.clone()),
+            Some(safety.reasons.clone()),
+        ));
+    }
+    let live_owner_count = live_workspace_owner_count(&record, store_dir)?;
+    if live_owner_count > 0 {
+        return Err(Error::validation_invalid_argument(
+            "workspace_claim",
+            format!("Task worktree is held by {live_owner_count} durable live owner(s)"),
+            Some(record.id.clone()),
+            None,
+        ));
+    }
 
-    if !safety.worktree_missing {
-        let mut args = vec!["worktree", "remove"];
-        if options.force {
-            args.push("--force");
+    let claims = workspace_claim_store_for_worktrees(store_dir)?;
+    let claim = claims.acquire(
+        record.effective_workspace_identity()?,
+        crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+        now_ms(),
+    )?;
+    let worktree_parent = Path::new(&record.worktree_path)
+        .parent()
+        .map(Path::to_path_buf);
+    let git_common_dir = git_common_dir(Path::new(&record.source_checkout))?;
+    let result = claims.with_reconciliation_fence(&claim, || {
+        if !safety.worktree_missing {
+            let mut args = vec!["worktree", "remove"];
+            if options.force {
+                args.push("--force");
+            }
+            args.push(&record.worktree_path);
+            git::run_git(
+                Path::new(&record.source_checkout),
+                &args,
+                "git worktree remove",
+            )?;
         }
-        args.push(&record.worktree_path);
-        git::run_git(
-            Path::new(&record.source_checkout),
-            &args,
-            "git worktree remove",
-        )?;
+        if let Some(parent) = &worktree_parent {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+                })?;
+        }
+        let registrations = git_common_dir.join("worktrees");
+        let git_metadata_parent = if registrations.exists() {
+            registrations.as_path()
+        } else {
+            git_common_dir.as_path()
+        };
+        fs::File::open(git_metadata_parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(git_metadata_parent.display().to_string()),
+                )
+            })?;
+        let mut branch_cleanup = branch_cleanup_report(&record)
+            .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
+        if options.cleanup_branch {
+            branch_cleanup =
+                apply_branch_cleanup(&record, branch_cleanup, options.allow_unmerged_branch)?;
+        }
+        record.state = TaskWorktreeState::Removed;
+        record.lifecycle_revision = record.lifecycle_revision.checked_add(1).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lifecycle_revision",
+                "task worktree lifecycle revision overflowed during removal",
+                Some(record.id.clone()),
+                None,
+            )
+        })?;
+        write_record_unlocked(store_dir, &record)?;
+        Ok(WorktreeRemoveOutput {
+            record,
+            safety,
+            branch_cleanup,
+            removed: true,
+        })
+    });
+    let release = claims.release(&claim, now_ms());
+    match result {
+        Err(error) => Err(error),
+        Ok(output) => {
+            release?;
+            Ok(output)
+        }
     }
-    let mut branch_cleanup = branch_cleanup_report(&record)
-        .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
-    if options.cleanup_branch {
-        branch_cleanup =
-            apply_branch_cleanup(&record, branch_cleanup, options.allow_unmerged_branch)?;
-    }
-    record.state = TaskWorktreeState::Removed;
-    write_record(store_dir, &record)?;
-    Ok(WorktreeRemoveOutput {
-        record,
-        safety,
-        branch_cleanup,
-        removed: true,
-    })
+}
+
+fn live_workspace_owner_count(record: &TaskWorktreeRecord, store_dir: &Path) -> Result<usize> {
+    let claims = workspace_claim_store_for_worktrees(store_dir)?;
+    Ok(claims
+        .owner_status(&record.effective_workspace_identity()?, now_ms())?
+        .len())
+}
+
+fn workspace_claim_store_for_worktrees(
+    store_dir: &Path,
+) -> Result<crate::workspace_claim::WorkspaceClaimStore> {
+    let data_root = store_dir.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store `{}` has no data root",
+            store_dir.display()
+        ))
+    })?;
+    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root.join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    ))
 }
 
 pub(super) fn branch_cleanup_report(
@@ -1278,6 +1703,11 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     let worktree_missing = !raw_worktree.exists();
     let primary_checkout = source == worktree;
     let path_contained = worktree.starts_with(parent) && worktree != source;
+    let caller_cwd =
+        std::env::current_dir().map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let caller_cwd = normalize_missing_path(&caller_cwd);
+    let live_caller_cwd =
+        !worktree_missing && (caller_cwd == worktree || caller_cwd.starts_with(&worktree));
     let dirty = !worktree_missing && is_dirty(&worktree)?;
     let unpushed_commits = if worktree_missing {
         0
@@ -1297,6 +1727,9 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     if !path_contained {
         reasons.push("worktree path is outside the component checkout parent".to_string());
     }
+    if live_caller_cwd {
+        reasons.push(LIVE_CWD_REASON.to_string());
+    }
     let safe = reasons.is_empty();
     Ok(WorktreeSafetyReport {
         dirty,
@@ -1308,6 +1741,8 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
         reasons,
     })
 }
+
+const LIVE_CWD_REASON: &str = "refuses to remove the caller's live current working directory";
 
 pub(super) fn is_dirty(path: &Path) -> Result<bool> {
     Ok(
@@ -1489,9 +1924,7 @@ pub(super) fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Res
 
 pub(super) fn write_record_unlocked(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
     let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
-    fs::create_dir_all(store_dir).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
-    })?;
+    crate::engine::local_files::create_dir_all_durably(store_dir)?;
     let json = serde_json::to_string_pretty(record)
         .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
     let path = record_path(store_dir, &record.id);

@@ -4,12 +4,20 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_engine_primitives::command::{
-    terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
+    supports_process_tree_isolation, terminate_process_tree_and_reap,
+    wait_with_bounded_output_supervised_guarded, ControllerChildGuard,
+    SupervisedCommandTermination,
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{io, os::fd::RawFd};
 
 use super::constants::{
     RELEASE_TAG_ENV, RELEASE_VERSION_ENV, VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY,
@@ -26,6 +34,8 @@ use super::types::InstallMethod;
 /// `agent_task_promotion` / runner exec captures (#5297).
 const UPGRADE_CAPTURE_LIMIT_BYTES: usize = 65_536;
 const SOURCE_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const INSTALLER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const INSTALLER_SUPERVISION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CLEANUP_ERROR_CONTEXT_LIMIT_CHARS: usize = 1_024;
 
 /// Environment variable set in the shell child's environment and checked at the
@@ -81,6 +91,43 @@ struct SourceSwapVerification<'a> {
     built_binary_identity: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ReplacementCheckpoint {
+    pub state: String,
+    pub target: PathBuf,
+    pub expected_version: Option<String>,
+    pub expected_build_identity: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub previous_build_identity: Option<String>,
+    pub previous_sha256: String,
+}
+
+impl ReplacementCheckpoint {
+    pub(crate) fn pending(
+        target: &Path,
+        expected_version: Option<&str>,
+        expected_build_identity: Option<&str>,
+        expected_sha256: Option<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            state: "pending".to_string(),
+            target: target.to_path_buf(),
+            expected_version: expected_version.map(str::to_string),
+            expected_build_identity: expected_build_identity.map(str::to_string),
+            expected_sha256,
+            previous_build_identity: installed_target_build_identity_from_disk(target)?
+                .map(|identity| identity.display),
+            previous_sha256: sha256_file(target)?,
+        })
+    }
+
+    pub(crate) fn with_state(&self, state: &str) -> Self {
+        let mut checkpoint = self.clone();
+        checkpoint.state = state.to_string();
+        checkpoint
+    }
+}
+
 /// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
 /// (the most relevant tail for a failure message) and returning the retained
 /// text plus truncation metadata. Mirrors the `bound_captured_stream` pattern
@@ -115,40 +162,140 @@ pub(crate) fn annotate_truncation(detail: &str, capture: &StreamCaptureMetadata)
     }
 }
 
+fn upgrade_failure_detail(stderr: &[u8], stdout: &[u8]) -> Option<String> {
+    let (stderr, stderr_capture) = bound_captured_stream(stderr, UPGRADE_CAPTURE_LIMIT_BYTES);
+    let (stdout, stdout_capture) = bound_captured_stream(stdout, UPGRADE_CAPTURE_LIMIT_BYTES);
+    let stderr =
+        (!stderr.trim().is_empty()).then(|| annotate_truncation(stderr.trim(), &stderr_capture));
+    let stdout =
+        (!stdout.trim().is_empty()).then(|| annotate_truncation(stdout.trim(), &stdout_capture));
+
+    match (stderr, stdout) {
+        (Some(stderr), Some(stdout)) => Some(format!("stderr:\n{stderr}\nstdout:\n{stdout}")),
+        (Some(stderr), None) => Some(stderr),
+        (None, Some(stdout)) => Some(stdout),
+        (None, None) => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_upgrade(
     method: InstallMethod,
     source_path: Option<&Path>,
     explicit_source_path: bool,
     force: bool,
+    deliberate_replacement: bool,
     previous_build_identity: Option<&str>,
     selected_release: Option<&SelectedRelease>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+    phase: &mut dyn FnMut(&str) -> Result<()>,
+    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
     // The binary installer replaces `command -v homeboy`. Capture that path
     // before its shell runs so verification proves the intended PATH target was
     // replaced rather than merely finding some other Homeboy afterward.
-    let binary_destination = (method == InstallMethod::Binary)
-        .then(active_binary_path)
+    let release_binary = matches!(method, InstallMethod::Binary | InstallMethod::Secondary);
+    let binary_destination = release_binary.then(active_binary_path).transpose()?;
+    if release_binary {
+        promotion_lease
+            .ok_or_else(|| {
+                Error::internal_unexpected(
+                    "release replacement eligibility must be revalidated under promotion ownership",
+                )
+            })?
+            .assert_generation()?;
+        validate_binary_replacement_eligibility(
+            deliberate_replacement,
+            selected_binary_version.expect("release upgrades select a release"),
+            installed_target_build_identity_from_disk(
+                binary_destination
+                    .as_deref()
+                    .expect("release upgrades capture a destination"),
+            )?,
+        )?;
+    }
+    if method != InstallMethod::Source {
+        phase("running_candidate_admission")?;
+        phase("installing_controller")?;
+    }
+    let binary_checkpoint = if release_binary {
+        let checkpoint = ReplacementCheckpoint::pending(
+            binary_destination
+                .as_deref()
+                .expect("release upgrades capture a destination"),
+            selected_binary_version,
+            None,
+            None,
+        )?;
+        replacement_checkpoint(&checkpoint)?;
+        Some(checkpoint)
+    } else {
+        None
+    };
+    let release_stage = release_binary
+        .then(|| {
+            tempfile::Builder::new()
+                .prefix("homeboy-release-stage-")
+                .tempdir()
+                .map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some("create release staging directory".to_string()),
+                    )
+                })
+        })
         .transpose()?;
+    let staged_release_binary = release_stage
+        .as_ref()
+        .map(|stage| stage.path().join("homeboy"));
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
-            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run homebrew upgrade".to_string()))
-            })?
+            run_installer_shell_command(
+                cmd,
+                promotion_lease,
+                INSTALLER_UPGRADE_TIMEOUT,
+                "run homebrew upgrade",
+                |_| {},
+            )?
         }
-        InstallMethod::Secondary => {
-            // Legacy cargo-installed binaries are replaced with the release
-            // asset now that Homeboy's private workspace is not on crates.io.
+        InstallMethod::Secondary | InstallMethod::Binary => {
+            // Legacy cargo-installed binaries use the same pinned release asset,
+            // replacement checkpoints, and read-back contract as binary installs.
             let cmd = &defaults.install_methods.binary.upgrade_command;
-            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some("run release binary upgrade".to_string()),
-                )
-            })?
+            match run_installer_shell_command(
+                cmd,
+                promotion_lease,
+                INSTALLER_UPGRADE_TIMEOUT,
+                "run release binary upgrade",
+                |command| {
+                    command.env(
+                        "HOMEBOY_INSTALL_PATH",
+                        staged_release_binary
+                            .as_deref()
+                            .expect("release upgrades have an isolated stage"),
+                    );
+                    if let Some(release) = selected_release {
+                        command.env(RELEASE_TAG_ENV, &release.tag);
+                        command.env(RELEASE_VERSION_ENV, &release.version);
+                    }
+                },
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some(checkpoint) = binary_checkpoint.as_ref() {
+                        replacement_checkpoint(
+                            &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+                        )?;
+                    }
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some("run release binary upgrade".to_string()),
+                    ));
+                }
+            }
         }
         InstallMethod::Source => {
             if env::var_os(REENTRANCY_GUARD_ENV).is_some() {
@@ -179,6 +326,7 @@ pub(crate) fn execute_upgrade(
                 &workspace_root,
                 explicit_source_path,
             )?;
+            phase("building_candidate")?;
             run_source_upgrade_command(
                 &cmd,
                 &workspace_root,
@@ -198,23 +346,9 @@ pub(crate) fn execute_upgrade(
                 previous_build_identity,
                 source_revision,
                 promotion_lease,
+                phase,
+                replacement_checkpoint,
             );
-        }
-        InstallMethod::Binary => {
-            let cmd = &defaults.install_methods.binary.upgrade_command;
-            // Pin the installer to the release this upgrade selected. Without
-            // the pin the installer always resolves `latest/download`, so a
-            // newest release missing this target's asset is unreachable past —
-            // there is no older release the operator can be moved to (#11750).
-            let mut command = Command::new("sh");
-            command.args(["-c", cmd]);
-            if let Some(release) = selected_release {
-                command.env(RELEASE_TAG_ENV, &release.tag);
-                command.env(RELEASE_VERSION_ENV, &release.version);
-            }
-            command.output().map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run binary upgrade".to_string()))
-            })?
         }
         InstallMethod::Unknown => {
             return Err(Error::validation_invalid_argument(
@@ -227,27 +361,86 @@ pub(crate) fn execute_upgrade(
     };
 
     if !output.status.success() {
-        // The upgrade command's stdout/stderr are unbounded; bound the retained
-        // bytes (keeping the trailing tail) with truncation metadata so a
-        // pathological command cannot force an arbitrarily large failure string
-        // into memory or logs (#5297).
-        let (stderr, stderr_capture) =
-            bound_captured_stream(&output.stderr, UPGRADE_CAPTURE_LIMIT_BYTES);
-        let (stdout, stdout_capture) =
-            bound_captured_stream(&output.stdout, UPGRADE_CAPTURE_LIMIT_BYTES);
-        let error_detail = if !stderr.trim().is_empty() {
-            annotate_truncation(stderr.trim(), &stderr_capture)
-        } else if !stdout.trim().is_empty() {
-            annotate_truncation(stdout.trim(), &stdout_capture)
-        } else {
-            format!("exit code {}", output.status.code().unwrap_or(1))
-        };
+        if let Some(checkpoint) = binary_checkpoint.as_ref() {
+            let state = replacement_observed_state(checkpoint)?;
+            replacement_checkpoint(&checkpoint.with_state(state))?;
+        }
+        // Keep both bounded streams: installers may log progress to stderr while
+        // a staged candidate returns the actionable failure contract on stdout.
+        let error_detail = upgrade_failure_detail(&output.stderr, &output.stdout)
+            .unwrap_or_else(|| format!("exit code {}", output.status.code().unwrap_or(1)));
         return Err(upgrade_failure_error(
             method,
             &error_detail,
             selected_release,
         ));
     }
+
+    if release_binary {
+        let checkpoint = binary_checkpoint
+            .as_ref()
+            .expect("release replacement has a pending checkpoint");
+        let staged = staged_release_binary
+            .as_deref()
+            .expect("release upgrades have an isolated stage");
+        let selected_version =
+            selected_binary_version.expect("release upgrades select a release version");
+        let staged_identity = active_binary_info_at(staged)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "release installer did not produce a verifiable staged candidate at {}",
+                staged.display()
+            ))
+        })?;
+        if staged_identity.version.as_deref() != Some(selected_version) {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+            )?;
+            return Err(binary_swap_failure(
+                selected_version,
+                Some(staged),
+                Some(&staged_identity),
+            ));
+        }
+        run_verified_target_admission(
+            staged,
+            selected_version,
+            &candidate_legacy_identity(
+                binary_destination
+                    .as_deref()
+                    .expect("release upgrades capture a destination"),
+            )?,
+            &selected_release
+                .expect("release upgrades select a release")
+                .tag,
+        )?;
+        promotion_lease
+            .expect("release replacement requires promotion ownership")
+            .assert_generation()?;
+        if let Err(error) = install_source_built_binary(
+            staged,
+            binary_destination
+                .as_deref()
+                .expect("release upgrades capture a destination"),
+        ) {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+            )?;
+            return Err(error);
+        }
+        if !replacement_was_applied(checkpoint)? {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+            )?;
+            return Err(binary_swap_failure(
+                selected_version,
+                binary_destination.as_deref(),
+                active_binary_info_at(&checkpoint.target)?.as_ref(),
+            ));
+        }
+        replacement_checkpoint(&checkpoint.with_state("applied"))?;
+    }
+
+    phase("verifying_install")?;
 
     // The upgrade command above succeeded, so the new binary is already on
     // disk. Reading the version back can race the just-replaced binary (atomic
@@ -259,7 +452,7 @@ pub(crate) fn execute_upgrade(
     let (success, active_binary) = if let Some(selected_version) = selected_binary_version {
         let destination = binary_destination
             .as_deref()
-            .expect("binary upgrades capture a PATH destination");
+            .expect("release upgrades capture a PATH destination");
         verify_binary_upgrade_with_retry(
             destination,
             selected_version,
@@ -285,9 +478,9 @@ pub(crate) fn execute_upgrade(
         .as_ref()
         .and_then(|info| info.build_identity.clone());
 
-    if method == InstallMethod::Binary && !success {
+    if release_binary && !success {
         return Err(binary_swap_failure(
-            selected_binary_version.expect("binary upgrades select a release version"),
+            selected_binary_version.expect("release upgrades select a release version"),
             binary_destination.as_deref(),
             active_binary.as_ref(),
         ));
@@ -304,6 +497,261 @@ pub(crate) fn execute_upgrade(
     Ok((success, new_version, new_build_identity, None, false))
 }
 
+fn run_installer_shell_command(
+    script: &str,
+    promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+    timeout: Duration,
+    context: &str,
+    configure: impl FnOnce(&mut Command),
+) -> Result<std::process::Output> {
+    let promotion_lease = promotion_lease.ok_or_else(|| {
+        Error::internal_unexpected("installer mutation requires controller promotion ownership")
+    })?;
+    promotion_lease.assert_generation()?;
+    supervise_installer_shell_command(
+        script,
+        timeout,
+        context,
+        |command| promotion_lease.authorize_mutating_subprocess(command),
+        configure,
+    )
+}
+
+fn supervise_installer_shell_command<A>(
+    script: &str,
+    timeout: Duration,
+    context: &str,
+    authorize_before_spawn: impl FnOnce(&mut Command) -> Result<A>,
+    configure: impl FnOnce(&mut Command),
+) -> Result<std::process::Output> {
+    if !supports_process_tree_isolation() {
+        return Err(Error::internal_unexpected(
+            "installer supervision requires native process-tree containment on this platform",
+        ));
+    }
+    let mut start_gate = InstallerStartGate::new()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+    let mut command = start_gate.command(script);
+    configure(&mut command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut guard = ControllerChildGuard::prepare(&mut command)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+    // The capability is intentionally scoped to this exact supervised spawn.
+    let mutation_fence = authorize_before_spawn(&mut command)?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+    drop(mutation_fence);
+    #[cfg(test)]
+    if let Some(ready) = std::env::var_os("HOMEBOY_INSTALLER_BEFORE_ATTACH_READY") {
+        if let Some(pid_file) = std::env::var_os("HOMEBOY_INSTALLER_GATE_PID_FILE") {
+            std::fs::write(pid_file, child.id().to_string()).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(context.to_string()))
+            })?;
+        }
+        std::fs::write(ready, b"spawned before guard attachment")
+            .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+        loop {
+            std::thread::park_timeout(Duration::from_secs(30));
+        }
+    }
+    if let Err(error) = guard.attach(&child) {
+        let primary = Error::internal_io(
+            format!("failed to attach installer process guard: {error}"),
+            Some(context.to_string()),
+        );
+        return Err(append_cleanup_failure_context(
+            primary,
+            terminate_process_tree_and_reap(&mut child).err(),
+        ));
+    }
+    start_gate.release().map_err(|error| {
+        append_cleanup_failure_context(
+            Error::internal_io(error.to_string(), Some(context.to_string())),
+            terminate_process_tree_and_reap(&mut child).err(),
+        )
+    })?;
+    let supervised = wait_with_bounded_output_supervised_guarded(
+        &mut child,
+        &mut guard,
+        UPGRADE_CAPTURE_LIMIT_BYTES,
+        timeout,
+        INSTALLER_SUPERVISION_POLL_INTERVAL,
+        || false,
+        |_, _| Ok(()),
+    );
+    let supervised = match supervised {
+        Ok(supervised) => supervised,
+        Err(error) => {
+            return Err(append_cleanup_failure_context(
+                Error::internal_io(error.to_string(), Some(context.to_string())),
+                guard.terminate_and_reap_bounded(&mut child).err(),
+            ));
+        }
+    };
+    match supervised.termination {
+        SupervisedCommandTermination::Completed => Ok(supervised.output.into_output()),
+        SupervisedCommandTermination::TimedOut => Err(Error::internal_io(
+            format!("installer timed out after {}s", timeout.as_secs()),
+            Some(context.to_string()),
+        )),
+        termination => Err(Error::internal_io(
+            format!("installer terminated before completion: {termination:?}"),
+            Some(context.to_string()),
+        )),
+    }
+}
+
+#[cfg(unix)]
+struct InstallerStartGate {
+    read_fd: RawFd,
+    write_fd: RawFd,
+}
+
+#[cfg(unix)]
+impl InstallerStartGate {
+    fn new() -> io::Result<Self> {
+        let mut fds = [-1; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            read_fd: fds[0],
+            write_fd: fds[1],
+        })
+    }
+
+    fn command(&self, script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                &format!(
+                    "IFS= read -r _ <&{} || exit 125; exec sh -c \"$HOMEBOY_INSTALLER_SCRIPT\"",
+                    self.read_fd
+                ),
+            ])
+            .env("HOMEBOY_INSTALLER_SCRIPT", script);
+        command
+    }
+
+    fn release(&mut self) -> io::Result<()> {
+        let bytes = b"1\n";
+        let written = unsafe { libc::write(self.write_fd, bytes.as_ptr().cast(), bytes.len()) };
+        if written != bytes.len() as isize {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe {
+            libc::close(self.read_fd);
+            libc::close(self.write_fd);
+        }
+        self.read_fd = -1;
+        self.write_fd = -1;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InstallerStartGate {
+    fn drop(&mut self) {
+        unsafe {
+            if self.read_fd >= 0 {
+                libc::close(self.read_fd);
+            }
+            if self.write_fd >= 0 {
+                libc::close(self.write_fd);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct InstallerStartGate {
+    path: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl InstallerStartGate {
+    fn new() -> std::io::Result<Self> {
+        let gate = tempfile::Builder::new()
+            .prefix("homeboy-installer-start-")
+            .tempfile()?;
+        let path = gate.path().to_path_buf();
+        gate.close()?;
+        Ok(Self { path })
+    }
+
+    fn command(&self, script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "attempt=0; while [ ! -f \"$HOMEBOY_INSTALLER_START_GATE\" ]; do attempt=$((attempt + 1)); [ \"$attempt\" -ge 500 ] && exit 125; sleep 0.01; done; exec sh -c \"$HOMEBOY_INSTALLER_SCRIPT\"",
+            ])
+            .env("HOMEBOY_INSTALLER_START_GATE", &self.path)
+            .env("HOMEBOY_INSTALLER_SCRIPT", script);
+        command
+    }
+
+    fn release(&mut self) -> std::io::Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .map(|_| ())
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for InstallerStartGate {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn validate_binary_replacement_eligibility(
+    deliberate_replacement: bool,
+    selected_version: &str,
+    installed: Option<homeboy_core::build_identity::BuildIdentity>,
+) -> Result<()> {
+    if deliberate_replacement {
+        return Ok(());
+    }
+    let installed = installed.ok_or_else(|| {
+        Error::internal_unexpected(
+            "cannot revalidate the installed controller before binary replacement",
+        )
+        .with_hint("Retry after the PATH-active controller reports a readable build identity.")
+    })?;
+    if installed.version == selected_version
+        || version_is_newer(&installed.version, selected_version)
+    {
+        return Err(Error::validation_invalid_argument(
+            "selected_release",
+            format!(
+                "Selected controller {selected_version} is no longer newer than installed controller {}",
+                installed.version
+            ),
+            Some(selected_version.to_string()),
+            Some(vec![
+                "A queued upgrade must not reinstall or downgrade a controller promoted by an earlier owner. Re-run update discovery against the active controller."
+                    .to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify a source-built candidate while it is still staged, then let that
 /// candidate decide whether durable ownership permits replacement. This is the
 /// source equivalent of the release installer's verified-target admission.
@@ -312,7 +760,7 @@ fn verify_source_candidate_target_admission(
     built_binary: &Path,
     source_revision: Option<&str>,
     installed_binary: Option<&Path>,
-) -> Result<()> {
+) -> Result<ActiveBinaryInfo> {
     let expected_version = source_workspace_package_version(workspace_root)?;
     if let Some(revision) = source_revision {
         let observed = source_workspace_revision(workspace_root)?;
@@ -333,7 +781,7 @@ fn verify_source_candidate_target_admission(
             built_binary.display()
         ))
     })?;
-    let candidate_version = candidate.version.as_deref().ok_or_else(|| {
+    let candidate_version = candidate.version.clone().ok_or_else(|| {
         Error::internal_unexpected(format!(
             "source-built candidate did not report a version: {}",
             built_binary.display()
@@ -368,7 +816,13 @@ fn verify_source_candidate_target_admission(
     let legacy_identity = installed_binary
         .and_then(|path| candidate_legacy_identity(path).ok())
         .unwrap_or_else(|| "unavailable".to_string());
-    run_verified_target_admission(built_binary, candidate_version, &legacy_identity)
+    run_verified_target_admission(
+        built_binary,
+        &candidate_version,
+        &legacy_identity,
+        &format!("source candidate {}", built_binary.display()),
+    )?;
+    Ok(candidate)
 }
 
 fn source_workspace_package_version(workspace_root: &Path) -> Result<String> {
@@ -410,6 +864,7 @@ fn run_verified_target_admission(
     candidate: &Path,
     target_version: &str,
     legacy_identity: &str,
+    selected_tag_or_artifact: &str,
 ) -> Result<()> {
     upgrade_phase("running verified source candidate admission");
     let output = Command::new(candidate)
@@ -420,6 +875,8 @@ fn run_verified_target_admission(
             legacy_identity,
             "--target-version",
             target_version,
+            "--selected-tag-or-artifact",
+            selected_tag_or_artifact,
         ])
         .output()
         .map_err(|error| {
@@ -442,9 +899,11 @@ fn run_verified_target_admission(
         "controller_upgrade",
         format!(
             "verified source candidate refused controller replacement{}",
-            (!detail.is_empty())
-                .then(|| format!(": {detail}"))
-                .unwrap_or_default()
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         ),
         None,
         None,
@@ -476,6 +935,7 @@ fn binary_swap_failure(
     .with_hint("Retry explicitly after correcting the active destination: homeboy upgrade --force --method binary")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_source_upgrade(
     workspace_root: PathBuf,
     built_binary: PathBuf,
@@ -485,6 +945,8 @@ fn complete_source_upgrade(
     previous_build_identity: Option<&str>,
     source_revision: Option<String>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+    phase: &mut dyn FnMut(&str) -> Result<()>,
+    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
@@ -503,7 +965,7 @@ fn complete_source_upgrade(
         }
     };
     let active_identity = installed_target_build_identity()?;
-    if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root) {
+    if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root)? {
         let active = active_identity.expect("identity checked above");
         return Ok((
             false,
@@ -516,15 +978,36 @@ fn complete_source_upgrade(
     // The promotion decision above verifies source ancestry against the final
     // installed target. The staged binary owns recovery and admission before
     // this lease permits a byte change.
-    verify_source_candidate_target_admission(
+    phase("running_candidate_admission")?;
+    let candidate_identity = verify_source_candidate_target_admission(
         &workspace_root,
         &built_binary,
         source_revision.as_deref(),
         Some(replacement_target),
     )?;
     promotion_lease.assert_generation()?;
+    phase("installing_controller")?;
+    let replacement = ReplacementCheckpoint::pending(
+        replacement_target,
+        candidate_identity.version.as_deref(),
+        candidate_identity.build_identity.as_deref(),
+        Some(sha256_file(&built_binary)?),
+    )?;
+    replacement_checkpoint(&replacement)?;
     upgrade_phase("installing source-built binary");
-    install_source_built_binary(&built_binary, replacement_target)?;
+    if let Err(error) = install_source_built_binary(&built_binary, replacement_target) {
+        let state = replacement_observed_state(&replacement)?;
+        replacement_checkpoint(&replacement.with_state(state))?;
+        return Err(error);
+    }
+    if !replacement_was_applied(&replacement)? {
+        replacement_checkpoint(&replacement.with_state(replacement_observed_state(&replacement)?))?;
+        return Err(Error::internal_unexpected(
+            "source installer completed without an observable controller byte transition",
+        ));
+    }
+    replacement_checkpoint(&replacement.with_state("applied"))?;
+    phase("verifying_install")?;
     upgrade_phase("verifying installed source binary");
 
     let (_verified_version, active_binary) = verify_upgrade_with_retry(
@@ -554,7 +1037,7 @@ fn complete_source_upgrade(
         source_workspace: Some(&workspace_root),
         built_binary: Some(&built_binary),
         replacement_target: Some(replacement_target),
-        built_binary_identity: previous_build_identity,
+        built_binary_identity: candidate_identity.build_identity.as_deref(),
     }) {
         return Err(error);
     }
@@ -573,10 +1056,17 @@ fn source_promotion_is_superseded(
     force: bool,
     active: Option<&homeboy_core::build_identity::BuildIdentity>,
     workspace_root: &Path,
-) -> bool {
-    !force
-        && active
-            .is_some_and(|active| !source_promotion_decision(active, workspace_root).upgrades())
+) -> Result<bool> {
+    if force {
+        return Ok(false);
+    }
+    let active = active.ok_or_else(|| {
+        Error::internal_unexpected(
+            "cannot revalidate the installed controller before source replacement",
+        )
+        .with_hint("Retry after the PATH-active controller reports a readable build identity.")
+    })?;
+    Ok(!source_promotion_decision(active, workspace_root).upgrades())
 }
 
 fn upgrade_phase(phase: &str) {
@@ -589,6 +1079,11 @@ fn run_source_upgrade_command(
     timeout: Duration,
     cargo_target: Option<(&Path, &str)>,
 ) -> Result<()> {
+    if !supports_process_tree_isolation() {
+        return Err(Error::internal_unexpected(
+            "source upgrade supervision requires native process-tree containment on this platform",
+        ));
+    }
     upgrade_phase("building source workspace");
     let mut child_command = Command::new("sh");
     child_command
@@ -602,7 +1097,7 @@ fn run_source_upgrade_command(
             .env("CARGO_TARGET_DIR", cargo_target_dir)
             .env("HOMEBOY_CARGO_TARGET_RESOLUTION", resolution);
     }
-    let guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
+    let mut guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
         Error::internal_io(error.to_string(), Some("run source upgrade".to_string()))
     })?;
     let mut child = child_command
@@ -618,44 +1113,38 @@ fn run_source_upgrade_command(
             terminate_process_tree_and_reap(&mut child).err(),
         ));
     }
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let cleanup = terminate_remaining_process_group(child.id());
-                if status.success() {
-                    return cleanup.map_err(|error| {
-                        Error::internal_io(
-                            error.to_string(),
-                            Some("run source upgrade".to_string()),
-                        )
-                    });
-                }
-                return Err(append_cleanup_failure_context(
-                    source_upgrade_command_failure(status, cargo_target.map(|(path, _)| path)),
-                    cleanup.err(),
-                ));
-            }
-            Ok(None) if start.elapsed() >= timeout => {
-                let primary = Error::internal_io(
-                    format!("source upgrade timed out after {}s", timeout.as_secs()),
-                    Some("run source upgrade".to_string()),
-                );
-                return Err(append_cleanup_failure_context(
-                    primary,
-                    terminate_process_tree_and_reap(&mut child).err(),
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(e) => {
-                let primary =
-                    Error::internal_io(e.to_string(), Some("wait for source upgrade".to_string()));
-                return Err(append_cleanup_failure_context(
-                    primary,
-                    terminate_process_tree_and_reap(&mut child).err(),
-                ));
-            }
+    let supervised = wait_with_bounded_output_supervised_guarded(
+        &mut child,
+        &mut guard,
+        0,
+        timeout,
+        INSTALLER_SUPERVISION_POLL_INTERVAL,
+        || false,
+        |_, _| Ok(()),
+    );
+    let supervised = match supervised {
+        Ok(supervised) => supervised,
+        Err(error) => {
+            return Err(append_cleanup_failure_context(
+                Error::internal_io(error.to_string(), Some("run source upgrade".to_string())),
+                guard.terminate_and_reap_bounded(&mut child).err(),
+            ));
         }
+    };
+    match supervised.termination {
+        SupervisedCommandTermination::Completed if supervised.output.status.success() => Ok(()),
+        SupervisedCommandTermination::Completed => Err(source_upgrade_command_failure(
+            supervised.output.status,
+            cargo_target.map(|(path, _)| path),
+        )),
+        SupervisedCommandTermination::TimedOut => Err(Error::internal_io(
+            format!("source upgrade timed out after {}s", timeout.as_secs()),
+            Some("run source upgrade".to_string()),
+        )),
+        termination => Err(Error::internal_io(
+            format!("source upgrade terminated before completion: {termination:?}"),
+            Some("run source upgrade".to_string()),
+        )),
     }
 }
 
@@ -925,6 +1414,15 @@ fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -
 
     make_source_install_executable(&temp_target)?;
 
+    std::fs::File::open(&temp_target)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| {
+            Error::internal_io(
+                format!("sync {} failed: {}", temp_target.display(), e),
+                Some("install source-built binary".to_string()),
+            )
+        })?;
+
     std::fs::rename(&temp_target, replacement_target).map_err(|err| {
         Error::internal_io(
             format!(
@@ -937,9 +1435,28 @@ fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -
         )
     })?;
 
+    sync_source_install_parent(parent)?;
+
     // Rename succeeded; the file is at its final path. Prevent the guard from
     // deleting it on drop.
     guard.into_owned();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_source_install_parent(parent: &Path) -> Result<()> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| {
+            Error::internal_io(
+                format!("sync directory {} failed: {}", parent.display(), e),
+                Some("install source-built binary".to_string()),
+            )
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_source_install_parent(_parent: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -977,6 +1494,106 @@ fn make_source_install_executable(path: &Path) -> Result<()> {
 
 fn display_path(path: &Path) -> String {
     path.display().to_string()
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "hash controller replacement target {}",
+                path.display()
+            )),
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "hash controller replacement target {}",
+                    path.display()
+                )),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+pub(crate) fn replacement_applied_identity(
+    checkpoint: &ReplacementCheckpoint,
+) -> Result<Option<homeboy_core::build_identity::BuildIdentity>> {
+    let current_sha256 = match sha256_file(&checkpoint.target) {
+        Ok(digest) => digest,
+        Err(_) => return Ok(None),
+    };
+    if current_sha256 == checkpoint.previous_sha256
+        || checkpoint
+            .expected_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &current_sha256)
+    {
+        return Ok(None);
+    }
+    let Some(identity) = installed_target_build_identity_from_disk(&checkpoint.target)? else {
+        return Ok(None);
+    };
+    let matches_expected = checkpoint.expected_build_identity.as_deref().map_or_else(
+        || {
+            checkpoint
+                .expected_version
+                .as_deref()
+                .is_some_and(|expected| identity.version == expected)
+        },
+        |expected| identity.display == expected,
+    );
+    Ok(matches_expected.then_some(identity))
+}
+
+pub(crate) fn replacement_was_applied(checkpoint: &ReplacementCheckpoint) -> Result<bool> {
+    let current_sha256 = match sha256_file(&checkpoint.target) {
+        Ok(digest) => digest,
+        Err(_) => return Ok(false),
+    };
+    if current_sha256 == checkpoint.previous_sha256 {
+        return Ok(false);
+    }
+    if let Some(expected) = checkpoint.expected_sha256.as_deref() {
+        return Ok(current_sha256 == expected);
+    }
+    Ok(replacement_applied_identity(checkpoint)
+        .ok()
+        .flatten()
+        .is_some())
+}
+
+fn replacement_target_changed(checkpoint: &ReplacementCheckpoint) -> Option<bool> {
+    if !checkpoint.target.exists() {
+        return None;
+    }
+    sha256_file(&checkpoint.target)
+        .ok()
+        .map(|current| current != checkpoint.previous_sha256)
+}
+
+pub(crate) fn replacement_observed_state(
+    checkpoint: &ReplacementCheckpoint,
+) -> Result<&'static str> {
+    if replacement_was_applied(checkpoint)? {
+        Ok("applied")
+    } else {
+        match replacement_target_changed(checkpoint) {
+            Some(true) => Ok("changed_unverified"),
+            Some(false) => Ok("not_applied"),
+            None => Ok("evidence_unavailable"),
+        }
+    }
 }
 
 /// Read back the active binary version after a successful swap, retrying while
@@ -1136,7 +1753,9 @@ fn upgrade_failure_error(
         Some("execute upgrade".to_string()),
     );
 
-    if method == InstallMethod::Binary && error_detail.contains("404") {
+    if matches!(method, InstallMethod::Binary | InstallMethod::Secondary)
+        && error_detail.contains("404")
+    {
         error = error.with_hint("No release asset was found for this Homeboy version.");
 
         if let Some(release) = selected_release {
@@ -1491,7 +2110,15 @@ pub(crate) fn installed_target_build_identity(
         }
     }
 
-    let Some(info) = active_binary_info_at(&target_path)? else {
+    installed_target_build_identity_from_disk(&target_path)
+}
+
+/// Execute the selected on-disk target so replacement at the current process's
+/// pathname cannot be mistaken for the still-running process identity.
+pub(crate) fn installed_target_build_identity_from_disk(
+    target_path: &Path,
+) -> Result<Option<homeboy_core::build_identity::BuildIdentity>> {
+    let Some(info) = active_binary_info_at(target_path)? else {
         return Ok(None);
     };
     Ok(info

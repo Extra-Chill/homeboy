@@ -126,7 +126,8 @@ const RESERVATION_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// A durable cross-process capacity claim. Dropping it releases the exact
 /// record on every terminal path, including cancellation and pre-execution
-/// failure.
+/// failure. A live owner keeps its claim even when a slow materialization
+/// exceeds the advisory lease interval.
 #[derive(Debug)]
 pub struct CapacityReservation {
     ledger: PathBuf,
@@ -156,6 +157,8 @@ struct CapacityReservationRecord {
     inodes: u64,
     owner_pid: u32,
     owner_process: String,
+    #[serde(default)]
+    owner_start_identity: Option<crate::process::ProcessStartIdentity>,
     created_unix_seconds: u64,
     lease_expires_unix_seconds: u64,
 }
@@ -168,16 +171,17 @@ struct CapacityReservationInput<'a> {
     budget: DiskBudget,
     demand: CapacityDemand,
     reserve: CapacityReserve,
-    owner: (u32, String),
+    owner: (u32, String, Option<crate::process::ProcessStartIdentity>),
     now: u64,
 }
 
 /// Reserve projected materialization demand before the first large write.
 ///
 /// Capacity is compared after subtracting already-reserved capacity and this
-/// request, then against the configured floor. The reservation is intentionally
-/// process-local: it closes concurrent Cook overcommit while the durable
-/// lifecycle remains the authority for recovering interrupted work.
+/// request. Configured reserve floors are advisory; a reservation blocks only
+/// when its measured projected capacity is exhausted. The reservation is
+/// intentionally process-local: it closes concurrent Cook overcommit while the
+/// durable lifecycle remains the authority for recovering interrupted work.
 pub fn reserve_projected_capacity(
     path: &Path,
     subject: &str,
@@ -210,7 +214,13 @@ fn reserve_projected_capacity_in(
 ) -> Result<CapacityReservation> {
     let lock = lock_capacity_ledger(input.ledger)?;
     let mut records = read_capacity_reservations(input.ledger)?;
-    records.retain(|record| reservation_is_live(record, input.now));
+    let records_before_recovery = records.len();
+    records.retain(reservation_is_live);
+    if records.len() != records_before_recovery {
+        // Persist recovery before evaluating the replacement claim. Otherwise a
+        // capacity refusal leaves the dead owner in the ledger for every retry.
+        write_capacity_reservations(input.ledger, &records)?;
+    }
     let held = records
         .iter()
         .fold(CapacityDemand::default(), |total, record| {
@@ -229,12 +239,12 @@ fn reserve_projected_capacity_in(
             .saturating_sub(held.inodes)
             .saturating_sub(input.demand.inodes)
     });
-    let bytes_ok = projected_bytes.is_some_and(|available| available >= input.reserve.bytes);
-    let inodes_ok = projected_inodes.is_some_and(|available| available >= input.reserve.inodes);
-    if !bytes_ok || !inodes_ok {
+    let bytes_exhausted = projected_bytes == Some(0);
+    let inodes_exhausted = projected_inodes == Some(0);
+    if bytes_exhausted || inodes_exhausted {
         let mut error = Error::storage_exhausted_detailed(StorageExhaustedDetails {
             error: format!(
-                "{} projected materialization would breach configured capacity floors",
+                "{} projected materialization would exhaust available capacity",
                 input.subject
             ),
             context: Some(format!("admission before {}", input.subject)),
@@ -270,6 +280,7 @@ fn reserve_projected_capacity_in(
         inodes: input.demand.inodes,
         owner_pid: input.owner.0,
         owner_process: input.owner.1,
+        owner_start_identity: input.owner.2,
         created_unix_seconds: input.now,
         lease_expires_unix_seconds: input.now.saturating_add(RESERVATION_TTL.as_secs()),
     });
@@ -391,12 +402,34 @@ fn remove_capacity_reservation(ledger: &Path, id: &str) -> Result<()> {
     write_capacity_reservations(ledger, &records)
 }
 
-fn reservation_is_live(record: &CapacityReservationRecord, now: u64) -> bool {
-    record.lease_expires_unix_seconds > now && crate::process::pid_is_running(record.owner_pid)
+fn reservation_is_live(record: &CapacityReservationRecord) -> bool {
+    let owner_is_live = match record.owner_start_identity.as_ref() {
+        Some(identity) => matches!(
+            crate::process::process_identity_state_with_start_identity(
+                record.owner_pid,
+                None,
+                Some(identity),
+            ),
+            crate::process::ProcessIdentityState::Live
+                | crate::process::ProcessIdentityState::Unverifiable
+        ),
+        // Records written before process-start identity was recorded cannot
+        // distinguish PID reuse, so retain the old conservative behavior.
+        None => crate::process::pid_is_running(record.owner_pid),
+    };
+
+    // The lease remains durable diagnostic evidence. It must not evict a
+    // still-live owner: a slow materialization otherwise makes its capacity
+    // visible to another Cook.
+    owner_is_live
 }
 
-fn owner_evidence(pid: u32) -> (u32, String) {
-    (pid, format!("pid:{pid}"))
+fn owner_evidence(pid: u32) -> (u32, String, Option<crate::process::ProcessStartIdentity>) {
+    (
+        pid,
+        format!("pid:{pid}"),
+        crate::process::process_start_identity(pid).ok().flatten(),
+    )
 }
 
 fn now_seconds() -> u64 {
@@ -638,6 +671,7 @@ fn reserve_message(subject: &str, bytes: bool, inodes: bool, reserve: CapacityRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Arc, Barrier};
 
     fn reserve_projected_capacity_from_budget(
         path: &Path,
@@ -800,34 +834,25 @@ mod tests {
     }
 
     #[test]
-    fn large_dependency_tree_near_the_floor_is_rejected_before_materialization() {
+    fn reserve_breached_but_projected_demand_fits_acquires_a_reservation() {
         let dir = tempfile::tempdir().expect("capacity fixture");
         let demand = CapacityDemand {
-            bytes: 4 * 1024 * 1024 * 1024,
-            inodes: 250_000,
+            bytes: 53 * 1024 * 1024,
+            inodes: 1,
         };
-        let error = reserve_projected_capacity_from_budget(
+        let reservation = reserve_projected_capacity_from_budget(
             dir.path(),
             "Cook workspace materialization",
-            budget(Some(8 * 1024 * 1024 * 1024), Some(500_000)),
+            budget(Some(144 * 1024 * 1024 * 1024), Some(990_000)),
             demand,
-            reserve(),
+            CapacityReserve {
+                bytes: 150 * 1024 * 1024 * 1024,
+                inodes: 1_000_000,
+            },
         )
-        .expect_err("node_modules/vendor-sized demand must not cross the floor");
+        .expect("configured reserve breaches are advisory when demand fits");
 
-        assert_eq!(error.details["demand_bytes"], demand.bytes);
-        assert_eq!(error.details["demand_inodes"], demand.inodes);
-        assert_eq!(
-            error.details["dominant_reclaimable_categories"][0],
-            "build_output"
-        );
-        assert_eq!(
-            error.details["cleanup_commands"][0],
-            format!(
-                "homeboy cleanup artifacts --path {} --sort size --limit 100 --apply",
-                crate::engine::shell::quote_arg(&dir.path().display().to_string())
-            )
-        );
+        drop(reservation);
     }
 
     #[test]
@@ -848,29 +873,36 @@ mod tests {
     }
 
     #[test]
-    fn projected_inode_exhaustion_blocks_even_when_bytes_are_sufficient() {
+    fn projected_inode_exhaustion_blocks_with_bytes_remaining() {
         let dir = tempfile::tempdir().expect("capacity fixture");
         let error = reserve_projected_capacity_from_budget(
             dir.path(),
             "Cook workspace materialization",
-            budget(Some(100 * 1024 * 1024 * 1024), Some(150_000)),
+            budget(Some(100 * 1024 * 1024 * 1024), Some(500_000)),
             CapacityDemand {
                 bytes: 1,
-                inodes: 60_000,
+                inodes: 500_000,
             },
             reserve(),
         )
-        .expect_err("inode floor must be enforced independently");
+        .expect_err("a demand that consumes measured inodes must block");
 
-        assert_eq!(error.details["projected_inodes"], 90_000);
-        assert_eq!(error.details["reserve_inodes"], 100_000);
+        assert_eq!(
+            error.details["projected_bytes"],
+            100_u64 * 1024 * 1024 * 1024 - 1
+        );
+        assert_eq!(error.details["projected_inodes"], 0);
+        assert!(error.details["error"]
+            .as_str()
+            .expect("message")
+            .contains("would exhaust available capacity"));
     }
 
     #[test]
     fn dropping_a_reservation_releases_capacity_for_the_next_cook() {
         let dir = tempfile::tempdir().expect("capacity fixture");
         let demand = CapacityDemand {
-            bytes: 4 * 1024 * 1024 * 1024,
+            bytes: 6 * 1024 * 1024 * 1024,
             inodes: 1,
         };
         let reservation = reserve_projected_capacity_from_budget(
@@ -881,14 +913,15 @@ mod tests {
             reserve(),
         )
         .expect("first Cook reserves capacity");
-        let blocked = reserve_projected_capacity_from_budget(
+        let error = reserve_projected_capacity_from_budget(
             dir.path(),
             "second Cook",
             budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
             demand,
             reserve(),
-        );
-        assert!(blocked.is_err(), "live reservation prevents overcommit");
+        )
+        .expect_err("live reservation prevents projected byte exhaustion");
+        assert_eq!(error.details["projected_bytes"], 0);
 
         drop(reservation);
         reserve_projected_capacity_from_budget(
@@ -905,7 +938,7 @@ mod tests {
     fn independently_opened_ledgers_cannot_overcommit_a_live_filesystem_claim() {
         let dir = tempfile::tempdir().expect("capacity fixture");
         let demand = CapacityDemand {
-            bytes: 4 * 1024 * 1024 * 1024,
+            bytes: 6 * 1024 * 1024 * 1024,
             inodes: 1,
         };
         let first = reserve_projected_capacity_from_budget(
@@ -931,7 +964,58 @@ mod tests {
     }
 
     #[test]
-    fn dead_or_expired_reservations_are_reconciled_before_admission() {
+    fn concurrent_admissions_admit_only_one_snapshot_consumer() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let ledger = Arc::new(dir.path().join("capacity-reservations.json"));
+        let start = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(3));
+        let (results, received) = mpsc::channel();
+        let mut workers = Vec::new();
+
+        for subject in ["first concurrent Cook", "second concurrent Cook"] {
+            let ledger = Arc::clone(&ledger);
+            let start = Arc::clone(&start);
+            let release = Arc::clone(&release);
+            let results = results.clone();
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                let reservation = reserve_projected_capacity_in(CapacityReservationInput {
+                    ledger: &ledger,
+                    root: Path::new("/fixture"),
+                    filesystem: "fixture-filesystem",
+                    subject,
+                    budget: budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+                    demand: CapacityDemand {
+                        bytes: 6 * 1024 * 1024 * 1024,
+                        inodes: 1,
+                    },
+                    reserve: reserve(),
+                    owner: owner_evidence(std::process::id()),
+                    now: now_seconds(),
+                });
+                results
+                    .send(reservation.is_ok())
+                    .expect("report admission result");
+                // Keep the winning claim until both admissions have observed
+                // the shared ledger; this makes the race regression deterministic.
+                release.wait();
+                drop(reservation);
+            }));
+        }
+        drop(results);
+
+        let outcomes: Vec<_> = (0..2)
+            .map(|_| received.recv().expect("admission outcome"))
+            .collect();
+        assert_eq!(outcomes.into_iter().filter(|admitted| *admitted).count(), 1);
+        release.wait();
+        for worker in workers {
+            worker.join().expect("concurrent admission worker");
+        }
+    }
+
+    #[test]
+    fn dead_reservations_are_reconciled_before_admission() {
         let dir = tempfile::tempdir().expect("capacity fixture");
         let ledger = dir.path().join("capacity-reservations.json");
         write_capacity_reservations(
@@ -944,6 +1028,7 @@ mod tests {
                 inodes: 900_000,
                 owner_pid: u32::MAX,
                 owner_process: "pid:4294967295".to_string(),
+                owner_start_identity: None,
                 created_unix_seconds: now_seconds().saturating_sub(1),
                 lease_expires_unix_seconds: now_seconds().saturating_add(RESERVATION_TTL.as_secs()),
             }],
@@ -964,6 +1049,42 @@ mod tests {
         let records = read_capacity_reservations(&ledger).expect("read reconciled ledger");
         assert_eq!(records.len(), 1, "only the live replacement remains");
         assert_ne!(records[0].id, "crashed-owner");
+    }
+
+    #[test]
+    fn expired_claim_with_live_owner_still_blocks_admission() {
+        let dir = tempfile::tempdir().expect("capacity fixture");
+        let ledger = dir.path().join("capacity-reservations.json");
+        write_capacity_reservations(
+            &ledger,
+            &[CapacityReservationRecord {
+                id: "slow-owner".to_string(),
+                filesystem: "fixture-filesystem".to_string(),
+                root: dir.path().display().to_string(),
+                bytes: 6 * 1024 * 1024 * 1024,
+                inodes: 1,
+                owner_pid: std::process::id(),
+                owner_process: format!("pid:{}", std::process::id()),
+                owner_start_identity: owner_evidence(std::process::id()).2,
+                created_unix_seconds: now_seconds().saturating_sub(RESERVATION_TTL.as_secs()),
+                lease_expires_unix_seconds: now_seconds().saturating_sub(1),
+            }],
+        )
+        .expect("seed expired live reservation");
+
+        let error = reserve_projected_capacity_from_budget(
+            dir.path(),
+            "replacement Cook",
+            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
+            CapacityDemand {
+                bytes: 6 * 1024 * 1024 * 1024,
+                inodes: 1,
+            },
+            reserve(),
+        )
+        .expect_err("a live slow owner must retain its capacity claim");
+
+        assert_eq!(error.details["projected_bytes"], 0);
     }
 
     #[test]

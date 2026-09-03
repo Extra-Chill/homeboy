@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
 use homeboy::core::component;
@@ -173,11 +173,9 @@ pub struct ReleaseExecuteArgs {
     #[arg(long, value_name = "OWNER_RUN_REF")]
     owner_run_ref: Option<String>,
 
-    /// With --recover: if the release tag exists but points at a commit behind
-    /// HEAD (e.g. config-only commits landed after tagging), move the tag to
-    /// HEAD instead of refusing. Guarded — the tagged commit must be an
-    /// ancestor of HEAD, HEAD must satisfy the version targets, and no GitHub
-    /// Release may exist for the tag.
+    /// With --recover: move a stale tag to HEAD, or recreate an unpublished
+    /// divergent tagged release on the current branch. Divergent recovery also
+    /// requires --bump <version> to name the tag Homeboy may replace.
     #[arg(long)]
     retag: bool,
 
@@ -633,6 +631,17 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
             )
         })?;
         let mut command = Command::new(executable);
+        let output_dir = tempfile::tempdir().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                format!(
+                    "create portable release {} preflight output directory: {error}",
+                    request.gate
+                ),
+                Some(request.path.to_string()),
+            )
+        })?;
+        let output_path = output_dir.path().join("command-result.json");
+        command.args(["--output", output_path.to_string_lossy().as_ref()]);
         if let Some(runner_id) = request.requested_runner_id {
             command.args(["--runner", runner_id]);
         } else if matches!(request.placement, ReleasePreflightPlacementArg::Lab) {
@@ -647,26 +656,45 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
             "--release-readiness-source",
             request.source_commit,
         ]);
+        // Review dependencies may stream ordinary progress on stdout. The
+        // global output file is the machine contract; retaining stdout here
+        // would both corrupt that contract and buffer unbounded gate logs.
+        command.stdout(Stdio::null());
         let output = command.output().map_err(|error| {
             homeboy::core::Error::internal_io(
                 format!("start portable release {} preflight: {error}", request.gate),
                 Some(request.path.to_string()),
             )
         })?;
-        let envelope: PortableReviewChildEnvelope = serde_json::from_slice(&output.stdout)
-            .map_err(|error| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "release.preflight",
-                    format!(
-                        "portable {} preflight returned no stable command-result JSON: {error}",
-                        request.gate
-                    ),
-                    Some(String::from_utf8_lossy(&output.stderr).to_string()),
-                    None,
-                )
-            })?;
-        envelope.project(output.status.success(), request.source_commit)
+        let envelope =
+            read_portable_review_child_envelope(&output_path, request.gate, &output.stderr)?;
+        envelope.project(output.status.success(), request.source_commit, request.gate)
     }
+}
+
+fn read_portable_review_child_envelope(
+    path: &Path,
+    gate: &str,
+    stderr: &[u8],
+) -> homeboy::core::Result<PortableReviewChildEnvelope> {
+    let result = fs::read(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            format!("portable {gate} preflight returned no structured command-result: {error}"),
+            Some(String::from_utf8_lossy(stderr).to_string()),
+            None,
+        )
+    })?;
+    serde_json::from_slice(&result).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            format!(
+                "portable {gate} preflight returned invalid structured command-result JSON: {error}"
+            ),
+            Some(String::from_utf8_lossy(stderr).to_string()),
+            None,
+        )
+    })
 }
 
 /// Stable subset of a child command-result envelope consumed by release.
@@ -709,6 +737,7 @@ struct PortableReviewChildData {
 
 #[derive(Deserialize)]
 struct PortableChildReadinessEvidence {
+    gate: String,
     requested_source_commit: String,
     source_commit: String,
     runner_id: Option<String>,
@@ -719,6 +748,7 @@ impl PortableReviewChildEnvelope {
         self,
         process_passed: bool,
         requested_source_commit: &str,
+        expected_gate: &str,
     ) -> homeboy::core::Result<PortableStageChildResult> {
         let mut evidence_refs = self
             .evidence
@@ -747,7 +777,12 @@ impl PortableReviewChildEnvelope {
         })?;
         let readiness = child.release_readiness;
         if process_passed && self.success {
-            validate_portable_child_success(&readiness, requested_source_commit, &evidence_refs)?;
+            validate_portable_child_success(
+                &readiness,
+                requested_source_commit,
+                expected_gate,
+                &evidence_refs,
+            )?;
         }
         Ok(PortableStageChildResult {
             passed: process_passed && self.success,
@@ -761,8 +796,17 @@ impl PortableReviewChildEnvelope {
 fn validate_portable_child_success(
     child: &PortableChildReadinessEvidence,
     requested_source_commit: &str,
+    expected_gate: &str,
     evidence_refs: &[String],
 ) -> homeboy::core::Result<()> {
+    if child.gate != expected_gate {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            "portable child readiness gate does not match the requested release gate",
+            Some(child.gate.clone()),
+            None,
+        ));
+    }
     if child.source_commit != requested_source_commit {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "release.preflight",
@@ -928,7 +972,16 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     let (skip_checks, mut skip_checks_granular) = args.resolve_skip_checks()?;
     let execution = args.execution_plan(skip_checks);
     validate_apply_boundary(&execution)?;
+    if args.retag && !args.recover {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "retag",
+            "--retag is a recovery operation and requires --recover",
+            None,
+            None,
+        ));
+    }
     let component_ids = resolve_component_ids(&args, &args.components)?;
+    validate_positional_component_ids(&args, &component_ids)?;
     if args.package_only {
         validate_package_only_intent(&args, &component_ids)?;
     }
@@ -1587,6 +1640,30 @@ fn resolve_component_ids(
     }
 }
 
+/// Validate explicit positional batches before release setup can execute any
+/// one target. Single targets retain `--path` portable-config resolution.
+fn validate_positional_component_ids(
+    args: &ReleaseExecuteArgs,
+    component_ids: &[String],
+) -> homeboy::core::Result<()> {
+    if args.project.is_some() || args.components.len() < 2 {
+        return Ok(());
+    }
+
+    for component_id in component_ids {
+        component::load(component_id).map_err(|error| {
+            error.with_hint(
+                "Release inspection commands use a verb before the component ID: \
+                 homeboy release changes <component-id>, homeboy release gap <component-id>, \
+                 homeboy release contains <component-id> <commit>, or \
+                 homeboy release readiness list <component-id>.",
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1719,6 +1796,64 @@ mod tests {
 
         assert_eq!(components, vec!["api"]);
         assert_eq!(release_args.bump.as_deref(), Some("minor"));
+    }
+
+    #[test]
+    fn invalid_positional_component_prevents_valid_batch_target_execution() {
+        homeboy::core::test_support::with_isolated_home(|home| {
+            let component_path = home.path().join("homeboy");
+            std::fs::create_dir_all(&component_path).expect("component directory");
+            std::fs::write(
+                component_path.join("homeboy.json"),
+                r#"{"id":"homeboy","remote_path":"homeboy"}"#,
+            )
+            .expect("portable component config");
+            component::write_standalone_registration(&component::Component::new(
+                "homeboy".to_string(),
+                component_path.to_string_lossy().to_string(),
+                "homeboy".to_string(),
+                None,
+            ))
+            .expect("component registration");
+
+            let error = match run_execute(args(&["inspect", "homeboy"])) {
+                Ok(_) => panic!("an unknown batch target must fail before homeboy releases"),
+                Err(error) => error,
+            };
+
+            assert_eq!(error.code.as_str(), "component.not_found");
+            assert_eq!(error.details["id"], "inspect");
+            assert!(error.hints.iter().any(|hint| hint
+                .message
+                .contains("homeboy release changes <component-id>")));
+        });
+    }
+
+    #[test]
+    fn single_positional_component_with_path_allows_portable_config_fallback() {
+        homeboy::core::test_support::with_isolated_home(|home| {
+            let component_path = home.path().join("portable");
+            std::fs::create_dir_all(&component_path).expect("component directory");
+            std::fs::write(
+                component_path.join("homeboy.json"),
+                r#"{"id":"portable","remote_path":"portable"}"#,
+            )
+            .expect("portable component config");
+            let mut release_args = args(&["portable"]);
+            release_args.path = Some(component_path.to_string_lossy().to_string());
+            let component_ids =
+                resolve_component_ids(&release_args, &release_args.components).expect("target");
+
+            assert!(component::load("portable").is_err());
+            assert_eq!(
+                component::resolve_effective(Some("portable"), release_args.path.as_deref(), None,)
+                    .expect("portable fallback")
+                    .id,
+                "portable"
+            );
+            validate_positional_component_ids(&release_args, &component_ids)
+                .expect("single portable target remains valid");
+        });
     }
 
     fn skip_args(skip_checks: Option<Vec<&str>>) -> ReleaseExecuteArgs {
@@ -1894,6 +2029,21 @@ mod tests {
 
         let execution = args.execution_plan(false);
         validate_apply_boundary(&execution).expect("--apply confirms risky release mode");
+    }
+
+    #[test]
+    fn retag_requires_recover_even_when_apply_is_present() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.retag = true;
+        args.apply = true;
+
+        let err = match run_execute(args) {
+            Err(err) => err,
+            Ok(_) => panic!("retag without recover must be rejected"),
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("requires --recover"));
     }
 
     #[test]
@@ -2087,6 +2237,7 @@ jobs:
             "evidence": [{ "uri": "runner-artifact://lab-runner-7/review.json" }],
             "data": {
                 "release_readiness": {
+                    "gate": "lint",
                     "requested_source_commit": "frozen-source",
                     "source_commit": "frozen-source",
                     "runner_id": "lab-runner-7",
@@ -2099,7 +2250,9 @@ jobs:
         }))
         .expect("stable child result");
 
-        let projected = child.project(true, "frozen-source").expect("valid child");
+        let projected = child
+            .project(true, "frozen-source", "lint")
+            .expect("valid child");
 
         assert!(projected.passed);
         assert_eq!(projected.runner_id.as_deref(), Some("lab-runner-7"));
@@ -2122,6 +2275,7 @@ jobs:
 
     fn valid_child_evidence() -> PortableChildReadinessEvidence {
         PortableChildReadinessEvidence {
+            gate: "lint".to_string(),
             requested_source_commit: "frozen-source".to_string(),
             source_commit: "frozen-source".to_string(),
             runner_id: Some("lab-runner".to_string()),
@@ -2139,42 +2293,72 @@ jobs:
     fn portable_child_success_rejects_missing_source_commit() {
         let mut child = valid_child_evidence();
         child.source_commit.clear();
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
     }
 
     #[test]
     fn portable_child_success_rejects_mismatched_source_commit() {
         let mut child = valid_child_evidence();
         child.source_commit = "other-source".to_string();
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
     }
 
     #[test]
     fn portable_child_success_rejects_missing_runner_or_durable_evidence() {
         let mut child = valid_child_evidence();
         child.runner_id = None;
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
         let child = valid_child_evidence();
-        assert!(validate_portable_child_success(&child, "frozen-source", &[]).is_err());
+        assert!(validate_portable_child_success(&child, "frozen-source", "lint", &[]).is_err());
     }
 
     #[test]
     fn portable_child_success_rejects_empty_provenance() {
         let mut child = valid_child_evidence();
         child.provenance = Default::default();
-        assert!(
-            validate_portable_child_success(&child, "frozen-source", &["run://1".to_string()])
-                .is_err()
-        );
+        assert!(validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn portable_child_success_rejects_mismatched_gate_evidence() {
+        let mut child = valid_child_evidence();
+        child.gate = "audit".to_string();
+
+        let error = validate_portable_child_success(
+            &child,
+            "frozen-source",
+            "lint",
+            &["run://1".to_string()],
+        )
+        .expect_err("evidence for a different gate must not authorize lint");
+
+        assert!(error
+            .message
+            .contains("does not match the requested release gate"));
     }
 
     #[test]
@@ -2195,6 +2379,7 @@ jobs:
                 finalization_lease: None,
                 finalization_lease_started_ms: None,
                 attempt_count: 1,
+                mutation_attempted: false,
                 continuation_evidence: Vec::new(),
                 attributes: Default::default(),
             };
@@ -2234,6 +2419,7 @@ jobs:
                 finalization_lease: None,
                 finalization_lease_started_ms: None,
                 attempt_count: 1,
+                mutation_attempted: false,
                 continuation_evidence: Vec::new(),
                 attributes: Default::default(),
             };
@@ -2458,5 +2644,67 @@ jobs:
             .iter()
             .filter(|gate| ["audit", "lint", "test"].contains(&gate.gate.as_str()))
             .all(|gate| gate.provenance.as_ref() == Some(&child_provenance)));
+    }
+
+    #[test]
+    fn portable_preflight_reads_only_the_structured_output_file() {
+        let output = tempfile::NamedTempFile::new().expect("output file");
+        std::fs::write(
+            output.path(),
+            serde_json::to_vec(&serde_json::json!({
+                "success": true,
+                "evidence": [{ "uri": "run://portable-test" }],
+                "data": {
+                    "release_readiness": {
+                        "gate": "test",
+                        "requested_source_commit": "source",
+                        "source_commit": "source",
+                        "runner_id": "homeboy-lab",
+                        "provenance": { "dependencies": { "fixture": "locked" } }
+                    }
+                }
+            }))
+            .expect("serialize envelope"),
+        )
+        .expect("write envelope");
+
+        let envelope = read_portable_review_child_envelope(
+            output.path(),
+            "test",
+            b"ordinary child progress remains outside the structured result",
+        )
+        .expect("structured output is authoritative");
+        let projected = envelope
+            .project(true, "source", "test")
+            .expect("valid evidence");
+
+        assert!(projected.passed);
+        assert_eq!(projected.runner_id.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn portable_preflight_fails_closed_for_missing_or_invalid_structured_output() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let missing = match read_portable_review_child_envelope(
+            &directory.path().join("missing.json"),
+            "lint",
+            b"diagnostic",
+        ) {
+            Ok(_) => panic!("missing output must fail"),
+            Err(error) => error,
+        };
+        assert!(missing.message.contains("no structured command-result"));
+
+        let invalid_path = directory.path().join("invalid.json");
+        std::fs::write(&invalid_path, "progress before JSON\n{not-json}")
+            .expect("write invalid output");
+        let invalid =
+            match read_portable_review_child_envelope(&invalid_path, "lint", b"diagnostic") {
+                Ok(_) => panic!("invalid output must fail"),
+                Err(error) => error,
+            };
+        assert!(invalid
+            .message
+            .contains("invalid structured command-result JSON"));
     }
 }

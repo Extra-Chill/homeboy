@@ -1,5 +1,5 @@
 use crate::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
-use crate::Result;
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,6 +18,30 @@ pub fn task_worktree_workspace_identity(
 pub enum TaskWorktreeState {
     Active,
     Removed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeLeaseActivity {
+    Live,
+    Stale,
+    Stopped,
+}
+
+/// Deterministic local view of the write authority protecting a managed checkout.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeOwnershipProbe {
+    pub handle: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    pub lifecycle_state: String,
+    pub activity: WorktreeLeaseActivity,
+    pub heartbeat_fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_holders: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,6 +353,47 @@ pub struct WorktreeCreateOutput {
     pub record: TaskWorktreeRecord,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<WorktreeCreateReconciliation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_freshness: Option<WorktreeHandoffFreshness>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeHandoffFreshness {
+    pub status: String,
+    pub proof: WorktreeHandoffFreshnessProof,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeHandoffFreshnessProof {
+    pub schema: String,
+    pub proof_id: String,
+    pub handle: String,
+    pub worktree_sha: String,
+    pub resolved_base_ref: String,
+    pub resolved_base_sha: String,
+    pub remote_default_ref: String,
+    pub remote_default_sha: String,
+    pub remote_default_advertised_sha: String,
+    pub verified_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorktreeImportOptions {
+    pub component_id: String,
+    pub handle: String,
+    pub path: String,
+    pub branch: String,
+    pub base_ref: String,
+    pub task_url: Option<String>,
+    pub owner_run_ref: Option<String>,
+    pub cleanup_policy: CleanupPolicy,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeImportOutput {
+    pub record: TaskWorktreeRecord,
+    pub imported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -339,6 +404,37 @@ pub struct WorktreeAdoptOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeListOutput {
     pub worktrees: Vec<TaskWorktreeRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<WorktreeListDiagnostic>,
+}
+
+/// A record-scoped failure retained by `worktree list` while unaffected records
+/// remain available to operators.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeListDiagnostic {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_path: Option<String>,
+    pub details: serde_json::Value,
+}
+
+impl WorktreeListDiagnostic {
+    pub(crate) fn from_error(
+        error: Error,
+        record_id: Option<String>,
+        record_path: Option<String>,
+    ) -> Self {
+        Self {
+            code: error.code.as_str().to_string(),
+            message: error.message,
+            record_id,
+            record_path,
+            details: error.details,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -582,6 +678,7 @@ pub struct WorktreeCreateOptions {
     pub task_url: Option<String>,
     pub run_id: Option<String>,
     pub cleanup_policy: Option<CleanupPolicy>,
+    pub require_handoff_freshness: bool,
 }
 
 #[derive(Debug, Clone)]

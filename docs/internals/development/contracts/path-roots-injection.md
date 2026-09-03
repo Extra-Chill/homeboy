@@ -212,12 +212,12 @@ nothing calls it *yet* because the callers above it have not been rooted. It is
 ahead of demand, not behind it. Deleting it means re-adding the same five lines
 when that layer's turn comes.
 
-`extension_store` has one of each, side by side:
+`extension::catalog` has one of each, side by side:
 
 | function | callers | verdict |
 |---|---|---|
 | `is_extension_linked` (ambient) | 20+ | live |
-| `is_extension_linked_in_root` (rooted) | **0** | **keep** — it is the injection point `homeboy-extension`'s 22 ambient sites will need |
+| `is_extension_linked_in_root` (rooted) | **0** | **keep** — it is the injection point core's extension subsystem ambient sites will need |
 | `broken_extension_links` (ambient) | 1, a test | **delete** |
 | `broken_extension_links_in_root` (rooted) | 0 → 1 | keep, test now calls it |
 
@@ -306,7 +306,7 @@ an ambient root". Both directions fail:
 - **False negatives.** A test calling `install_for_component(...)` names no
   blocker and writes half the config root.
 
-A scan of `homeboy-extension` and `homeboy-deploy` for blocks with "no
+A scan of the extension subsystem and `homeboy-deploy` for blocks with "no
 blocker" returned 97 candidates, and spot-checking found tests that plainly
 install extensions into `<config>/extensions`. The list was noise.
 

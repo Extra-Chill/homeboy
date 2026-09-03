@@ -19,6 +19,7 @@ pub fn stop() -> Result<DaemonStopResult> {
 /// caller supplied an explicit destructive force request.
 pub fn stop_with_force(force: bool) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
+    let _admission_fence = acquire_daemon_job_admission_fence()?;
     stop_unlocked_with_force(force)
 }
 
@@ -30,6 +31,7 @@ pub fn stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
 /// This deliberately does not use the daemon HTTP lifecycle endpoint.
 pub fn force_stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
+    let _admission_fence = acquire_daemon_job_admission_fence()?;
     force_stop_for_lease_unlocked(expected_lease_id)
 }
 
@@ -372,6 +374,7 @@ pub(super) fn stop_with_force_for_lease(
     force: bool,
 ) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
+    let _admission_fence = acquire_daemon_job_admission_fence()?;
     let path = state_path()?;
     let validation = validate_lease_file(&path)?;
     if validation.invalid_pid.is_some()

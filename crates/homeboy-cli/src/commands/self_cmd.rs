@@ -4,7 +4,8 @@ use homeboy::core::build_identity;
 use homeboy::core::cleanup;
 use homeboy::core::engine;
 use homeboy::core::{api_jobs::JobStore, paths};
-use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
+use homeboy::runner::runners::{self as runner, Runner, RunnerStatusReport};
+use homeboy_runner_contract::RunnerKind;
 use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde::Serialize;
 use serde_json::Value;
@@ -66,6 +67,9 @@ pub struct UpgradeAdmissionArgs {
     /// Exact version expected from the checksum-verified staged release.
     #[arg(long)]
     pub target_version: Option<String>,
+    /// Release tag or artifact selected by the installer for this candidate.
+    #[arg(long)]
+    pub selected_tag_or_artifact: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -170,9 +174,12 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                             None,
                         ));
                     }
-                    homeboy_upgrade::upgrade::ensure_verified_target_upgrade_admission(
-                        target_version,
-                    )?
+                    let target = homeboy_upgrade::upgrade::VerifiedTargetUpgrade::classify(
+                        args.legacy_identity.clone(),
+                        build_identity::current().display,
+                        args.selected_tag_or_artifact.clone(),
+                    );
+                    homeboy_upgrade::upgrade::ensure_verified_target_upgrade_admission(&target)?
                 }
                 None => homeboy_upgrade::upgrade::ensure_controller_upgrade_admission()?,
             };
@@ -258,6 +265,7 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                     run_max_bytes: policy.runtime_run_max_bytes,
                     run_max_count: policy.runtime_run_max_count,
                     cursor: args.cursor.as_deref(),
+                    deadline: None,
                 },
             )?;
             let mut json = serde_json::to_value(output)
@@ -451,8 +459,7 @@ mod tests {
     /// #11102: controllers negotiate the daemon-recovery contract from this
     /// envelope instead of scraping `--help` text. The field name is a wire
     /// contract read by `homeboy_lab_runner::connection::remote_daemon`, so
-    /// renaming or dropping it here must fail loudly rather than silently
-    /// reverting every controller to the help scrape.
+    /// renaming or dropping it here must fail loudly.
     #[test]
     fn identity_report_advertises_the_daemon_recovery_capabilities() {
         let report = super::identity_report();

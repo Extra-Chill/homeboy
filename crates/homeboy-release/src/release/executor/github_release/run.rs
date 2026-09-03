@@ -6,10 +6,13 @@ use homeboy_core::error::{Error, Result};
 
 use super::super::step_success;
 use super::delivery::{existing_release_action, ExistingReleaseAction};
-use super::gh_cli::manifest_declared_asset_names;
 use super::gh_cli::{
     gh_command, gh_is_authenticated, gh_is_available, gh_release_exists,
     github_release_publications,
+};
+use super::gh_cli::{
+    manifest_declared_asset_names, GhCommandOutput, GitHubReleaseMetadata,
+    GitHubReleaseMetadataError, ReleaseAssetPublication,
 };
 use super::notes::{
     build_github_release_body, github_changelog_url, github_release_notes_start_tag,
@@ -26,6 +29,92 @@ use super::{
     github_release_upload_timeout, reconcile_release_publications, run_gh_command,
     validate_draft_adoption, verify_release_publications,
 };
+
+#[derive(Debug)]
+pub(super) enum PublicationUploadError {
+    Upload {
+        output: GhCommandOutput,
+        readback_error: Option<GitHubReleaseMetadataError>,
+    },
+    Verification(GitHubReleaseMetadataError),
+}
+
+/// Upload one canonical asset at a time and read it back before continuing.
+///
+/// `gh release upload` uploads multiple positional files concurrently. A killed
+/// process can therefore leave an arbitrary subset on the draft release, while
+/// its exit status describes the batch rather than any one asset. Serial
+/// readback makes every completed asset an idempotent checkpoint. A failed
+/// command counts as success only when the exact remote bytes are verified.
+pub(super) fn upload_publications_with<M>(
+    publications: &[ReleaseAssetPublication],
+    mut upload: impl FnMut(&ReleaseAssetPublication) -> GhCommandOutput,
+    mut read_metadata: impl FnMut() -> std::result::Result<M, GitHubReleaseMetadataError>,
+    mut verify: impl FnMut(
+        &ReleaseAssetPublication,
+        &M,
+    ) -> std::result::Result<(), GitHubReleaseMetadataError>,
+) -> std::result::Result<Option<M>, PublicationUploadError> {
+    let mut latest = None;
+    for publication in publications {
+        let output = upload(publication);
+        let command_failed = output.timed_out || output.exit_code != Some(0);
+        let metadata = match read_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if command_failed => {
+                return Err(PublicationUploadError::Upload {
+                    output,
+                    readback_error: Some(error),
+                })
+            }
+            Err(error) => return Err(PublicationUploadError::Verification(error)),
+        };
+        match verify(publication, &metadata) {
+            Ok(()) => latest = Some(metadata),
+            Err(error) if command_failed => {
+                return Err(PublicationUploadError::Upload {
+                    output,
+                    readback_error: Some(error),
+                })
+            }
+            Err(error) => return Err(PublicationUploadError::Verification(error)),
+        }
+    }
+    Ok(latest)
+}
+
+fn upload_release_publications(
+    publications: &[ReleaseAssetPublication],
+    github: &homeboy_core::git::release_download::GitHubRepo,
+    config: &homeboy_core::component::GithubConfig,
+    tag: &str,
+    repo_flag: &str,
+) -> std::result::Result<Option<GitHubReleaseMetadata>, PublicationUploadError> {
+    upload_publications_with(
+        publications,
+        |publication| {
+            let upload_spec = publication.upload_spec();
+            run_gh_command(
+                gh_command(
+                    github,
+                    config,
+                    &["release", "upload", tag, &upload_spec, "-R", repo_flag],
+                ),
+                github_release_upload_timeout(),
+            )
+        },
+        || gh_release_metadata(github, config, tag, repo_flag, false),
+        |publication, metadata| {
+            verify_release_publications(
+                std::slice::from_ref(publication),
+                &metadata.assets,
+                github,
+                config,
+                repo_flag,
+            )
+        },
+    )
+}
 
 /// Create a GitHub Release for the just-pushed tag.
 ///
@@ -437,72 +526,66 @@ pub(crate) fn run_github_release(
             existing.len()
         );
 
-        let upload_specs = uploads
-            .iter()
-            .map(|publication| publication.upload_spec())
-            .collect::<Vec<_>>();
-        let upload_output = if upload_specs.is_empty() {
-            None
-        } else {
-            let mut upload_args: Vec<&str> = vec!["release", "upload", &tag];
-            for path in &upload_specs {
-                upload_args.push(path);
-            }
-            upload_args.extend_from_slice(&["-R", &repo_flag]);
-            Some(run_gh_command(
-                gh_command(&github, &component.github, &upload_args),
-                github_release_upload_timeout(),
-            ))
-        };
-
-        if upload_output
-            .as_ref()
-            .is_some_and(|output| output.timed_out || output.exit_code != Some(0))
-        {
-            let upload_output = upload_output.expect("checked upload output");
-            let diagnostic = gh_failure_diagnostic(
-                "gh release upload",
-                &format!("repos/{repo_flag}/releases/{tag}/assets"),
-                &upload_output,
-            );
-            let repair = repair_commands(None, None);
-            homeboy_core::log_status!("release", "✗ {}", diagnostic.summary);
-            log_repair_commands(&repair);
-            return Ok(upload_failed_result(
-                &tag,
-                &github,
-                UploadFailedResultRequest {
-                    stdout: upload_output.stdout,
-                    stderr: upload_output.stderr,
-                    exit_code: upload_output.exit_code,
-                    timed_out: upload_output.timed_out,
-                    artifact_count: artifact_paths.len(),
-                    repair,
-                    diagnostics: &[diagnostic],
-                },
-            ));
-        }
-
-        let metadata =
-            match gh_release_metadata(&github, &component.github, &tag, &repo_flag, false) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    let diagnostics = error.diagnostics;
-                    return Ok(upload_failed_result(
-                        &tag,
-                        &github,
-                        UploadFailedResultRequest {
-                            stdout: String::new(),
-                            stderr: error.message,
-                            exit_code: None,
-                            timed_out: false,
-                            artifact_count: artifact_paths.len(),
-                            repair: repair_commands(None, None),
-                            diagnostics: &diagnostics,
-                        },
-                    ));
+        let metadata = match upload_release_publications(
+            &uploads,
+            &github,
+            &component.github,
+            &tag,
+            &repo_flag,
+        ) {
+            Ok(Some(metadata)) => metadata,
+            Ok(None) => metadata,
+            Err(PublicationUploadError::Upload {
+                output,
+                readback_error,
+            }) => {
+                let mut diagnostics = vec![gh_failure_diagnostic(
+                    "gh release upload",
+                    &format!("repos/{repo_flag}/releases/{tag}/assets"),
+                    &output,
+                )];
+                let mut stderr = output.stderr;
+                if let Some(error) = readback_error {
+                    if !stderr.trim().is_empty() {
+                        stderr.push_str("; ");
+                    }
+                    stderr.push_str(&error.message);
+                    diagnostics.extend(error.diagnostics);
                 }
-            };
+                let repair = repair_commands(None, None);
+                homeboy_core::log_status!("release", "✗ {}", diagnostics[0].summary);
+                log_repair_commands(&repair);
+                return Ok(upload_failed_result(
+                    &tag,
+                    &github,
+                    UploadFailedResultRequest {
+                        stdout: output.stdout,
+                        stderr,
+                        exit_code: output.exit_code,
+                        timed_out: output.timed_out,
+                        artifact_count: artifact_paths.len(),
+                        repair,
+                        diagnostics: &diagnostics,
+                    },
+                ));
+            }
+            Err(PublicationUploadError::Verification(error)) => {
+                let diagnostics = error.diagnostics;
+                return Ok(upload_failed_result(
+                    &tag,
+                    &github,
+                    UploadFailedResultRequest {
+                        stdout: String::new(),
+                        stderr: error.message,
+                        exit_code: None,
+                        timed_out: false,
+                        artifact_count: artifact_paths.len(),
+                        repair: repair_commands(None, None),
+                        diagnostics: &diagnostics,
+                    },
+                ));
+            }
+        };
         if let Err(error) = verify_release_publications(
             &publications,
             &metadata.assets,

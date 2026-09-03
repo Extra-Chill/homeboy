@@ -16,10 +16,10 @@ use crate::plan::verify::AuditConvergenceScoring;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::engine::undo::UndoSnapshot;
+use homeboy_core::extension;
 use homeboy_core::git;
 use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use homeboy_core::Error;
-use homeboy_extension as extension;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -396,7 +396,8 @@ pub(super) fn run_lint_stage(
             runner.run()?;
         }
 
-        homeboy_extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
+        homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file)
+            .unwrap_or_default()
     };
 
     let lint_source_result = serde_json::json!({
@@ -525,7 +526,7 @@ pub(super) fn run_lint_stage(
             runner.run()?;
         }
         let remaining_findings =
-            homeboy_extension::lint::baseline::parse_findings_file(&findings_file)?;
+            homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file)?;
         reject_remaining_lint_fix_findings(&remaining_findings)?;
 
         let fix_results = fix_sidecars.consume_fix_results();
@@ -597,7 +598,7 @@ fn run_lint_fix_phase(
     progress: &mut ValidationProgressRecorder<'_>,
     index: usize,
     phase: &str,
-    runner: extension::ExtensionRunner,
+    runner: extension::invoke::ExtensionRunner,
     run_dir: &RunDir,
     timeout: Duration,
 ) -> homeboy_core::Result<()> {

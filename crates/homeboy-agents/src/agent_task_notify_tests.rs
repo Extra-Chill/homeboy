@@ -91,6 +91,36 @@ fn successful_cook_carries_the_pull_request_link() {
 }
 
 #[test]
+fn intentional_no_change_terminal_notifications_match_policy_outcome() {
+    let accepted = terminal_payload(&report("intentional_no_change", None), None, 0);
+    assert_eq!(accepted.kind, NotifyEventKind::Completed);
+    assert!(accepted
+        .render_body()
+        .contains("Status: intentional_no_change"));
+
+    let refused = terminal_payload(&report("no_candidate", None), None, 1);
+    assert_eq!(refused.kind, NotifyEventKind::NeedsAttention);
+    assert!(refused.render_body().contains("Status: no_candidate"));
+}
+
+#[test]
+fn rotation_exhaustion_notification_preserves_the_terminal_cause() {
+    let mut report = report("provider_failure", None);
+    report.terminal_phase = Some("provider".to_string());
+    report.terminal_failure_classification = Some("provider_rotation_exhausted".to_string());
+    report.stop_reason = Some(
+        "provider rotation exhausted without a candidate: xai/grok-4.6: provider_account_blocked; zai-coding-plan/glm-5.3: rate_limited; opencode-go/kimi-k3: stalled".to_string(),
+    );
+
+    let payload = terminal_payload(&report, None, 1);
+    let body = payload.render_body();
+    assert!(body.contains("Failure classification: provider_rotation_exhausted"));
+    assert!(body.contains("xai/grok-4.6: provider_account_blocked"));
+    assert!(body.contains("zai-coding-plan/glm-5.3: rate_limited"));
+    assert!(body.contains("opencode-go/kimi-k3: stalled"));
+}
+
+#[test]
 fn failed_cook_forwards_its_own_legal_recovery_commands() {
     let mut failed = report("durable_failure", None);
     failed.failure_context = Some(failure_context());
@@ -236,7 +266,7 @@ fn install_transport(id: &str, command: Vec<&str>) {
         }))
         .expect("manifest");
     manifest.id = "cook-notify-test".to_string();
-    homeboy_core::extension_store::save_manifest(&manifest).expect("install transport");
+    homeboy_core::extension::catalog::save_manifest(&manifest).expect("install transport");
 }
 
 fn set_default_transport(id: &str) {

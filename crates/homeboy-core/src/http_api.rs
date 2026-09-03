@@ -17,6 +17,9 @@ use crate::observation::{
     OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
 };
 use crate::{activity, component, git};
+use homeboy_resource_topology_contract::{
+    ResourceTopologyResourceKind, ResourceTopologyResourceRef,
+};
 
 mod analysis_job_runner;
 mod sandbox_tools;
@@ -44,6 +47,9 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         }),
         (HttpMethod::Get, ["components", id, "changes"]) => Ok(HttpEndpoint::ComponentChanges {
             id: (*id).to_string(),
+        }),
+        (HttpMethod::Get, ["topology", kind, id]) => Ok(HttpEndpoint::ResourceTopology {
+            root: topology_root(kind, id)?,
         }),
         (HttpMethod::Get, ["rigs"]) => Ok(HttpEndpoint::Rigs),
         (HttpMethod::Get, ["rigs", id]) => Ok(HttpEndpoint::Rig {
@@ -87,9 +93,31 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["activity", id]) => Ok(HttpEndpoint::ActivityItem {
             id: (*id).to_string(),
         }),
-        (HttpMethod::Get, ["agent-task", "runs", id]) => Ok(HttpEndpoint::AgentTaskRun {
-            id: (*id).to_string(),
-        }),
+        (HttpMethod::Get, ["v1", "control-plane", "capabilities"]) => {
+            Ok(HttpEndpoint::ControlPlaneCapabilities)
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id]) => {
+            Ok(HttpEndpoint::ControlPlaneRun {
+                id: (*id).to_string(),
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "events"]) => {
+            let cursor = query_value(path, "cursor")
+                .map(homeboy_control_plane_contract::EventCursor::new)
+                .transpose()
+                .map_err(|error| {
+                    Error::validation_invalid_argument("cursor", error.to_string(), None, None)
+                })?;
+            Ok(HttpEndpoint::ControlPlaneRunEvents {
+                id: (*id).to_string(),
+                cursor,
+            })
+        }
+        (HttpMethod::Post, ["v1", "control-plane", "runs", id, "actions"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunActions {
+                id: (*id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["jobs"]) => Ok(HttpEndpoint::Jobs),
         (HttpMethod::Get, ["jobs", id]) => Ok(HttpEndpoint::Job {
             id: (*id).to_string(),
@@ -149,7 +177,10 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /bench/runs".to_string(),
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
-                "GET /agent-task/runs/:id".to_string(),
+                "GET /v1/control-plane/capabilities".to_string(),
+                "GET /v1/control-plane/runs/:id".to_string(),
+                "GET /v1/control-plane/runs/:id/events".to_string(),
+                "POST /v1/control-plane/runs/:id/actions".to_string(),
                 "GET /jobs".to_string(),
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
@@ -181,12 +212,29 @@ pub fn handle_with_jobs_and_runner<R>(
 where
     R: AnalysisJobRunner,
 {
-    // Boundary: one HTTP request is one unit of work, so the observation store
-    // is opened exactly once here. The endpoint arms and the helpers below used
-    // to open their own, which made a single request several independently
-    // resolved stores (#7505).
-    let store = ObservationStore::open_initialized()?;
     let endpoint = route(request.method, &request.path)?;
+    match &endpoint {
+        HttpEndpoint::ControlPlaneRun { id } => {
+            return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRunEvents { id, cursor } => {
+            return control_plane_events_response(endpoint.clone(), id, cursor.as_ref());
+        }
+        HttpEndpoint::ControlPlaneCapabilities => {
+            return control_plane_capabilities_response();
+        }
+        HttpEndpoint::ControlPlaneRunActions { id } => {
+            return control_plane_action_response(endpoint.clone(), id, request.body.as_ref());
+        }
+        HttpEndpoint::ResourceTopology { root } => {
+            return topology_response(endpoint.clone(), root.clone());
+        }
+        _ => {}
+    }
+    // Boundary: one observation-backed HTTP request is one unit of work, so
+    // the store is opened exactly once. Control-plane reads return above and
+    // never open this unrelated store.
+    let store = ObservationStore::open_initialized()?;
     let body = match &endpoint {
         HttpEndpoint::Components => json!({
             "command": "api.components.list",
@@ -204,6 +252,7 @@ where
             "command": "api.components.changes",
             "changes": git::changes(Some(id), None, false)?,
         }),
+        HttpEndpoint::ResourceTopology { .. } => unreachable!("returned before store open"),
         HttpEndpoint::Rigs => json!({
             "command": "api.rigs.list",
             "rigs": crate::rig_provider::rig_list_json()?,
@@ -340,7 +389,12 @@ where
                 },
             )?,
         }),
-        HttpEndpoint::AgentTaskRun { id } => agent_task_run(id)?,
+        HttpEndpoint::ControlPlaneRun { .. }
+        | HttpEndpoint::ControlPlaneRunEvents { .. }
+        | HttpEndpoint::ControlPlaneRunActions { .. }
+        | HttpEndpoint::ControlPlaneCapabilities => {
+            unreachable!("returned before store open")
+        }
         HttpEndpoint::Jobs => {
             let active_runner_jobs = job_store.active_runner_jobs();
             let stale_runner_jobs = job_store.stale_runner_jobs();
@@ -421,108 +475,151 @@ where
 /// `daemon_endpoint_identity` applies to its nonce.
 const MAX_AGENT_TASK_RUN_ID_LEN: usize = 256;
 
-/// `GET /agent-task/runs/:id` — the durable agent-task run projection.
+/// Versioned control-plane capability, run, and event reads.
+///
+/// Route handlers only parse HTTP, call the registered orchestration provider,
+/// and serialize the contract.
 ///
 /// # This is a pure read, deliberately
 ///
-/// The CLI's `agent-task status` is `agent_task_lifecycle::status()`, and it is
-/// a *reconciling read that writes*: it rewrites the durable record on the way
-/// out (admission status, candidate adoption, aggregate projection, terminal
-/// model repair) and, for a record that is not controller-local, performs a
-/// **live network probe of the runner**. Neither belongs behind this route:
-///
-/// 1. The daemon accept loop is serial — one connection is handled inline
-///    before the next is accepted. A read whose latency is a remote round trip
-///    stalls every other client of a long-lived shared process.
-/// 2. This module is the read-only contract. `require_run` already refuses the
-///    same reconciling facade for the same reason (#6768); a GET that mutates
-///    would contradict a decision this file has already made once.
-///
-/// So this route resolves through the **activity agent-task provider**, whose
-/// `probe_by_id` is documented as an indexed, non-mutating lookup precisely
-/// because `activity` is a read model that must not reconcile (#10308). It
-/// already understands Cook-id aliasing, so the id an operator was handed
-/// resolves here too.
-///
-/// The cost is honesty about staleness, not silence about it: the response
-/// carries `reconciles: false` and names the command that does reconcile.
-///
-/// # Bounding
-///
-/// Exactly one indexed probe. This is not `activity::show_activity`, which
-/// falls back to a full-corpus scan of up to 1000 records across three stores
-/// when the probes miss — unbounded work on a serial daemon, and wrong here
-/// anyway, since a non-agent-task id has no business resolving on an
-/// agent-task route.
-///
-/// # Redaction
-///
-/// The `ActivityItem` projection is a typed, field-by-field allowlist built by
-/// the agent-task provider, matching the discipline the controller-job
-/// `public_*` projections apply to cook job state. It carries ids, timestamps,
-/// state, and evidence *references* — `command` and `cwd` are `None` for an
-/// agent-task record, and no provider output, prompt, or error text is
-/// reachable through it.
-fn agent_task_run(run_id: &str) -> Result<Value> {
-    if run_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!("agent-task run id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"),
-            None,
-            None,
-        ));
+/// CLI and HTTP status reads share the same non-reconciling contract. Live
+/// runner probes and durable rewrites belong to explicit reconciliation, not
+/// the serial daemon accept loop.
+fn control_plane_capabilities_response() -> Result<HttpApiResponse> {
+    control_plane_ok(
+        HttpEndpoint::ControlPlaneCapabilities,
+        crate::control_plane::capabilities(),
+    )
+}
+
+fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<HttpApiResponse> {
+    match control_plane_run(run_id) {
+        Ok(resource) => control_plane_ok(endpoint, resource),
+        Err(error) => control_plane_err(endpoint, error),
     }
+}
 
-    // A failing probe is reported as a miss with a flag, never with its message.
-    // Error text from this subsystem can quote durable record contents, and the
-    // daemon copies `message`/`details` straight into the response body. The
-    // caller still learns that the lookup itself failed — that is what
-    // `probe_failed` is for — without being handed the text.
-    let probe = activity::agent_task_provider::probe_by_id(run_id);
-    let probe_failed = probe.is_err();
-    let Some(run) = probe.unwrap_or(None) else {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!("agent-task run not found: {run_id}"),
-            Some(run_id.to_string()),
-            Some(vec![
-                if probe_failed {
-                    "The agent-task record lookup failed; run `homeboy agent-task status <id>` for the reconciling read."
-                } else {
-                    "Run `homeboy agent-task active` to list agent-task runs."
-                }
-                .to_string(),
-            ]),
-        ));
-    };
+fn control_plane_events_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<HttpApiResponse> {
+    match control_plane_events(run_id, cursor) {
+        Ok(events) => control_plane_ok(endpoint, events),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
 
-    Ok(json!({
-        "command": "api.agent_task.runs.show",
-        // The resolved id, which is not always the requested one: a Cook id is
-        // an alias for its latest attempt record.
-        "run_id": run.id.clone(),
-        "requested_id": run_id,
-        "run": run,
-        "projection": {
-            "source": "agent-task.lifecycle",
-            // A GET that mutates is a decision, not an accident. This one does
-            // not, and says so rather than leaving a caller to assume freshness.
-            "reconciles": false,
-            "probe_failed": probe_failed,
-            "reconcile_with": "homeboy agent-task status",
-        },
-        // A run is not a job: the job supervises the run. Cook and fanout are
-        // both controller jobs, so watching and cancelling a detached run is
-        // already the generic controller-job surface — named here so an
-        // orchestrator does not have to rediscover it.
-        "job_surface": {
-            "list": "/jobs",
-            "show": "/jobs/:job_id",
-            "events": "/jobs/:job_id/events",
-            "cancel": "/controller/jobs/:job_id/cancel",
-            "note": "POST /jobs/:id/cancel refuses controller jobs; controller-owned work is cancelled through its driver so the driver can stop the work it owns.",
-        },
-    }))
+fn control_plane_action_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    body: Option<&Value>,
+) -> Result<HttpApiResponse> {
+    let result = body
+        .cloned()
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "control-plane action request body is required",
+            )
+        })
+        .and_then(|body| {
+            serde_json::from_value::<homeboy_control_plane_contract::ControlPlaneActionRequest>(
+                body,
+            )
+            .map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                    "invalid control-plane action request: {error}"
+                ))
+            })
+        })
+        .and_then(|request| {
+            control_plane_run_id(run_id)
+                .and_then(|run_id| crate::control_plane::execute_action(&run_id, &request))
+        });
+    match result {
+        Ok(acknowledgement) => control_plane_ok(endpoint, acknowledgement),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_run(
+    run_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ControlPlaneRun,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let run_id = control_plane_run_id(run_id)?;
+    crate::control_plane::run(&run_id)
+}
+
+fn control_plane_run_id(
+    run_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::RunId,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    if run_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
+        return Err(
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                "agent-task run id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"
+            )),
+        );
+    }
+    homeboy_control_plane_contract::RunId::new(run_id).map_err(|error| {
+        homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+    })
+}
+
+fn control_plane_events(
+    run_id: &str,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ControlPlaneEventPage,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let requested_id = control_plane_run_id(run_id)?;
+    crate::control_plane::events(&requested_id, cursor)
+}
+
+fn control_plane_ok<T: serde::Serialize>(
+    endpoint: HttpEndpoint,
+    resource: T,
+) -> Result<HttpApiResponse> {
+    let body = serde_json::to_value(homeboy_control_plane_contract::ControlPlaneResult::ok(
+        resource,
+    ))
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize control-plane result".to_string()),
+        )
+    })?;
+    Ok(HttpApiResponse {
+        status: 200,
+        endpoint: endpoint.name().to_string(),
+        body,
+    })
+}
+
+fn control_plane_err(
+    endpoint: HttpEndpoint,
+    error: homeboy_control_plane_contract::ControlPlaneError,
+) -> Result<HttpApiResponse> {
+    let status = error.http_status();
+    let body = serde_json::to_value(homeboy_control_plane_contract::ControlPlaneResult::<
+        homeboy_control_plane_contract::ControlPlaneRun,
+    >::err(error))
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize control-plane error".to_string()),
+        )
+    })?;
+    Ok(HttpApiResponse {
+        status,
+        endpoint: endpoint.name().to_string(),
+        body,
+    })
 }
 
 fn activity_scope_for_path(path: &str) -> activity::ActivityScope {
@@ -1430,6 +1527,57 @@ fn query_value(path: &str, key: &str) -> Option<String> {
     path.split_once('?')?.1.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         (name == key && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn topology_root(kind: &str, id: &str) -> Result<ResourceTopologyResourceRef> {
+    let kind = match kind {
+        "component" => ResourceTopologyResourceKind::Component,
+        "project" => ResourceTopologyResourceKind::Project,
+        "server" => ResourceTopologyResourceKind::Server,
+        "fleet" => ResourceTopologyResourceKind::Fleet,
+        "runner" => ResourceTopologyResourceKind::Runner,
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "kind",
+                format!("Unknown topology resource kind '{kind}'"),
+                Some(kind.to_string()),
+                Some(vec![
+                    "component".to_string(),
+                    "project".to_string(),
+                    "server".to_string(),
+                    "fleet".to_string(),
+                    "runner".to_string(),
+                ]),
+            ));
+        }
+    };
+    Ok(ResourceTopologyResourceRef {
+        kind,
+        id: id.to_string(),
+    })
+}
+
+fn topology_response(
+    endpoint: HttpEndpoint,
+    root: ResourceTopologyResourceRef,
+) -> Result<HttpApiResponse> {
+    let runners = crate::server::list()?
+        .into_iter()
+        .filter(|server| server.runner.is_some())
+        .map(|server| crate::resource_topology::ResourceTopologyRunner {
+            id: server.id.clone(),
+            server_id: Some(server.id),
+        })
+        .collect::<Vec<_>>();
+    let snapshot = crate::resource_topology::resolve(&[root], &runners)?;
+    Ok(HttpApiResponse {
+        status: 200,
+        endpoint: endpoint.name().to_string(),
+        body: json!({
+            "command": "api.resource_topology.show",
+            "snapshot": snapshot,
+        }),
     })
 }
 

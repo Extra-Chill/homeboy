@@ -1313,14 +1313,14 @@ fn env_source_layer_output(value: &Value) -> Option<RunsEnvSourceLayerOutput> {
     })
 }
 
-pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
+pub fn artifact_command(store: &ObservationStore, args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     match args.command {
-        RunsArtifactCommand::Attach(args) => remote_artifact::attach(args),
-        RunsArtifactCommand::Get(args) => artifact_get(args),
-        RunsArtifactCommand::GetHandle(args) => artifact_get_handle(args),
-        RunsArtifactCommand::Preview(args) => remote_artifact::preview(args),
-        RunsArtifactCommand::PreviewHandle(args) => artifact_preview_handle(args),
-        RunsArtifactCommand::Capture(args) => remote_artifact::capture(args),
+        RunsArtifactCommand::Attach(args) => remote_artifact::attach(store, args),
+        RunsArtifactCommand::Get(args) => artifact_get(store, args),
+        RunsArtifactCommand::GetHandle(args) => artifact_get_handle(store, args),
+        RunsArtifactCommand::Preview(args) => remote_artifact::preview(store, args),
+        RunsArtifactCommand::PreviewHandle(args) => artifact_preview_handle(store, args),
+        RunsArtifactCommand::Capture(args) => remote_artifact::capture(store, args),
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
         RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),
         RunsArtifactCommand::Postprocess(args) => {
@@ -1331,9 +1331,9 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
 }
 
 pub(crate) fn artifact_preview_handle(
+    store: &ObservationStore,
     args: RunsArtifactPreviewHandleArgs,
 ) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
     let artifact = store
         .get_artifact_for_handle(&args.handle)?
         .ok_or_else(|| {
@@ -1347,31 +1347,38 @@ pub(crate) fn artifact_preview_handle(
     remote_artifact::preview_artifact(artifact, args.port)
 }
 
-pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn artifact_get(
+    store: &ObservationStore,
+    args: RunsArtifactGetArgs,
+) -> CmdResult<RunsOutput> {
     let fields = args.field.clone();
-    let (output, exit_code) = artifact_get_inner(args)?;
+    let (output, exit_code) = artifact_get_inner(store, args)?;
     if fields.is_empty() {
         return Ok((output, exit_code));
     }
     apply_field_selection(output, &fields)
 }
 
-fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
+fn artifact_get_inner(
+    store: &ObservationStore,
+    args: RunsArtifactGetArgs,
+) -> CmdResult<RunsOutput> {
     if let Some(runner_id) = args.runner.clone() {
         return remote::runner_artifact_get(&runner_id, args);
     }
 
-    let store = ObservationStore::open_initialized()?;
-    let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+    let artifact = runs_service::resolve_artifact_for_run(store, &args.run_id, &args.artifact_id)?;
     artifact_get_resolved(artifact, args.output)
 }
 
 /// Handle lookup is deliberately exact: it has no run-id, name, ordinal, or
 /// fuzzy token fallback. The unique handle index scopes the resolved artifact
 /// to its durable owner before any byte access happens.
-fn artifact_get_handle(args: RunsArtifactGetHandleArgs) -> CmdResult<RunsOutput> {
+fn artifact_get_handle(
+    store: &ObservationStore,
+    args: RunsArtifactGetHandleArgs,
+) -> CmdResult<RunsOutput> {
     let fields = args.field.clone();
-    let store = ObservationStore::open_initialized()?;
     let artifact = store
         .get_artifact_for_handle(&args.handle)?
         .ok_or_else(|| {

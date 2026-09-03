@@ -1695,6 +1695,81 @@ fn durable_finalization_discloses_terminal_successful_model_after_cross_backend_
 }
 
 #[test]
+fn durable_finalization_accepts_fingerprinted_candidate_from_successful_fallback() {
+    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+    lifecycle.provider_runtime = vec![
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "quota-exhausted-provider".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "failure": "quota_exhausted", "model": "openai/gpt-5.6-sol" }),
+        },
+        ProviderRuntimeLifecycle {
+            task_id: "account-fallback".to_string(),
+            backend: "account-unavailable-provider".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "failure": "account_unavailable", "model": "openai/gpt-5.6-sol" }),
+        },
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "fallback-provider".to_string(),
+            state: ProviderRuntimeState::Succeeded,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "model": "openai/gpt-5.6-terra" }),
+        },
+    ];
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle.clone()),
+        gate_proof: Some(successful_gate_proof()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+
+    finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("successful fallback candidate finalizes");
+    assert_eq!(lifecycle.provider_runtime.len(), 3);
+    assert_eq!(
+        lifecycle.provider_runtime[0].state,
+        ProviderRuntimeState::Failed
+    );
+    assert_eq!(
+        lifecycle.provider_runtime[1].state,
+        ProviderRuntimeState::Failed
+    );
+
+    let mut failed_only = lifecycle.clone();
+    failed_only.provider_runtime[2].state = ProviderRuntimeState::Failed;
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(failed_only),
+        gate_proof: Some(successful_gate_proof()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+
+    let mut unbound_candidate = successful_gate_proof();
+    unbound_candidate.promotion.source.task_id = "other-task".to_string();
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(unbound_candidate),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+}
+
+#[test]
 fn finalization_keeps_internal_durable_refs_for_operators_but_not_reviewers() {
     let internal_ref = "homeboy://agent-task/run/run-9568/artifacts#task=cook&artifact=patch";
     let reviewer_ref = "https://github.com/Extra-Chill/homeboy/issues/9568";
@@ -2089,8 +2164,8 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
             record.lifecycle.provider_runtime.clear();
         })
         .expect("obsolete record persisted");
-        let before =
-            crate::agent_task_lifecycle::status(&record.run_id).expect("obsolete record loads");
+        let before = crate::agent_task_lifecycle::reconcile_status(&record.run_id)
+            .expect("obsolete record loads");
         assert!(before.lifecycle.provider_runtime.is_empty());
 
         let mut backend = MockBackend {
@@ -2104,7 +2179,7 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
 
         let error = finalize_pr_with_backend(finalization_options, &mut backend)
             .expect_err("model-less terminal record is rejected");
-        let after = crate::agent_task_lifecycle::status(&record.run_id)
+        let after = crate::agent_task_lifecycle::reconcile_status(&record.run_id)
             .expect("obsolete record remains readable");
 
         assert_eq!(
@@ -2490,6 +2565,72 @@ fn durable_finalization_uses_promoted_files_for_clean_committed_candidate() {
 }
 
 #[test]
+fn production_validator_accepts_patch_tree_on_two_parent_baseline() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = real_git_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git runs")
+                .success());
+        };
+        let base_branch = String::from_utf8(
+            Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(repo.path())
+                .output()
+                .expect("read base branch")
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git(&["checkout", "-b", "side"]);
+        std::fs::write(repo.path().join("side"), "side").unwrap();
+        git(&["add", "side"]);
+        git(&["commit", "-m", "side"]);
+        git(&["checkout", &base_branch]);
+        std::fs::write(repo.path().join("main-only"), "main").unwrap();
+        git(&["add", "main-only"]);
+        git(&["commit", "-m", "base"]);
+        git(&["merge", "--no-ff", "side", "-m", "merge side"]);
+
+        std::fs::write(repo.path().join("candidate"), "promoted bytes").unwrap();
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
+                .unwrap();
+        let run_id = "patch-on-two-parent-baseline";
+        crate::agent_task_lifecycle::submit_plan(
+            &crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+            Some(run_id),
+        )
+        .unwrap();
+        let mut promotion = successful_gate_proof().promotion;
+        promotion.source.run_id = Some(run_id.to_string());
+        promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec!["candidate".to_string()];
+        promotion.provenance = json!({ "candidate": candidate });
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion).unwrap(),
+        )
+        .unwrap();
+
+        let mut options = real_git_finalization_options(repo.path(), vec!["candidate".to_string()]);
+        options.run_id = run_id.to_string();
+        validate_real_candidate_fingerprint(&options)
+            .expect("patch tree on merge baseline accepted");
+
+        git(&["add", "candidate"]);
+        git(&["commit", "-m", "recover promoted patch"]);
+        validate_real_candidate_fingerprint(&options)
+            .expect("exact recovery commit on merge baseline accepted");
+    });
+}
+
+#[test]
 fn production_validator_accepts_only_the_exact_promoted_recovery_commit() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let repo = real_git_repo();
@@ -2634,26 +2775,6 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
         })
         .to_string();
         std::fs::write(outcome.path(), &source).expect("write adoption outcome");
-        let provider = tempfile::NamedTempFile::new().expect("promotion provider");
-        std::fs::write(
-            provider.path(),
-            format!(
-                "#!/bin/sh\ncat >/dev/null\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\",\"command_evidence\":[]}}'\n",
-                repo.path().display()
-            ),
-        )
-        .expect("write promotion provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(provider.path())
-                .expect("provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(provider.path(), permissions)
-                .expect("make provider executable");
-        }
         let promotion = crate::agent_task_promotion::promote_with_checkpoint(
             crate::agent_task_promotion::AgentTaskPromotionOptions {
                 source,
@@ -2663,7 +2784,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                 base_ref: Some(base_branch.clone()),
                 task_base_sha: Some(historical_base),
                 candidate_ref: Some(merged_candidate.clone()),
-                to_worktree: "repo@adopted".to_string(),
+                to_worktree: repo.path().display().to_string(),
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,
@@ -2671,7 +2792,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                     verify: vec!["true".to_string()],
                     ..Default::default()
                 },
-                provider_command: Some(provider.path().display().to_string()),
+                provider_command: None,
                 provider_invocation: None,
             },
             |checkpoint| {
@@ -2965,6 +3086,20 @@ fn successful_gate_proof() -> AgentTaskPrDurableGateProof {
             "to_worktree": "worktree", "target": { "worktree": "worktree", "path": "/repo" },
             "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
             "operator_notification": { "status": "completed", "message": "complete" },
+            "provenance": {
+                "candidate": {
+                    "kind": "git",
+                    "fingerprint": {
+                        "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                        "target_path": "/repo",
+                        "head": "7f76933ef002d195ee1cc5bf21069e0f40b1c972",
+                        "base": "6f76933ef002d195ee1cc5bf21069e0f40b1c972",
+                        "changed_files": ["src/lib.rs"],
+                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "tree": "5f76933ef002d195ee1cc5bf21069e0f40b1c972"
+                    }
+                }
+            },
             "gate_results": [{ "id": "gate", "name": "cargo test", "kind": "command", "status": "passed" }]
         })).expect("promotion proof"),
     }
@@ -3134,7 +3269,7 @@ fn changed_files_mismatch_error_reports_missing_and_unexpected_paths() {
         "{message}"
     );
     assert!(
-        message.contains("homeboy agent-task status agent-task-1 --full"),
+        message.contains("homeboy agent-task diagnose agent-task-1 --full"),
         "{message}"
     );
 }

@@ -132,10 +132,12 @@ fn fanout_totals_sentence(payload: &Value) -> Option<String> {
 }
 
 fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
-    if payload.get("schema")?.as_str()? != "homeboy/agent-task-cook-batch/v1"
-        || payload.get("status")?.as_str()? != "blocked"
-    {
+    if payload.get("schema")?.as_str()? != "homeboy/agent-task-cook-batch/v1" {
         return None;
+    }
+    let status = payload.get("status")?.as_str()?;
+    if status != "blocked" {
+        return render_failed_fanout_child_summary(payload, status);
     }
     let fanout_id = payload.get("fanout_id")?.as_str()?;
     let primary = payload.get("primary_failure")?.as_object()?;
@@ -188,6 +190,52 @@ fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+fn render_failed_fanout_child_summary(payload: &Value, status: &str) -> Option<String> {
+    if !matches!(status, "failed" | "partial_failure") {
+        return None;
+    }
+    let fanout_id = payload.get("fanout_id")?.as_str()?;
+    let primary = payload.get("primary_failure")?.as_object()?;
+    let phase = primary.get("phase")?.as_str()?;
+    let classification = primary.get("classification")?.as_str()?;
+    let reason = primary.get("reason")?.as_str()?.lines().next()?.trim();
+    let next_action = primary
+        .get("next_action")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            primary
+                .get("recovery")
+                .and_then(|recovery| recovery.get("command"))
+                .and_then(Value::as_str)
+        })?;
+    let affected = primary
+        .get("affected_child_count")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            payload
+                .pointer("/causal_failures/total")
+                .and_then(Value::as_u64)
+        })?;
+    let budget = primary
+        .get("provider_budget_consumed")
+        .and_then(Value::as_bool)
+        .map(|consumed| {
+            if consumed {
+                " provider_budget=consumed"
+            } else {
+                " provider_budget=unspent"
+            }
+        })
+        .unwrap_or("");
+    let evidence = payload
+        .pointer("/causal_failures/complete_evidence_path")
+        .and_then(Value::as_str)
+        .unwrap_or("run_result.result.cooks");
+    Some(format!(
+        "Fanout {fanout_id}: {status} phase={phase} classification={classification} children={affected}{budget} reason={reason}; next={next_action}\nEvidence: {evidence} ({affected} child references)"
+    ))
+}
+
 fn render_providers_summary(payload: &Value) -> Option<String> {
     let summary = payload.get("operator_summary")?;
     let state = summary.get("state")?.as_str()?;
@@ -212,33 +260,43 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
     if let Some(next_action) = summary.get("next_action").and_then(Value::as_str) {
         lines.push(format!("Next: {next_action}"));
     }
+    if let Some(refresh_action) = summary.get("refresh_action").and_then(Value::as_str) {
+        lines.push(format!("Refresh: {refresh_action}"));
+    }
     Some(lines.join("\n"))
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
+    if payload.get("schema").and_then(Value::as_str) == Some("homeboy/agent-task-cook-preview/v1") {
+        return render_cook_preview_summary(payload);
+    }
     let run_id =
         string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["latest_run_id"]))?;
     let raw_state = string_value(payload, &["state"])
         .or_else(|| string_value(payload, &["record", "state"]))
+        .or_else(|| string_value(payload, &["status"]))
         .unwrap_or("unknown");
+    let durable_unavailable =
+        string_value(payload, &["durable_candidate", "status"]) == Some("unavailable");
     let tasks_planned = usize_value(payload, &["task_count"])
-        .or_else(|| array_len(payload, &["record", "tasks"]))
-        .unwrap_or(0);
+        .or_else(|| usize_value(payload, &["durable_candidate", "task_count"]))
+        .or_else(|| array_len(payload, &["record", "tasks"]));
     let canonical = classify_candidates(payload);
-    let tasks_attempted = canonical
-        .provider_executions
-        .or_else(|| aggregate_outcome_count(payload))
-        .unwrap_or(0);
+    let tasks_attempted = usize_value(payload, &["durable_candidate", "provider_execution_count"])
+        .or(canonical.provider_executions)
+        .or_else(|| aggregate_outcome_count(payload));
     let aggregate_path = string_value(payload, &["aggregate_path"])
+        .or_else(|| string_value(payload, &["durable_candidate", "aggregate_path"]))
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
     let metrics = code_production_metrics(payload);
     let state = effective_run_state(
         raw_state,
-        tasks_attempted,
+        tasks_attempted.unwrap_or(0),
         metrics.candidate_state,
         metrics.candidate_scan_degraded,
     );
-    let artifact_count = aggregate_artifact_count(payload);
+    let artifact_count = usize_value(payload, &["durable_candidate", "artifact_count"])
+        .or_else(|| Some(aggregate_artifact_count(payload)).filter(|_| !durable_unavailable));
     let first_artifact = string_value(
         payload,
         &["aggregate", "outcomes", "0", "artifacts", "0", "path"],
@@ -275,19 +333,56 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
             lines.push(format!("Next: {command}"));
         }
     }
+    let unavailable_or_zero = || {
+        if durable_unavailable {
+            "unavailable".to_string()
+        } else {
+            "0".to_string()
+        }
+    };
     lines.extend([
         format!("Run: {run_id}"),
         format!("Status: {state}"),
-        format!("Tasks planned: {tasks_planned}"),
-        format!("Tasks attempted: {tasks_attempted}"),
+        format!(
+            "Tasks planned: {}",
+            tasks_planned
+                .map(|count| count.to_string())
+                .unwrap_or_else(unavailable_or_zero)
+        ),
+        format!(
+            "Tasks attempted: {}",
+            tasks_attempted
+                .map(|count| count.to_string())
+                .unwrap_or_else(unavailable_or_zero)
+        ),
     ]);
-    lines.extend(code_production_lines(&metrics));
+    if durable_unavailable {
+        let reason = string_value(payload, &["durable_candidate", "reason"])
+            .unwrap_or("authoritative candidate evidence could not be read");
+        lines.push(format!("Candidate evidence: unavailable ({reason})"));
+    } else {
+        lines.extend(code_production_lines(&metrics));
+    }
     if let Some(path) = aggregate_path {
         lines.push(format!("Aggregate: {path}"));
     }
-    lines.push(format!("Artifacts: {artifact_count}"));
+    lines.push(format!(
+        "Artifacts: {}",
+        artifact_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(unavailable_or_zero)
+    ));
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
+    }
+    if matches!(raw_state, "candidate_recoverable" | "partial_recoverable") {
+        if let Some(task) = string_value(payload, &["selected_candidate", "selected_task_id"]) {
+            let artifact = string_value(payload, &["selected_candidate", "selected_artifact_id"])
+                .unwrap_or("unknown");
+            lines.push(format!(
+                "Retained candidate: task {task}, artifact {artifact}"
+            ));
+        }
     }
     if primary_failure.is_some() {
         // Its exact action already leads the report.
@@ -299,13 +394,77 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     Some(finish(lines))
 }
 
+fn render_cook_preview_summary(payload: &Value) -> Option<String> {
+    let resolved = payload.get("resolved")?;
+    let placement = resolved
+        .pointer("/placement/requested")
+        .and_then(Value::as_str)?;
+    let provider = resolved
+        .get("provider")
+        .and_then(Value::as_object)
+        .and_then(|provider| {
+            provider.get("backend").and_then(|backend| {
+                backend
+                    .as_str()
+                    .or_else(|| backend.get("state").and_then(Value::as_str))
+            })
+        })
+        .unwrap_or("unresolved");
+    let model = resolved
+        .pointer("/provider/model")
+        .and_then(Value::as_str)
+        .unwrap_or("unresolved");
+    let destination = resolved
+        .pointer("/workspace/path")
+        .and_then(Value::as_str)
+        .or_else(|| resolved.get("worktree").and_then(Value::as_str))
+        .or_else(|| {
+            resolved
+                .pointer("/workspace/action")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("unresolved");
+    let public_gates = resolved
+        .pointer("/gates/public")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let private_gates = resolved
+        .pointer("/gates/private")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let replay = payload
+        .get("replay_argv")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        "Cook preview".to_string(),
+        format!("Placement: {placement}"),
+        format!("Provider: {provider}"),
+        format!("Model: {model}"),
+        format!("Destination: {destination}"),
+        format!("Gates: {public_gates} public, {private_gates} private"),
+        format!(
+            "Replay: {}",
+            homeboy::core::engine::shell::quote_args(&replay)
+        ),
+    ];
+    if let Some(failure) = payload.pointer("/failure/message").and_then(Value::as_str) {
+        lines.push(format!("Blocked: {failure}"));
+    }
+    Some(finish(lines))
+}
+
 fn render_status_summary(payload: &Value) -> Option<String> {
-    let run_id = string_value(payload, &["run_id"])?;
+    let run_id = string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["run"]))?;
     let raw_state = string_value(payload, &["state"]).unwrap_or("unknown");
-    let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
+    let tasks_planned = array_len(payload, &["tasks"])
+        .or_else(|| usize_value(payload, &["durable_candidate", "task_count"]));
     let canonical = classify_candidates(payload);
-    let tasks_attempted = canonical
-        .provider_executions
+    let tasks_attempted = usize_value(payload, &["durable_candidate", "provider_execution_count"])
+        .or(canonical.provider_executions)
         .unwrap_or_else(|| status_attempted_task_count(payload));
     let metrics = code_production_metrics(payload);
     let candidate_state = status_scope_candidate(payload).unwrap_or(metrics.candidate_state);
@@ -322,8 +481,11 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         });
     let completion = cook_completion_summary(payload);
     let cook = cook_outcome_summary(payload, state, candidate_state, completion.as_ref());
-    let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
-    let aggregate_path = string_value(payload, &["aggregate_path"]);
+    let artifact_count = array_len(payload, &["artifact_refs"])
+        .or_else(|| array_len(payload, &["artifacts"]))
+        .or_else(|| usize_value(payload, &["durable_candidate", "artifact_count"]));
+    let aggregate_path = string_value(payload, &["aggregate_path"])
+        .or_else(|| string_value(payload, &["durable_candidate", "aggregate_path"]));
 
     let mut lines = vec!["Agent task status".to_string()];
     if let Some(cook) = cook.as_ref() {
@@ -342,19 +504,26 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Status: {state}"));
         lines.push(format!("Run: {run_id}"));
     }
-    lines.extend([
-        format!("Tasks planned: {tasks_planned}"),
-        format!("Tasks attempted: {tasks_attempted}"),
-    ]);
+    lines.push(tasks_planned.map_or_else(
+        || "Tasks planned: unavailable".to_string(),
+        |count| format!("Tasks planned: {count}"),
+    ));
+    lines.push(format!("Tasks attempted: {tasks_attempted}"));
     let mut production_lines = code_production_lines(&metrics);
     if let Some(candidate) = string_value(payload, &["execution_states", "candidate", "state"]) {
         production_lines[1] = format!("Candidate state: {candidate}");
     }
     lines.extend(production_lines);
+    if let Some(line) = target_application_line(payload) {
+        lines.push(line);
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
-    lines.push(format!("Artifacts: {artifact_count}"));
+    lines.push(artifact_count.map_or_else(
+        || "Artifacts: unavailable".to_string(),
+        |count| format!("Artifacts: {count}"),
+    ));
     if let Some(cook) = cook {
         lines.push(format!("Next: {}", cook.next_action(run_id)));
     } else if metrics.candidate_state.is_available() {
@@ -613,9 +782,19 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .then(|| command_line(payload, &["promotion_candidates", "0", "command"]))
         .flatten();
 
+    let target_applied = payload
+        .pointer("/execution_states/promotion/patch_promoted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let verified = payload
+        .pointer("/execution_states/promotion/verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let outcome = if metrics.candidate_state == CandidateState::Finalized {
         "pull request finalized"
-    } else if metrics.candidate_state == CandidateState::Promoted {
+    } else if target_applied && verified {
+        "patch promoted and verified"
+    } else if target_applied {
         "patch promoted"
     } else if promotable {
         "patch produced, not promoted"
@@ -634,6 +813,9 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         format!("Outcome: {outcome}"),
     ];
     lines.extend(code_production_lines(&metrics));
+    if let Some(line) = target_application_line(payload) {
+        lines.push(line);
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -648,6 +830,25 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: {next}"));
     }
     Some(finish(lines))
+}
+
+fn target_application_line(payload: &Value) -> Option<String> {
+    let promotion = value_at(payload, &["execution_states", "promotion"])?;
+    let target = string_value(promotion, &["target", "worktree"]).unwrap_or("not declared");
+    let target_state = string_value(promotion, &["target", "state"]).unwrap_or("not_applied");
+    let fingerprint = promotion
+        .pointer("/target/candidate_fingerprint_matches")
+        .and_then(Value::as_bool)
+        .map(|matches| if matches { "matches" } else { "does not match" })
+        .unwrap_or("unknown");
+    let verification = promotion
+        .get("verified")
+        .and_then(Value::as_bool)
+        .map(|verified| if verified { "verified" } else { "not verified" })
+        .unwrap_or("unknown");
+    Some(format!(
+        "Target application: {target_state} (worktree: {target}; candidate fingerprint: {fingerprint}; verification: {verification})"
+    ))
 }
 
 fn first_actionable_diagnostic(payload: &Value) -> Option<&str> {
@@ -670,6 +871,7 @@ fn first_diagnostic_message<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a
 
 fn aggregate_outcome_count(payload: &Value) -> Option<usize> {
     array_len(payload, &["aggregate", "outcomes"])
+        .or_else(|| usize_value(payload, &["durable_candidate", "outcome_count"]))
 }
 
 fn aggregate_artifact_count(payload: &Value) -> usize {
@@ -870,6 +1072,25 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn cook_preview_summary_renders_the_terminal_preview_payload() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": { "requested": "local" },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 2 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        assert_eq!(
+            render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
+            Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+        );
+    }
+
+    #[test]
     fn providers_summary_presents_selection_without_calling_it_blocked() {
         let payload = json!({
             "providers": [{ "backend": "alpha" }, { "backend": "zeta" }],
@@ -917,6 +1138,58 @@ mod tests {
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn cook_summary_marks_authoritative_candidate_counts_unavailable() {
+        let payload = json!({
+            "run_id": "candidate-read-unavailable",
+            "status": "candidate_recoverable",
+            "durable_candidate": {
+                "status": "unavailable",
+                "reason": "the authoritative observation has no aggregate"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(
+            summary.contains("Tasks planned: unavailable\n"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Tasks attempted: unavailable\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("Artifacts: unavailable\n"), "{summary}");
+        assert!(summary.contains(
+            "Candidate evidence: unavailable (the authoritative observation has no aggregate)\n"
+        ));
+        assert!(!summary.contains("Candidate state: unknown"), "{summary}");
+    }
+
+    #[test]
+    fn cook_summary_prefers_durable_provider_executions_over_outcomes() {
+        let payload = json!({
+            "run_id": "candidate-after-retries",
+            "status": "candidate_recoverable",
+            "durable_candidate": {
+                "status": "available",
+                "outcome_count": 1,
+                "provider_execution_count": 3,
+                "canonical_candidate": {
+                    "schema": "homeboy/agent-task-candidate/v1",
+                    "state": "patch_available",
+                    "provider_executions": 3,
+                    "counts": { "patch_available": 1 },
+                    "scan": {}
+                }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Tasks attempted: 3\n"), "{summary}");
     }
 
     #[test]
@@ -1195,15 +1468,14 @@ mod tests {
     }
 
     #[test]
-    fn review_summary_uses_the_promoted_candidate_fingerprint() {
-        // A promoted candidate is no longer an apply candidate, but its durable
-        // promotion fingerprint remains the authoritative review summary source.
+    fn review_summary_uses_a_target_applied_candidate_fingerprint() {
+        // Target application is independent from retained candidate selection.
         let payload = json!({
             "run_id": "agent-task-11805",
             "state": "succeeded",
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
+                "state": "apply_ready",
                 "diff_bytes": 0,
                 "counts": { "patch_available": 1 },
                 "scan": { "degraded": false }
@@ -1214,15 +1486,55 @@ mod tests {
                 "size_bytes": 7635,
                 "changed_files": ["a.rs", "b.rs", "c.rs"]
             },
+            "execution_states": {
+                "promotion": {
+                    "patch_promoted": true,
+                    "verified": true,
+                    "target": { "state": "applied", "worktree": "fixture@target", "candidate_fingerprint_matches": true }
+                }
+            },
             "aggregate_review": { "summary": { "apply_candidates": 0, "failed": 0 } },
             "next_actions": ["finalize the pull request"]
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
 
-        assert!(summary.contains("Outcome: patch promoted\n"));
+        assert!(summary.contains("Outcome: patch promoted and verified\n"));
+        assert!(summary.contains("Target application: applied (worktree: fixture@target; candidate fingerprint: matches; verification: verified)\n"));
         assert!(summary.contains("Changed files: 3\n"));
         assert!(summary.contains("Diff bytes: 7635\n"));
+    }
+
+    #[test]
+    fn review_summary_keeps_a_pre_apply_candidate_out_of_the_promoted_outcome() {
+        let payload = json!({
+            "run_id": "retained-candidate",
+            "state": "partial_recoverable",
+            "canonical_candidate": {
+                "schema": "homeboy/agent-task-candidate/v1",
+                "state": "apply_ready",
+                "counts": { "patch_available": 1 }, "scan": { "degraded": false }
+            },
+            "selected_candidate": { "status": "verification_pending" },
+            "execution_states": {
+                "promotion": {
+                    "state": "verification_pending",
+                    "patch_promoted": false,
+                    "verification_phase": "pre_apply",
+                    "target": { "state": "not_applied", "worktree": "fixture@clean-target", "candidate_fingerprint_matches": false }
+                }
+            },
+            "aggregate_review": { "summary": { "apply_candidates": 1, "failed": 0 } }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(
+            summary.contains("Outcome: patch produced, not promoted\n"),
+            "{summary}"
+        );
+        assert!(!summary.contains("Outcome: patch promoted\n"), "{summary}");
+        assert!(summary.contains("Target application: not_applied (worktree: fixture@clean-target; candidate fingerprint: does not match; verification: not verified)\n"), "{summary}");
     }
 
     #[test]
@@ -1665,11 +1977,11 @@ mod tests {
             "cook": { "state": "finalization_failed", "publication": "blocked" },
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
+                "state": "apply_ready",
                 "counts": {}, "scan": {}
             },
             "execution_states": {
-                "candidate": { "state": "promoted_finalization_failed" },
+                "candidate": { "state": "apply_ready_finalization_failed" },
                 "gate": { "state": "passed" },
                 "finalization": { "state": "finalization_failed" },
                 "provider": [{ "task_id": "cook", "state": "succeeded" }]
@@ -1691,12 +2003,12 @@ mod tests {
 
         assert!(
             summary.starts_with(
-                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (promoted; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
+                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (apply_ready; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
             ),
             "{summary}"
         );
         assert!(!summary.contains("Status: succeeded"), "{summary}");
-        assert!(summary.contains("Candidate state: promoted_finalization_failed\n"));
+        assert!(summary.contains("Candidate state: apply_ready_finalization_failed\n"));
         assert!(summary.contains("Publication: blocked\n"));
         assert!(summary.contains("Provider/task evidence:\n"));
         assert!(summary.contains("Tasks attempted: 1\n"));
@@ -2179,7 +2491,7 @@ mod tests {
                     "top_diagnostic": "Agent runtime did not produce required typed artifacts: concept_packet, design_packet.",
                     "hydrated_root_cause": "Provider runtime import failed: module not found",
                     "owner_surface": "agent_runtime",
-                    "next_command": "homeboy agent-task status agent-task-child-1 --full"
+                    "next_command": "homeboy agent-task status agent-task-child-1"
                 }]
             }
         });
@@ -2190,7 +2502,7 @@ mod tests {
         assert!(summary.contains(
             "Last failure: action-1 (agent-task-child-1): Provider runtime import failed: module not found\n"
         ));
-        assert!(summary.contains("Next: homeboy agent-task status agent-task-child-1 --full\n"));
+        assert!(summary.contains("Next: homeboy agent-task status agent-task-child-1\n"));
     }
 
     #[test]
@@ -2388,6 +2700,41 @@ mod tests {
             payload, lossless,
             "rendering must not compact structured evidence"
         );
+    }
+
+    #[test]
+    fn failed_fanout_summary_leads_with_shared_child_root_cause() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": "issue-wave",
+            "status": "failed",
+            "primary_failure": {
+                "phase": "committed_harvest_preflight",
+                "classification": "agent_task.committed_harvest_dirty_workspace",
+                "reason": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes",
+                "provider_budget_consumed": false,
+                "affected_child_count": 3,
+                "next_action": "homeboy agent-task cook-continue cook-1",
+                "child_references": [
+                    {"latest_run_id": "cook-1-replacement"},
+                    {"latest_run_id": "cook-2-replacement"},
+                    {"latest_run_id": "cook-3-replacement"}
+                ]
+            },
+            "causal_failures": {
+                "total": 3,
+                "returned": 3,
+                "omitted": 0,
+                "unique_causes": 1,
+                "complete_evidence_path": "run_result.result.cooks"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::FanoutCookBatch, &payload)
+            .expect("failed fanout summary");
+
+        assert!(summary.starts_with("Fanout issue-wave: failed phase=committed_harvest_preflight classification=agent_task.committed_harvest_dirty_workspace children=3 provider_budget=unspent reason=refusing committed-change harvest from a workspace with pre-existing uncommitted changes; next=homeboy agent-task cook-continue cook-1"), "{summary}");
+        assert!(summary.contains("Evidence: run_result.result.cooks (3 child references)"));
     }
 
     #[test]

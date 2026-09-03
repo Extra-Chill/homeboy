@@ -1,4 +1,4 @@
-use crate::lint::baseline as lint_baseline;
+use crate::extension::lint::baseline as lint_baseline;
 use homeboy_core::finding::HomeboyFinding;
 use std::path::Path;
 

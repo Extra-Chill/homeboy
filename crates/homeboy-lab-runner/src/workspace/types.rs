@@ -6,6 +6,7 @@ use super::super::validation_dependencies::RunnerValidationDependencySyncOutput;
 use super::super::RunnerWorkspaceLease;
 use super::snapshot::WorkspaceContentManifest;
 use homeboy_core::resource_lifecycle_index::ResourceLifecycleRecord;
+use homeboy_core::source_snapshot::SourceSnapshot;
 
 pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
@@ -28,11 +29,8 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     "*.pfx",
 ];
 
-// RunnerWorkspaceSyncMode + RunnerWorkspaceSyncOptions are behavior-free data;
-// they now live in the shared runner-contract crate so core can name them
-// without a core -> runner edge. Re-exported so internal/CLI call sites resolve
-// unchanged.
-pub use homeboy_lab_runner_contract::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+pub use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
+pub use homeboy_runner_contract::RunnerWorkspaceSyncMode;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceSyncOutput {
@@ -47,6 +45,9 @@ pub struct RunnerWorkspaceSyncOutput {
     pub resource_lifecycle: ResourceLifecycleRecord,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
+    /// Opaque capability for resolving this exact physical snapshot in a later
+    /// runner command. Callers must not parse it as a path or source identity.
+    pub workspace_ref: String,
     /// Opaque lease used by `runner workspace update`; distinct from the
     /// deterministic source snapshot identity.
     pub prepared_workspace_lease: Option<String>,
@@ -506,6 +507,8 @@ pub struct RunnerWorkspaceSnapshotEntry {
     pub snapshot_identity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_lease: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_ref: Option<String>,
     #[serde(default)]
     pub workspace_generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -532,6 +535,20 @@ pub struct RunnerWorkspaceSnapshotEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_lifecycle: Option<ResourceLifecycleRecord>,
     pub exec_command: String,
+}
+
+/// Validated handoff for one metadata-backed physical runner workspace.
+///
+/// The ref remains opaque to callers; resolution is the only boundary that
+/// turns it into paths and source provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerWorkspaceRefResolution {
+    pub workspace_ref: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub source_snapshot: SourceSnapshot,
+    pub(crate) snapshot_excludes: Vec<String>,
+    pub(crate) content_manifest: Option<WorkspaceContentManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -625,18 +642,15 @@ pub(crate) struct RunnerWorkspaceReconciliation {
     pub job_logs_command: String,
 }
 
-// RunnerWorkspaceCurrentSummary now lives in the shared runner-contract crate
-// (core's dev_run names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_lab_runner_contract::RunnerWorkspaceCurrentSummary;
+pub use homeboy_runner_contract::RunnerWorkspaceCurrentSummary;
 
 /// File + byte counts for a synced/snapshotted workspace tree.
 ///
 /// Shared across the workspace-sync and git-dependency materialization outputs
 /// so the `files` / `bytes` pair is declared once. Serialized flat via
 /// `#[serde(flatten)]` to preserve the historical top-level JSON keys.
-// ByteFileCounts now lives in the shared runner-contract crate (core's dev_run
-// names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_lab_runner_contract::ByteFileCounts;
+// Re-exported so runner-internal call sites resolve.
+pub use homeboy_runner_contract::ByteFileCounts;
 
 pub(super) type SnapshotStats = ByteFileCounts;
 

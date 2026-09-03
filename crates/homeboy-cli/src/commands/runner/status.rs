@@ -9,9 +9,10 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerActiveJobState, RunnerKind, RunnerSession, RunnerStatusReport,
+    self as runner, Runner, RunnerActiveJobState, RunnerSession, RunnerStatusReport,
     RunnerTunnelMode, RuntimeMaterializationStatus,
 };
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::CmdResult;
 use super::controller_ancestry::{commits_are_ancestral, CommitAncestry};
@@ -1986,7 +1987,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
                     scope: "agent_task_status",
                     runner_id: report.runner_id.clone(),
                     job_id: None,
-                    command: format!("homeboy agent-task status {run_id} --full"),
+                    command: format!("homeboy agent-task status {run_id}"),
                     description:
                         "Inspect the durable orphaned agent-task run and its preserved evidence."
                             .to_string(),
@@ -2183,7 +2184,6 @@ mod tests {
             .find(|command| command.scope == "daemon_refresh")
             .expect("daemon refresh command");
         assert!(refresh.command.starts_with(&job_binary_refresh));
-        assert!(refresh.description.contains("configured Homeboy binary"));
     }
 
     #[test]

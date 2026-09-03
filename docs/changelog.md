@@ -4,6 +4,326 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.6] - 2026-08-31
+
+### Fixed
+- Fix portable release preflight output
+
+## [0.367.5] - 2026-08-31
+
+### Changed
+- Migrate runner list to API v1
+- Bound default operator payloads
+
+## [0.367.4] - 2026-08-31
+
+### Changed
+- make self-audit advisory
+- Route compiler warnings through Extension API v1
+- Define Runner API v1 discovery operations
+- Simplify Homeboy tests and CI policy
+- Define Runner API v1 handshake
+- Terminalize verified no-change before Cook-wide candidate selection
+
+### Fixed
+- keep reconciliation store-rooted
+- require live credential verification
+
+## [0.367.3] - 2026-08-31
+
+### Changed
+- Route capability resolution through Extension API v1
+- Remove generic Runner exports from the Lab contract
+- Migrate extension inventory to v1 API
+
+### Fixed
+- make setup timeout configurable
+- Fix intentional no-change Cook outcomes
+- accept repository path targets
+- recover persisted manual intents
+- finalize rotated provider candidates
+- make dirty recovery adoption executable
+- preserve Git extra workspaces
+- terminalize runner pre-provider failures
+
+## [0.367.2] - 2026-08-31
+
+### Changed
+- add native worktree handoff freshness proof
+- Consolidate runner workspace transfer accounting
+
+### Fixed
+- finalize patches on merge baselines
+- Fix Cook isolated snapshot promotion base
+
+## [0.367.1] - 2026-08-31
+
+### Changed
+- Pin explicit Cook model routes
+- Define Extension API v1 catalog resolution
+- Preserve declared capability contract versions
+- Define Extension API v1 descriptor handshake
+- Consolidate runner execution context markers
+
+### Fixed
+- clarify cwd repository inference
+- Fix concurrent release tag handoff
+
+## [0.367.0] - 2026-08-30
+
+### Added
+- add canonical discovery service
+
+### Changed
+- Remove flat extension fingerprint export
+- Treat capacity reserves as advisory
+- Remove flat extension recipe-run exports
+- Consolidate persisted runner session contracts
+- Consolidate runner workspace state contracts
+- Remove low-signal build smoke test
+- Remove extension validation facade
+- Consolidate runner resource telemetry contracts
+- Consolidate runner artifact result contracts
+- Consolidate extension catalog projections
+- Consolidate runner capability contracts
+- Complete extension invocation provider ownership
+
+### Fixed
+- Fix native Cook worktree convergence
+- Fix portable rig Lab handoff
+
+## [0.366.1] - 2026-08-30
+
+### Changed
+- Trust reconciled runner version
+- Dissolve mixed extension maintenance ownership
+- Remove stale runner recovery wrapper
+- Consolidate runner lifecycle contracts
+- remove duplicate legacy runtime accessor
+- Complete extension invocation runner ownership
+- Route controller retries through control plane actions
+- Validate action payloads before admission
+- Route durable promotions through control plane actions
+- Route resume consumers through control plane actions
+- Route retry consumers through control plane actions
+- Route reconcile apply through control plane actions
+- Add canonical idempotent cancel action
+- Stop duplicate generated release runs
+- Consolidate extension lifecycle source APIs
+
+### Fixed
+- Fix Cook continuation remediation
+- Fix interrupted release asset recovery
+- Fix source upgrade runner revision
+- Fix native Cook workspace readmission
+
+## [0.366.0] - 2026-08-30
+
+### Added
+- hand off synced workspace refs
+
+### Changed
+- Consolidate extension provider registry
+- Consolidate extension readiness ownership
+- Consolidate extension invocation ownership
+- Correct runner contract lock ownership
+- Narrow Runner API work to contracts
+- Preserve runner request environment plans
+- Establish core-owned Runner API
+- Consolidate extension resolution ownership
+- Consolidate extension catalog ownership
+- remove child recovery migration alias
+
+### Fixed
+- Fix nested Lab command placement
+- Fix prepared source cache publication race
+- validate dependency hydration outputs
+- promote provider failure diagnostics
+
+## [0.365.2] - 2026-08-30
+
+### Changed
+- cover candidate-derived Cook title
+- Consolidate extension lifecycle ownership
+- return canonical status resource
+- Apply prepared deploys with bounded concurrency
+- Consolidate extension API ownership
+- Regenerate CLI command contract
+- Remove deprecated daemon recovery confirmations
+- Reuse prepared deploy payloads across targets
+- Remove extension discovery re-exports
+
+### Fixed
+- derive Cook pull request titles
+- preserve upgrade failure streams
+- recover detached Cook retries
+- recover missing promotion aggregates
+- preflight rig runner tools
+
+## [0.365.1] - 2026-08-30
+
+### Changed
+- Remove daemon recovery help negotiation
+- make status reads non-reconciling
+- stop compiling unused fixtures
+- reuse socket helper binary
+- observe cancelled child exit
+- remove real-time check waits
+- Validate imported lifecycle provenance
+- Test worktree import and finalization lifecycle
+
+### Fixed
+- admit unregistered cwd repositories
+
+## [0.365.0] - 2026-08-30
+
+### Added
+- add plan-bound worktree retention
+
+### Changed
+- Add native worktree import and finalization commands
+- Remove extension merge re-export
+- Remove unused extension store re-exports
+- Remove extension execution-context re-exports
+- remove dead work error projections
+- delete legacy cook work drivers
+- Return canonical event pages from logs
+
+## [0.364.21] - 2026-08-30
+
+### Changed
+- root artifact handlers at dispatch
+
+### Fixed
+- infer binary method for release pins
+
+## [0.364.20] - 2026-08-30
+
+### Changed
+- Remove extension update-check re-exports
+- Remove dead extension scope aliases
+- Remove extension readiness re-exports
+- Remove extension grammar re-exports
+- Remove core extension glob re-export
+- Unify control-plane event streams
+
+### Fixed
+- persist canonical child lineage
+- preserve shared child root cause
+- honor snapshot excludes during harvest
+- persist inspectable operation progress
+- report child execution placement
+- persist interrupted local owner cause
+
+## [0.364.19] - 2026-08-30
+
+### Changed
+- Move bridge status onto control-plane run
+- Fold extension subsystem into core
+- Unify canonical control-plane run detail
+
+## [0.364.18] - 2026-08-30
+
+### Changed
+- remove dead retry handoff helper
+- remove stale scheduler and retry fixtures
+- drop fabricated dependency evidence paths
+- remove stale promotion review fixtures
+
+### Fixed
+- preserve gitignore reinclusions
+- keep job logs concise
+- preserve observation creator version
+- scope staging handles to owners
+- reconcile idle queued runner residue
+- Fix Lab linked worktree materialization
+
+## [0.364.17] - 2026-08-30
+
+### Changed
+- Type lifecycle hook events
+- group durable Cook request
+- remove stale direct routing fixtures
+- Delete control-plane compatibility scaffolding
+- Simplify the control-plane read API
+
+### Fixed
+- bound compact provider dispatchability
+- separate lifecycle and tracker identity
+- reconcile terminal job observations
+- preserve Lab proxy ownership through provider_start
+
+## [0.364.16] - 2026-08-30
+
+### Changed
+- load leases from the config root
+- remove stale lint integration fixtures
+- decouple digest cache from pin setup reads
+- prune stale policy and help assertions
+- remove obsolete explicit run id rejections
+- remove stale scope migration checklist
+
+### Fixed
+- keep cleanup noise out of command results
+- honor injected readiness observation
+
+## [0.364.15] - 2026-08-30
+
+### Changed
+- prune stale lifecycle assertions
+- Preserve root release tag namespaces
+- Recover fanout planning, placement, and convergence contracts
+- Preserve detached Lab staging ownership
+- read the blocker from normalized full status
+
+### Fixed
+- canonicalize staging worktree handles
+- materialize executable Lab retries
+- protect live managed worktrees from foreign writes
+
+## [0.364.14] - 2026-08-29
+
+### Changed
+- Report review-form deadlines truthfully
+- Stage provider evidence outside candidate worktrees
+- Type recipe_run_providers and empty the extra buffer
+- Add a typed orchestration service and Lab HTTP vertical
+- Consolidate Cook service API
+- Provision runtime settings for extension scripts
+- Promote audit to a first-class extension capability
+
+### Fixed
+- preserve excluded snapshot directory roots
+- preserve local Cook ownership
+- resolve catalog secret_env per requiring provider
+
+## [0.364.13] - 2026-08-29
+
+### Changed
+- Make status report canonical control-plane identities
+- Report the commit a rolled-back release actually created
+
+## [0.364.12] - 2026-08-29
+
+### Changed
+- Name the unmet Lab staging requirement
+- Add the control-plane identity contract
+- Root reverse Cook runtime fixture
+- Root controller runtime pins in lifecycle stores
+
+## [0.364.11] - 2026-08-29
+
+### Changed
+- Derive controller-runtime pin retention from lifecycle mutability
+- Pin canonical enum wire labels
+- Hydrate structured provider errors in diagnose
+- Bound hermetic test execution
+- Unify fanout preview help
+- Rotate blocked provider accounts
+
+### Fixed
+- Fix worktree provider cleanup contract
+
 ## [0.364.10] - 2026-08-29
 
 ### Changed

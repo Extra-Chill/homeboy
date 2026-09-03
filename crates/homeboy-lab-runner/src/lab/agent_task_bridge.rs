@@ -1318,7 +1318,8 @@ mod tests {
             )
             .expect("completed no-op mirror");
 
-            let record = agent_task_lifecycle::status("run-completed-noop").expect("status");
+            let record =
+                agent_task_lifecycle::reconcile_status("run-completed-noop").expect("status");
             let artifacts =
                 agent_task_lifecycle::artifacts("run-completed-noop").expect("artifacts");
             let (_, aggregate_path) = agent_task_lifecycle::aggregate_source("run-completed-noop")
@@ -1458,7 +1459,8 @@ mod tests {
             )
             .expect("remapped Lab aggregate mirrored");
 
-            let record = agent_task_lifecycle::status("run-remapped-model").expect("status");
+            let record =
+                agent_task_lifecycle::reconcile_status("run-remapped-model").expect("status");
             assert_eq!(record.lifecycle.provider_runtime.len(), 1);
             assert_eq!(
                 record.lifecycle.provider_runtime[0].metadata["model"],

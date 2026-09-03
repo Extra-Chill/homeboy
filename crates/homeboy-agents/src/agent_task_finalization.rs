@@ -572,7 +572,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
 fn validate_manual_finalization_policy(
     run_id: &str,
 ) -> Result<Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>> {
-    let record = match crate::agent_task_lifecycle::persisted_status(run_id) {
+    let record = match crate::agent_task_lifecycle::status(run_id) {
         Ok(record) => record,
         Err(error) if error.message.contains("agent-task run record not found") => return Ok(None),
         Err(error) => return Err(error),
@@ -594,7 +594,7 @@ fn validate_durable_acceptance(
     lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
 ) -> Result<Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>> {
     let record = match lifecycle_store.map_or_else(
-        || crate::agent_task_lifecycle::persisted_status(run_id),
+        || crate::agent_task_lifecycle::status(run_id),
         |store| store.read_record(run_id),
     ) {
         Ok(record) => record,
@@ -712,7 +712,7 @@ pub(crate) fn changed_files_mismatch_error(
         "caller changed files must exactly match the persisted promotion report before \
          finalization. expected_count={} actual_count={}; missing_from_caller={}; \
          unexpected_from_caller={}. Inspect the full recorded set with \
-         `homeboy agent-task status {run_id} --full` (promotion.changed_files). A caller \
+         `homeboy agent-task diagnose {run_id} --full` (promotion.changed_files). A caller \
          typo lists an unexpected path; a stale promotion scope inflates the expected set \
          beyond the current PR diff (see #9706 for adoption scope).",
         expected.len(),
@@ -876,18 +876,8 @@ fn inherit_promotion_gates(
         .deterministic_gates
         .iter()
         .map(|gate| {
-            let [shell, flag, command] = gate.command.as_slice() else {
-                return Err(Error::validation_invalid_argument(
-                    "latest_promotion.deterministic_gates.command",
-                    "green promotion reuse requires each retained gate to preserve its exact shell command",
-                    None,
-                    None,
-                ));
-            };
+            let invocation = gate.invocation()?;
             if gate.id.trim().is_empty()
-                || shell != "sh"
-                || flag != "-lc"
-                || command.trim().is_empty()
                 || gate.candidate_checkout.as_ref() != Some(&candidate)
             {
                 return Err(Error::validation_invalid_argument(
@@ -899,9 +889,7 @@ fn inherit_promotion_gates(
             }
             Ok((
                 gate.id.clone(),
-                homeboy_engine_primitives::content_hash::nul_separated_digest(
-                    gate.command.iter().map(String::as_str),
-                ),
+                invocation.identity_digest()?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1429,11 +1417,26 @@ fn validate_durable_publication_eligibility(
     promotion: &AgentTaskPromotionReport,
 ) -> Result<DurablePublicationEligibility> {
     use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunExecutionState};
-    if !lifecycle.provider_runtime.is_empty()
+    let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
         && lifecycle
             .provider_runtime
             .iter()
-            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded)
+            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
+    let producing_runtime = lifecycle.provider_runtime.iter().find(|runtime| {
+        runtime.task_id == promotion.source.task_id
+            && runtime.state == ProviderRuntimeState::Succeeded
+    });
+    let fingerprinted_candidate = matches!(
+        serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionCandidate>(
+            promotion.provenance["candidate"].clone(),
+        ),
+        Ok(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. })
+    );
+    let successful_fallback_produced_candidate = lifecycle.execution.state
+        == RunExecutionState::Succeeded
+        && producing_runtime.is_some()
+        && fingerprinted_candidate;
+    if (all_provider_runtimes_succeeded || successful_fallback_produced_candidate)
         && (lifecycle.execution.state == RunExecutionState::Succeeded
             // `CandidateRecoverable` and `PartialRecoverable` were folded into
             // `PartialFailure` before #6761, so they reached this check as
@@ -1468,7 +1471,9 @@ fn validate_durable_publication_eligibility(
         && candidate_ref.is_some_and(is_git_commit_identity)
         && candidate_ref == candidate_head
         && adoption_model.is_some_and(is_concrete_model)
-        && recovery.is_some_and(crate::agent_task_lifecycle::is_pre_provider_transport_recovery)
+        && recovery.is_some_and(|recovery| {
+            crate::agent_task_lifecycle::candidate_adoption_recovery_eligibility(recovery).is_some()
+        })
         && !promotion.gate_results.is_empty()
         && promotion
             .gate_results

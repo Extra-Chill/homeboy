@@ -41,7 +41,7 @@ fn install_fuzz_postprocess_helper(home: &std::path::Path) {
 fn strict_fuzz_rejects_dirty_linked_rig_packages() {
     let mut args = fuzz_run_args_with_run_id("dirty-rig");
     args.gate_profile = FuzzGateProfileArg::Strict;
-    let dirty_linked = homeboy_extension::bench::parsing::RigPackageEvidence {
+    let dirty_linked = homeboy_core::extension::bench::parsing::RigPackageEvidence {
         rig_id: "rig".to_string(),
         package_root: "/tmp/rig".to_string(),
         source: "/tmp/rig".to_string(),
@@ -55,7 +55,7 @@ fn strict_fuzz_rejects_dirty_linked_rig_packages() {
         source_dirty: true,
         linked: true,
         materialized: false,
-        freshness: homeboy_extension::bench::parsing::RigPackageFreshness::Stale,
+        freshness: homeboy_core::extension::bench::parsing::RigPackageFreshness::Stale,
         freshness_verified: false,
         freshness_message: Some("content changed".to_string()),
         refresh_command: None,
@@ -114,8 +114,8 @@ fn auto_run_ids_scope_identical_payloads_while_explicit_ids_remain_stable() {
 #[test]
 fn fuzz_contract_exposes_only_declared_core_helper_environment() {
     let config = FuzzConfig {
-        runtime_helpers: vec![homeboy_extension::RuntimeHelperRequirement {
-            id: homeboy_extension::RUNTIME_SETTINGS_HELPER_ID.to_string(),
+        runtime_helpers: vec![homeboy_extension_contract::RuntimeHelperRequirement {
+            id: homeboy_core::extension::invoke::RUNTIME_SETTINGS_HELPER_ID.to_string(),
             revision: None,
         }],
         ..Default::default()
@@ -124,7 +124,7 @@ fn fuzz_contract_exposes_only_declared_core_helper_environment() {
 
     assert!(contract
         .env
-        .contains(&homeboy_extension::RUNTIME_SETTINGS_HELPER_ENV.to_string()));
+        .contains(&homeboy_core::extension::invoke::RUNTIME_SETTINGS_HELPER_ENV.to_string()));
     assert!(!contract
         .env
         .contains(&"HOMEBOY_RUNTIME_HELPERS_PROVENANCE".to_string()));

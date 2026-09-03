@@ -24,7 +24,7 @@ use super::workloads::{
     build_target_inventory, fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context,
     resolve_profile_workload_id, resolve_profile_workload_ids, select_workload,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
     let rig_context = load_rig(args.run.rig.as_deref(), &args.run.setting_args)?;
@@ -43,7 +43,9 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     let fuzz_config = ctx
         .extension_id
         .as_deref()
-        .and_then(|extension_id| homeboy_extension::load_extension(extension_id).ok())
+        .and_then(|extension_id| {
+            homeboy_core::extension::catalog::load_extension(extension_id).ok()
+        })
         .and_then(|manifest| manifest.fuzz);
     let workloads = fuzz_workloads(
         &ctx.component,
@@ -79,6 +81,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     let target_inventory = build_target_inventory(
         &ctx.component_id,
         &workloads,
+        selected_workload,
         args.run.run_id.clone(),
         args.run.inventory.as_deref(),
     )?;
@@ -1212,10 +1215,18 @@ fn operation_skip_reason(
     filters: &BTreeSet<String>,
     workload_operations: &BTreeSet<String>,
 ) -> Option<&'static str> {
+    let explicitly_scoped = workload_operations.contains(&operation.id)
+        || workload_operations.contains(&operation.kind);
     if matches!(safety_class, FuzzSafetyClass::Destructive) && !destructive_allowed {
         return Some("destructive");
     }
-    if family.is_none() {
+    if family.is_none()
+        && !(explicitly_scoped
+            && matches!(
+                strategy,
+                FuzzPlanStrategy::All | FuzzPlanStrategy::CoverageGaps
+            ))
+    {
         return Some("unsupported");
     }
     if !workload_operations.is_empty()
@@ -1230,7 +1241,7 @@ fn operation_skip_reason(
     if !filters.is_empty() && !operation_matches_filters(operation, family, filters) {
         return Some("unsupported");
     }
-    if !strategy_matches_operation(strategy, family.expect("family checked above")) {
+    if family.is_some_and(|family| !strategy_matches_operation(strategy, family)) {
         return Some("unsupported");
     }
     if requires_isolated_mutation(family, safety_class) && !isolation_requested {

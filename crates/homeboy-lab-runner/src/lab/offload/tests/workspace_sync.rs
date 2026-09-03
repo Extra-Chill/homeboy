@@ -46,6 +46,7 @@ fn synced_workspace(local_path: String) -> RunnerWorkspaceSyncOutput {
         ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot:workspace".to_string(),
+        workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts::default(),
         excludes: Vec::new(),
@@ -497,7 +498,7 @@ fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
             .iter()
             .any(|step| step.id == "lab.exec.detached"
                 && step.status == PlanStepStatus::PartialSuccess));
-        let record = homeboy_agents::agent_task_lifecycle::status("run-123")
+        let record = homeboy_agents::agent_task_lifecycle::reconcile_status("run-123")
             .expect("inspectable agent-task record");
         assert_eq!(record.metadata["runner_id"], "homeboy-lab");
         assert_eq!(record.metadata["runner_job_id"], "job-123");

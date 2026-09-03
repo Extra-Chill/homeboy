@@ -14,6 +14,10 @@ pub struct RuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_command: Option<String>,
 
+    /// Maximum setup command runtime. Defaults to 300 seconds when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_timeout_seconds: Option<u64>,
+
     /// Shell command to check if extension is ready. Exit 0 = ready.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_check: Option<String>,
@@ -88,6 +92,42 @@ pub struct SettingConfig {
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default: Option<serde_json::Value>,
+}
+
+fn deserialize_present_json<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setting_default_distinguishes_absent_from_null() {
+        let absent: SettingConfig = serde_json::from_value(serde_json::json!({
+            "id": "absent",
+            "type": "json",
+            "label": "Absent"
+        }))
+        .unwrap();
+        let null: SettingConfig = serde_json::from_value(serde_json::json!({
+            "id": "null",
+            "type": "json",
+            "label": "Null",
+            "default": null
+        }))
+        .unwrap();
+
+        assert_eq!(absent.default, None);
+        assert_eq!(null.default, Some(serde_json::Value::Null));
+    }
 }

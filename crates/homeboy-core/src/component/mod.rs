@@ -49,9 +49,9 @@ pub use inventory::{
     exists, exists_in_root, extension_provides_artifact_pattern,
     extension_provides_artifact_pattern_in_root, inventory, inventory_in_root, list, list_ids,
     list_ids_in_root, list_in_root, load, load_in_root, reconcile_standalone_registration,
-    registered, registered_by_id, registered_by_id_in_root, registered_by_local_path,
-    registered_by_local_path_in_root, registered_in_root, write_standalone_component_config,
-    write_standalone_registration, ComponentReconcileReport,
+    registered, registered_base, registered_by_id, registered_by_id_in_root,
+    registered_by_local_path, registered_by_local_path_in_root, registered_in_root,
+    write_standalone_component_config, write_standalone_registration, ComponentReconcileReport,
 };
 pub use model::{Component, ComponentLifecycle, ComponentManagedExecution};
 pub use mutations::{delete_safe, merge, rename};
@@ -68,8 +68,9 @@ pub use remote_path::{
 pub use resolution::{
     local_path_is_relative, normalize_component_local_path, normalize_component_local_path_against,
     resolve, resolve_artifact, resolve_artifact_in_root, resolve_effective,
-    resolve_effective_in_root, resolve_in_root, resolve_registered_primary_path, resolve_target,
-    resolve_target_from_component, validate_local_path, RegisteredPrimaryPathResolution,
+    resolve_effective_in_root, resolve_in_root, resolve_registered_primary_identity,
+    resolve_registered_primary_path, resolve_target, resolve_target_from_component,
+    validate_local_path, RegisteredPathCandidates, RegisteredPrimaryPathResolution,
     RegistryLookupPolicy, ResolvedTarget, TargetSpec,
 };
 pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};

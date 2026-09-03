@@ -34,10 +34,27 @@ pub(super) fn prepare_in_roots(
     workspace: &Path,
     plan: &[homeboy_core::deps::DependencyInstallPlanStep],
 ) -> Result<Option<DependencyPackage>> {
-    let outputs = output_paths(plan);
-    if outputs.is_empty() || outputs.iter().any(|path| !workspace.join(path).exists()) {
+    if plan.is_empty() {
         return Ok(None);
     }
+    for step in plan {
+        if step.outputs.is_empty() {
+            return Ok(None);
+        }
+        for output in &step.outputs {
+            let path =
+                homeboy_core::deps::dependency_install_step_output_path(workspace, step, output)?;
+            let exists = match output.kind {
+                homeboy_core::deps::DependencyInstallOutputKind::Path => path.exists(),
+                homeboy_core::deps::DependencyInstallOutputKind::File => path.is_file(),
+                homeboy_core::deps::DependencyInstallOutputKind::Directory => path.is_dir(),
+            };
+            if !exists {
+                return Ok(None);
+            }
+        }
+    }
+    let outputs = output_paths(workspace, plan)?;
     let lockfiles = lockfile_identity(workspace)?;
     let outputs_identity = output_identity(workspace, &outputs)?;
     let key = content_hash::sha256_hex(&serde_json::to_vec(&(SCHEMA, plan, lockfiles)).map_err(
@@ -153,14 +170,26 @@ fn output_identity(workspace: &Path, outputs: &[String]) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn output_paths(plan: &[homeboy_core::deps::DependencyInstallPlanStep]) -> Vec<String> {
-    let mut paths = plan
-        .iter()
-        .flat_map(|step| step.outputs.iter().map(|output| output.path.clone()))
-        .collect::<Vec<_>>();
+fn output_paths(
+    workspace: &Path,
+    plan: &[homeboy_core::deps::DependencyInstallPlanStep],
+) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for step in plan {
+        for output in &step.outputs {
+            let path =
+                homeboy_core::deps::dependency_install_step_output_path(workspace, step, output)?;
+            paths.push(
+                path.strip_prefix(workspace)
+                    .map_err(|_| Error::internal_unexpected("dependency output escaped workspace"))?
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
     paths.sort();
     paths.dedup();
-    paths
+    Ok(paths)
 }
 
 fn collect_files(path: &Path, workspace: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -295,6 +324,7 @@ mod tests {
             invocation: DependencyInstallInvocation::Argv {
                 argv: vec!["test".to_string()],
             },
+            workspace_relative_root: String::new(),
             outputs: vec![DependencyInstallOutput {
                 path: "deps".to_string(),
                 kind: DependencyInstallOutputKind::Directory,
@@ -321,6 +351,22 @@ mod tests {
         assert_eq!(first.sha256, second.sha256);
         assert_eq!(first.path, second.path);
     }
+
+    #[test]
+    fn packages_nested_component_outputs_from_their_provider_root() {
+        let data_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("php-transformer/deps");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("a"), "ok").unwrap();
+        let mut plan = plan();
+        plan[0].workspace_relative_root = "php-transformer".to_string();
+
+        assert!(prepare_in_roots(data_root.path(), root.path(), &plan)
+            .unwrap()
+            .is_some());
+    }
+
     #[test]
     fn rejects_hash_mismatch() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -331,6 +377,38 @@ mod tests {
     fn reports_missing_outputs_without_a_package() {
         let data_root = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
+        assert!(prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn refuses_partial_packages_when_any_provider_omits_outputs() {
+        let data_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("deps")).unwrap();
+        fs::write(root.path().join("deps/a"), "ok").unwrap();
+        let mut plan = plan();
+        plan.push(DependencyInstallPlanStep {
+            provider_id: "outputless".to_string(),
+            invocation: DependencyInstallInvocation::Argv {
+                argv: vec!["test".to_string()],
+            },
+            workspace_relative_root: String::new(),
+            outputs: Vec::new(),
+        });
+
+        assert!(prepare_in_roots(data_root.path(), root.path(), &plan)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn validates_declared_output_kind_before_packaging() {
+        let data_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("deps"), "not a directory").unwrap();
+
         assert!(prepare_in_roots(data_root.path(), root.path(), &plan())
             .unwrap()
             .is_none());

@@ -17,9 +17,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::refactor_provider::{invoke_refactor_value, refactor_providers, RefactorProvider};
 use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use homeboy_core::Error;
-use homeboy_extension as extension;
 
 /// A located definition: the file it lives in and its extracted source block.
 pub(crate) struct LocatedDefinition {
@@ -34,12 +34,8 @@ pub(crate) struct LocatedDefinition {
 /// Enumerate installed extensions that advertise a refactor script and handle at
 /// least one file extension. Shared by definition-finding and the
 /// propagate/collapse scans so they agree on which languages participate.
-pub(crate) fn refactor_capable_extensions() -> Result<Vec<extension::ExtensionManifest>, Error> {
-    let exts: Vec<extension::ExtensionManifest> = extension::load_all_extensions()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|m| m.refactor_script().is_some() && !m.provided_file_extensions().is_empty())
-        .collect();
+pub(crate) fn refactor_capable_extensions() -> Result<Vec<RefactorProvider>, Error> {
+    let exts = refactor_providers();
 
     if exts.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -62,19 +58,24 @@ pub(crate) fn extract_definition_source(
     struct_name: &str,
     file_content: &str,
     file_relative: &str,
-    exts: &[extension::ExtensionManifest],
+    root: &Path,
+    exts: &[RefactorProvider],
 ) -> Option<String> {
     if !file_content.contains(struct_name) {
         return None;
     }
+    let file_extension = Path::new(file_relative).extension()?.to_str()?;
     for ext_manifest in exts {
+        if !ext_manifest.handles_file_extension(file_extension) {
+            continue;
+        }
         let cmd = serde_json::json!({
             "command": "find_definition",
             "struct_name": struct_name,
             "file_content": file_content,
             "file_path": file_relative,
         });
-        let Some(result) = extension::run_refactor_script(ext_manifest, &cmd) else {
+        let Some(result) = invoke_refactor_value(ext_manifest, root, file_extension, cmd) else {
             continue;
         };
         let defines = result
@@ -100,10 +101,10 @@ pub(crate) fn extract_definition_source(
 pub(crate) fn find_definition(
     struct_name: &str,
     root: &Path,
-    exts: &[extension::ExtensionManifest],
+    exts: &[RefactorProvider],
 ) -> Result<LocatedDefinition, Error> {
     for ext_manifest in exts {
-        let handled_exts: Vec<String> = ext_manifest.provided_file_extensions().to_vec();
+        let handled_exts = ext_manifest.file_extensions.clone();
         let scan_config = ScanConfig {
             extensions: ExtensionFilter::Only(handled_exts.clone()),
             skip_hidden: true,
@@ -124,6 +125,10 @@ pub(crate) fn find_definition(
                 .unwrap_or(file_path)
                 .to_string_lossy()
                 .to_string();
+            let Some(file_extension) = file_path.extension().and_then(|value| value.to_str())
+            else {
+                continue;
+            };
 
             let cmd = serde_json::json!({
                 "command": "find_definition",
@@ -131,7 +136,8 @@ pub(crate) fn find_definition(
                 "file_content": content,
                 "file_path": relative,
             });
-            let Some(result) = extension::run_refactor_script(ext_manifest, &cmd) else {
+            let Some(result) = invoke_refactor_value(ext_manifest, root, file_extension, cmd)
+            else {
                 continue;
             };
             let defines = result

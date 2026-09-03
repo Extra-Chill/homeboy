@@ -10,9 +10,10 @@ use homeboy::agents::agent_tasks::provider::{
 use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server, SshClient};
 use homeboy::runner::runners::{
-    self as runner, daemon_repair_codes, Runner, RunnerKind, RunnerSession, RunnerToolRegistry,
-    RunnerToolSpec, RunnerTunnelMode,
+    self as runner, daemon_repair_codes, Runner, RunnerSession, RunnerToolRegistry, RunnerToolSpec,
+    RunnerTunnelMode,
 };
+use homeboy_runner_contract::RunnerKind;
 use serde::Serialize;
 
 use crate::commands::output_runtime::{CommandPresentation, CommandRun};
@@ -60,34 +61,41 @@ pub(crate) fn run_with_options(
 ) -> CmdResult<RunnerDoctorOutput> {
     options.scope = repair_scope(options.scope, options.repair);
     let target = target::resolve(runner_id)?;
-    let mut report = match &target {
-        target::RunnerTarget::Local { id, runner } => {
-            // The local probe's artifact root is the only filesystem root this
-            // command reads, so it is resolved once here at the entry point
-            // rather than inside the probe. The SSH branch resolves its root on
-            // the remote host and deliberately does not take this one.
-            let artifact_root = crate::core::paths::artifact_root().ok();
-            local::report(id, runner.as_ref(), &options, artifact_root.as_deref())
-        }
-        target::RunnerTarget::Ssh {
-            id,
-            runner,
-            server,
-            client,
-        } => remote::report(id, runner, server, client, &options),
-    };
+    let mut report = report_for_target(&target, &options);
 
     let migration = runner::secret_env_migration_plan(runner_id)?;
     report.secret_env_migration = (!migration.is_empty()).then_some(migration);
 
     if options.repair {
         repair::apply(&target, &options, &mut report);
+
+        // Repair is not success by itself. Re-probe the same resolved target so
+        // the terminal report verifies its identity, binary, SSH, workspace,
+        // daemon, and provider readiness after the mutation.
+        let mut repairs = std::mem::take(&mut report.repairs);
+        report = report_for_target(&target, &options);
+        match target.ensure_current() {
+            Ok(()) => {
+                let migration = runner::secret_env_migration_plan(runner_id)?;
+                report.secret_env_migration = (!migration.is_empty()).then_some(migration);
+            }
+            Err(error) => repairs.push(types::RunnerRepair {
+                id: "repair.target_identity".to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: error.message,
+                commands: Vec::new(),
+            }),
+        }
+        report.repairs = repairs;
     }
 
-    // Doctor probes the runner directly. Its observation supersedes any
-    // process-local capability answer, so the next execution preflight probes
-    // the exact command environment rather than replaying stale remediation.
-    runner::observe_runner_capabilities(runner_id);
+    // Only general doctor observes the complete capability surface. Scoped
+    // Lab diagnostics deliberately skip CPU, tools, and artifact
+    // probes, so treating that partial report as a complete observation would
+    // evict known-good admission evidence.
+    if observes_complete_capabilities(options.scope) {
+        runner::observe_runner_capabilities(runner_id);
+    }
     if options.scope == RunnerDoctorScope::LabOffload {
         let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
         let eligible_provider_ids = probes::eligible_provider_ids(
@@ -104,6 +112,28 @@ pub(crate) fn run_with_options(
     }
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
+}
+
+fn report_for_target(
+    target: &target::RunnerTarget,
+    options: &RunnerDoctorOptions,
+) -> RunnerDoctorOutput {
+    match target {
+        target::RunnerTarget::Local { id, runner } => {
+            // The local probe's artifact root is the only filesystem root this
+            // command reads, so it is resolved once here at the entry point
+            // rather than inside the probe. The SSH branch resolves its root on
+            // the remote host and deliberately does not take this one.
+            let artifact_root = crate::core::paths::artifact_root().ok();
+            local::report(id, runner.as_ref(), &options, artifact_root.as_deref())
+        }
+        target::RunnerTarget::Ssh {
+            id,
+            runner,
+            server,
+            client,
+        } => remote::report(id, runner, server, client, &options),
+    }
 }
 
 const COMPACT_CHECK_LIMIT: usize = 12;
@@ -169,6 +199,17 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         readiness.ready_for.len() + readiness.blocked_for.len()
     });
     let runner_id = bounded_text(&report.runner_id);
+    let failed_repairs = report
+        .repairs
+        .iter()
+        .filter(|repair| repair.status != RunnerDoctorStatus::Ok)
+        .map(|repair| serde_json::json!({
+            "id": bounded_text(&repair.id),
+            "status": repair.status,
+            "message": bounded_text(&repair.message),
+            "commands": repair.commands.iter().take(1).map(|command| bounded_text(command)).collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>();
     let projection = serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": report.command,
@@ -188,11 +229,12 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
             "cpu": { "count": report.resources.cpu.count },
         },
         "checks": checks,
+        "repairs": failed_repairs,
         "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for }) },
         "truncation": {
             "checks": { "shown": checks.len(), "omitted": report.checks.len().saturating_sub(checks.len()), "evidence_ref": "runner:doctor:checks", "full_command": format!("homeboy runner doctor {runner_id} --full") },
             "provider_readiness": { "shown": ready_for.len() + blocked_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {runner_id} --full") },
-            "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "repairs", "secret_env_migration", "daemon_recovery", "admission_summary"],
+            "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "secret_env_migration", "daemon_recovery", "admission_summary"],
         }
     });
     projection
@@ -217,6 +259,15 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
     if projection_envelope_bytes(&projection).is_ok_and(|bytes| bytes <= COMPACT_PROJECTION_BYTES) {
         return projection;
     }
+    // Even the size-cap fallback must retain the failed repair that explains
+    // why the operator should not retry a generic connect choreography.
+    let repairs = projection
+        .get("repairs")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|repairs| repairs.first())
+        .cloned()
+        .map(|repair| vec![repair])
+        .unwrap_or_default();
     serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": "runner.doctor",
@@ -228,6 +279,7 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
             "next_action": "homeboy runner doctor <runner-id> --full",
         },
         "checks": [],
+        "repairs": repairs,
         "truncation": { "checks": { "shown": 0, "omitted": "see_full_output", "full_command": "homeboy runner doctor <runner-id> --full" } },
     })
 }
@@ -285,6 +337,10 @@ pub(super) fn repair_scope(scope: RunnerDoctorScope, repair: bool) -> RunnerDoct
     } else {
         scope
     }
+}
+
+fn observes_complete_capabilities(scope: RunnerDoctorScope) -> bool {
+    scope != RunnerDoctorScope::LabOffload
 }
 
 fn runner_summary(

@@ -1,35 +1,38 @@
 use serde_json::Value;
 
-use super::persistence::request_metadata_string;
-use super::remote_runner::RemoteRunnerJobRequest;
 use super::store::LocalRunnerJob;
 use super::types::{ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job, JobStatus};
 use crate::redaction::redact_argv_display;
+use crate::runner_execution_envelope::RunnerExecutionEnvelope;
 
 pub(super) fn active_runner_job_summary(
     job: &Job,
-    request: &RemoteRunnerJobRequest,
+    envelope: &RunnerExecutionEnvelope,
     now_ms: u64,
 ) -> ActiveRunnerJobSummary {
+    let dispatch = envelope
+        .dispatch
+        .as_ref()
+        .expect("validated remote runner envelope has dispatch");
     let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
-    let lifecycle = request.lifecycle.clone();
+    let lifecycle = envelope.lifecycle.clone();
     ActiveRunnerJobSummary {
-        runner_id: request.runner_id.clone(),
+        runner_id: dispatch.runner_id.clone(),
         job_id: job.id.to_string(),
         operation: job.operation.clone(),
         source: lifecycle
             .as_ref()
             .and_then(|lifecycle| lifecycle.source.clone())
-            .or_else(|| request_metadata_string(request, "source"))
+            .or_else(|| envelope_metadata_string(envelope, "source"))
             .unwrap_or_else(|| "runner-daemon".to_string()),
         kind: lifecycle
             .as_ref()
             .and_then(|lifecycle| lifecycle.kind.clone())
-            .or_else(|| request_metadata_string(request, "kind"))
+            .or_else(|| envelope_metadata_string(envelope, "kind"))
             .unwrap_or_else(|| job.operation.clone()),
         status: job.status,
-        command: redact_argv_display(&request.command),
-        cwd: request.cwd.clone(),
+        command: redact_argv_display(&dispatch.command),
+        cwd: dispatch.cwd.clone(),
         started_at_ms,
         updated_at_ms: job.updated_at_ms,
         elapsed_ms: now_ms.saturating_sub(started_at_ms),
@@ -47,20 +50,20 @@ pub(super) fn active_runner_job_summary(
         durable_run_id: lifecycle
             .as_ref()
             .and_then(|lifecycle| lifecycle.durable_run_id.clone())
-            .or_else(|| request_metadata_string(request, "durable_run_id"))
-            .or_else(|| request_metadata_string(request, "run_id"))
-            .or_else(|| request_metadata_string(request, "record_run_id")),
+            .or_else(|| envelope_metadata_string(envelope, "durable_run_id"))
+            .or_else(|| envelope_metadata_string(envelope, "run_id"))
+            .or_else(|| envelope_metadata_string(envelope, "record_run_id")),
         stale_reason: job.stale_reason.clone(),
         lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
         retryable: Some(runner_job_retryable(job)),
         active_child_count: lifecycle
             .as_ref()
             .and_then(|lifecycle| lifecycle.active_child_count)
-            .or_else(|| request_metadata_u64(request, "active_child_count")),
+            .or_else(|| envelope_metadata_u64(envelope, "active_child_count")),
         active_cell_count: lifecycle
             .as_ref()
             .and_then(|lifecycle| lifecycle.active_cell_count)
-            .or_else(|| request_metadata_u64(request, "active_cell_count")),
+            .or_else(|| envelope_metadata_u64(envelope, "active_cell_count")),
     }
 }
 
@@ -156,12 +159,18 @@ pub(super) fn active_local_runner_job_summary(
     }
 }
 
-fn request_metadata_u64(request: &RemoteRunnerJobRequest, key: &str) -> Option<u64> {
-    request
+fn envelope_metadata_string(envelope: &RunnerExecutionEnvelope, key: &str) -> Option<String> {
+    envelope
         .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get(key))
-        .and_then(Value::as_u64)
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn envelope_metadata_u64(envelope: &RunnerExecutionEnvelope, key: &str) -> Option<u64> {
+    envelope.metadata.get(key).and_then(Value::as_u64)
 }
 
 pub fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> ActiveRunnerJobRunSummary {

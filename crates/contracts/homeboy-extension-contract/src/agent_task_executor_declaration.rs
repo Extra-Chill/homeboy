@@ -7,12 +7,12 @@
 //! well-formed, and that decision has to be made in two places that cannot see
 //! each other:
 //!
-//! - `homeboy-extension`, at install/replace time, so a malformed declaration is
+//! - `homeboy-core`, at install/replace time, so a malformed declaration is
 //!   rejected and rolled back instead of installed silently.
 //! - `homeboy-agents`, at discovery time, which owns the far richer resolved
 //!   provider type.
 //!
-//! `homeboy-agents` depends on `homeboy-extension`, so `homeboy-extension` can
+//! `homeboy-agents` depends on `homeboy-core`, so core can
 //! never call into it. Rather than duplicate the rule on both sides (which would
 //! drift), the rule lives here once and both sides call it.
 //!
@@ -31,6 +31,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
+pub const DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS: u64 = 20_000;
+pub const MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS: u64 = 120_000;
 
 fn default_provider_schema() -> String {
     AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string()
@@ -54,8 +56,49 @@ pub struct AgentTaskExecutorProviderDeclaration {
     /// declare a command that is never executed.
     #[serde(default, deserialize_with = "reject_deprecated_provider_command")]
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_invocation: Option<AgentTaskExecutorReadinessInvocationDeclaration>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// The provider-owned readiness command is generic, but its total wall-clock
+/// budget is a core-owned admission boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskExecutorReadinessInvocationDeclaration {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_readiness_invocation_timeout_ms"
+    )]
+    pub timeout_ms: Option<u64>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+fn deserialize_readiness_invocation_timeout_ms<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let timeout_ms = Option::<u64>::deserialize(deserializer)?;
+    if let Some(timeout_ms) = timeout_ms {
+        validate_provider_readiness_invocation_timeout_ms(timeout_ms)
+            .map_err(serde::de::Error::custom)?;
+    }
+    Ok(timeout_ms)
+}
+
+pub fn validate_provider_readiness_invocation_timeout_ms(
+    timeout_ms: u64,
+) -> std::result::Result<(), String> {
+    if (1..=MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS).contains(&timeout_ms) {
+        Ok(())
+    } else {
+        Err(format!(
+            "readiness_invocation.timeout_ms must be between 1 and {MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS} milliseconds"
+        ))
+    }
 }
 
 fn reject_deprecated_provider_command<'de, D>(
@@ -173,5 +216,21 @@ mod tests {
 
         assert!(declaration.extra.contains_key("capabilities"));
         assert!(declaration.extra.contains_key("some_future_provider_key"));
+    }
+
+    #[test]
+    fn readiness_invocation_timeout_is_validated_at_install_time() {
+        let error = parse_agent_task_executor_declaration(
+            "wordpress",
+            "wordpress-runtime",
+            &json!({
+                "id": "a",
+                "backend": "b",
+                "readiness_invocation": { "argv": ["provider"], "timeout_ms": 0 }
+            }),
+        )
+        .expect_err("zero readiness timeout must be rejected");
+
+        assert!(error.message.contains("readiness_invocation.timeout_ms"));
     }
 }

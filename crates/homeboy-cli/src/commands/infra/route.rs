@@ -208,8 +208,9 @@ pub(crate) fn route_after_parse_with_provenance(
                 .map(|runner| runner.runner_id.clone())
         })
         .flatten();
-    if detached_cook_can_queue(cli) && !is_unmaterialized_replay_worker() {
-        // Persist before any bounded refresh. The scoped replay selector owns
+    if cook_requires_unmaterialized_admission(cli, &preflight) && !is_unmaterialized_replay_worker()
+    {
+        // Persist before provider execution. The scoped replay selector owns
         // ready and reverse-capacity admission after this durable boundary.
         return admit_unmaterialized_cook(
             cli,
@@ -957,15 +958,33 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
     }
 }
 
-fn detached_cook_can_queue(cli: &Cli) -> bool {
-    cli.detach_after_handoff
-        && !matches!(cli.placement, homeboy::cli_surface::Placement::Local)
-        && matches!(
-            cli.command,
-            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-            })
-        )
+/// Preserve durable Cook admission when no provider route is currently
+/// executable. Automatic local execution under pressure needs the separately
+/// audited local-capacity fallback; a stale or failed runner refresh is not it.
+fn cook_requires_unmaterialized_admission(
+    cli: &Cli,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+) -> bool {
+    let is_cook = matches!(
+        cli.command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+        })
+    );
+    is_cook
+        && ((cli.detach_after_handoff
+            && !cli.placement.allows_local_fallback()
+            && !matches!(cli.placement, homeboy::cli_surface::Placement::Local))
+            || (matches!(cli.placement, homeboy::cli_surface::Placement::Auto)
+                && preflight.selected_runner_id.is_none()
+                && matches!(
+                    preflight.resource_admission,
+                    homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+                )
+                && !matches!(
+                    preflight.fallback,
+                    homeboy::core::parsed_command_preflight::FallbackDirective::LocalCapacity
+                )))
 }
 
 fn admission_digest(value: impl AsRef<[u8]>) -> String {
@@ -995,6 +1014,11 @@ fn admit_unmaterialized_cook(
     };
     let resolved = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
+    let mut replay_args = normalized_args.to_vec();
+    crate::commands::agent_task::run::rewrite_cook_identity_replay_argv(
+        &mut replay_args,
+        &resolved,
+    );
     let cook_id = resolved
         .dispatch
         .run_id
@@ -1016,7 +1040,7 @@ fn admit_unmaterialized_cook(
         |value: serde_json::Value| admission_digest(serde_json::to_vec(&value).unwrap_or_default());
     let current_notification = homeboy::core::notification_route::current();
     let request_ref = digest_json(serde_json::json!({
-        "argv": normalized_args,
+        "argv": &replay_args,
         "notification": current_notification,
     }));
     let existing =
@@ -1029,7 +1053,7 @@ fn admit_unmaterialized_cook(
     });
     let mut staged_intent = if existing.is_none() {
         Some(stage_unmaterialized_cook_replay_intent(
-            normalized_args,
+            &replay_args,
             &cook_id,
             current_notification.as_ref(),
         )?)
@@ -1128,7 +1152,8 @@ fn admit_unmaterialized_cook(
     let admission = record.metadata["unmaterialized_cook_admission"].clone();
     let output = serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-admission-result/v1",
-        "status": admission["state"],
+        "status": "pending_resource_admission",
+        "admission_state": admission["state"],
         "cook_id": cook_id,
         "run_id": cook_id,
         "materialized": false,
@@ -2144,36 +2169,49 @@ fn run_split_placement_fanout(
     let allow_dirty_lab_workspace = cli.allow_dirty_lab_workspace;
     let skip_deps_hydration = cli.skip_deps_hydration;
     let detach_after_handoff = cli.detach_after_handoff;
-    let attempt_dispatcher =
-        move |options: &crate::agents::agent_task_service::AgentTaskCookServiceOptions| {
-            // Fanout compiles each child worktree before this factory runs. Bind
-            // its decision here, not at coordinator startup, so the decision
-            // names the child candidate/base that will actually be dispatched.
-            let source_path = options
-                .initial_plan
-                .tasks
-                .first()
-                .and_then(|task| task.workspace.root.as_ref())
-                .map(PathBuf::from);
-            let task = options
-                .initial_plan
-                .tasks
-                .first()
-                .map(|task| task.task_id.as_str())
-                .unwrap_or("fanout-provider-attempt");
-            Arc::new(LabCookAttemptDispatcher {
-                runner_id: runner_id.clone(),
-                placement_decision: finalize_placement(&directive, task, source_path.as_deref()),
-                allow_local_fallback: false,
-                allow_dirty_lab_workspace,
-                skip_deps_hydration,
-                detach_after_handoff,
-                source_path,
-                job_overrides: job_overrides.clone(),
-                progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
-            })
-                as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
-        };
+    let attempt_dispatcher = move |options: &crate::agents::agent_task_service::CookRequest| {
+        // Fanout compiles each child worktree before this factory runs. Bind
+        // its decision here, not at coordinator startup, so the decision
+        // names the child candidate/base that will actually be dispatched.
+        let source_path = options
+            .identity
+            .initial_plan
+            .tasks
+            .first()
+            .and_then(|task| task.workspace.root.as_ref())
+            .map(PathBuf::from);
+        let task = options
+            .identity
+            .initial_plan
+            .tasks
+            .first()
+            .map(|task| task.task_id.as_str())
+            .unwrap_or("fanout-provider-attempt");
+        let placement_decision = options
+            .identity
+            .initial_plan
+            .metadata
+            .get("execution_placement_decision")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_else(|| finalize_placement(&directive, task, source_path.as_deref()));
+        let selected_runner_id = placement_decision
+            .runner
+            .as_ref()
+            .map(|runner| runner.runner_id.clone())
+            .unwrap_or_else(|| runner_id.clone());
+        Arc::new(LabCookAttemptDispatcher {
+            runner_id: selected_runner_id,
+            placement_decision,
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace,
+            skip_deps_hydration,
+            detach_after_handoff,
+            source_path,
+            job_overrides: job_overrides.clone(),
+            progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
+        }) as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
+    };
     let (value, exit_code) = match &cli.command {
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command:
@@ -2976,7 +3014,7 @@ pub(crate) fn dispatch_controller_plan_to_lab(
         run_id,
         None,
     )?;
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     Ok(serde_json::json!({
         "schema": "homeboy/agent-task-controller-lab-handoff/v1",
         "run_id": run_id,
@@ -3035,13 +3073,6 @@ fn materialize_agent_task_cook_plan(
     let cook = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
-    if let Some(workspace) = provision.get("path").and_then(serde_json::Value::as_str) {
-        crate::commands::agent_task::run::project_provider_evidence_inputs(
-            &cook.provider_evidence_inputs,
-            std::path::Path::new(workspace),
-            None,
-        )?;
-    }
     let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision)?;
     if let Some(provenance) = provenance {
         crate::commands::agent_task::run::record_cook_argument_provenance(&mut plan, provenance);
@@ -3699,7 +3730,7 @@ fn materialize_agent_task_retry_handoff(
     {
         return Ok(None);
     }
-    if agent_task_lifecycle::status_in_store(
+    if agent_task_lifecycle::reconcile_status_in_store(
         &lifecycle_store,
         &retry.run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -3714,17 +3745,55 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let retry_result = crate::agents::agent_task_service::retry_with_preflight(
-        &retry.run_id,
-        retry.new_run_id.as_deref(),
-        true,
-        retry.force,
-        validate_generic_lab_command_replay_workspace,
-    )?;
-    if !retry_result.run {
+    let acknowledgement =
+        homeboy::agents::orchestration::execute_retry_action_from_current_environment_with_preflight(
+            &retry.run_id,
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                idempotency_key: retry
+                    .idempotency_key
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                actor: "homeboy-cli-lab-route".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({
+                        "new_run_id": retry.new_run_id,
+                        "force": retry.force,
+                    }),
+                },
+                confirmed: true,
+            },
+            validate_generic_lab_command_replay_workspace,
+        )?;
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "retry",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "retry action failed".to_string()),
+            Some(retry.run_id.clone()),
+            None,
+        ));
+    }
+    if !acknowledgement.result.data["runnable"]
+        .as_bool()
+        .unwrap_or(false)
+    {
         return Ok(None);
     }
-    let record = retry_result.record;
+    let record: agent_task_lifecycle::AgentTaskRunRecord =
+        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode retry action result for Lab handoff".to_string()),
+            )
+        })?;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     if let Some(replay) = generic_lab_command_replay(&plan)? {
         let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);
@@ -3955,7 +4024,7 @@ fn persist_retry_handoff_preacceptance_failure(
     let selected_runner = route_runner_id
         .map(str::to_string)
         .or_else(|| {
-            agent_task_lifecycle::status(&handoff.run_id)
+            agent_task_lifecycle::reconcile_status(&handoff.run_id)
                 .ok()
                 .and_then(|record| record.runner_id().map(str::to_string))
         })
@@ -4118,15 +4187,17 @@ fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverride
 
 /// The test manifest, not the ambient controller, owns portable environment.
 /// This runs before direct Lab dispatch and deferred-plan persistence.
-fn portable_test_env(cli: &Cli) -> homeboy::core::Result<homeboy_extension::test::PortableTestEnv> {
+fn portable_test_env(
+    cli: &Cli,
+) -> homeboy::core::Result<homeboy_core::extension::test::PortableTestEnv> {
     let Commands::Review(review) = &cli.command else {
-        return Ok(homeboy_extension::test::PortableTestEnv {
+        return Ok(homeboy_core::extension::test::PortableTestEnv {
             public_env: Vec::new(),
             secret_env: Default::default(),
         });
     };
     let Some(crate::commands::review::ReviewCommand::Test(args)) = review.command.as_ref() else {
-        return Ok(homeboy_extension::test::PortableTestEnv {
+        return Ok(homeboy_core::extension::test::PortableTestEnv {
             public_env: Vec::new(),
             secret_env: Default::default(),
         });
@@ -4135,9 +4206,9 @@ fn portable_test_env(cli: &Cli) -> homeboy::core::Result<homeboy_extension::test
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_extension::ExtensionCapability::Test),
+        Some(homeboy_extension_contract::ExtensionCapability::Test),
     )?;
-    homeboy_extension::test::portable_env(&context.component)
+    homeboy_core::extension::test::portable_env(&context.component)
 }
 
 fn parse_lab_env_pair(source: &str, raw: &str) -> homeboy::core::Result<(String, String)> {
@@ -4527,13 +4598,26 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
     };
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    Some(agent_task_lifecycle::run_record_exists_resolved_in_store(
-        &lifecycle_store,
-        run_id,
-    )?)
-    .map(Ok)
-    .transpose()
-    .map(|present| present.unwrap_or(false))
+    let present =
+        agent_task_lifecycle::run_record_exists_resolved_in_store(&lifecycle_store, run_id)?;
+    if !present {
+        return Ok(false);
+    }
+    if let AgentTaskCommand::Retry(args) = &agent_task.command {
+        if args.run {
+            let record = agent_task_lifecycle::reconcile_status_in_store(
+                &lifecycle_store,
+                run_id,
+                agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                false,
+            )?
+            .record;
+            return Ok(record.metadata["cook_id"].is_string()
+                || (record.state.is_terminal()
+                    && agent_task_lifecycle::is_unmaterialized_cook_admission(&record)));
+        }
+    }
+    Ok(true)
 }
 
 fn lab_offload_command_for_materialized_args(

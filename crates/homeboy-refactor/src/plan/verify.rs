@@ -1,7 +1,6 @@
 use crate::auto as fixer;
 use homeboy_code_audit::CodeAuditResult;
 use homeboy_core::engine::undo::UndoSnapshot;
-use homeboy_extension as extension;
 use serde::Serialize;
 use std::path::Path;
 
@@ -134,13 +133,15 @@ pub(crate) fn run_audit_refactor(
     })
 }
 
-fn resolve_verify_config(component_id: &str) -> Option<homeboy_extension::AutofixVerifyConfig> {
+fn resolve_verify_config(
+    component_id: &str,
+) -> Option<homeboy_extension_contract::autofix_config::AutofixVerifyConfig> {
     use homeboy_core::component;
 
     let comp = component::load(component_id).ok()?;
     let extensions = comp.extensions.as_ref()?;
     for ext_id in extensions.keys() {
-        if let Ok(manifest) = extension::load_extension(ext_id) {
+        if let Ok(manifest) = homeboy_core::extension::catalog::load_extension(ext_id) {
             if let Some(cfg) = manifest.autofix_verify() {
                 return Some(cfg.clone());
             }

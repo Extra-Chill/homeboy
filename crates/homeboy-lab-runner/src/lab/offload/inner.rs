@@ -1103,7 +1103,7 @@ pub(crate) struct AcceptedRunnerJob {
     pub(crate) daemon_generation: Option<String>,
 }
 
-fn accepted_runner_job_id(runner_id: &str, run_id: &str) -> Option<AcceptedRunnerJob> {
+pub(crate) fn accepted_runner_job_id(runner_id: &str, run_id: &str) -> Option<AcceptedRunnerJob> {
     accepted_runner_job_id_with(runner_id, run_id, || crate::status(runner_id))
 }
 
@@ -1861,14 +1861,10 @@ pub(crate) fn run_lab_offload_inner(
 
     let mut capability_preflight: Option<RunnerCapabilityPreflight> =
         capability_plan.map(Into::into);
-    if let Some(toolchain_preflight) = execution_toolchain {
-        match &mut capability_preflight {
-            Some(preflight) => preflight
-                .required_toolchain_probes
-                .extend(toolchain_preflight.required_toolchain_probes),
-            None => capability_preflight = Some(toolchain_preflight),
-        }
-    }
+    crate::lab_selection::merge_runner_capability_preflight(
+        &mut capability_preflight,
+        execution_toolchain,
+    );
     if let Some(preflight) = capability_preflight.as_ref() {
         preflight_runner_toolchain_readiness(&runner, preflight)?;
     }
@@ -1994,6 +1990,7 @@ pub(crate) fn run_lab_offload_inner(
         workspace_mapping,
         path_materialization_plan,
         source_snapshot,
+        workspace_snapshots,
         mut remapped_args,
         agent_task_run_id,
         runner_required_extensions,
@@ -2166,6 +2163,7 @@ pub(crate) fn run_lab_offload_inner(
         &mut lab_metadata,
         LabWorkspaceMetadataInputs {
             source_snapshot: &source_snapshot,
+            workspace_snapshots: &workspace_snapshots,
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced,
         },
@@ -3396,7 +3394,7 @@ mod tests {
             assert_eq!(metadata["runner_jobs_created"], 0);
             assert_eq!(metadata["transport_retry_attempts"], 0);
 
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id)
+            let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)
                 .expect("persisted local fallback");
             assert!(record.lab_handoff.is_none());
             assert!(record.runner_id().is_none());

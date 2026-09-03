@@ -3,7 +3,7 @@
 use crate::component::{self, Component};
 use crate::engine::shell;
 use crate::error::{Error, Result};
-use crate::extension_store;
+use crate::extension::catalog;
 use crate::paths as base_path;
 use crate::project::Project;
 use crate::server::SshClient;
@@ -310,7 +310,7 @@ fn component_remote_path_root_rules(component: &Component) -> Vec<RemotePathRoot
 
     extensions
         .keys()
-        .filter_map(|id| extension_store::load_extension(id).ok())
+        .filter_map(|id| catalog::load_extension(id).ok())
         .filter_map(|manifest| manifest.deploy)
         .flat_map(|deploy| deploy.path_roots)
         .collect()
@@ -370,7 +370,7 @@ mod tests {
     }
 
     fn install_extension_with_detect_command(detect_command: Option<&str>) {
-        extension_store::save_manifest(&ExtensionManifest {
+        catalog::save_manifest(&ExtensionManifest {
             id: "package-host".to_string(),
             name: "Package Host".to_string(),
             version: "1.0.0".to_string(),

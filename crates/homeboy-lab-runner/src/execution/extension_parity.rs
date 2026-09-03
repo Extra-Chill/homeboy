@@ -1,8 +1,8 @@
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
+use homeboy_core::extension;
 use homeboy_core::output::MergeOutput;
 use homeboy_core::server::{self, SshClient};
-use homeboy_extension as extension;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -663,18 +663,19 @@ fn runner_extension_materialization_request(
     extension_id: &str,
     parity_error: Error,
 ) -> Result<RunnerExtensionMaterializationRequest> {
-    let local_revision = homeboy_core::extension_update_check::read_source_revision(extension_id)
+    let local_revision = homeboy_core::extension::lifecycle::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
         .ok_or_else(|| parity_error.clone())?;
-    let source = extension::resolve_source_url(extension_id).map_err(|err| {
-        controller_extension_metadata_required_error(
-            runner_id,
-            homeboy_path,
-            extension_id,
-            &local_revision,
-            err,
-        )
-    })?;
+    let source =
+        extension::lifecycle::source_metadata::resolve_source_url(extension_id).map_err(|err| {
+            controller_extension_metadata_required_error(
+                runner_id,
+                homeboy_path,
+                extension_id,
+                &local_revision,
+                err,
+            )
+        })?;
     let materialization_source =
         if let Some(local_source_path) = controller_local_source_path(&source.url) {
             RunnerExtensionMaterializationSource::ControllerSnapshot {
@@ -991,7 +992,7 @@ fn validate_runner_extension_revision(
         );
     }
 
-    let local_revision = homeboy_core::extension_update_check::read_source_revision(extension_id)
+    let local_revision = homeboy_core::extension::lifecycle::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty());
     let remote_revision = remote_extension_source_revision(remote_stdout)
         .filter(|revision| !revision.trim().is_empty());
@@ -1004,10 +1005,9 @@ fn validate_runner_extension_revision(
     // silently ran the *committed* code instead of the edited code. A dirty
     // controller checkout is therefore stale parity by definition, whatever the
     // revisions say.
-    let cleanliness = homeboy_core::extension_update_check::read_source_cleanliness(extension_id);
-    if let homeboy_core::extension_update_check::ExtensionSourceCleanliness::Dirty {
-        changed_paths,
-    } = &cleanliness
+    let cleanliness = homeboy_core::extension::lifecycle::read_source_cleanliness(extension_id);
+    if let homeboy_core::extension::lifecycle::ExtensionSourceCleanliness::Dirty { changed_paths } =
+        &cleanliness
     {
         return Err(uncommitted_controller_extension_source_error(
             runner_id,
@@ -1070,11 +1070,11 @@ fn warn_revision_only_extension_parity(
     runner_id: &str,
     extension_id: &str,
     local_revision: &str,
-    cleanliness: &homeboy_core::extension_update_check::ExtensionSourceCleanliness,
+    cleanliness: &homeboy_core::extension::lifecycle::ExtensionSourceCleanliness,
 ) {
     if !matches!(
         cleanliness,
-        homeboy_core::extension_update_check::ExtensionSourceCleanliness::Unknown
+        homeboy_core::extension::lifecycle::ExtensionSourceCleanliness::Unknown
     ) {
         return;
     }

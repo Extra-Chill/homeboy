@@ -41,13 +41,18 @@ use std::time::{Duration, Instant};
 use homeboy::agents::agent_task_service;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::Error;
+use homeboy_lab_runner_contract::{
+    EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementOutcome,
+    ExecutionPlacementRequirement, Placement,
+};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::commands::agent_task::{
     AgentTaskArgs, AgentTaskCommand, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
 };
 
-const HANDOFF_SCHEMA: &str = "homeboy/agent-task-fanout-local-detach-handoff/v1";
+const HANDOFF_SCHEMA: &str = "homeboy/agent-task-fanout-local-detach-handoff/v2";
 
 /// Bound on how long the launcher waits for the detached coordinator to publish
 /// its durable batch record before reporting the handoff as still pending.
@@ -261,8 +266,18 @@ pub(super) fn intercept_local_detached_fanout(
         submit_batch_controller_job(&fanout_id, pid, &start_identity),
     )?;
     let handoff = await_durable_handoff(&fanout_id, &mut child, handoff_timeout());
+    let child_workload_placement = child_workload_placement(&fanout_id)
+        .or_else(invocation_child_workload_placement)
+        .unwrap_or(ChildWorkloadPlacement::Unknown);
 
-    let envelope = handoff_envelope(&fanout_id, pid, &log_path, &handoff, &controller_job);
+    let envelope = handoff_envelope(
+        &fanout_id,
+        pid,
+        &log_path,
+        &handoff,
+        &controller_job,
+        &child_workload_placement,
+    );
     let stdout = serde_json::to_string_pretty(&envelope).map_err(|error| {
         Error::internal_json(
             error.to_string(),
@@ -644,6 +659,125 @@ fn durable_handoff(fanout_id: &str) -> Option<DetachedFanoutHandoff> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct WorkloadPlacement {
+    requested: Placement,
+    required: ExecutionPlacementRequirement,
+    selected: EffectiveExecutionPlacement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective: Option<EffectiveExecutionPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_id: Option<String>,
+}
+
+impl From<homeboy::core::parsed_command_preflight::PlacementDirective> for WorkloadPlacement {
+    fn from(placement: homeboy::core::parsed_command_preflight::PlacementDirective) -> Self {
+        Self {
+            requested: placement.requested,
+            required: placement.required,
+            selected: placement.selected,
+            effective: None,
+            runner_id: placement.runner.map(|runner| runner.runner_id),
+        }
+    }
+}
+
+impl From<ExecutionPlacementDecision> for WorkloadPlacement {
+    fn from(decision: ExecutionPlacementDecision) -> Self {
+        Self {
+            requested: decision.requested,
+            required: decision.required,
+            selected: decision.selected,
+            effective: None,
+            runner_id: decision.runner.map(|runner| runner.runner_id),
+        }
+    }
+}
+
+fn workload_from_child_record(metadata: &Value) -> Option<WorkloadPlacement> {
+    let decision: ExecutionPlacementDecision =
+        serde_json::from_value(metadata.get("execution_placement_decision")?.clone()).ok()?;
+    let outcome = metadata
+        .get("execution_placement_outcome")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ExecutionPlacementOutcome>(value).ok())
+        .filter(|outcome| outcome.decision_id == decision.decision_id);
+    let mut placement = WorkloadPlacement::from(decision);
+    placement.effective = outcome.as_ref().map(|outcome| outcome.effective);
+    if let Some(runner_id) = outcome.and_then(|outcome| outcome.runner_id) {
+        placement.runner_id = Some(runner_id);
+    }
+    Some(placement)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ChildPlacement {
+    task_id: String,
+    run_id: String,
+    placement: WorkloadPlacement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum ChildWorkloadPlacement {
+    Uniform { placement: WorkloadPlacement },
+    PerChild { children: Vec<ChildPlacement> },
+    Unknown,
+}
+
+fn summarize_child_placements(children: Vec<ChildPlacement>) -> ChildWorkloadPlacement {
+    let Some(first) = children.first() else {
+        return ChildWorkloadPlacement::Unknown;
+    };
+    if children
+        .iter()
+        .all(|child| child.placement == first.placement)
+    {
+        ChildWorkloadPlacement::Uniform {
+            placement: first.placement.clone(),
+        }
+    } else {
+        ChildWorkloadPlacement::PerChild { children }
+    }
+}
+
+/// Prefer materialized child decisions, then fall back to the plan-wide policy
+/// while admission is still in progress. This is a read-only projection: it
+/// must not expire or otherwise mutate coordinator admission.
+fn child_workload_placement(fanout_id: &str) -> Option<ChildWorkloadPlacement> {
+    let record = homeboy::agents::agent_tasks::batch::read_batch_record(fanout_id).ok()?;
+    let children = record
+        .child_runs
+        .iter()
+        .filter_map(|child| {
+            let run = homeboy::agents::agent_tasks::lifecycle::status(&child.run_id).ok()?;
+            Some(ChildPlacement {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                placement: workload_from_child_record(&run.metadata)?,
+            })
+        })
+        .collect::<Vec<_>>();
+    if children.len() == record.child_runs.len() {
+        return Some(summarize_child_placements(children));
+    }
+    serde_json::from_value::<homeboy::core::parsed_command_preflight::PlacementDirective>(
+        record.metadata.get("placement")?.clone(),
+    )
+    .ok()
+    .map(|placement| ChildWorkloadPlacement::Uniform {
+        placement: placement.into(),
+    })
+}
+
+fn invocation_child_workload_placement() -> Option<ChildWorkloadPlacement> {
+    homeboy::core::parsed_command_preflight::captured_result().map(|preflight| {
+        ChildWorkloadPlacement::Uniform {
+            placement: preflight.placement.into(),
+        }
+    })
+}
+
 /// The launcher's only output: a bounded, machine-readable handoff naming the
 /// durable handle and the evidence needed to follow or stop the wave.
 fn handoff_envelope(
@@ -652,10 +786,12 @@ fn handoff_envelope(
     log_path: &Path,
     handoff: &DetachedFanoutHandoff,
     controller_job: &ControllerJobHandoff,
+    child_workload_placement: &ChildWorkloadPlacement,
 ) -> Value {
     json!({
         "schema": HANDOFF_SCHEMA,
-        "placement": "local",
+        "coordinator_placement": EffectiveExecutionPlacement::Local,
+        "child_workload_placement": child_workload_placement,
         "detached": true,
         "fanout_id": fanout_id,
         "pid": pid,
@@ -1091,6 +1227,15 @@ mod tests {
     /// to be one they can actually use.
     #[test]
     fn the_envelope_names_the_wave_and_how_to_follow_it() {
+        let child_workload_placement = ChildWorkloadPlacement::Uniform {
+            placement: WorkloadPlacement {
+                requested: Placement::Lab,
+                required: ExecutionPlacementRequirement::Lab,
+                selected: EffectiveExecutionPlacement::Lab,
+                effective: None,
+                runner_id: Some("homeboy-lab".to_string()),
+            },
+        };
         let envelope = handoff_envelope(
             "wave-7",
             4242,
@@ -1106,11 +1251,23 @@ mod tests {
             &ControllerJobHandoff::Owned {
                 job_id: "job-1".to_string(),
             },
+            &child_workload_placement,
         );
 
         assert_eq!(envelope["schema"], HANDOFF_SCHEMA);
         assert_eq!(envelope["fanout_id"], "wave-7");
         assert_eq!(envelope["detached"], true);
+        assert_eq!(envelope["coordinator_placement"], "local");
+        assert!(envelope.get("placement").is_none());
+        assert_eq!(envelope["child_workload_placement"]["mode"], "uniform");
+        assert_eq!(
+            envelope["child_workload_placement"]["placement"]["required"],
+            "lab"
+        );
+        assert_eq!(
+            envelope["child_workload_placement"]["placement"]["runner_id"],
+            "homeboy-lab"
+        );
         assert_eq!(envelope["handoff"]["state"], "accepted");
         assert_eq!(envelope["handoff"]["admission"]["expected"], 3);
         assert_eq!(envelope["handoff"]["admission"]["admitted"], 3);
@@ -1147,6 +1304,135 @@ mod tests {
             assert_eq!(handoff.rejected, Some(0));
             assert_eq!(handoff.absent, Some(1));
         });
+    }
+
+    fn lab_child_directive() -> homeboy::core::parsed_command_preflight::PlacementDirective {
+        homeboy::core::parsed_command_preflight::PlacementDirective {
+            requested: Placement::Lab,
+            required: ExecutionPlacementRequirement::Lab,
+            selected: EffectiveExecutionPlacement::Lab,
+            runner: Some(
+                homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
+                    runner_id: "homeboy-lab".to_string(),
+                    source: homeboy_lab_runner_contract::RunnerSelectionSource::Explicit,
+                },
+            ),
+            fallback: homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            override_authorization:
+                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                    authorized: false,
+                    authority: None,
+                },
+        }
+    }
+
+    #[test]
+    fn a_local_coordinator_reports_the_lab_child_policy_before_admission() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            homeboy::agents::agent_tasks::batch::persist_fanout_run_batch(
+                "wave-lab-children",
+                "wave-lab-children",
+                &[homeboy::agents::agent_tasks::batch::FanoutRunBatchChild {
+                    task_id: "child".to_string(),
+                    run_id: "child-run".to_string(),
+                }],
+                json!({ "placement": lab_child_directive() }),
+            )
+            .expect("persist Lab-bound coordinator roster");
+
+            let handoff = durable_handoff("wave-lab-children").expect("read handoff");
+            let workload = child_workload_placement("wave-lab-children")
+                .expect("read persisted child placement policy");
+            let envelope = handoff_envelope(
+                "wave-lab-children",
+                4242,
+                Path::new("/tmp/fanout.log"),
+                &handoff,
+                &ControllerJobHandoff::Owned {
+                    job_id: "job-lab".to_string(),
+                },
+                &workload,
+            );
+
+            assert_eq!(envelope["handoff"]["state"], "coordinator_started");
+            assert_eq!(envelope["coordinator_placement"], "local");
+            assert_eq!(
+                envelope["child_workload_placement"],
+                serde_json::to_value(ChildWorkloadPlacement::Uniform {
+                    placement: lab_child_directive().into(),
+                })
+                .expect("serialize expected Lab child placement")
+            );
+        });
+    }
+
+    #[test]
+    fn mixed_child_placement_is_reported_per_child() {
+        let children = vec![
+            ChildPlacement {
+                task_id: "local-child".to_string(),
+                run_id: "local-run".to_string(),
+                placement: WorkloadPlacement {
+                    requested: Placement::Auto,
+                    required: ExecutionPlacementRequirement::Either,
+                    selected: EffectiveExecutionPlacement::Local,
+                    effective: Some(EffectiveExecutionPlacement::Local),
+                    runner_id: None,
+                },
+            },
+            ChildPlacement {
+                task_id: "lab-child".to_string(),
+                run_id: "lab-run".to_string(),
+                placement: WorkloadPlacement {
+                    requested: Placement::Auto,
+                    required: ExecutionPlacementRequirement::Lab,
+                    selected: EffectiveExecutionPlacement::Lab,
+                    effective: Some(EffectiveExecutionPlacement::Lab),
+                    runner_id: Some("homeboy-lab".to_string()),
+                },
+            },
+        ];
+        let workload = summarize_child_placements(children);
+        let envelope = handoff_envelope(
+            "wave-mixed",
+            4242,
+            Path::new("/tmp/fanout.log"),
+            &DetachedFanoutHandoff {
+                state: DetachedHandoffState::Accepted,
+                expected: Some(2),
+                admitted: Some(2),
+                rejected: Some(0),
+                absent: Some(0),
+                waited_ms: 8,
+            },
+            &ControllerJobHandoff::Owned {
+                job_id: "job-mixed".to_string(),
+            },
+            &workload,
+        );
+
+        assert_eq!(envelope["coordinator_placement"], "local");
+        assert!(envelope.get("placement").is_none());
+        assert_eq!(envelope["child_workload_placement"]["mode"], "per_child");
+        assert_eq!(
+            envelope["child_workload_placement"]["children"][0]["task_id"],
+            "local-child"
+        );
+        assert_eq!(
+            envelope["child_workload_placement"]["children"][0]["placement"]["selected"],
+            "local"
+        );
+        assert_eq!(
+            envelope["child_workload_placement"]["children"][1]["task_id"],
+            "lab-child"
+        );
+        assert_eq!(
+            envelope["child_workload_placement"]["children"][1]["placement"]["runner_id"],
+            "homeboy-lab"
+        );
     }
 
     #[test]

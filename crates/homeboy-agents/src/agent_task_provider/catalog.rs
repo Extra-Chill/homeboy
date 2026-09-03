@@ -11,6 +11,31 @@ use super::secrets::{
 };
 use super::*;
 use homeboy_engine_primitives::content_hash;
+use std::sync::OnceLock;
+
+static PROVIDER_EVIDENCE: OnceLock<Arc<Mutex<ProviderEvidenceStore>>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+pub(super) struct ProviderEvidenceStore {
+    pub(super) readiness: ProviderRuntimeReadinessCache,
+    pub(super) usage_caps: ProviderUsageCapRegistry,
+    pub(super) account_blocks: BTreeMap<String, AccountBlockEvidence>,
+    pub(super) launch_credentials: HashMap<String, VecDeque<BoundProviderCredentials>>,
+}
+
+#[derive(Debug)]
+pub(super) struct BoundProviderCredentials {
+    pub(super) env: Vec<(String, String)>,
+}
+
+#[derive(Debug)]
+pub(super) struct AccountBlockEvidence {
+    pub(super) expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn shared_provider_evidence() -> Arc<Mutex<ProviderEvidenceStore>> {
+    Arc::clone(PROVIDER_EVIDENCE.get_or_init(|| Arc::new(Mutex::new(Default::default()))))
+}
 
 /// The discovered catalog, keyed by the config root it was discovered from.
 ///
@@ -27,6 +52,7 @@ static PROVIDER_CATALOG: OnceLock<RwLock<Option<(PathBuf, AgentTaskProviderCatal
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
     diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+    pub(super) evidence: Arc<Mutex<ProviderEvidenceStore>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +300,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers: catalog.providers,
             diagnostics: catalog.diagnostics,
+            evidence: shared_provider_evidence(),
         }
     }
 
@@ -282,6 +309,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers,
             diagnostics: Vec::new(),
+            evidence: shared_provider_evidence(),
         }
     }
 
@@ -300,7 +328,7 @@ impl ExtensionProviderAgentTaskExecutor {
     #[cfg(test)]
     pub(super) fn default_backend_with_policy(
         &self,
-        extensions: Vec<extension::ExtensionManifest>,
+        extensions: Vec<homeboy_extension_contract::ExtensionManifest>,
         config: &defaults::HomeboyConfig,
     ) -> homeboy_core::Result<Option<String>> {
         default_backend_from_policy_sources(None, extensions, || {
@@ -507,7 +535,18 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
         crate::agent_task_config_materialization::materialize_provider_config_refs(Value::Object(
             defaults::load_config().settings.into_iter().collect(),
         ))?;
-    let verdict = super::command_runner::run_provider_readiness_invocation(provider, &effective_config).map_err(
+    let credential_env = super::secrets::provider_declared_credential_env(provider).map_err(|error| {
+        Error::validation_invalid_argument(
+            "backend",
+            format!(
+                "agent-task backend '{backend}' could not resolve declared provider credentials: {}",
+                error.message
+            ),
+            Some(backend.to_string()),
+            None,
+        )
+    })?;
+    let verdict = super::command_runner::run_provider_readiness_invocation_with_env(provider, &effective_config, &credential_env).map_err(
         |message| {
             Error::validation_invalid_argument(
                 "backend",
@@ -560,7 +599,9 @@ pub(super) fn provider_not_found_message(
     backend: &str,
     diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
 ) -> String {
-    let base = format!("no extension agent-task provider found for backend '{backend}'");
+    let base = format!(
+        "no extension agent-task provider found for backend '{backend}' (no installed provider can serve this backend)"
+    );
     if diagnostics.is_empty() {
         return base;
     }
@@ -645,6 +686,24 @@ pub fn provider_secret_sources_for_providers(
     sources
 }
 
+/// One secret-env scope per provider so catalog `secret_env` resolves each
+/// required name against the provider that requires it (#13629).
+pub fn provider_secret_env_scopes(
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<crate::agent_task_secrets::AgentTaskSecretEnvScope> {
+    providers
+        .iter()
+        .map(
+            |provider| crate::agent_task_secrets::AgentTaskSecretEnvScope {
+                fallback_sources: provider_declared_secret_sources(provider),
+                required_names: super::credential_readiness::provider_required_secret_env_names(
+                    provider,
+                ),
+            },
+        )
+        .collect()
+}
+
 /// Secret sources scoped to a single backend (and optional provider selector).
 ///
 /// Mirrors the backend/selector resolution `agent-task doctor` uses so auth
@@ -671,14 +730,14 @@ fn default_backend_from_policy(component_id: Option<&str>) -> homeboy_core::Resu
     let component = component_id.and_then(|id| component::load(id).ok());
     default_backend_from_policy_sources(
         component.as_ref(),
-        extension::load_all_extensions().unwrap_or_default(),
+        homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default(),
         || defaults::load_config().agent_task.default_backend,
     )
 }
 
 pub(super) fn default_backend_from_policy_sources<F>(
     component: Option<&component::Component>,
-    extensions: Vec<extension::ExtensionManifest>,
+    extensions: Vec<homeboy_extension_contract::ExtensionManifest>,
     config_default: F,
 ) -> homeboy_core::Result<Option<String>>
 where

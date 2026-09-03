@@ -11,12 +11,9 @@
 //! ## This is a read model, not a reconciler
 //!
 //! Every source here is read without writing. That is a deliberate contract,
-//! and it is *observable*: `agent-task status <id>` is a reconciling read that
-//! writes, and `runs watch` reconciles on purpose. So `activity show <id>` and
-//! `agent-task status <id>` can legitimately report different states for the
-//! same run at the same instant, and calling one changes what the other
-//! returns. [`ActivityReport::reconciled`] is emitted as `false` so a consumer
-//! can tell which kind of answer it is holding (#W3-15).
+//! shared with `agent-task status`; lifecycle repair belongs to the explicit
+//! reconciliation operations. [`ActivityReport::reconciled`] remains `false`
+//! so mutation results and read models stay distinguishable (#W3-15).
 
 use std::collections::BTreeSet;
 
@@ -297,7 +294,6 @@ fn resolve_item<'a>(items: &'a [ActivityItem], id: &str) -> Option<&'a ActivityI
     items.iter().find(|item| {
         item.id == id
             || item.refs.run_id.as_deref() == Some(id)
-            || item.refs.agent_task_run_id.as_deref() == Some(id)
             || item.refs.runner_job_id.as_deref() == Some(id)
     })
 }
@@ -509,7 +505,6 @@ mod tests {
             runner: ActivityRunnerRefs::default(),
             refs: ActivityCrossRefs {
                 run_id: Some(id.to_string()),
-                agent_task_run_id: None,
                 runner_job_id: None,
             },
             context: ActivityContext::default(),
@@ -518,6 +513,7 @@ mod tests {
             source_projections: Vec::new(),
             state_conflicts: Vec::new(),
             next_actions: vec![action("show", format!("homeboy runs show {id}"))],
+            failure: None,
         }
     }
 
@@ -542,6 +538,7 @@ mod tests {
             source_projections: Vec::new(),
             state_conflicts: Vec::new(),
             next_actions: Vec::new(),
+            failure: None,
         }
     }
 
@@ -579,8 +576,7 @@ mod tests {
         let mut lifecycle = item("agent-task-1", ActivityState::Queued);
         lifecycle.kind = "agent-task".to_string();
         lifecycle.source_store = "agent-task.lifecycle".to_string();
-        lifecycle.refs.run_id = None;
-        lifecycle.refs.agent_task_run_id = Some("agent-task-1".to_string());
+        lifecycle.refs.run_id = Some("agent-task-1".to_string());
         collector.insert(lifecycle);
 
         let items = collector.items(ActivityScope::All, 10);
@@ -622,8 +618,7 @@ mod tests {
     fn source_projection_order_and_conflicts_are_stable_across_collection_order() {
         let mut lifecycle = item("agent-task-1", ActivityState::Queued);
         lifecycle.source_store = "agent-task.lifecycle".to_string();
-        lifecycle.refs.run_id = None;
-        lifecycle.refs.agent_task_run_id = Some("agent-task-1".to_string());
+        lifecycle.refs.run_id = Some("agent-task-1".to_string());
 
         let mut observation = item("agent-task-1", ActivityState::Running);
         observation.source_store = "observation.sqlite".to_string();
@@ -664,14 +659,12 @@ mod tests {
     }
 
     #[test]
-    fn id_resolution_checks_all_id_spaces() {
+    fn id_resolution_checks_run_and_execution_id_spaces() {
         let mut item = item("run-1", ActivityState::Succeeded);
-        item.refs.agent_task_run_id = Some("agent-1".to_string());
         item.refs.runner_job_id = Some("job-1".to_string());
         let items = vec![item];
 
         assert!(resolve_item(&items, "run-1").is_some());
-        assert!(resolve_item(&items, "agent-1").is_some());
         assert!(resolve_item(&items, "job-1").is_some());
         assert!(resolve_item(&items, "missing").is_none());
     }
@@ -922,7 +915,7 @@ mod tests {
         assert_eq!(
             compacted.context.task_url.as_deref(),
             Some("https://example.test/issues/13617"),
-            "the legacy single identity stays"
+            "the task reference stays"
         );
         assert!(compacted.context.identities.is_empty());
         assert!(compacted.command.is_none());
@@ -1202,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_job_projects_durable_and_agent_task_run_ids_from_metadata() {
+    fn daemon_job_projects_durable_run_id_from_metadata() {
         let store = api_jobs::JobStore::default();
         let job = store.create_with_source_snapshot_and_metadata(
             "runner.exec",
@@ -1216,9 +1209,27 @@ mod tests {
         let item = daemon_jobs::item_from_job(&store, job).expect("activity item");
 
         assert_eq!(item.refs.run_id.as_deref(), Some("agent-task-run-123"));
+        let serialized = serde_json::to_value(&item.refs).expect("serialize refs");
+        assert!(serialized.get("agent_task_run_id").is_none());
+    }
+
+    #[test]
+    fn persisted_agent_task_run_id_deserializes_as_run_id() {
+        let refs: ActivityCrossRefs = serde_json::from_value(serde_json::json!({
+            "agent_task_run_id": "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751",
+            "runner_job_id": "accepted-daemon-job"
+        }))
+        .expect("deserialize legacy refs");
         assert_eq!(
-            item.refs.agent_task_run_id.as_deref(),
-            Some("agent-task-run-123")
+            refs.run_id.as_deref(),
+            Some("agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751")
+        );
+        assert_eq!(refs.runner_job_id.as_deref(), Some("accepted-daemon-job"));
+        let serialized = serde_json::to_value(&refs).expect("serialize");
+        assert!(serialized.get("agent_task_run_id").is_none());
+        assert_eq!(
+            serialized["run_id"],
+            "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751"
         );
     }
 

@@ -6,9 +6,10 @@
 //! execution, and evidence functions.
 
 use homeboy_agents::agent_task_lifecycle::{
-    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation,
+    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationSubmission,
+    RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
-use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -16,9 +17,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::workspace_claim::{
-    WorkspaceAuthorityStatus, WorkspaceClaim, WorkspaceClaimProtocol, WorkspaceIdentity,
-    WORKSPACE_CLAIM_CAPABILITY,
+use homeboy_core::workspace_claim::WorkspaceAuthorityStatus;
+use homeboy_runner_contract::{
+    WorkspaceClaim, WorkspaceClaimProtocol, WorkspaceIdentity, WORKSPACE_CLAIM_CAPABILITY,
 };
 
 /// The runner layer's `RunnerContinuationProvider`. Registered with core at startup.
@@ -186,6 +187,17 @@ impl RunnerContinuationProvider for RunnerContinuation {
         }
     }
 
+    fn runner_job_id_for_durable_run(
+        &self,
+        runner_id: &str,
+        durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(
+            super::lab::offload::accepted_runner_job_id(runner_id, durable_run_id)
+                .map(|job| job.id),
+        )
+    }
+
     fn is_runner_connected(&self, runner_id: &str) -> bool {
         // Preserve the original lifecycle semantics: only an affirmative
         // `connected == false` should be treated as disconnected. A status
@@ -200,6 +212,17 @@ impl RunnerContinuationProvider for RunnerContinuation {
         // `list` failing means the registry cannot establish absence. Only a
         // successful inventory that omits this id proves a removed authority.
         runner_authority_from_inventory(runner_id, super::list(), || super::load(runner_id).is_ok())
+    }
+
+    fn runner_live_job_authority(&self, runner_id: &str) -> RunnerLiveJobAuthority {
+        match super::runner_admission_snapshot(runner_id) {
+            Ok(snapshot) => runner_live_job_authority_from_admission(
+                snapshot.summary.active_job_count,
+                snapshot.summary.safe_to_rotate,
+                snapshot.summary.unresolved_retained_projection_count,
+            ),
+            Err(_) => RunnerLiveJobAuthority::Unknown,
+        }
     }
 
     fn run_continuation_exec(
@@ -221,12 +244,12 @@ impl RunnerContinuationProvider for RunnerContinuation {
         Ok(exit_code)
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        request: RemoteRunnerJobRequest,
+        submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
-        super::connection::submit_reverse_broker_job(runner_id, request)
+        super::connection::submit_runner_api_request(runner_id, submission)
     }
 
     fn lookup_reverse_broker_submission(
@@ -236,6 +259,20 @@ impl RunnerContinuationProvider for RunnerContinuation {
     ) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
         super::connection::lookup_reverse_broker_submission(runner_id, submission_key)
     }
+}
+
+fn runner_live_job_authority_from_admission(
+    active_job_count: usize,
+    safe_to_rotate: bool,
+    unresolved_retained_projection_count: usize,
+) -> RunnerLiveJobAuthority {
+    if active_job_count > 0 {
+        return RunnerLiveJobAuthority::Busy;
+    }
+    if safe_to_rotate && unresolved_retained_projection_count == 0 {
+        return RunnerLiveJobAuthority::Idle;
+    }
+    RunnerLiveJobAuthority::Unknown
 }
 
 fn runner_authority_from_inventory(
@@ -478,6 +515,26 @@ mod tests {
         let mut runner = super::super::load("local").expect("built-in local runner");
         runner.id = id.to_string();
         runner
+    }
+
+    #[test]
+    fn live_job_authority_maps_reconciled_idle_busy_and_unknown_admission() {
+        assert_eq!(
+            runner_live_job_authority_from_admission(0, true, 0),
+            RunnerLiveJobAuthority::Idle
+        );
+        assert_eq!(
+            runner_live_job_authority_from_admission(2, false, 0),
+            RunnerLiveJobAuthority::Busy
+        );
+        assert_eq!(
+            runner_live_job_authority_from_admission(0, true, 1),
+            RunnerLiveJobAuthority::Unknown
+        );
+        assert_eq!(
+            runner_live_job_authority_from_admission(0, false, 0),
+            RunnerLiveJobAuthority::Unknown
+        );
     }
 
     #[test]

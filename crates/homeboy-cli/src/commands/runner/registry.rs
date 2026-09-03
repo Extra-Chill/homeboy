@@ -5,7 +5,11 @@ use serde_json::Value;
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::MergeOutput;
-use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner, RunnerKind};
+use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner};
+use homeboy_runner_contract::{
+    RunnerApiListRequest, RunnerApiListResponse, RunnerKind, RUNNER_API_LIST_REQUEST_SCHEMA,
+    RUNNER_API_V1,
+};
 
 use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::{CmdResult, DynamicSetArgs};
@@ -90,17 +94,40 @@ const RUNNER_LIST_TEXT_LIMIT: usize = 256;
 const RUNNER_LIST_PROJECTION_BYTES: usize = 12 * 1024;
 
 pub(super) fn list(full: bool) -> CmdResult<RunnerListOutput> {
-    let entities = runner::list()?;
     let sessions = runner::statuses()?;
 
     if full {
-        return Ok((full_list_output(entities, sessions), 0));
+        return Ok((full_list_output(runner::list()?, sessions), 0));
     }
 
+    let descriptors = descriptors_from_list_response(runner::RunnerDiscoveryService::list_api(
+        &RunnerApiListRequest {
+            schema: RUNNER_API_LIST_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+        },
+    )?)?;
     Ok((
-        bounded_list_output(compact_list_output(&entities, &sessions)),
+        bounded_list_output(compact_list_output(&descriptors, &sessions)),
         0,
     ))
+}
+
+fn descriptors_from_list_response(
+    response: RunnerApiListResponse,
+) -> homeboy::core::Result<Vec<runner::RunnerDescriptor>> {
+    if let Some(failure) = response.failure {
+        let failure_code = serde_json::to_value(failure.code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string));
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "runner_api.list",
+            failure.message,
+            failure_code,
+            None,
+        ));
+    }
+
+    Ok(response.descriptors)
 }
 
 fn full_list_output(
@@ -121,16 +148,18 @@ fn full_list_output(
 }
 
 fn compact_list_output(
-    entities: &[Runner],
+    descriptors: &[runner::RunnerDescriptor],
     sessions: &[runner::RunnerStatusReport],
 ) -> RunnerListOutput {
-    let runner_summaries = entities
+    let runner_summaries = descriptors
         .iter()
         .take(RUNNER_LIST_LIMIT)
-        .map(|runner| {
+        .map(|descriptor| {
             runner_inventory_summary(
-                runner,
-                sessions.iter().find(|status| status.runner_id == runner.id),
+                descriptor,
+                sessions
+                    .iter()
+                    .find(|status| status.runner_id == descriptor.runner_id),
             )
         })
         .collect::<Vec<_>>();
@@ -139,7 +168,7 @@ fn compact_list_output(
         variant: "list",
         truncation: Some(RunnerListTruncation {
             shown: runner_summaries.len(),
-            omitted: entities.len().saturating_sub(runner_summaries.len()),
+            omitted: descriptors.len().saturating_sub(runner_summaries.len()),
             evidence_ref: "runner:configured-inventory",
             full_command: "homeboy runner list --full",
         }),
@@ -150,10 +179,10 @@ fn compact_list_output(
 }
 
 fn runner_inventory_summary(
-    configured: &Runner,
+    configured: &runner::RunnerDescriptor,
     status: Option<&runner::RunnerStatusReport>,
 ) -> RunnerInventorySummary {
-    let identity = bounded_list_text(&configured.id);
+    let identity = bounded_list_text(&configured.runner_id);
     let is_local = configured.kind == RunnerKind::Local;
     let operator = status.map(super::status::operator_summary);
     let admission = status.map(|status| {
@@ -186,7 +215,7 @@ fn runner_inventory_summary(
                 (status.active_job_state == runner::RunnerActiveJobState::Available)
                     .then_some(status.active_job_count)
             }),
-            limit: configured.settings.concurrency_limit,
+            limit: configured.concurrency_limit,
         },
         drift: if is_local {
             "not_applicable"
@@ -213,15 +242,15 @@ fn runner_inventory_summary(
             .map(|summary| summary.next_action.clone())
             .unwrap_or_else(|| {
                 if is_local {
-                    format!("homeboy runner show {}", shell_arg(&configured.id))
+                    format!("homeboy runner show {}", shell_arg(&configured.runner_id))
                 } else {
                     "homeboy runner status --full".to_string()
                 }
             }),
         evidence: RunnerInventoryEvidence {
-            environment_ref: format!("runner:{}:environment", configured.id),
-            environment_command: format!("homeboy runner env {}", shell_arg(&configured.id)),
-            full_ref: format!("runner:{}:configuration", configured.id),
+            environment_ref: format!("runner:{}:environment", configured.runner_id),
+            environment_command: format!("homeboy runner env {}", shell_arg(&configured.runner_id)),
+            full_ref: format!("runner:{}:configuration", configured.runner_id),
             full_command: "homeboy runner list --full",
         },
     }
@@ -434,79 +463,33 @@ pub(super) struct RunnerConnectInput {
     pub(super) runner_id: Option<String>,
     pub(super) broker_url: Option<String>,
     pub(super) adopt_orphan_lease: Option<String>,
-    pub(super) confirm_pid_dead: bool,
     pub(super) adopt_live_lease: Option<String>,
     pub(super) expected_live_pid: Option<u32>,
     pub(super) confirm_untracked_child_dead: Vec<uuid::Uuid>,
     pub(super) reconcile_leaseless_orphans: bool,
     pub(super) reconcile_unleased_candidates: bool,
-    pub(super) confirm_no_daemon_owner: bool,
     pub(super) recover_missing_lease_state: Option<String>,
     pub(super) recorded_pid: Option<u32>,
     pub(super) recorded_endpoint: Option<String>,
-    pub(super) confirm_control_plane_lost: bool,
 }
 
 /// Argument-shape validation for `runner connect`, split out so it can be
 /// exercised without attempting an SSH connection.
-///
-/// The three `--confirm-*` inputs are deprecated no-ops: every fact they
-/// asserted is proven on the runner, under its own locks, before it mutates
-/// anything. They stay accepted for one release so composed repair commands and
-/// released operator muscle memory keep working. A confirmation supplied
-/// *without* its recovery mode still means the operator selected no recovery, so
-/// it is refused rather than silently ignored.
 pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::core::Result<()> {
     let RunnerConnectInput {
         reverse,
         runner_id: _,
         broker_url: _,
         adopt_orphan_lease,
-        confirm_pid_dead,
         adopt_live_lease,
         expected_live_pid,
         confirm_untracked_child_dead,
         reconcile_leaseless_orphans,
         reconcile_unleased_candidates,
-        confirm_no_daemon_owner,
         recover_missing_lease_state,
         recorded_pid,
         recorded_endpoint,
-        confirm_control_plane_lost,
     } = input;
-    for (supplied, flag, selector, mode_selected) in [
-        (
-            *confirm_pid_dead,
-            "--confirm-pid-dead",
-            "--adopt-orphan-lease <lease> or --recover-missing-lease-state <lease>",
-            adopt_orphan_lease.is_some() || recover_missing_lease_state.is_some(),
-        ),
-        (
-            *confirm_no_daemon_owner,
-            "--confirm-no-daemon-owner",
-            "--reconcile-leaseless-orphans",
-            *reconcile_leaseless_orphans,
-        ),
-        (
-            *confirm_control_plane_lost,
-            "--confirm-control-plane-lost",
-            "--recover-missing-lease-state <lease>",
-            recover_missing_lease_state.is_some(),
-        ),
-    ] {
-        if supplied && !mode_selected {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "recovery_mode",
-                format!(
-                    "{flag} is a deprecated no-op and selects no recovery; pass {selector} to choose the recovery mode"
-                ),
-                None,
-                Some(vec![format!(
-                    "The runner proves this condition itself before mutating anything; {flag} can be dropped entirely."
-                )]),
-            ));
-        }
-    }
     if adopt_live_lease.is_some() != expected_live_pid.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "adopt_live_lease",
@@ -569,8 +552,7 @@ pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::cor
         ));
     }
     // `--recorded-pid` and `--recorded-endpoint` are evidence the runner cannot
-    // reconstruct once its state record is gone, so they remain required. The
-    // confirmations that used to be demanded alongside them are not.
+    // reconstruct once its state record is gone, so they remain required.
     if recover_missing_lease_state.is_some()
         && (recorded_pid.is_none() || recorded_endpoint.is_none())
     {
@@ -599,17 +581,14 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         runner_id,
         broker_url,
         adopt_orphan_lease,
-        confirm_pid_dead: _deprecated_confirm_pid_dead,
         adopt_live_lease,
         expected_live_pid,
         confirm_untracked_child_dead,
         reconcile_leaseless_orphans,
         reconcile_unleased_candidates,
-        confirm_no_daemon_owner: _deprecated_confirm_no_daemon_owner,
         recover_missing_lease_state,
         recorded_pid,
         recorded_endpoint,
-        confirm_control_plane_lost: _deprecated_confirm_control_plane_lost,
     } = input;
     let (report, exit_code) = if reverse {
         let runner_id = runner_id.ok_or_else(|| {
@@ -904,6 +883,17 @@ mod tests {
             }
         }
 
+        fn descriptor(configured: &Runner) -> runner::RunnerDescriptor {
+            runner::RunnerDescriptor {
+                schema: runner::RUNNER_DESCRIPTOR_SCHEMA.to_string(),
+                runner_id: configured.id.clone(),
+                kind: configured.kind.clone(),
+                server_id: configured.server_id.clone(),
+                workspace_root: configured.workspace_root.clone(),
+                concurrency_limit: configured.settings.concurrency_limit,
+            }
+        }
+
         fn parse(args: &[&str]) -> bool {
             let cli = Cli::try_parse_from(args).expect("parse runner list");
             let crate::cli_surface::Commands::Runner(runner) = cli.command else {
@@ -930,9 +920,26 @@ mod tests {
         }
 
         #[test]
+        fn typed_api_failure_is_not_treated_as_an_empty_inventory() {
+            let error = descriptors_from_list_response(RunnerApiListResponse {
+                schema: homeboy_runner_contract::RUNNER_API_LIST_RESPONSE_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                descriptors: Vec::new(),
+                failure: Some(homeboy_runner_contract::RunnerApiOperationFailure {
+                    code: homeboy_runner_contract::RunnerApiOperationFailureCode::UnsupportedApiVersion,
+                    message: "unsupported Runner API version".to_string(),
+                }),
+            })
+            .expect_err("typed failure must fail the command");
+
+            assert!(error.message.contains("unsupported Runner API version"));
+            assert_eq!(error.details["id"], "unsupported_api_version");
+        }
+
+        #[test]
         fn default_projection_omits_environment_and_bounds_the_real_wire_envelope() {
             let runners = (0..25)
-                .map(|index| configured_runner(&format!("lab-{index}")))
+                .map(|index| descriptor(&configured_runner(&format!("lab-{index}"))))
                 .collect::<Vec<_>>();
             let output = bounded_list_output(compact_list_output(&runners, &[]));
             let data = serde_json::to_value(super::super::super::types::RunnerCommandOutput::List(
@@ -973,7 +980,7 @@ mod tests {
         #[test]
         fn projection_keeps_exact_quoted_environment_followup_or_falls_back() {
             let id = "lab 'quoted' \\ target";
-            let runners = vec![configured_runner(id)];
+            let runners = vec![descriptor(&configured_runner(id))];
             let output = bounded_list_output(compact_list_output(&runners, &[]));
             let summary = &output.runner_summaries[0];
 
@@ -994,7 +1001,7 @@ mod tests {
 
         #[test]
         fn oversized_exact_followups_trigger_the_bounded_fallback() {
-            let runners = vec![configured_runner(&"\"\\\n".repeat(10_000))];
+            let runners = vec![descriptor(&configured_runner(&"\"\\\n".repeat(10_000)))];
             let output = bounded_list_output(compact_list_output(&runners, &[]));
 
             assert!(output.runner_summaries.is_empty());
@@ -1008,7 +1015,7 @@ mod tests {
             let mut configured = configured_runner("lab");
             configured.kind = RunnerKind::Ssh;
             let status = ssh_status("lab", runner::RunnerActiveJobState::Unavailable);
-            let output = compact_list_output(&[configured], &[status]);
+            let output = compact_list_output(&[descriptor(&configured)], &[status]);
             let value =
                 serde_json::to_value(&output.runner_summaries[0]).expect("summary serializes");
 
@@ -1054,66 +1061,19 @@ mod tests {
             runner_id: None,
             broker_url: None,
             adopt_orphan_lease: None,
-            confirm_pid_dead: false,
             adopt_live_lease: None,
             expected_live_pid: None,
             confirm_untracked_child_dead: Vec::new(),
             reconcile_leaseless_orphans: false,
             reconcile_unleased_candidates: false,
-            confirm_no_daemon_owner: false,
             recover_missing_lease_state: None,
             recorded_pid: None,
             recorded_endpoint: None,
-            confirm_control_plane_lost: false,
         }
     }
 
     #[test]
-    fn deprecated_confirmations_without_a_recovery_mode_are_refused() {
-        for (flag, input) in [
-            (
-                "--confirm-pid-dead",
-                RunnerConnectInput {
-                    confirm_pid_dead: true,
-                    ..input()
-                },
-            ),
-            (
-                "--confirm-no-daemon-owner",
-                RunnerConnectInput {
-                    confirm_no_daemon_owner: true,
-                    ..input()
-                },
-            ),
-            (
-                "--confirm-control-plane-lost",
-                RunnerConnectInput {
-                    confirm_control_plane_lost: true,
-                    ..input()
-                },
-            ),
-        ] {
-            let error = validate_connect_input(&input)
-                .expect_err("a confirmation that selects no recovery mode must fail");
-            assert!(
-                error.message.contains(flag),
-                "expected {flag} in {}",
-                error.message
-            );
-            assert!(
-                error.message.contains("deprecated no-op"),
-                "expected a deprecation notice in {}",
-                error.message
-            );
-        }
-    }
-
-    #[test]
-    fn recovery_modes_no_longer_demand_hand_confirmations() {
-        // The runner proves each of these facts itself, under its own locks,
-        // before it mutates anything: PID death for orphan adoption, owner
-        // absence for lease-less recovery, and state/endpoint loss for
-        // state-loss recovery. Selecting the mode alone must now validate.
+    fn recovery_modes_validate_with_their_required_evidence() {
         for input in [
             RunnerConnectInput {
                 adopt_orphan_lease: Some("lease-dead".to_string()),
@@ -1130,37 +1090,7 @@ mod tests {
                 ..input()
             },
         ] {
-            validate_connect_input(&input)
-                .expect("selecting a recovery mode must not require a confirmation flag");
-        }
-    }
-
-    #[test]
-    fn deprecated_confirmations_remain_accepted_alongside_their_mode() {
-        // The released spellings still appear in composed repair commands and in
-        // operator runbooks, so they must keep validating for one release.
-        for input in [
-            RunnerConnectInput {
-                adopt_orphan_lease: Some("lease-dead".to_string()),
-                confirm_pid_dead: true,
-                ..input()
-            },
-            RunnerConnectInput {
-                reconcile_leaseless_orphans: true,
-                confirm_no_daemon_owner: true,
-                ..input()
-            },
-            RunnerConnectInput {
-                recover_missing_lease_state: Some("lease".to_string()),
-                recorded_pid: Some(42),
-                recorded_endpoint: Some("127.0.0.1:7421".to_string()),
-                confirm_pid_dead: true,
-                confirm_control_plane_lost: true,
-                ..input()
-            },
-        ] {
-            validate_connect_input(&input)
-                .expect("released confirmation spellings stay accepted for one release");
+            validate_connect_input(&input).expect("valid recovery mode");
         }
     }
 
@@ -1179,7 +1109,6 @@ mod tests {
         let error = validate_connect_input(&RunnerConnectInput {
             reverse: true,
             reconcile_leaseless_orphans: true,
-            confirm_no_daemon_owner: true,
             ..input()
         })
         .expect_err("reverse recovery is unsupported");
@@ -1217,17 +1146,13 @@ mod tests {
 
     #[test]
     fn state_loss_recovery_still_requires_unreconstructable_evidence() {
-        // `--recorded-pid` and `--recorded-endpoint` are not confirmations: once
-        // the state record is gone the runner cannot recompute them, so they
-        // stay required while the confirmations alongside them do not.
+        // Once the state record is gone the runner cannot recompute these.
         let error = validate_connect_input(&RunnerConnectInput {
             recover_missing_lease_state: Some("lease".to_string()),
-            confirm_control_plane_lost: true,
             ..input()
         })
         .expect_err("partial state-loss evidence must fail before connecting");
         assert!(error.message.contains("--recorded-pid"));
-        assert!(!error.message.contains("--confirm-control-plane-lost"));
     }
 
     #[test]
@@ -1235,28 +1160,21 @@ mod tests {
         let conflicting_inputs = [
             RunnerConnectInput {
                 adopt_orphan_lease: Some("lease".to_string()),
-                confirm_pid_dead: true,
                 reconcile_leaseless_orphans: true,
-                confirm_no_daemon_owner: true,
                 ..input()
             },
             RunnerConnectInput {
                 adopt_orphan_lease: Some("lease".to_string()),
-                confirm_pid_dead: true,
                 recover_missing_lease_state: Some("lease".to_string()),
                 recorded_pid: Some(42),
                 recorded_endpoint: Some("127.0.0.1:7421".to_string()),
-                confirm_control_plane_lost: true,
                 ..input()
             },
             RunnerConnectInput {
                 reconcile_leaseless_orphans: true,
-                confirm_no_daemon_owner: true,
-                confirm_pid_dead: true,
                 recover_missing_lease_state: Some("lease".to_string()),
                 recorded_pid: Some(42),
                 recorded_endpoint: Some("127.0.0.1:7421".to_string()),
-                confirm_control_plane_lost: true,
                 ..input()
             },
         ];

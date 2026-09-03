@@ -1,6 +1,7 @@
 use super::builders::{disabled_step, ready_step, string_array_config, string_config, StepConfig};
 use super::changelog::build_changelog_steps;
 use super::hints::{github_release_applies, push_publish_vs_github_release_hints};
+use crate::release::context::ReleaseExtension;
 use crate::release::pipeline_capabilities::{
     get_publish_targets, has_package_capability, has_prepare_capability,
 };
@@ -9,11 +10,11 @@ use crate::release::types::{ReleaseChangelogPlan, ReleaseOptions};
 use homeboy_core::component::Component;
 use homeboy_core::plan::PlanStep;
 use homeboy_core::Result;
-use homeboy_extension::{ExtensionCapability, ExtensionManifest};
+use homeboy_extension_contract::ExtensionCapability;
 
 pub(in crate::release) fn build_release_steps_with_reconciliation(
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     current_version: &str,
     new_version: &str,
     changelog_plan: &ReleaseChangelogPlan,
@@ -235,11 +236,16 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         ));
     }
 
-    let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks_with_extensions(
-        component,
-        extensions,
-        homeboy_core::engine::hooks::events::POST_RELEASE,
-    )?;
+    let mut post_release_hooks = extensions
+        .iter()
+        .flat_map(|extension| extension.post_release_hooks.iter().cloned())
+        .collect::<Vec<_>>();
+    if let Some(component_hooks) = component
+        .hooks
+        .get(&homeboy_extension_contract::HookEvent::PostRelease)
+    {
+        post_release_hooks.extend(component_hooks.clone());
+    }
     if !post_release_hooks.is_empty() {
         let post_release_needs = if package_step_needed && !options.pipeline.deploy {
             vec!["cleanup".to_string()]
@@ -291,7 +297,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
 
 fn build_head_release_steps(
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     version: &str,
     options: &ReleaseOptions,
     release_scope: &ReleaseScope,
@@ -403,10 +409,16 @@ fn build_head_release_steps(
         ));
     }
 
-    let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks(
-        component,
-        homeboy_core::engine::hooks::events::POST_RELEASE,
-    )?;
+    let mut post_release_hooks = extensions
+        .iter()
+        .flat_map(|extension| extension.post_release_hooks.iter().cloned())
+        .collect::<Vec<_>>();
+    if let Some(component_hooks) = component
+        .hooks
+        .get(&homeboy_extension_contract::HookEvent::PostRelease)
+    {
+        post_release_hooks.extend(component_hooks.clone());
+    }
     if !post_release_hooks.is_empty() {
         let post_release_needs = if package_step_needed && !options.pipeline.deploy {
             vec!["cleanup".to_string()]
@@ -463,7 +475,7 @@ fn build_head_release_steps(
 fn add_package_preflight_step(
     steps: &mut Vec<PlanStep>,
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     publish_targets: &[String],
     options: &ReleaseOptions,
     github_release_needed: bool,
@@ -496,7 +508,7 @@ fn github_release_needed(component: &Component, options: &ReleaseOptions) -> boo
 
 fn package_step_needed(
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     publish_targets: &[String],
     options: &ReleaseOptions,
     github_release_needed: bool,
@@ -510,7 +522,7 @@ fn package_step_needed(
 
 fn head_package_step_needed(
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     publish_targets: &[String],
     options: &ReleaseOptions,
 ) -> bool {
@@ -543,7 +555,7 @@ fn add_disabled_publish_steps(steps: &mut Vec<PlanStep>, publish_targets: &[Stri
 
 fn add_release_extension_diagnostics(
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     publish_targets: &[String],
     options: &ReleaseOptions,
     warnings: &mut Vec<String>,
@@ -570,11 +582,10 @@ fn add_release_extension_diagnostics(
     let loaded = extensions
         .iter()
         .map(|extension| {
-            let mut action_ids: Vec<&str> = extension
-                .actions
-                .iter()
-                .map(|action| action.id.as_str())
-                .collect();
+            let mut action_ids = ["release.prepare", "release.package", "release.publish"]
+                .into_iter()
+                .filter(|action| extension.provides_action(action))
+                .collect::<Vec<_>>();
             action_ids.sort_unstable();
             format!("{} [{}]", extension.id, action_ids.join(", "))
         })
@@ -594,13 +605,12 @@ fn add_release_extension_diagnostics(
 
 fn configured_extension_has_release_actions(
     configured_ids: &[String],
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
 ) -> bool {
     extensions.iter().any(|extension| {
         configured_ids.iter().any(|id| id == &extension.id)
-            && extension
-                .actions
-                .iter()
-                .any(|action| action.id.starts_with("release."))
+            && ["release.prepare", "release.package", "release.publish"]
+                .into_iter()
+                .any(|action| extension.provides_action(action))
     })
 }

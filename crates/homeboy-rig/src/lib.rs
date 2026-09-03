@@ -49,6 +49,7 @@ mod rig_test_support;
 
 pub use app::AppLauncherAction;
 pub use app::{AppLauncherOptions, AppLauncherReport};
+pub use capabilities::runner_capability_preflight;
 // Reachable through `RigRunArtifactIndex`'s public fields.
 pub use artifact_index::{
     for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
@@ -151,7 +152,7 @@ pub use workloads::{
 use discovery::discover_rigs_for_install;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::{git, paths};
-use homeboy_extension::bench::parsing::{RigPackageEvidence, RigPackageFreshness};
+use homeboy_extension_contract::{RigPackageEvidence, RigPackageFreshness};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -407,7 +408,7 @@ fn read_spec_from_path(
     if spec.id.is_empty() {
         spec.id = id_hint.unwrap_or_default().to_string();
     }
-    spec.id = homeboy_extension::slugify_id(&spec.id)?;
+    spec.id = homeboy_core::extension::lifecycle::slugify_id(&spec.id)?;
     remember_local_package_root(&spec.id, package_root);
     apply_trace_workload_defaults(&mut spec)?;
     validate_rig_spec(&spec)?;
@@ -575,7 +576,7 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
         discover_rigs(&path)?
     };
     if let Some(id) = id {
-        let id = homeboy_extension::slugify_id(id)?;
+        let id = homeboy_core::extension::lifecycle::slugify_id(id)?;
         if rigs.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "id",

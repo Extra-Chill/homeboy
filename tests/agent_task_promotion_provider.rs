@@ -63,6 +63,14 @@ fn promotion_provider_applies_a_typed_patch_request() {
 fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_id() {
     use std::os::unix::fs::PermissionsExt;
 
+    const SOCKET_HELPER_ENV: &str = "HOMEBOY_TEST_PROMOTION_SOCKET_HELPER";
+    if std::env::var_os(SOCKET_HELPER_ENV).is_some() {
+        let path = PathBuf::from(std::env::var_os("TMPDIR").expect("TMPDIR")).join("gate.sock");
+        std::os::unix::net::UnixListener::bind(&path).expect("bind gate socket");
+        println!("{}", path.display());
+        std::process::exit(0);
+    }
+
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -75,47 +83,30 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
     let patch = temp.path().join("changes.patch");
     std::fs::write(&patch, PATCH).expect("patch");
 
-    let provider = temp.path().join("promotion-provider.sh");
-    std::fs::write(
-        &provider,
-        format!(
-            "#!/bin/sh\nset -eu\ngit -C '{}' apply '{}'\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
-            workspace.display(),
-            patch.display(),
-            workspace.display(),
-        ),
-    )
-    .expect("provider script");
-    let mut permissions = std::fs::metadata(&provider)
-        .expect("provider metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&provider, permissions).expect("provider executable");
-
-    let helper_source = temp.path().join("bind_socket.rs");
     let helper = temp.path().join("bind_socket");
     // Gate toolchain preflight probes this command with `--version` in the same
     // environment the gate itself receives, so the helper must answer that probe
     // without side effects — exactly like a real toolchain. Binding on every
     // invocation would leave `gate.sock` behind and make the gate's own bind
     // fail with EADDRINUSE.
-    std::fs::write(
-        &helper_source,
-        "use std::{env, os::unix::net::UnixListener, path::PathBuf};\nfn main() { if env::args().any(|arg| arg == \"--version\") { println!(\"bind_socket 1.0\"); return; } let path = PathBuf::from(env::var_os(\"TMPDIR\").expect(\"TMPDIR\")).join(\"gate.sock\"); UnixListener::bind(&path).unwrap(); println!(\"{}\", path.display()); }\n",
-    )
-    .expect("socket helper source");
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    assert!(
-        Command::new(rustc)
-            .args(["--edition=2021"])
-            .arg(&helper_source)
-            .arg("-o")
-            .arg(&helper)
-            .status()
-            .expect("compile socket helper")
-            .success(),
-        "socket helper compiles"
+    let current_exe = homeboy_engine_primitives::shell::quote_path(
+        &std::env::current_exe()
+            .expect("current test executable")
+            .display()
+            .to_string(),
     );
+    std::fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then\n  printf '%s\\n' 'bind_socket 1.0'\n  exit 0\nfi\n{SOCKET_HELPER_ENV}=1 exec {current_exe} promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_id --exact --nocapture\n"
+        ),
+    )
+    .expect("socket helper script");
+    let mut permissions = std::fs::metadata(&helper)
+        .expect("helper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&helper, permissions).expect("helper executable");
     let run_id = format!("promotion-run-{}", "semantic-id-".repeat(16));
     let source = serde_json::json!({
         "schema": "homeboy/agent-task-outcome/v1",
@@ -134,7 +125,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@socket-gate".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -145,7 +136,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
                     homeboy::agents::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: Some(provider.display().to_string()),
+            provider_command: None,
             provider_invocation: None,
         },
     )

@@ -20,10 +20,8 @@ pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &s
     }
 }
 
-pub(super) fn forward_release_ci_env(env: &mut HashMap<String, String>) {
-    for name in ["GITHUB_ACTIONS", "RELEASE_BLOCKING_COMMANDS"] {
-        forward_env_if_present(env, name);
-    }
+pub(super) fn forward_ci_env(env: &mut HashMap<String, String>) {
+    forward_env_if_present(env, "GITHUB_ACTIONS");
 }
 
 pub(crate) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
@@ -72,13 +70,13 @@ fn subprocess_lab_offload_metadata(lab_metadata: &serde_json::Value) -> serde_js
     })
 }
 
-/// Forward the preview metadata/public-url passthroughs plus release CI context
+/// Forward the preview metadata/public-url passthroughs plus CI context
 /// into a Lab offload env. Centralizes the repeated forward sequence shared by
 /// the offload dispatch paths so they stay in lock-step.
-pub(super) fn forward_preview_and_release_ci_env(env: &mut HashMap<String, String>) {
+pub(super) fn forward_preview_and_ci_env(env: &mut HashMap<String, String>) {
     forward_env_if_present(env, PREVIEW_METADATA_ENV);
     forward_env_if_present(env, PREVIEW_PUBLIC_URL_ENV);
-    forward_release_ci_env(env);
+    forward_ci_env(env);
 }
 
 /// Build a fresh Lab offload env from `lab_metadata` and forward the preview and
@@ -87,7 +85,7 @@ pub(super) fn build_lab_offload_env_with_passthroughs(
     lab_metadata: &serde_json::Value,
 ) -> HashMap<String, String> {
     let mut env = build_lab_offload_env(lab_metadata);
-    forward_preview_and_release_ci_env(&mut env);
+    forward_preview_and_ci_env(&mut env);
     env
 }
 
@@ -138,7 +136,6 @@ fn declared_dependency_paths(
                 serde_json::json!({
                     "local_path": entry.local_path(),
                     "remote_path": entry.remote_path(),
-                    "evidence_path": freshness.get("evidence_path").cloned().unwrap_or(serde_json::Value::Null),
                 }),
             ))
         })
@@ -526,6 +523,7 @@ mod tests {
                 ),
                 sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                 snapshot_identity: "snapshot".to_string(),
+                workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
                 prepared_workspace_lease: None,
                 counts: crate::ByteFileCounts { files: 1, bytes: 1 },
                 excludes: Vec::new(),
@@ -588,7 +586,6 @@ mod tests {
                     role: "validation_dependency".to_string(),
                     local_path: "/Users/user/Developer/static-site-importer".to_string(),
                     remote_path: "/home/user/Developer/job-123/static-site-importer".to_string(),
-                    evidence_path: "/home/user/Developer/job-123/static-site-importer/.homeboy/lab-source-evidence.json".to_string(),
                 },
             ),
             workspace_mapping_entry(
@@ -638,6 +635,7 @@ mod tests {
                     ),
                     sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                     snapshot_identity: "snapshot".to_string(),
+                    workspace_ref: "workspace:00000000-0000-0000-0000-000000000002".to_string(),
                     prepared_workspace_lease: None,
                     counts: crate::ByteFileCounts { files: 1, bytes: 1 },
                     excludes: Vec::new(),
@@ -682,18 +680,13 @@ mod tests {
     }
 
     #[test]
-    fn forward_release_ci_env_preserves_release_gate_context() {
+    fn forward_ci_env_preserves_github_actions_context() {
         let _github_actions = EnvVarGuard::set("GITHUB_ACTIONS", "true");
-        let _blocking = EnvVarGuard::set("RELEASE_BLOCKING_COMMANDS", "lint,test");
         let mut env = HashMap::new();
 
-        forward_release_ci_env(&mut env);
+        forward_ci_env(&mut env);
 
         assert_eq!(env.get("GITHUB_ACTIONS").map(String::as_str), Some("true"));
-        assert_eq!(
-            env.get("RELEASE_BLOCKING_COMMANDS").map(String::as_str),
-            Some("lint,test")
-        );
     }
 
     #[test]

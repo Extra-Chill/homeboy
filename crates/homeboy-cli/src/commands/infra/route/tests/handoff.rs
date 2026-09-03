@@ -511,6 +511,7 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
                     available_runner_ids: vec!["admitted-lab".to_string()],
                     reasons: Vec::new(),
                     remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
                 },
             ),
             homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
@@ -1134,7 +1135,7 @@ fn controller_local_lifecycle_reads_never_acquire_a_default_lab_runner() {
 }
 
 #[test]
-fn controller_local_record_owns_lifecycle_reads_before_default_lab_selection() {
+fn controller_local_record_owns_lifecycle_reads_and_cook_retries_before_lab_selection() {
     crate::test_support::with_isolated_home(|_| {
         let inferred = connected_default_lab_runner();
         let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
@@ -1170,6 +1171,63 @@ fn controller_local_record_owns_lifecycle_reads_before_default_lab_selection() {
                 };
             assert_eq!(route_runner, None, "{args:?} must not use homeboy-lab");
         }
+
+        let plan_only_retry =
+            Cli::try_parse_from(["homeboy", "agent-task", "retry", OWNER_LOCAL_RUN_ID])
+                .expect("plan-only retry parses");
+        assert!(
+            controller_owns_agent_task_lifecycle_command(&plan_only_retry)
+                .expect("plan-only retry owner resolves")
+        );
+
+        let executable_retry_args = [
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "retry",
+            OWNER_LOCAL_RUN_ID,
+            "--run",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let executable_retry =
+            Cli::try_parse_from(&executable_retry_args).expect("executable retry parses");
+        assert!(
+            !controller_owns_agent_task_lifecycle_command(&executable_retry)
+                .expect("executable retry owner resolves"),
+            "retry --run must reach controller preflight and Lab handoff materialization"
+        );
+
+        agent_task_lifecycle::rewrite_record_for_test(OWNER_LOCAL_RUN_ID, |record| {
+            record.metadata["cook_id"] = serde_json::json!("cook-owner-routing");
+            record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+        })
+        .expect("mark the retry as Cook-owned");
+
+        assert!(
+            controller_owns_agent_task_lifecycle_command(&executable_retry)
+                .expect("Cook retry owner resolves"),
+            "a Cook retry must remain on its controller before replaying provider work"
+        );
+        assert_eq!(
+            route_after_parse_with_provenance(
+                &executable_retry,
+                &executable_retry_args,
+                None,
+                None,
+            )
+            .expect("route the generated Cook retry action"),
+            None,
+            "the routing layer must return a Cook retry to its controller before Lab preflight"
+        );
+        assert!(
+            materialize_agent_task_retry_handoff(&executable_retry, &executable_retry_args,)
+                .expect("Cook retry handoff decision")
+                .is_none(),
+            "Cook retries are replayed by their controller lifecycle, not generic Lab routing"
+        );
     });
 }
 
@@ -1180,7 +1238,7 @@ fn every_generated_next_action_command_round_trips_to_the_record_owner() {
     // these strings is emitted verbatim by a diagnosis/status projection.
     let inferred = connected_default_lab_runner();
     for generated in [
-        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID} --full"),
+        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task logs {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID} --full"),

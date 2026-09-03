@@ -1,6 +1,7 @@
 use super::hints::{github_release_applies, push_publish_vs_github_release_hints};
 use super::preflight::build_preflight_steps;
 use super::release::build_release_steps_with_reconciliation;
+use crate::release::context::ReleaseExtension;
 use crate::release::scope::ReleaseScope;
 use crate::release::types::{
     ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
@@ -9,14 +10,14 @@ use crate::release::types::{
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
 use homeboy_core::Result;
-use homeboy_extension::ExtensionManifest;
+use homeboy_extension_contract::ExtensionManifest;
 
 /// Test-local shim: production callers pass their own reconciliation input,
 /// so the no-reconciliation default only ever existed for these assertions.
 #[allow(clippy::too_many_arguments)]
 fn build_release_steps(
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     current_version: &str,
     new_version: &str,
     changelog_plan: &ReleaseChangelogPlan,
@@ -165,7 +166,11 @@ fn release_plan_adds_extension_declared_release_preflight() {
     .expect("extension manifest");
     extension.id = "registry".to_string();
 
-    let steps = build_preflight_steps(&options, None, &[extension]);
+    let steps = build_preflight_steps(
+        &options,
+        None,
+        &[ReleaseExtension::from_manifest(&extension)],
+    );
     let token = steps
         .iter()
         .find(|step| step.id == "preflight.extension.registry.publish_token")
@@ -256,6 +261,53 @@ fn head_release_with_artifacts_skips_branch_and_working_tree_checks() {
             .and_then(|value| value.as_str()),
         Some("head-release-artifacts")
     );
+}
+
+#[test]
+fn tagged_head_recovery_skips_mutable_source_gates() {
+    for from_artifacts in [None, Some("artifacts".to_string())] {
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                from_artifacts,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let steps = build_preflight_steps(&options, None, &[]);
+        for step_id in [
+            "preflight.test_secret_env",
+            "preflight.dependencies",
+            "preflight.audit",
+            "preflight.lint",
+            "preflight.test",
+        ] {
+            let step = steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .expect("tagged recovery preflight step");
+            assert_eq!(step.status, PlanStepStatus::Disabled, "{step_id}");
+            assert_eq!(
+                step.inputs.get("reason").and_then(|value| value.as_str()),
+                Some("tagged-head-recovery"),
+                "{step_id}"
+            );
+        }
+
+        for step_id in ["preflight.head_identity", "preflight.remote_sync"] {
+            assert_eq!(
+                steps
+                    .iter()
+                    .find(|step| step.id == step_id)
+                    .expect("immutable recovery preflight step")
+                    .status,
+                PlanStepStatus::Ready,
+                "{step_id}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -511,7 +563,7 @@ fn release_plan_records_dry_run_lower_bump_preview() {
 #[test]
 fn test_build_release_steps() {
     let component = fixture_component();
-    let extension = serde_json::from_value(serde_json::json!({
+    let extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Fixture",
         "version": "1.0.0",
         "actions": [
@@ -534,7 +586,7 @@ fn test_build_release_steps() {
 
     let steps = build_release_steps(
         &component,
-        &[extension],
+        &[ReleaseExtension::from_manifest(&extension)],
         "1.0.0",
         "1.0.1",
         &fixture_changelog_plan(),
@@ -604,7 +656,8 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
         }))
         .expect("extension manifest");
         extension.id = "fixture-packager".to_string();
-        homeboy_extension::save_manifest(&extension).expect("save extension manifest");
+        homeboy_core::extension::catalog::save_manifest(&extension)
+            .expect("save extension manifest");
         let mut warnings = Vec::new();
         let mut hints = Vec::new();
         let release_scope =
@@ -616,7 +669,7 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
 
         let steps = build_release_steps(
             &component,
-            &[extension],
+            &[ReleaseExtension::from_manifest(&extension)],
             "1.0.0",
             "1.0.1",
             &fixture_changelog_plan(),
@@ -1084,7 +1137,7 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
 
     let steps = build_release_steps(
         &component,
-        &[extension],
+        &[ReleaseExtension::from_manifest(&extension)],
         "1.0.1",
         "1.0.1",
         &fixture_changelog_plan(),
@@ -1197,7 +1250,7 @@ fn head_release_skip_publish_still_uploads_existing_artifacts() {
 
     let steps = build_release_steps(
         &component,
-        &[extension],
+        &[ReleaseExtension::from_manifest(&extension)],
         "1.0.1",
         "1.0.1",
         &fixture_changelog_plan(),
@@ -1230,7 +1283,6 @@ fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
             ScopedExtensionConfig::default(),
         )]));
         let extension = release_extension("wordpress", &["release.package"]);
-        homeboy_extension::save_manifest(&extension).expect("install extension manifest");
         let mut warnings = Vec::new();
         let mut hints = Vec::new();
         let release_scope =
@@ -1391,7 +1443,7 @@ fn fixture_changelog_plan() -> ReleaseChangelogPlan {
     }
 }
 
-fn release_extension(id: &str, actions: &[&str]) -> ExtensionManifest {
+fn release_extension(id: &str, actions: &[&str]) -> ReleaseExtension {
     let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": id,
         "version": "1.0.0",
@@ -1404,7 +1456,7 @@ fn release_extension(id: &str, actions: &[&str]) -> ExtensionManifest {
     }))
     .expect("extension manifest");
     extension.id = id.to_string();
-    extension
+    ReleaseExtension::from_manifest(&extension)
 }
 
 fn semver_recommendation(

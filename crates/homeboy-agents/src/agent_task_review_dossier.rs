@@ -400,13 +400,8 @@ pub(crate) fn verified_commands_from_promotion(
         .deterministic_gates
         .iter()
         .filter_map(|gate| {
-            let [shell, flag, command] = gate.command.as_slice() else {
-                return None;
-            };
-            if shell != "sh"
-                || flag != "-lc"
-                || !promotion.has_visible_passed_gate_for_command(command)
-            {
+            let command = gate.invocation().ok()?.reviewer_command();
+            if !promotion.has_visible_passed_gate_for_command(&command) {
                 return None;
             }
             let candidate = gate.candidate_checkout.as_ref()?;
@@ -417,7 +412,7 @@ pub(crate) fn verified_commands_from_promotion(
                 },
             );
             Some(AgentTaskReviewVerifiedCommand {
-                command: command.clone(),
+                command,
                 status: format!("{:?}", gate.status).to_ascii_lowercase(),
                 candidate_commit: candidate.commit.clone(),
                 candidate_tree: candidate.tree.clone(),

@@ -4,11 +4,11 @@ use std::process::Command;
 
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension;
 use homeboy_core::git;
 use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use homeboy_core::project::{self, Project};
 use homeboy_core::server::SshClient;
-use homeboy_extension as extension;
 use homeboy_version::version;
 
 use super::types::{
@@ -812,7 +812,7 @@ pub(super) fn load_project_components_with_projection(
         // Validate required extensions are installed before attempting artifact resolution.
         // Without this check, missing extensions cause resolve_artifact() to silently
         // return None, and the component gets skipped with a vague "no artifact" message.
-        if let Err(err) = extension::validate_required_extensions(&loaded) {
+        if let Err(err) = extension::resolve::validate_required_extensions(&loaded) {
             if check {
                 // Read-only diff: a missing extension must not poison the whole pass.
                 // Skip-and-warn so operators still see the diff for the components they

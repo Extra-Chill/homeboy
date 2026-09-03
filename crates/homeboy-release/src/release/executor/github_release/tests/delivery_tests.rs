@@ -35,6 +35,27 @@ fn published_release_with_nothing_to_attach_is_an_idempotent_no_op() {
 }
 
 #[test]
+fn completed_publication_is_adopted_when_tagged_recovery_reaches_delivery() {
+    // The release may have completed after recovery began. Delivery sees the
+    // exact published tag and must stop rather than recreate or republish it.
+    let declared = vec![
+        "dist-manifest.json".to_string(),
+        "homeboy-aarch64-apple-darwin.tar.xz".to_string(),
+        "homeboy-x86_64-unknown-linux-gnu.tar.xz".to_string(),
+    ];
+    let published = vec![
+        "dist-manifest.json".to_string(),
+        "homeboy-aarch64-apple-darwin.tar.xz".to_string(),
+        "homeboy-x86_64-unknown-linux-gnu.tar.xz".to_string(),
+    ];
+
+    assert_eq!(
+        existing_release_action(false, false, &published, Some(&declared), true),
+        ExistingReleaseAction::AlreadyPublished
+    );
+}
+
+#[test]
 fn published_release_with_no_assets_is_still_an_idempotent_no_op() {
     // Asset count is only consulted for drafts: a published release with no
     // assets is a delivery problem for `verify-published` to report, not a

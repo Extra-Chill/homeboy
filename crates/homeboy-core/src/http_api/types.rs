@@ -28,34 +28,86 @@ pub struct HttpApiResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpEndpoint {
     Components,
-    Component { id: String },
-    ComponentStatus { id: String },
-    ComponentChanges { id: String },
+    Component {
+        id: String,
+    },
+    ComponentStatus {
+        id: String,
+    },
+    ComponentChanges {
+        id: String,
+    },
+    ResourceTopology {
+        root: homeboy_resource_topology_contract::ResourceTopologyResourceRef,
+    },
     Rigs,
-    Rig { id: String },
-    RigCheck { id: String },
+    Rig {
+        id: String,
+    },
+    RigCheck {
+        id: String,
+    },
     Stacks,
-    Stack { id: String },
-    StackStatus { id: String },
+    Stack {
+        id: String,
+    },
+    StackStatus {
+        id: String,
+    },
     Runs,
-    Run { id: String },
-    RunArtifacts { id: String },
-    RunArtifactContent { id: String, artifact_id: String },
-    RunFindings { id: String },
+    Run {
+        id: String,
+    },
+    RunArtifacts {
+        id: String,
+    },
+    RunArtifactContent {
+        id: String,
+        artifact_id: String,
+    },
+    RunFindings {
+        id: String,
+    },
     AuditRuns,
     BenchRuns,
     Activity,
-    ActivityItem { id: String },
-    AgentTaskRun { id: String },
+    ActivityItem {
+        id: String,
+    },
+    ControlPlaneCapabilities,
+    ControlPlaneRun {
+        id: String,
+    },
+    ControlPlaneRunEvents {
+        id: String,
+        cursor: Option<homeboy_control_plane_contract::EventCursor>,
+    },
+    ControlPlaneRunActions {
+        id: String,
+    },
     Jobs,
-    Job { id: String },
-    JobEvents { id: String },
-    JobCancel { id: String },
-    JobProjectionCancel { id: String },
-    JobReadyRun { kind: JobReadyRunKind },
+    Job {
+        id: String,
+    },
+    JobEvents {
+        id: String,
+    },
+    JobCancel {
+        id: String,
+    },
+    JobProjectionCancel {
+        id: String,
+    },
+    JobReadyRun {
+        kind: JobReadyRunKind,
+    },
     SandboxTools,
-    SandboxTool { id: String },
-    SandboxToolRun { id: String },
+    SandboxTool {
+        id: String,
+    },
+    SandboxToolRun {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +153,7 @@ impl HttpEndpoint {
             Self::Component { .. } => "components.show",
             Self::ComponentStatus { .. } => "components.status",
             Self::ComponentChanges { .. } => "components.changes",
+            Self::ResourceTopology { .. } => "resource_topology.show",
             Self::Rigs => "rigs.list",
             Self::Rig { .. } => "rigs.show",
             Self::RigCheck { .. } => "rigs.check",
@@ -116,7 +169,10 @@ impl HttpEndpoint {
             Self::BenchRuns => "bench.runs",
             Self::Activity => "activity.list",
             Self::ActivityItem { .. } => "activity.show",
-            Self::AgentTaskRun { .. } => "agent_task.runs.show",
+            Self::ControlPlaneCapabilities => "control_plane.capabilities",
+            Self::ControlPlaneRun { .. } => "control_plane.runs.show",
+            Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",
+            Self::ControlPlaneRunActions { .. } => "control_plane.runs.actions",
             Self::Jobs => "jobs.list",
             Self::Job { .. } => "jobs.show",
             Self::JobEvents { .. } => "jobs.events",

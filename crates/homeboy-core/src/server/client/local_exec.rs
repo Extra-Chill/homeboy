@@ -285,8 +285,8 @@ fn run_local_command(
     let transport_observation_failed = status.is_err();
     // Descendants can inherit these pipes after the shell exits. Tear down the
     // process group before joining readers so they cannot hold this command open.
-    let cleanup_context = if matches!(&status, Ok(status) if status.success()) {
-        ProcessContainmentCleanupContext::LeaderReapedAfterSuccess
+    let cleanup_context = if status.is_ok() {
+        ProcessContainmentCleanupContext::LeaderReaped
     } else {
         ProcessContainmentCleanupContext::LeaderMayBeRunning
     };
@@ -377,8 +377,7 @@ fn run_local_command(
     output
 }
 
-/// Preserve process containment evidence on every terminal result. An
-/// incomplete cleanup overrides only a clean producer: a producer failure,
+/// An incomplete cleanup overrides only a clean producer: a producer failure,
 /// timeout, cancellation, or delegated terminal failure remains authoritative.
 fn finalize_cleanup_report(
     mut output: CommandOutput,
@@ -390,19 +389,13 @@ fn finalize_cleanup_report(
     if !output.stderr.is_empty() && !output.stderr.ends_with('\n') {
         output.stderr.push('\n');
     }
-    if let Some(warning) = report.warning {
-        output.stderr.push_str(&format!(
-            "Homeboy containment cleanup warning: {warning}.\n"
-        ));
-    }
-    if let Some(incomplete) = report.incomplete {
-        output.stderr.push_str(&format!(
-            "Homeboy containment cleanup was incomplete: {incomplete}.\n"
-        ));
-        if output.success {
-            output.success = false;
-            output.exit_code = 1;
-        }
+    output.stderr.push_str(&format!(
+        "Homeboy containment cleanup was incomplete: {}.\n",
+        report.incomplete
+    ));
+    if output.success {
+        output.success = false;
+        output.exit_code = 1;
     }
     output
 }
@@ -1193,33 +1186,17 @@ mod tests {
         }
     }
 
-    fn cleanup_report(incomplete: Option<&str>, warning: Option<&str>) -> ProcessCleanupReport {
+    fn cleanup_report(incomplete: &str) -> ProcessCleanupReport {
         ProcessCleanupReport {
-            incomplete: incomplete.map(str::to_string),
-            warning: warning.map(str::to_string),
+            incomplete: incomplete.to_string(),
         }
-    }
-
-    #[test]
-    fn cleanup_warning_preserves_a_clean_producer_result() {
-        let output = finalize_cleanup_report(
-            command_output(true, 0, false),
-            Some(cleanup_report(
-                None,
-                Some("unreadable unrelated proc entry"),
-            )),
-        );
-
-        assert!(output.success);
-        assert_eq!(output.exit_code, 0);
-        assert!(output.stderr.contains("containment cleanup warning"));
     }
 
     #[test]
     fn incomplete_cleanup_fails_a_clean_producer_result() {
         let output = finalize_cleanup_report(
             command_output(true, 0, false),
-            Some(cleanup_report(Some("run-owned process survived"), None)),
+            Some(cleanup_report("run-owned process survived")),
         );
 
         assert!(!output.success);
@@ -1231,7 +1208,7 @@ mod tests {
     fn incomplete_cleanup_preserves_a_producer_failure() {
         let output = finalize_cleanup_report(
             command_output(false, 42, false),
-            Some(cleanup_report(Some("ambiguous process scope"), None)),
+            Some(cleanup_report("ambiguous process scope")),
         );
 
         assert!(!output.success);
@@ -1243,7 +1220,7 @@ mod tests {
     fn incomplete_cleanup_preserves_timeout_failure_evidence() {
         let output = finalize_cleanup_report(
             command_output(false, 124, true),
-            Some(cleanup_report(Some("cleanup after timeout"), None)),
+            Some(cleanup_report("cleanup after timeout")),
         );
 
         assert!(!output.success);
@@ -1256,7 +1233,7 @@ mod tests {
     fn incomplete_cleanup_preserves_cancellation_failure_evidence() {
         let output = finalize_cleanup_report(
             command_output(false, 143, false),
-            Some(cleanup_report(Some("cleanup after cancellation"), None)),
+            Some(cleanup_report("cleanup after cancellation")),
         );
 
         assert!(!output.success);
@@ -1268,10 +1245,7 @@ mod tests {
     fn incomplete_cleanup_preserves_delegated_failure_evidence() {
         let output = finalize_cleanup_report(
             command_output(false, 1, false),
-            Some(cleanup_report(
-                Some("cleanup after delegated failure"),
-                None,
-            )),
+            Some(cleanup_report("cleanup after delegated failure")),
         );
 
         assert!(!output.success);

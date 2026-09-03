@@ -12,7 +12,8 @@ use serde::Serialize;
 
 use classification::{
     is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
-    is_lab_offloadable_fanout_coordinator, is_local_registry_management, is_plan_only_command,
+    is_executable_agent_task_retry, is_lab_offloadable_fanout_coordinator,
+    is_local_registry_management, is_plan_only_command,
 };
 use messages::{
     append_local_placement, lab_routed_controller_notice, primary_action, severity_str,
@@ -67,8 +68,8 @@ pub(crate) fn parsed_command_preflight_input(
         || is_local_registry_management(&cli.command)
     {
         ControllerExecution::ControllerOnly
-    } else if hot_command(&cli.command)
-        .is_some_and(|command| command.allows_warm_runner_coordination)
+    } else if !is_executable_agent_task_retry(&cli.command)
+        && hot_command(&cli.command).is_some_and(|command| command.allows_warm_runner_coordination)
     {
         ControllerExecution::SplitPlacementCoordinator
     } else {
@@ -81,7 +82,11 @@ pub(crate) fn parsed_command_preflight_input(
         Placement::LabOrLocal => PlacementIntent::LabOrLocal,
     };
     let runner = if let Some(runner) = &cli.runner {
-        RunnerIntent::Explicit(runner.clone())
+        if matches!(&cli.command, Commands::Extension(args) if args.is_readiness_repair_command()) {
+            RunnerIntent::ReadinessRepair(runner.clone())
+        } else {
+            RunnerIntent::Explicit(runner.clone())
+        }
     } else if matches!(&cli.command, Commands::Runs(_))
         && normalized_args
             .iter()
@@ -334,6 +339,7 @@ pub(crate) fn lab_readiness_snapshot(
         available_runner_ids: readiness.available_runner_ids.clone(),
         reasons: readiness.reasons.clone(),
         remediation_commands: readiness.remediation_commands.clone(),
+        repair_admitted_runner_ids: Vec::new(),
     }
 }
 
@@ -489,6 +495,25 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
             offload_only_when_hot: false,
+        });
+    }
+
+    // Promotion of a durable controller candidate cannot transfer its mutation,
+    // artifact selection, or finalization authority to Lab. Its deterministic
+    // gate workload is nevertheless portable, so a ready runner admits the
+    // controller coordinator under CPU pressure just as it does for Cook.
+    if matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Promote(args),
+        }) if crate::commands::contract_lab_routing::agent_task_promotion_source_is_controller_owned(&args.source)
+    ) {
+        return Some(HotCommand {
+            label: "agent-task promote",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+            offload_only_when_hot: true,
         });
     }
 
@@ -894,6 +919,31 @@ mod tests {
     use crate::commands::resources::{LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary};
     use crate::test_support::with_isolated_home;
     use clap::Parser;
+
+    #[test]
+    fn executable_agent_task_retry_uses_generic_lab_routing() {
+        use crate::core::parsed_command_preflight::ControllerExecution;
+
+        let args = [
+            "homeboy",
+            "agent-task",
+            "retry",
+            "persisted-lab-run",
+            "--run",
+            "--runner",
+            "homeboy-lab",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&args);
+
+        assert_eq!(
+            parsed_command_preflight_input(&cli, &args).controller_execution,
+            ControllerExecution::Ordinary
+        );
+    }
+
     fn resources(recommendation: ResourceRecommendation) -> DoctorOutput {
         DoctorOutput {
             command: "self.resources",
@@ -1011,6 +1061,7 @@ mod tests {
                             .collect(),
                         reasons: Vec::new(),
                         remediation_commands: Vec::new(),
+                        repair_admitted_runner_ids: Vec::new(),
                     }),
                     selected_runner_id: selected_runner_id.map(str::to_string),
                     generic_route: GenericRoutePolicySnapshot {
@@ -1574,6 +1625,36 @@ mod tests {
     }
 
     #[test]
+    fn continuation_preflight_is_controller_only_and_resource_exempt() {
+        use crate::core::parsed_command_preflight::{
+            ControllerExecution, ResourceAdmissionRequirement,
+        };
+
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "missing-cook",
+            "--preflight",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&args);
+        let preflight = parsed_command_preflight_input(&cli, &args);
+
+        assert_eq!(
+            preflight.controller_execution,
+            ControllerExecution::ControllerOnly
+        );
+        assert_eq!(
+            preflight.resource_admission,
+            ResourceAdmissionRequirement::Exempt
+        );
+        assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
     fn agent_task_cook_batch_dry_run_does_not_start_hot_workloads() {
         let cli = Cli::parse_from([
             "homeboy",
@@ -1775,6 +1856,68 @@ mod tests {
             Some("missing-lab"),
             Some(&ready),
         ));
+    }
+
+    #[test]
+    fn controller_owned_promotion_admits_a_ready_runner_for_portable_gates_when_hot() {
+        with_isolated_home(|_| {
+            let run_id = "promotion-admission-run";
+            crate::agents::agent_tasks::lifecycle::submit_plan(
+                &crate::agents::agent_tasks::AgentTaskPlan::new("fixture", Vec::new()),
+                Some(run_id),
+            )
+            .expect("persist controller-owned promotion source");
+            let cli = Cli::parse_from([
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "promote",
+                run_id,
+                "--to-worktree",
+                "homeboy@promotion-admission",
+                "--verify",
+                "cargo test --lib",
+            ]);
+            let command = hot_command(&cli.command).expect("promotion is resource managed");
+            let preflight = parsed_command_preflight_input(
+                &cli,
+                &[
+                    "homeboy".to_string(),
+                    "--runner".to_string(),
+                    "homeboy-lab".to_string(),
+                    "agent-task".to_string(),
+                    "promote".to_string(),
+                    run_id.to_string(),
+                ],
+            );
+            let ready = ready_lab();
+            let mut resources = coordination_resources();
+            resources.recommendation = ResourceRecommendation::Hot;
+            resources.load.recommendation = ResourceRecommendation::Hot;
+
+            assert_eq!(command.label, "agent-task promote");
+            assert!(command.lab_offload_supported);
+            assert!(command.allows_warm_runner_coordination);
+            assert_eq!(
+                preflight.controller_execution,
+                crate::core::parsed_command_preflight::ControllerExecution::SplitPlacementCoordinator,
+            );
+            assert!(matches!(
+                preflight.lab_route,
+                crate::core::parsed_command_preflight::LabRouteIntent::Unsupported
+            ));
+            assert!(admits_warm_runner_coordination(
+                command,
+                &resources,
+                cli.runner.as_deref(),
+                Some(&ready),
+            ));
+            assert!(
+                !admits_warm_runner_coordination(command, &resources, None, Some(&ready)),
+                "an unpinned controller-owned promotion must not treat a ready Lab as local capacity"
+            );
+        });
     }
 
     /// #13631/#13632: an operator who explicitly pins `--runner homeboy-lab`
@@ -2331,82 +2474,6 @@ mod tests {
             .message
             .contains("homeboy runner reconnect homeboy-lab"));
         assert!(error.message.contains("requires a ready Lab runner"));
-    }
-
-    #[test]
-    fn absent_lab_recovery_is_replayable_without_runner_repair() {
-        let absent = LabRunnerReadiness {
-            state: crate::runner::runners::LabRunnerReadinessState::Absent,
-            selected_runner_id: None,
-            available_runner_ids: Vec::new(),
-            reasons: Vec::new(),
-            // An intentionally absent Lab must ignore even stale-looking
-            // remediation supplied by an upstream inventory projection.
-            remediation_commands: vec!["homeboy runner disconnect homeboy-lab".to_string()],
-        };
-        let recovery = admission_recovery(
-            &[
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "fix resource admission".to_string(),
-            ],
-            Some(&absent),
-        )
-        .expect("argv produces recovery");
-
-        let value = serde_json::to_value(&recovery).expect("recovery serializes");
-        assert_eq!(value["schema"], RESOURCE_ADMISSION_RECOVERY_SCHEMA);
-        assert_eq!(value["run_created"], false);
-        assert_eq!(value["choices"][0]["kind"], "defer");
-        assert_eq!(value["choices"][0]["retry_after_seconds"], 60);
-        assert_eq!(value["choices"][1]["kind"], "retry");
-        assert_eq!(
-            value["choices"][1]["command"],
-            "homeboy agent-task cook --prompt 'fix resource admission'"
-        );
-        assert!(value["choices"][1]
-            .get("requires_operator_authorization")
-            .is_none());
-        assert_eq!(value["choices"][2]["kind"], "local_override");
-        assert_eq!(value["choices"].as_array().expect("choices").len(), 3);
-
-        let warning = evaluate_with_runner_hint(
-            lab_supported_hot("agent-task cook/run-plan/retry --run"),
-            &resources(ResourceRecommendation::Hot),
-            Some(&absent),
-        )
-        .expect("hot controller warns");
-        let error = non_interactive_preflight_error(&warning, false, false, Some(recovery), false)
-            .expect("pre-run admission refuses execution");
-        assert_eq!(error.details["run_created"], false);
-        assert_eq!(
-            error.details["rerun_command"],
-            "homeboy agent-task cook --prompt 'fix resource admission'"
-        );
-        assert!(error.details.get("resume_command").is_none());
-        assert_eq!(
-            error.details["recovery"]["schema"],
-            RESOURCE_ADMISSION_RECOVERY_SCHEMA
-        );
-        assert_eq!(error.details["recovery"]["run_created"], false);
-        assert_eq!(
-            error.details["recovery"]["choices"][1]["command"],
-            error.details["rerun_command"]
-        );
-        assert!(error
-            .message
-            .contains("No configured Homeboy Lab runner is expected"));
-        assert!(!error.message.contains("Follow the listed runner recovery"));
-        assert!(error.details["recovery"]["choices"]
-            .as_array()
-            .expect("serialized recovery choices")
-            .iter()
-            .all(|choice| choice["command"] != "homeboy runner disconnect homeboy-lab"));
-        assert!(!warning
-            .message
-            .contains("homeboy runner disconnect homeboy-lab"));
     }
 
     #[test]

@@ -9,8 +9,9 @@ use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{component, Error, Result};
 
 use super::lab_workspaces_deps::{
-    accepted_extra_lab_workspaces, add_candidate_extra_workspace, bare_module_imports,
-    canonical_existing_dir, component_contract_candidate_paths, containing_checkout_or_parent,
+    accepted_extra_lab_workspaces, add_candidate_extra_workspace,
+    add_candidate_extra_workspace_with_git_fetch_refs, bare_module_imports, canonical_existing_dir,
+    component_contract_candidate_paths, containing_checkout_or_parent,
     discovered_validation_dependency_workspaces, provider_config_candidate_paths,
     provider_config_source_cli_files,
 };
@@ -19,6 +20,7 @@ use super::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 use crate::rig_materialization::LabStackComponentMaterialization;
+use crate::workspace::git_output;
 
 pub(super) const LAB_EXTRA_WORKSPACES_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES";
 pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON";
@@ -64,6 +66,10 @@ impl LabWorkspaceMappingEntry {
     pub(super) fn dependency_freshness(&self) -> Option<&serde_json::Value> {
         self.dependency_freshness.as_ref()
     }
+
+    pub(super) fn sync_mode(&self) -> &str {
+        &self.sync_mode
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +77,7 @@ pub(super) struct ExtraLabWorkspace {
     pub(super) role: String,
     pub(super) path: PathBuf,
     pub(super) snapshot_includes: Vec<String>,
+    pub(super) git_fetch_refs: Vec<String>,
     pub(super) allow_dirty_lab_workspace: bool,
     pub(super) source_provenance: Option<serde_json::Value>,
 }
@@ -162,7 +169,7 @@ pub(super) fn sync_extra_lab_workspaces(
     primary_local_path: &str,
     extra_workspaces: Vec<ExtraLabWorkspace>,
     workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
-) -> Result<Vec<LabWorkspaceMappingEntry>> {
+) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
     let primary = canonical_existing_dir(primary_local_path, "path")?;
     let mut seen = HashSet::from([primary]);
     let mut synced_entries = Vec::new();
@@ -176,10 +183,10 @@ pub(super) fn sync_extra_lab_workspaces(
             runner_id,
             RunnerWorkspaceSyncOptions {
                 path: local_path.display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
+                mode: extra_workspace_sync_mode(&local_path),
                 controller_routed_git: false,
                 changed_since_base: None,
-                git_fetch_refs: Vec::new(),
+                git_fetch_refs: extra.git_fetch_refs.clone(),
                 snapshot_includes: extra.snapshot_includes.clone(),
                 allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
                 run_isolation_token: None,
@@ -189,10 +196,21 @@ pub(super) fn sync_extra_lab_workspaces(
         let mut entry = workspace_mapping_entry(&extra.role, &synced);
         entry.source_provenance = extra.source_provenance.clone();
         workspace_mapping.push(entry.clone());
-        synced_entries.push(entry);
+        synced_entries.push(synced);
     }
 
     Ok(synced_entries)
+}
+
+fn extra_workspace_sync_mode(path: &Path) -> RunnerWorkspaceSyncMode {
+    if matches!(
+        git_output(path, &["rev-parse", "--is-inside-work-tree"]).as_deref(),
+        Ok("true")
+    ) {
+        RunnerWorkspaceSyncMode::SnapshotGit
+    } else {
+        RunnerWorkspaceSyncMode::Snapshot
+    }
 }
 
 pub(super) fn workspace_mapping_entry(
@@ -248,7 +266,6 @@ pub(super) fn workspace_mapping_entry_for_validation_dependency(
         dependency_freshness: Some(serde_json::json!({
             "id": dependency.id.as_str(),
             "local_path": dependency.local_path.as_str(),
-            "evidence_path": dependency.evidence_path.as_str(),
             "source_provenance": "validation_dependency_sibling",
         })),
         source_provenance: None,
@@ -432,6 +449,7 @@ pub(super) fn parse_runtime_overlays(
                 role,
                 path,
                 snapshot_includes: spec.snapshot_includes,
+                git_fetch_refs: Vec::new(),
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             },
@@ -737,6 +755,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
                         role: "agent_task_plan".to_string(),
                         path: canon,
                         snapshot_includes: Vec::new(),
+                        git_fetch_refs: Vec::new(),
                         allow_dirty_lab_workspace: false,
                         source_provenance: None,
                     });
@@ -753,6 +772,44 @@ pub(super) fn agent_task_plan_extra_workspaces(
         Ok(value) => value,
         Err(_) => return Ok(workspaces),
     };
+    // A derived Cook baseline can be the primary Lab source while its plan
+    // still targets the issue worktree it was derived from. Materialize that
+    // target separately so committed harvest selects its own provenance.
+    for task in value
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = task
+            .pointer("/workspace/root")
+            .and_then(serde_json::Value::as_str)
+        {
+            let git_fetch_refs = task
+                .pointer("/metadata/cook_workspace_base_snapshot")
+                .filter(|snapshot| {
+                    snapshot.get("schema").and_then(serde_json::Value::as_str)
+                        == Some("homeboy/cook-workspace-base-snapshot/v1")
+                        && snapshot.get("mode").and_then(serde_json::Value::as_str)
+                            == Some("isolated_attempt_snapshot")
+                })
+                .and_then(|snapshot| snapshot.get("resolved_base"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|base| {
+                    base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(|base| vec![base.to_string()])
+                .unwrap_or_default();
+            add_candidate_extra_workspace_with_git_fetch_refs(
+                path,
+                "agent_task_plan_workspace",
+                &source_canon,
+                &mut seen,
+                &mut workspaces,
+                &git_fetch_refs,
+            )?;
+        }
+    }
     for candidate in component_contract_candidate_paths(&value) {
         add_candidate_extra_workspace(
             &candidate,
@@ -1168,6 +1225,7 @@ fn add_candidate_workspace_ref_extra_workspace(
         role: "path_setting_workspace_ref".to_string(),
         path: canon,
         snapshot_includes: Vec::new(),
+        git_fetch_refs: Vec::new(),
         allow_dirty_lab_workspace: false,
         source_provenance: Some(serde_json::json!({
             "source_provenance": "workspace_ref",
@@ -1418,9 +1476,10 @@ fn fanout_workspace_candidate_path(value: &str, source_path: &Path) -> Option<Pa
             return Some(source_relative);
         }
     }
-    homeboy_core::worktree_provider::observe_worktree_provider_workspace(value)
+    homeboy_core::worktree_provider::resolve_worktree_ownership_if_present(value)
         .ok()
-        .map(|workspace| PathBuf::from(workspace.ownership.path))
+        .flatten()
+        .map(|workspace| PathBuf::from(workspace.path))
         .filter(|path| path.is_dir())
 }
 

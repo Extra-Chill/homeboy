@@ -791,7 +791,7 @@ fn stale_active_daemon_without_a_matching_session_fails_closed_without_replacing
     ));
     assert_eq!(
         recovery.adoption_command.as_deref(),
-        Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner")
+        Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans")
     );
 }
 
@@ -838,9 +838,7 @@ fn remote_dead_lease_recovery_exposes_exact_adoption_command() {
     );
     assert_eq!(
         recovery.adoption_command.as_deref(),
-        Some(
-            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
-        )
+        Some("homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead")
     );
 }
 
@@ -943,7 +941,7 @@ fn remote_missing_or_corrupt_lease_with_active_jobs_exposes_bounded_reconciliati
         );
         assert_eq!(
             recovery.adoption_command.as_deref(),
-            Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner"),
+            Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans"),
             "{reason:?}"
         );
         assert!(recovery
@@ -980,7 +978,7 @@ fn remote_recovery_repair_plan_carries_the_lease_specific_action() {
         plan_of(&recovery),
         vec![(
             "runner_adopt_orphan_lease",
-            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
+            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead"
         )]
     );
     // The plan and the adoption command are one action in two shapes; they must
@@ -1004,7 +1002,7 @@ fn remote_recovery_repair_plan_carries_the_lease_specific_action() {
         plan_of(&recovery),
         vec![(
             "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner"
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans"
         )]
     );
 
@@ -1200,22 +1198,14 @@ fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}},{{"id":"daemon-recovery-state-loss","version":1}}]}}}}'
 ;;
 "daemon reconcile-leaseless-orphans")
-if [ "$3" = "--help" ]; then
-   printf '%s\n' 'OPTIONS:' '    --confirm-no-daemon-owner' '    --replacement-operation-id <ID>'
-else
   printf '%s\n' "$@" > "$HOMEBOY_TEST_RECOVERY_ARGV"
    printf '%s\n' '{{"success":true,"data":{{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":42,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}}}'
-fi
  ;;
 "daemon recover-missing-lease-state")
-   if [ "$3" = "--help" ]; then
-     printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
-   else
    printf '%s\n' '{{"success":true,"data":{{"recovered_lease_id":"lease-interrupted","recorded_dead_pid":41,"recorded_endpoint":"127.0.0.1:7419","affected_job_ids":[],"affected_job_count":0,"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":42,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}}}'
-   fi
  ;;
    "daemon status") exit 99 ;;
 esac
@@ -1253,12 +1243,40 @@ esac
         )
         .expect("enable local runner");
 
+        crate::runner_probe_gate::invalidate_runner_probes("local-runner");
+        let probes = Arc::new(AtomicUsize::new(0));
+        let stale_probes = Arc::clone(&probes);
+        let cached: String = crate::runner_probe_gate::deduplicated_probe(
+            "local-runner",
+            "connect-invalidation",
+            "same-runtime-probe",
+            move || {
+                stale_probes.fetch_add(1, Ordering::SeqCst);
+                Ok("missing".to_string())
+            },
+        )
+        .expect("cache pre-connect capability answer");
+        assert_eq!(cached, "missing");
+
         let (report, exit_code) =
             connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
                 .expect("connect result");
 
         assert_eq!(exit_code, 0);
         assert!(report.connected);
+        let fresh_probes = Arc::clone(&probes);
+        let refreshed: String = crate::runner_probe_gate::deduplicated_probe(
+            "local-runner",
+            "connect-invalidation",
+            "same-runtime-probe",
+            move || {
+                fresh_probes.fetch_add(1, Ordering::SeqCst);
+                Ok("present".to_string())
+            },
+        )
+        .expect("probe post-connect capability answer");
+        assert_eq!(refreshed, "present");
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
         assert_eq!(
             report.remote_daemon_address.as_deref(),
             Some(expected_address.as_str())
@@ -1318,9 +1336,9 @@ esac
             "lease-new"
         );
         let argv = std::fs::read_to_string(argv_path).expect("read dispatched recovery argv");
-        assert!(argv.starts_with(
-            "daemon\nreconcile-leaseless-orphans\n--confirm-no-daemon-owner\n--replacement-operation-id\n"
-        ));
+        assert!(
+            argv.starts_with("daemon\nreconcile-leaseless-orphans\n--replacement-operation-id\n")
+        );
         assert!(argv.ends_with("\n--addr\n127.0.0.1:0\n"));
         let (state_loss_report, state_loss_exit) = connect_with_orphan_adoption(
             "local-runner",
@@ -1378,7 +1396,7 @@ fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}}]}}}}'
     ;;
   "daemon status")
     printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
@@ -1565,15 +1583,11 @@ case "$1 $2" in
     printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
     ;;
   "daemon reconcile-leaseless-orphans")
-    if [ "$3" = "--help" ]; then
-      printf '%s\n' 'OPTIONS:' '    --confirm-no-daemon-owner' '    --replacement-operation-id <ID>'
-    else
       count=0
       if [ -f "{generation_count}" ]; then count=$(cat "{generation_count}"); fi
       count=$((count + 1))
       printf '%s' "$count" > "{generation_count}"
       printf '%s\n' '{{"success":true,"data":{{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}}}'
-    fi
     ;;
   "daemon status") exit 99 ;;
 esac
@@ -1958,123 +1972,32 @@ fn state_loss_recovery_delegation_uses_the_canonical_exact_contract() {
     );
     assert_eq!(
         command,
-        "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --confirm-pid-dead --confirm-control-plane-lost --replacement-operation-id operation-1 --addr 127.0.0.1:0"
+        "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --replacement-operation-id operation-1 --addr 127.0.0.1:0"
     );
-}
-
-#[test]
-fn leaseless_recovery_uses_confirm_no_daemon_owner_contract() {
-    let contract = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n",
-        false,
-    ))
-    .expect("one-flag contract");
-
-    assert_eq!(
-        contract,
-        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
-    );
-    let command =
-        remote_leaseless_recovery_command("/opt/homeboy", "127.0.0.1:0", contract, "operation-1");
-    assert!(command.contains("--confirm-no-daemon-owner"));
-    assert!(!command.contains("--reconcile-leaseless-orphans"));
-    assert!(!command.contains("--confirm-control-plane-lost"));
-}
-
-#[test]
-fn leaseless_recovery_rejects_legacy_two_flag_contract() {
-    let error = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n",
-        false,
-    ))
-    .expect_err("legacy two-flag contract is unsupported");
-    assert!(error.contains("canonical"));
-}
-
-#[test]
-fn leaseless_recovery_rejects_control_plane_lost_contract() {
-    let error = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --confirm-control-plane-lost\n",
-        false,
-    ))
-    .expect_err("legacy control-plane-lost contract is unsupported");
-    assert!(error.contains("canonical"));
-}
-
-#[test]
-fn leaseless_recovery_refuses_unsupported_or_ambiguous_help() {
-    let unsupported = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --addr <ADDR>\n",
-        false,
-    ))
-    .expect_err("unsupported contract");
-    assert!(unsupported.contains("did not advertise"));
-
-    let ambiguous = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --confirm-control-plane-lost\n",
-        false,
-    ))
-    .expect_err("mixed legacy flags are unsupported");
-    assert!(ambiguous.contains("canonical"));
-}
-
-#[test]
-fn leaseless_recovery_parses_only_exact_option_declarations() {
-    let options = declared_long_options(
-        "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --addr <ADDR>\n",
-    );
-    assert!(options.contains("--reconcile-leaseless-orphans"));
-    assert!(options.contains("--confirm-no-daemon-owner"));
-    assert!(options.contains("--addr"));
-
-    let prose = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "Examples:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n",
-        false,
-    ))
-    .expect_err("example lines must not advertise a contract");
-    assert!(prose.contains("did not advertise"));
-
-    let prose = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "Options:\n    --reconcile-leaseless-orphans after inspection\n    --confirm-no-daemon-owner after inspection\n",
-        false,
-    ))
-    .expect_err("prose in the options section must not advertise a contract");
-    assert!(prose.contains("did not advertise"));
 }
 
 #[test]
 fn leaseless_recovery_evidence_records_selected_contract_and_command_identity() {
-    for (help, expected_contract) in [(
-        "Options:\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n",
+    let evidence = leaseless_recovery_evidence(
         RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
-    )] {
-        let contract = negotiate_leaseless_recovery_contract(&command_output(true, help, false))
-            .expect("advertised contract");
-        let evidence = leaseless_recovery_evidence(
-            contract,
-            "homeboy 0.284.1+abc123",
-            sample_leaseless_recovery(),
-        );
+        "homeboy 0.284.1+abc123",
+        sample_leaseless_recovery(),
+    );
 
-        assert_eq!(evidence.contract, expected_contract);
-        assert_eq!(evidence.remote_command_identity, "homeboy 0.284.1+abc123");
-        assert_eq!(
-            evidence
-                .recovery
-                .as_ref()
-                .expect("recovery result")
-                .replacement
-                .lease_id,
-            "lease-new"
-        );
-    }
+    assert_eq!(
+        evidence.contract,
+        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
+    );
+    assert_eq!(evidence.remote_command_identity, "homeboy 0.284.1+abc123");
+    assert_eq!(
+        evidence
+            .recovery
+            .as_ref()
+            .expect("recovery result")
+            .replacement
+            .lease_id,
+        "lease-new"
+    );
 }
 
 // NOTE: the test asserting generated recovery commands parse against the real
@@ -2152,35 +2075,15 @@ fn hanging_ssh_connect_is_classified_as_a_timeout() {
 }
 
 #[test]
-fn leaseless_recovery_refuses_failed_or_timed_out_probe() {
-    let failed =
-        negotiate_leaseless_recovery_contract(&command_output(false, String::new(), false))
-            .expect_err("failed probe");
-    assert!(failed.contains("capability probe failed"));
-
-    let timed_out =
-        negotiate_leaseless_recovery_contract(&command_output(false, String::new(), true))
-            .expect_err("timed out probe");
-    assert!(timed_out.contains("timed out"));
-}
-
-#[test]
-fn leaseless_recovery_does_not_mutate_before_successful_negotiation() {
-    let events = std::cell::RefCell::new(Vec::new());
-    let result = execute_remote_leaseless_recovery(
-        None,
-        || {
-            events.borrow_mut().push("probe");
-            command_output(true, "OPTIONS:\n    --addr <ADDR>\n", false)
-        },
-        |_| {
-            events.borrow_mut().push("recover");
-            command_output(true, String::new(), false)
-        },
-    );
+fn leaseless_recovery_requires_typed_capability_before_mutation() {
+    let recovered = std::cell::Cell::new(false);
+    let result = execute_remote_leaseless_recovery(None, |_| {
+        recovered.set(true);
+        command_output(true, String::new(), false)
+    });
 
     assert!(result.is_err());
-    assert_eq!(*events.borrow(), vec!["probe"]);
+    assert!(!recovered.get());
 }
 
 #[test]
@@ -2200,14 +2103,13 @@ fn lost_local_session_refuses_unreachable_daemon_with_active_jobs() {
 }
 
 #[test]
-fn orphan_adoption_command_carries_exact_lease_and_dead_pid_confirmation() {
+fn orphan_adoption_command_carries_exact_lease_and_untracked_child_confirmation() {
     let job_id =
         uuid::Uuid::parse_str("fbac0390-dbb1-464b-8716-0894ccc05f2f").expect("valid job ID");
     let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead", &[job_id]);
 
     assert!(command.contains("daemon adopt-orphan"));
     assert!(command.contains("--lease-id 'lease dead'"));
-    assert!(command.contains("--confirm-pid-dead"));
     assert!(command.contains("--confirm-untracked-child-dead fbac0390-dbb1-464b-8716-0894ccc05f2f"));
 }
 
@@ -2484,23 +2386,11 @@ fn stale_replacement_force_stop_rejects_a_success_envelope_without_stop_action()
 
 #[test]
 fn unleased_candidate_reconciliation_requires_a_negotiated_contract() {
-    let output = || {
-        homeboy_core::server::CommandOutput {
-        success: true,
-        stdout: "Options:\n    --apply\n    --addr <ADDR>\n    --replacement-operation-id <REPLACEMENT_OPERATION_ID>\n".to_string(),
-        stderr: String::new(),
-        exit_code: 0,
-        timed_out: false,
-        observation: Default::default(),
-        child_resource: None,
-    }
-    };
-    negotiate_unleased_candidate_reconciliation(None, output)
-        .expect("legacy help advertises the canonical contract");
+    let error = negotiate_unleased_candidate_reconciliation(None)
+        .expect_err("remote without typed capabilities requires upgrade");
+    assert!(error.contains("must be upgraded"));
 
-    let error = negotiate_unleased_candidate_reconciliation(Some(&[]), || {
-        unreachable!("typed capability absence must not fall back to help")
-    })
-    .expect_err("current remote without capability requires upgrade");
+    let error = negotiate_unleased_candidate_reconciliation(Some(&[]))
+        .expect_err("typed capability absence requires upgrade");
     assert!(error.contains("must be upgraded"));
 }

@@ -3,10 +3,12 @@ use crate::{
     RunnerActiveJobSource, RunnerActiveJobState, RunnerSession, RunnerSessionRole,
     RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
 };
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use homeboy_core::runner_execution_envelope::{
-    PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-    PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
+use homeboy_core::{notification_route::NotificationRoute, observation::RunRecord};
+use homeboy_lab_contract::path_materialization::PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,6 +23,42 @@ fn extension_runtime_home_keeps_homeboy_data_on_the_runner() {
         durable_homeboy_data_dir_for_job(&job_env, Some("/runner/home"), Some(durable.clone())),
         Some(durable)
     );
+}
+
+#[test]
+fn detached_wrapper_terminal_notification_projects_the_nested_failed_run() {
+    let wrapper_run_id = "detached-wrapper";
+    let nested_run_id = "nested-authoritative-run";
+    let nested_run = RunRecord {
+        id: nested_run_id.to_string(),
+        kind: "runner_exec".to_string(),
+        status: "fail".to_string(),
+        command: Some("homeboy agent-task cook --backend fixture".to_string()),
+        ..Default::default()
+    };
+    let route = NotificationRoute::new("fixture", "thread-14060").expect("route");
+
+    let notification_run_id =
+        super::terminal_notification_run_id(Some(nested_run_id), Some(wrapper_run_id))
+            .expect("nested run owns the terminal notification");
+    let event = super::runner_direct_notification_event(
+        notification_run_id,
+        "running",
+        &route,
+        Some(&nested_run),
+    );
+    let payload = event.payload.expect("terminal payload");
+
+    assert_eq!(event.run_id, nested_run_id);
+    assert_eq!(event.status, "fail");
+    assert_eq!(event.title, "homeboy run fail");
+    assert_eq!(payload.subject.expect("subject").id, nested_run_id);
+    assert_eq!(payload.facts[0].label, "Status");
+    assert_eq!(payload.facts[0].value, "fail");
+    assert!(payload
+        .actions
+        .iter()
+        .any(|action| { action.command == format!("homeboy runs evidence {nested_run_id}") }));
 }
 
 #[test]
@@ -1289,8 +1327,12 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
             std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
                 .expect("provider executable");
         }
-        homeboy_extension::install(&extension.path().display().to_string(), Some("fixture"))
-            .expect("install provider fixture");
+        homeboy_core::extension::lifecycle::install(
+            &extension.path().display().to_string(),
+            Some("fixture"),
+            ExtensionLifecycleValidation::declaration_only(),
+        )
+        .expect("install provider fixture");
 
         let (output, exit_code) = exec(
             "lab-local",

@@ -6,7 +6,7 @@ use homeboy::fuzz::{
     fuzz_gate_profile_contract, merge_fuzz_target_inventory, parse_fuzz_target_inventory_file,
     FuzzGateProfile, FuzzProvenance, FuzzTargetInventory, FUZZ_PROVENANCE_SCHEMA,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::CmdResult;
 use super::compare::run_compare;

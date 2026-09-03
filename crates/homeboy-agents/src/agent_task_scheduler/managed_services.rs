@@ -219,7 +219,7 @@ impl AgentTaskServiceSupervisor {
         spec.port = port;
         let local_url = spec.port.map(|port| format!("http://{}:{port}", spec.host));
         let launch_token = uuid::Uuid::new_v4().to_string();
-        let owner_runner_id = std::env::var(homeboy_lab_runner_contract::RUNNER_ID_ENV).ok();
+        let owner_runner_id = std::env::var(homeboy_runner_contract::RUNNER_ID_ENV).ok();
         let owner_runner_job_id = std::env::var("HOMEBOY_RUNNER_JOB_ID").ok();
         let mut record = AgentTaskManagedServiceRecord {
             id: spec.id.clone(),

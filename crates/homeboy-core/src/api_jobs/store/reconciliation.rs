@@ -478,7 +478,7 @@ impl JobStore {
                 stored
                     .remote_runner
                     .as_ref()
-                    .and_then(|remote| remote.request.lifecycle.as_ref())
+                    .and_then(|remote| remote.envelope.lifecycle.as_ref())
                     .and_then(|lifecycle| lifecycle.durable_run_id.clone())
                     .map(LinkedDurableRunResolution::Unresolved)
                     .unwrap_or(LinkedDurableRunResolution::None)
@@ -993,7 +993,7 @@ impl JobStore {
                     .map(|remote| {
                         super::super::summary::active_runner_job_summary(
                             &stored.job,
-                            &remote.request,
+                            &remote.envelope,
                             now,
                         )
                     })
@@ -1015,19 +1015,14 @@ impl JobStore {
         jobs
     }
 
-    /// The already-enqueued, non-terminal job for a controller `durable_run_id`,
-    /// if one exists.
-    ///
-    /// A daemon `/exec` submission is not idempotent at the transport layer: a
-    /// dropped connection or timeout can hide that the daemon already accepted
-    /// the request. The controller-minted `durable_run_id` is a stable key for
-    /// the unit of work, so the daemon can treat a resubmission carrying the same
-    /// key as a no-op that returns the existing job instead of enqueuing a
-    /// duplicate. Only `Queued`/`Running` jobs are considered — a terminal job
-    /// for the same run id is finished, so a resubmission is a genuinely new
-    /// attempt and must enqueue a fresh job.
-    pub(crate) fn active_runner_job_for_durable_run_id(&self, durable_run_id: &str) -> Option<Job> {
-        if durable_run_id.trim().is_empty() {
+    /// The active execution admitted under a caller-owned transport submission
+    /// key. Capacity reservations use the same key but must be consumed rather
+    /// than returned as the accepted execution.
+    pub(crate) fn active_execution_job_for_admission_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Option<Job> {
+        if idempotency_key.trim().is_empty() {
             return None;
         }
         let inner = self.inner.lock().expect("job store mutex poisoned");
@@ -1035,9 +1030,8 @@ impl JobStore {
             .jobs
             .values()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
-            .filter(|stored| stored_job_durable_run_id(stored).as_deref() == Some(durable_run_id))
-            // Deterministic across a resubmission race: the oldest active job for
-            // the run id is the canonical one to return.
+            .filter(|stored| stored.job.operation != "runner.admission")
+            .filter(|stored| stored.admission_idempotency_key.as_deref() == Some(idempotency_key))
             .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
             .map(|stored| stored.job.clone())
     }
@@ -1052,10 +1046,10 @@ impl JobStore {
                 stored.job.status == JobStatus::Failed && stored.job.stale_reason.is_some()
             })
             .filter_map(|stored| {
-                let request = stored.remote_runner.as_ref()?.request.clone();
+                let envelope = &stored.remote_runner.as_ref()?.envelope;
                 Some(super::super::summary::active_runner_job_summary(
                     &stored.job,
-                    &request,
+                    envelope,
                     now,
                 ))
             })

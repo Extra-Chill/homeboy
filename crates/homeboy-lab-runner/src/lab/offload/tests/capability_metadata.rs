@@ -111,6 +111,7 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot:abc".to_string(),
+        workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts {
             files: 3,
@@ -166,6 +167,7 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         ),
         sync_mode: RunnerWorkspaceSyncMode::Git,
         snapshot_identity: "abc123".to_string(),
+        workspace_ref: "workspace:00000000-0000-0000-0000-000000000002".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts::default(),
         excludes: Vec::new(),
@@ -305,6 +307,7 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         &mut metadata,
         LabWorkspaceMetadataInputs {
             source_snapshot: &missing_source_path,
+            workspace_snapshots: &[missing_source_path.clone()],
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced_workspace,
         },
@@ -315,6 +318,7 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         &mut metadata,
         LabWorkspaceMetadataInputs {
             source_snapshot: &snapshot,
+            workspace_snapshots: &[snapshot.clone()],
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced_workspace,
         },
@@ -478,6 +482,7 @@ fn primary_synced_workspace(
         ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot:verified".to_string(),
+        workspace_ref: "workspace:00000000-0000-0000-0000-000000000003".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts::default(),
         excludes: vec!["excluded.txt".to_string()],
