@@ -18661,6 +18661,22 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
             .unwrap();
 
+        let mut invalid_provenance = supplied_test_review_form();
+        invalid_provenance.tool = "OpenCode\ninvalid".to_string();
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(invalid_provenance),
+            Vec::new(),
+            false,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("invalid reviewer-visible provenance cannot create a receipt");
+        assert!(agent_task_lifecycle::reconcile_status(run_id)
+            .unwrap()
+            .metadata
+            .get("recovery_review_form")
+            .is_none());
+
         agent_task_lifecycle::fail_next_record_write_for_test();
         let mut failed_persistence_backend = CaptureBackend {
             synthetic_gate_proof: Some(applied.clone()),
@@ -18728,6 +18744,43 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             serde_json::to_value(&record.metadata["latest_promotion"]["deterministic_gates"])
                 .unwrap()
         );
+    });
+}
+
+#[test]
+fn concurrent_conflicting_recovery_receipts_admit_only_one_submission() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-9866-concurrent-attempt-1";
+        let plan = AgentTaskPlan::new("cook-9866-concurrent", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        let store = test_lifecycle_store();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let left_store = store.clone();
+        let right_store = store.clone();
+        let left_barrier = barrier.clone();
+        let right_barrier = barrier.clone();
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            left_store.compare_and_set_metadata_value(
+                run_id,
+                "recovery_review_form",
+                serde_json::json!({ "submission": { "operator": "operator-a" } }),
+            )
+        });
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            right_store.compare_and_set_metadata_value(
+                run_id,
+                "recovery_review_form",
+                serde_json::json!({ "submission": { "operator": "operator-b" } }),
+            )
+        });
+        let left = left.join().unwrap();
+        let right = right.join().unwrap();
+        assert!(left.is_ok() ^ right.is_ok());
+        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
+        let operator = &record.metadata["recovery_review_form"]["submission"]["operator"];
+        assert!(operator == "operator-a" || operator == "operator-b");
     });
 }
 
