@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.9] - 2026-09-03
+
+### Changed
+- simplify proof dependencies
+- centralize aggregate transitions
+- collapse control-plane dispatch
+- Gate Lab provider readiness on extension parity
+
+### Fixed
+- embed owned remote payload once
+- let scoped continuations finish
+- admit local refresh on controller
+- normalize readiness diagnostics
+- fence cancelled Cook retries
+- converge stale local daemon
+- pin preview base for replay
+- avoid unsafe ahead guidance
+- bound cancel output
+- return update help locally
+- project refresh typed failures
+- admit runner-skewed cooks to upgrade
+- reconcile active job ownership
+- disambiguate finalization components
+- preserve Cook repository paths
+- Fix readiness contract compile gates
+
 ## [0.367.8] - 2026-09-03
 
 ### Fixed
