@@ -188,17 +188,23 @@ RECOVERY_ARTIFACTS="$(echo "${PAYLOAD}" | jq -c '
 ')"
 
 RECOVERY_ARTIFACT_COUNT="$(echo "${RECOVERY_ARTIFACTS}" | jq 'length')"
-if [[ "${RECOVERY_ARTIFACT_COUNT}" -gt 1 ]]; then
-  echo "Error: release payload contains multiple WordPress ZIP recovery artifacts" >&2
-  exit 1
-fi
-
 if [[ "${RECOVERY_ARTIFACT_COUNT}" -eq 1 ]]; then
   if ! echo "${RECOVERY_ARTIFACTS}" | jq -e '.[0].path | type == "string" and length > 0' >/dev/null; then
     echo "Error: WordPress ZIP recovery artifact path must be a non-empty string" >&2
     exit 1
   fi
   ARTIFACT_PATH="$(echo "${RECOVERY_ARTIFACTS}" | jq -r '.[0].path')"
+elif [[ "${RECOVERY_ARTIFACT_COUNT}" -gt 1 ]]; then
+  if ! echo "${RECOVERY_ARTIFACTS}" | jq -e 'all(.[]; (.path | type) == "string" and (.path | length) > 0)' >/dev/null; then
+    echo "Error: WordPress ZIP recovery artifact path must be a non-empty string" >&2
+    exit 1
+  fi
+  PRIMARY_RECOVERY_ARTIFACTS="$(echo "${RECOVERY_ARTIFACTS}" | jq -c --arg primary "${COMPONENT_SLUG}.zip" '[.[] | select((.path | split("/") | last) == $primary)]')"
+  if [[ "$(echo "${PRIMARY_RECOVERY_ARTIFACTS}" | jq 'length')" -ne 1 ]]; then
+    echo "Error: multiple WordPress ZIP recovery artifacts require exactly one canonical ${COMPONENT_SLUG}.zip primary artifact" >&2
+    exit 1
+  fi
+  ARTIFACT_PATH="$(echo "${PRIMARY_RECOVERY_ARTIFACTS}" | jq -r '.[0].path')"
 else
   ARTIFACT_PATH="build/${COMPONENT_SLUG}.zip"
 fi
@@ -206,6 +212,20 @@ fi
 if [[ ! -f "${ARTIFACT_PATH}" ]]; then
   echo "Error: expected release artifact at ${ARTIFACT_PATH}" >&2
   exit 1
+fi
+
+ADDITIONAL_ARTIFACT_PATHS_JSON="[]"
+ADDITIONAL_ARTIFACT_PATHS=()
+if [[ "${RECOVERY_ARTIFACT_COUNT}" -gt 1 ]]; then
+  ADDITIONAL_ARTIFACT_PATHS_JSON="$(echo "${RECOVERY_ARTIFACTS}" | jq -c --arg primary_path "${ARTIFACT_PATH}" '[.[] | select(.path != $primary_path) | .path]')"
+  while IFS= read -r additional_artifact_path; do
+    [[ -n "${additional_artifact_path}" ]] || continue
+    if [[ ! -f "${additional_artifact_path}" ]]; then
+      echo "Error: expected additional release artifact at ${additional_artifact_path}" >&2
+      exit 1
+    fi
+    ADDITIONAL_ARTIFACT_PATHS+=("${additional_artifact_path}")
+  done < <(echo "${ADDITIONAL_ARTIFACT_PATHS_JSON}" | jq -r '.[]')
 fi
 
 # A component that opted into package provenance must publish its sealed
@@ -306,8 +326,18 @@ resolve_github_token
 EXPECTED_VERSION="${TAG##*v}"
 bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" >/dev/null
 echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION} (tag ${TAG})" >&2
+for additional_artifact_path in "${ADDITIONAL_ARTIFACT_PATHS[@]}"; do
+  bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${additional_artifact_path}" "${EXPECTED_VERSION}" >/dev/null
+  echo "Verified ${additional_artifact_path} contains version ${EXPECTED_VERSION} (tag ${TAG})" >&2
+done
 
-echo "Uploading ${ARTIFACT_PATH}${SIDECAR_PATH:+ and ${SIDECAR_PATH}} to ${REPO_SLUG} release ${TAG}..." >&2
+echo "Uploading ${ARTIFACT_PATH}${SIDECAR_PATH:+ and ${SIDECAR_PATH}} plus ${#ADDITIONAL_ARTIFACT_PATHS[@]} additional package(s) to ${REPO_SLUG} release ${TAG}..." >&2
+
+# Upload profile variants first so the canonical package remains the final
+# publication signal for consumers that only know the primary asset contract.
+for additional_artifact_path in "${ADDITIONAL_ARTIFACT_PATHS[@]}"; do
+  gh release upload "${TAG}" "${additional_artifact_path}" --clobber --repo "${REPO_SLUG}" >&2
+done
 
 if [[ -n "${SIDECAR_PATH}" ]]; then
   ZIP_ASSET_NAME="$(basename "${ARTIFACT_PATH}")"
@@ -342,7 +372,7 @@ else
   gh release upload "${TAG}" "${ARTIFACT_PATH}" --clobber --repo "${REPO_SLUG}" >&2
 fi
 
-echo "Uploaded ${ARTIFACT_PATH} to ${REPO_SLUG} release ${TAG}" >&2
+echo "Uploaded ${ARTIFACT_PATH} and ${#ADDITIONAL_ARTIFACT_PATHS[@]} additional package(s) to ${REPO_SLUG} release ${TAG}" >&2
 
 # Optional: mirror the unzipped vendor-bundled tree to a CORS-friendly branch
 # so WordPress Playground blueprints can install via git:directory without
@@ -433,6 +463,7 @@ jq -cn \
   --arg host "${GITHUB_HOST}" \
   --arg repo "${REPO_SLUG}" \
   --arg path "${ARTIFACT_PATH}" \
+  --argjson additional_paths "${ADDITIONAL_ARTIFACT_PATHS_JSON}" \
   --arg sidecar_path "${SIDECAR_PATH}" \
   --arg zip_sha256 "${ZIP_SHA256}" \
   --arg sidecar_sha256 "${SIDECAR_SHA256}" \
@@ -443,6 +474,7 @@ jq -cn \
     github_host: $host,
     repository: $repo,
     artifact_path: $path,
+    additional_artifact_paths: $additional_paths,
     provenance: (if $sidecar_path == "" then null else {sidecar_path: $sidecar_path, zip_sha256: $zip_sha256, sidecar_sha256: $sidecar_sha256} end),
     release_latest_branch: (if $branch == "" then null else $branch end),
     success: true
