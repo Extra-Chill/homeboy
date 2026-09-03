@@ -1817,6 +1817,30 @@ mod declared_base_tests {
         assert_eq!(error.details["git_base_preflight"]["timeout_ms"], 100);
     }
 
+    /// An SSH credential failure is transport evidence in its own right. It
+    /// used to be classified only because the remote host string contained
+    /// `proxy`, so the same failure to any other host was misreported as an
+    /// invalid base ref.
+    #[test]
+    fn ssh_credential_failure_is_transport_without_a_proxy_hostname() {
+        assert!(is_git_transport_failure(
+            "git@github.example: Permission denied (publickey).\nfatal: Could not read from remote repository."
+        ));
+        assert!(is_git_transport_failure(
+            "sign_and_send_pubkey: signing failed for ECDSA from agent: agent refused operation"
+        ));
+        assert!(is_git_transport_failure("Host key verification failed."));
+    }
+
+    /// A hostname is not evidence. A genuinely invalid ref must stay a
+    /// validation failure even when the remote is named `proxy.example.test`.
+    #[test]
+    fn a_proxy_hostname_alone_is_not_transport_evidence() {
+        assert!(!is_git_transport_failure(
+            "fatal: couldn't find remote ref refs/heads/nope on proxy.example.test"
+        ));
+    }
+
     #[test]
     fn materialized_workspace_is_the_lab_execution_checkout() {
         assert!(materialized_promotion_workspace_in_context(None)
@@ -3050,6 +3074,12 @@ fn declared_base_transport_error(
     error
 }
 
+/// Classify a base-preflight failure as transport rather than a bad ref.
+///
+/// Every needle names diagnostic evidence emitted by Git, SSH, or the TLS
+/// stack. A bare `proxy` needle used to match here, which classified any
+/// failure whose remote host merely contained that word — including a local
+/// credential failure that is transport-related for unrelated reasons.
 fn is_git_transport_failure(stderr: &str) -> bool {
     let stderr = stderr.to_ascii_lowercase();
     [
@@ -3058,10 +3088,24 @@ fn is_git_transport_failure(stderr: &str) -> bool {
         "could not resolve host",
         "connection timed out",
         "connection refused",
+        "connection closed",
+        "connection reset",
         "network is unreachable",
-        "proxy",
-        "tls",
-        "ssl",
+        "no route to host",
+        "broken pipe",
+        "proxy connect",
+        "proxy error",
+        "proxy authentication",
+        "proxycommand",
+        "tls handshake",
+        "ssl certificate",
+        "ssl connect error",
+        "permission denied (publickey",
+        "could not read from remote repository",
+        "authentication failed",
+        "host key verification failed",
+        "agent refused operation",
+        "sign_and_send_pubkey",
     ]
     .iter()
     .any(|needle| stderr.contains(needle))
