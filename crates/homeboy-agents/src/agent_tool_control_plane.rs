@@ -60,15 +60,6 @@ mod dispatch {
     }
 
     #[derive(Debug, Clone, Copy, Default)]
-    pub struct UnsupportedAgentToolControlPlaneDispatcher;
-
-    impl AgentToolControlPlaneDispatcher for UnsupportedAgentToolControlPlaneDispatcher {
-        fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult {
-            unsupported_control_plane_result(request)
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, Default)]
     pub struct HomeboyAgentToolControlPlaneDispatcher;
 
     impl AgentToolControlPlaneDispatcher for HomeboyAgentToolControlPlaneDispatcher {
@@ -243,23 +234,6 @@ mod results {
                 data: json!({ "tool": request.tool }),
             }],
             metadata: json!({ "execution_location": "runner" }),
-        }
-    }
-
-    pub(crate) fn unsupported_control_plane_result(request: &AgentToolRequest) -> AgentToolResult {
-        AgentToolResult {
-            schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
-            request_id: request.request_id.clone(),
-            task_id: request.task_id.clone(),
-            tool: request.tool.clone(),
-            status: AgentToolResultStatus::Failed,
-            output: Value::Null,
-            diagnostics: vec![AgentTaskDiagnostic {
-                class: "agent_tool.control_plane_dispatch_unsupported".to_string(),
-                message: "control-plane tool dispatch is selected by policy, but no dispatcher is registered for this provider execution".to_string(),
-                data: json!({ "tool": request.tool }),
-            }],
-            metadata: json!({ "execution_location": "control_plane" }),
         }
     }
 
@@ -1219,26 +1193,6 @@ mod tests {
         assert_eq!(
             outcome.evidence.result.metadata["authorization"],
             "[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn unsupported_control_plane_dispatch_returns_explicit_diagnostic() {
-        let outcome = dispatch_agent_tool_request(
-            &policy(AgentToolExecutionLocation::ControlPlane),
-            &request("lookup"),
-            &UnsupportedAgentToolControlPlaneDispatcher,
-        );
-
-        assert_eq!(outcome.location, AgentToolExecutionLocation::ControlPlane);
-        assert_eq!(outcome.result.status, AgentToolResultStatus::Failed);
-        assert_eq!(
-            outcome.result.diagnostics[0].class,
-            "agent_tool.control_plane_dispatch_unsupported"
-        );
-        assert_eq!(
-            outcome.evidence.result.diagnostics[0].class,
-            "agent_tool.control_plane_dispatch_unsupported"
         );
     }
 }

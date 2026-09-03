@@ -881,52 +881,8 @@ fn redact_diagnostic_text(text: &str) -> String {
         .collect()
 }
 
-/// The generic cook side-effect boundary the attempt loop drives its external
-/// effects through: promotion, moving-base recovery, and PR finalization.
-///
-/// Routing every external effect through one injectable object (rather than a
-/// mix of free-function calls and ad-hoc closures) gives durable exactly-once
-/// operation claims a single wiring point, and lets deterministic tests inject
-/// side effects without real Git/GitHub mutations (#8357). Promotion is wired
-/// through the claim primitive here (`promote_with_operation_claim`); retry
-/// dispatch and finalization follow as separate slices.
-pub trait CookSideEffectService {
-    /// Promote the successful candidate for `run_id`, or load the already-persisted
-    /// promotion when this attempt was interrupted after promoting.
-    fn promote(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport>;
-
-    /// Rebase and re-verify a candidate whose base moved under it.
-    fn recover_moving_base(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport>;
-
-    /// Commit, push, and open/update the PR for a green promoted candidate, or
-    /// load the already-finalized PR when this attempt was interrupted after
-    /// finalizing.
-    fn finalize(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-        promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value>;
-}
-
-/// The PR-finalization closure a cook side-effect boundary drives.
-///
-/// Boxed rather than carried as a type parameter so [`DefaultCookSideEffects`]
-/// is a concrete type that can live in a struct field — which is what lets one
-/// `CookContext` replace the former `run_cook*` wrapper family. The `'a` is
-/// load-bearing: the production finalizer closes over a `&CookRecipeStore`, so
-/// a `'static` bound would reject every real construction site.
+/// The PR-finalization closure driven by the Cook runtime. The lifetime is
+/// load-bearing because production finalizers borrow their recipe store.
 pub(crate) type CookFinalizeFn<'a> = Box<
     dyn FnMut(
             &AgentTaskLifecycleStore,
@@ -937,16 +893,34 @@ pub(crate) type CookFinalizeFn<'a> = Box<
         + 'a,
 >;
 
-/// Production cook side-effect boundary. Each method delegates to the existing
-/// promotion/finalization free functions, so behavior is identical to the prior
-/// direct calls; the trait only relocates the call sites behind one seam.
-pub(crate) struct DefaultCookSideEffects<'a> {
+#[cfg(test)]
+type TestCookPromoteFn<'a> = Box<
+    dyn FnMut(&AgentTaskLifecycleStore, &CookRequest, &str) -> Result<AgentTaskPromotionReport>
+        + 'a,
+>;
+
+#[cfg(test)]
+type TestCookRecoverFn<'a> = Box<
+    dyn FnMut(
+            &AgentTaskLifecycleStore,
+            &CookRequest,
+            &MovingBaseCookRecovery,
+        ) -> Result<AgentTaskPromotionReport>
+        + 'a,
+>;
+
+/// Concrete production side effects. Promotion and recovery have one native
+/// implementation; only finalization varies because callers bind different
+/// durable recipe stores and backends.
+pub(crate) struct CookSideEffects<'a> {
     finalize: CookFinalizeFn<'a>,
+    #[cfg(test)]
+    test_promote: Option<TestCookPromoteFn<'a>>,
+    #[cfg(test)]
+    test_recover: Option<TestCookRecoverFn<'a>>,
 }
 
-impl<'a> DefaultCookSideEffects<'a> {
-    /// Generic in the closure so existing construction sites are unchanged; the
-    /// type parameter is erased at the boundary and never reaches the struct.
+impl<'a> CookSideEffects<'a> {
     pub(crate) fn new<F>(finalize: F) -> Self
     where
         F: FnMut(
@@ -959,17 +933,49 @@ impl<'a> DefaultCookSideEffects<'a> {
     {
         Self {
             finalize: Box::new(finalize),
+            #[cfg(test)]
+            test_promote: None,
+            #[cfg(test)]
+            test_recover: None,
         }
     }
-}
 
-impl CookSideEffectService for DefaultCookSideEffects<'_> {
+    #[cfg(test)]
+    pub(crate) fn for_test<P, R, F>(promote: P, recover: R, finalize: F) -> Self
+    where
+        P: FnMut(&AgentTaskLifecycleStore, &CookRequest, &str) -> Result<AgentTaskPromotionReport>
+            + 'a,
+        R: FnMut(
+                &AgentTaskLifecycleStore,
+                &CookRequest,
+                &MovingBaseCookRecovery,
+            ) -> Result<AgentTaskPromotionReport>
+            + 'a,
+        F: FnMut(
+                &AgentTaskLifecycleStore,
+                &CookRequest,
+                &str,
+                &AgentTaskPromotionReport,
+            ) -> Result<Value>
+            + 'a,
+    {
+        Self {
+            finalize: Box::new(finalize),
+            test_promote: Some(Box::new(promote)),
+            test_recover: Some(Box::new(recover)),
+        }
+    }
+
     fn promote(
         &mut self,
         lifecycle_store: &AgentTaskLifecycleStore,
         options: &CookRequest,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
+        #[cfg(test)]
+        if let Some(promote) = self.test_promote.as_mut() {
+            return promote(lifecycle_store, options, run_id);
+        }
         promote_with_operation_claim_in_store(lifecycle_store, options, run_id)
     }
 
@@ -979,6 +985,10 @@ impl CookSideEffectService for DefaultCookSideEffects<'_> {
         options: &CookRequest,
         recovery: &MovingBaseCookRecovery,
     ) -> Result<AgentTaskPromotionReport> {
+        #[cfg(test)]
+        if let Some(recover) = self.test_recover.as_mut() {
+            return recover(lifecycle_store, options, recovery);
+        }
         recover_moving_base_cook_candidate_in_store(lifecycle_store, options, recovery)
     }
 
@@ -998,70 +1008,6 @@ impl CookSideEffectService for DefaultCookSideEffects<'_> {
                 (self.finalize)(lifecycle_store, options, run_id, promotion)
             },
         )
-    }
-}
-
-/// Test cook side-effect boundary with injectable `finalize` and
-/// `recover_moving_base` closures, so recovery/finalization control flow can be
-/// exercised without real Git/GitHub mutations. `promote` delegates to the real
-/// promotion path (tests that need to intercept promotion persist a promotion
-/// first, exactly as before).
-#[cfg(test)]
-pub(crate) type TestCookFinalizeFn<'a> =
-    Box<dyn FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value> + 'a>;
-
-#[cfg(test)]
-pub(crate) type TestCookRecoverFn<'a> =
-    Box<dyn FnMut(&CookRequest, &MovingBaseCookRecovery) -> Result<AgentTaskPromotionReport> + 'a>;
-
-#[cfg(test)]
-pub(crate) struct TestCookSideEffects<'a> {
-    finalize: TestCookFinalizeFn<'a>,
-    recover: TestCookRecoverFn<'a>,
-}
-
-#[cfg(test)]
-impl<'a> TestCookSideEffects<'a> {
-    pub(crate) fn new<F, R>(finalize: F, recover: R) -> Self
-    where
-        F: FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value> + 'a,
-        R: FnMut(&CookRequest, &MovingBaseCookRecovery) -> Result<AgentTaskPromotionReport> + 'a,
-    {
-        Self {
-            finalize: Box::new(finalize),
-            recover: Box::new(recover),
-        }
-    }
-}
-
-#[cfg(test)]
-impl CookSideEffectService for TestCookSideEffects<'_> {
-    fn promote(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-    ) -> Result<AgentTaskPromotionReport> {
-        promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
-    }
-
-    fn recover_moving_base(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport> {
-        (self.recover)(options, recovery)
-    }
-
-    fn finalize(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-        promotion: &AgentTaskPromotionReport,
-    ) -> Result<Value> {
-        (self.finalize)(options, run_id, promotion)
     }
 }
 
@@ -3458,9 +3404,8 @@ where
             &format!("homeboy agent-task fanout resume {batch_id}"),
         )?;
     }
-    let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
-        finalize(options, run_id, promotion)
-    });
+    let side_effects =
+        CookSideEffects::new(|_, options, run_id, promotion| finalize(options, run_id, promotion));
     let store = CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     Ok(CookService::run(
@@ -3469,7 +3414,7 @@ where
             executor,
             &store,
             &lifecycle_store,
-            Box::new(side_effects),
+            side_effects,
             &noop_cook_progress_observer,
         ),
         CookMode::Resume,
@@ -4622,19 +4567,19 @@ impl CookMode {
 /// bind every dependency explicitly; there are no environment-derived stores or
 /// optional side-effect/observer fallbacks in the execution API.
 pub struct CookRuntime<'a> {
-    pub executor: SharedAgentTaskExecutor,
-    pub store: &'a CookRecipeStore,
-    pub lifecycle_store: &'a AgentTaskLifecycleStore,
-    pub side_effects: Box<dyn CookSideEffectService + 'a>,
-    pub durable_observer: &'a CookProgressObserver<'a>,
+    executor: SharedAgentTaskExecutor,
+    store: &'a CookRecipeStore,
+    lifecycle_store: &'a AgentTaskLifecycleStore,
+    side_effects: CookSideEffects<'a>,
+    durable_observer: &'a CookProgressObserver<'a>,
 }
 
 impl<'a> CookRuntime<'a> {
-    pub fn new(
+    fn new(
         executor: SharedAgentTaskExecutor,
         store: &'a CookRecipeStore,
         lifecycle_store: &'a AgentTaskLifecycleStore,
-        side_effects: Box<dyn CookSideEffectService + 'a>,
+        side_effects: CookSideEffects<'a>,
         durable_observer: &'a CookProgressObserver<'a>,
     ) -> Self {
         Self {
@@ -4644,6 +4589,33 @@ impl<'a> CookRuntime<'a> {
             side_effects,
             durable_observer,
         }
+    }
+
+    /// Bind a caller-owned finalizer while retaining native promotion, recovery,
+    /// and durable operation-claim behavior.
+    pub fn with_finalizer<F>(
+        executor: SharedAgentTaskExecutor,
+        store: &'a CookRecipeStore,
+        lifecycle_store: &'a AgentTaskLifecycleStore,
+        finalize: F,
+        durable_observer: &'a CookProgressObserver<'a>,
+    ) -> Self
+    where
+        F: FnMut(
+                &AgentTaskLifecycleStore,
+                &CookRequest,
+                &str,
+                &AgentTaskPromotionReport,
+            ) -> Result<Value>
+            + 'a,
+    {
+        Self::new(
+            executor,
+            store,
+            lifecycle_store,
+            CookSideEffects::new(finalize),
+            durable_observer,
+        )
     }
 
     /// Explicit production wiring with the standard side-effect boundary and a
@@ -4671,17 +4643,15 @@ impl<'a> CookRuntime<'a> {
             executor,
             store,
             lifecycle_store,
-            Box::new(DefaultCookSideEffects::new(
-                move |lifecycle_store, options, run_id, promotion| {
-                    finalize_or_load_cook_pr_with_stores(
-                        store,
-                        lifecycle_store,
-                        options,
-                        run_id,
-                        promotion,
-                    )
-                },
-            )),
+            CookSideEffects::new(move |lifecycle_store, options, run_id, promotion| {
+                finalize_or_load_cook_pr_with_stores(
+                    store,
+                    lifecycle_store,
+                    options,
+                    run_id,
+                    promotion,
+                )
+            }),
             durable_observer,
         )
     }
@@ -4700,7 +4670,7 @@ pub(crate) struct CookContext<'a> {
     pub executor: SharedAgentTaskExecutor,
     pub store: Option<&'a CookRecipeStore>,
     pub lifecycle_store: Option<&'a AgentTaskLifecycleStore>,
-    pub side_effects: Option<Box<dyn CookSideEffectService + 'a>>,
+    pub side_effects: Option<CookSideEffects<'a>>,
     pub durable_observer: Option<&'a CookProgressObserver<'a>>,
     pub mode: CookMode,
 }
@@ -4731,17 +4701,15 @@ pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentT
         None => AgentTaskLifecycleStore::from_current_environment()?,
     };
     let mut side_effects = ctx.side_effects.unwrap_or_else(|| {
-        Box::new(DefaultCookSideEffects::new(
-            |lifecycle_store, options, run_id, promotion| {
-                finalize_or_load_cook_pr_with_stores(
-                    &store,
-                    lifecycle_store,
-                    options,
-                    run_id,
-                    promotion,
-                )
-            },
-        ))
+        CookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_stores(
+                &store,
+                lifecycle_store,
+                options,
+                run_id,
+                promotion,
+            )
+        })
     });
     let observer = ctx.durable_observer.unwrap_or(&noop_cook_progress_observer);
     run_cook_with_runtime(
@@ -4749,7 +4717,7 @@ pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentT
         ctx.executor,
         &store,
         &lifecycle_store,
-        side_effects.as_mut(),
+        &mut side_effects,
         observer,
         ctx.mode,
     )
@@ -4776,7 +4744,7 @@ impl CookService {
             executor,
             store,
             lifecycle_store,
-            side_effects.as_mut(),
+            &mut side_effects,
             durable_observer,
             mode,
         )
@@ -4788,7 +4756,7 @@ fn run_cook_with_runtime(
     executor: SharedAgentTaskExecutor,
     store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    side_effects: &mut dyn CookSideEffectService,
+    side_effects: &mut CookSideEffects<'_>,
     durable_observer: &CookProgressObserver<'_>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
@@ -4866,7 +4834,7 @@ fn run_cook_reported(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: CookRequest,
     executor: SharedAgentTaskExecutor,
-    side_effects: &mut dyn CookSideEffectService,
+    side_effects: &mut CookSideEffects<'_>,
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
@@ -5189,7 +5157,7 @@ fn run_cook_spine(
     lifecycle_store: &AgentTaskLifecycleStore,
     mut options: CookRequest,
     executor: SharedAgentTaskExecutor,
-    side_effects: &mut dyn CookSideEffectService,
+    side_effects: &mut CookSideEffects<'_>,
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
