@@ -13,7 +13,7 @@ pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerProofArgs, AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, LogsArgs,
+    AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, LogsArgs,
     ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, SubmitArgs,
     ValidatePlanArgs,
 };

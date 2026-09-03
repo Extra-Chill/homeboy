@@ -971,6 +971,36 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
                     )
                 })
             })
+            .transpose()?
+            .map(|form| {
+                Ok::<_, Error>(agent_task_service::AgentTaskSuppliedReviewForm {
+                    form,
+                    tool: args.review_form_tool.clone().ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "review_form_tool",
+                            "--review-form-tool is required with --review-form",
+                            None,
+                            None,
+                        )
+                    })?,
+                    model: args.review_form_model.clone().ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "review_form_model",
+                            "--review-form-model is required with --review-form",
+                            None,
+                            None,
+                        )
+                    })?,
+                    operator: args.review_form_author.clone().ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "review_form_author",
+                            "--review-form-author is required with --review-form",
+                            None,
+                            None,
+                        )
+                    })?,
+                })
+            })
             .transpose()?;
         let value = agent_task_service::recover_cook_pr_with_review_form(
             run_or_cook_id,

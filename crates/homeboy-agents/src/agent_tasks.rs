@@ -554,12 +554,12 @@ pub mod service {
         AgentTaskDiscoveryReport, AgentTaskDiscoveryRun, AgentTaskHydratedEvidence,
         AgentTaskLiveness, AgentTaskPromotionJob, AgentTaskPromotionJobDriver,
         AgentTaskPromotionJobPhase, AgentTaskPromotionRequest, AgentTaskRetryServiceResult,
-        AgentTaskRunResult, CookActivityProbe, CookContinuationState, CookMode, CookProgressEvent,
-        CookProviderActivity, CookProviderRouteOverride, CookRecipeStore, CookRequest, CookRuntime,
-        CookService, CookSupervisionTick, CookSupervisor, AGENT_TASK_COOK_BATCH_JOB_TYPE,
-        AGENT_TASK_COOK_BATCH_JOB_VERSION, AGENT_TASK_PROMOTION_JOB_TYPE,
-        AGENT_TASK_PROMOTION_JOB_VERSION, DEFAULT_REVIEW_FORM_TIMEOUT_MS,
-        DETACHED_BATCH_COORDINATOR_ENV, MAX_REVIEW_FORM_TIMEOUT_MS,
+        AgentTaskRunResult, AgentTaskSuppliedReviewForm, CookActivityProbe, CookContinuationState,
+        CookMode, CookProgressEvent, CookProviderActivity, CookProviderRouteOverride,
+        CookRecipeStore, CookRequest, CookRuntime, CookService, CookSupervisionTick,
+        CookSupervisor, AGENT_TASK_COOK_BATCH_JOB_TYPE, AGENT_TASK_COOK_BATCH_JOB_VERSION,
+        AGENT_TASK_PROMOTION_JOB_TYPE, AGENT_TASK_PROMOTION_JOB_VERSION,
+        DEFAULT_REVIEW_FORM_TIMEOUT_MS, DETACHED_BATCH_COORDINATOR_ENV, MAX_REVIEW_FORM_TIMEOUT_MS,
     };
     pub use super::super::agent_task_service::{
         artifacts, logs, persist_initial_recipe, promotion_source,

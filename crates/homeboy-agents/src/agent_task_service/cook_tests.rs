@@ -23,8 +23,8 @@ use super::super::cook_promotion::{
     record_replacement_gate_proof, recover_cook_pr_with_backend,
     recover_cook_pr_with_backend_and_review_form, recover_moving_base_cook_candidate_in_store,
     refreshed_moving_base_recovery, replacement_gate_execution_started,
-    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
-    MovingBaseCookRecovery,
+    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -276,6 +276,15 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         compatibility: "Internal-only change; no compatibility impact.".to_string(),
         verification: Vec::new(),
         used_for: "Reproduced the failure, isolated the reload path, added a guard, and verified with the recorded deterministic gate before finalizing.".to_string(),
+    }
+}
+
+fn supplied_test_review_form() -> AgentTaskSuppliedReviewForm {
+    AgentTaskSuppliedReviewForm {
+        form: test_review_form(),
+        tool: "OpenCode".to_string(),
+        model: "openai/gpt-5.6-terra".to_string(),
+        operator: "fixture-operator".to_string(),
     }
 }
 
@@ -18603,7 +18612,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         };
         let preflight = recover_cook_pr_with_backend_and_review_form(
             cook_id,
-            Some(test_review_form()),
+            Some(supplied_test_review_form()),
             Vec::new(),
             true,
             &mut preflight_backend,
@@ -18614,9 +18623,78 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             preflight["review_dossier"]["summary"],
             "Close the issue by guarding the reload path."
         );
+        assert_eq!(
+            preflight["review_dossier"]["ai_assistance"]["tool"],
+            "OpenCode"
+        );
+        assert_eq!(
+            preflight["review_dossier"]["ai_assistance"]["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert!(preflight["review_dossier"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|evidence| evidence["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("fixture-operator"))));
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
+
+        let mut existing_form = agent_task_lifecycle::read_aggregate(run_id).unwrap();
+        existing_form.outcomes[0].outputs = test_review_form_outputs();
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
+            .unwrap();
+        let error = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            true,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("a valid recorded form cannot be replaced");
+        assert_eq!(error.details["field"], "review_form");
+        existing_form.outcomes[0].outputs = Value::Null;
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
+            .unwrap();
+
+        agent_task_lifecycle::fail_next_record_write_for_test();
+        let mut failed_persistence_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            ..Default::default()
+        };
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            false,
+            &mut failed_persistence_backend,
+        )
+        .expect_err("provenance persistence fails before publication");
+        assert!(!failed_persistence_backend.created);
+
+        let mut failed_publication_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            commit_error: true,
+            ..Default::default()
+        };
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            false,
+            &mut failed_publication_backend,
+        )
+        .expect_err("publication failure retains the prior supplied-form receipt");
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata["recovery_review_form"]["submission"]["operator"],
+            "fixture-operator"
+        );
 
         let mut publish_backend = CaptureBackend {
             synthetic_gate_proof: Some(applied),
@@ -18624,7 +18702,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         };
         let published = recover_cook_pr_with_backend_and_review_form(
             cook_id,
-            Some(test_review_form()),
+            None,
             Vec::new(),
             false,
             &mut publish_backend,
@@ -18638,8 +18716,12 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             "operator_supplied_recovery"
         );
         assert_eq!(
-            record.metadata["recovery_review_form"]["provenance"]["authoring"]["model"],
+            record.metadata["recovery_review_form"]["submission"]["model"],
             "openai/gpt-5.6-terra"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["submission"]["operator"],
+            "fixture-operator"
         );
         assert_eq!(
             record.metadata["recovery_review_form"]["provenance"]["deterministic_gates"],

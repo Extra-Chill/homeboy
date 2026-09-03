@@ -794,6 +794,15 @@ pub struct FinalizePrArgs {
     /// Complete typed AI review form to supply for a recovered Cook whose historical provider outcome did not record one: inline JSON, `@FILE`, or `-`.
     #[arg(long, value_name = "JSON|@FILE|-", requires = "recover")]
     pub review_form: Option<String>,
+    /// Tool that authored the supplied review form.
+    #[arg(long, value_name = "TOOL", requires = "review_form")]
+    pub review_form_tool: Option<String>,
+    /// Concrete model that authored the supplied review form.
+    #[arg(long, value_name = "MODEL", requires = "review_form")]
+    pub review_form_model: Option<String>,
+    /// Operator or agent identity submitting the supplied review form.
+    #[arg(long, value_name = "IDENTITY", requires = "review_form")]
+    pub review_form_author: Option<String>,
     /// Validate the complete hydrated dossier and candidate without publishing.
     #[arg(long)]
     pub preflight: bool,
