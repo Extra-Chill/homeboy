@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const wordpressDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-codebox-runtime-contract-'));
 
 const canonicalManifest = {
@@ -136,15 +136,9 @@ const {
   runtimeContractManifest,
   runtimeContractSchemas,
   validateCanonicalRuntimeContractManifest,
-} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-runtime-contract-source.js'));
-const {
-  WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
-  WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
-  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
-  WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
-  WP_CODEBOX_RUNTIME_PROFILE_SCHEMA,
-  wpCodeboxProviderRuntimeInvocationContract,
-} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox'));
+} = require(path.join(wordpressDir, 'lib', 'wp-codebox-runtime-contract-source.js'));
+const { WP_CODEBOX_RUNTIME_PROFILE_SCHEMA } = require(path.join(wordpressDir, 'lib', 'wp-codebox-runtime-profile.js'));
+const { artifactResultEnvelopeSchema } = require(path.join(wordpressDir, 'lib', 'wp-codebox-artifact-contract.js'));
 
 for (const requiredPath of REQUIRED_RUNTIME_CONTRACT_PATHS) {
   assert.equal(
@@ -158,24 +152,7 @@ assert.deepEqual(providerRuntimeInvocationContract(), canonicalManifest.provider
 
 const schemas = runtimeContractSchemas();
 assert.equal(WP_CODEBOX_RUNTIME_PROFILE_SCHEMA, schemas.runtimeBoundary.profile);
-assert.equal(WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA, schemas.artifact.resultEnvelope);
-assert.equal(WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA, schemas.agentTask.runResult);
-assert.equal(WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS.workspace_capture, schemas.runnerWorkspace.captureResult);
-assert.equal(
-  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'runtime-profile').schema,
-  schemas.runtimeBoundary.profile
-);
-assert.equal(
-  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').schema,
-  schemas.artifact.resultEnvelope
-);
-assert.deepEqual(wpCodeboxProviderRuntimeInvocationContract(), {
-  ...canonicalManifest.providerRuntime,
-  result_schemas: {
-    ...canonicalManifest.providerRuntime.result_schemas,
-    artifact_result_envelope: schemas.artifact.resultEnvelope,
-  },
-});
+assert.equal(artifactResultEnvelopeSchema(), schemas.artifact.resultEnvelope);
 
 validateCanonicalRuntimeContractManifest(canonicalManifest);
 

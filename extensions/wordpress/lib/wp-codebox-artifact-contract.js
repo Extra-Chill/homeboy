@@ -4,10 +4,19 @@ const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const {
 	runtimeContractSchemas,
 } = require('./wp-codebox-runtime-contract-source');
-const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
+
+// The canonical envelope schema is owned by WP Codebox core. Resolve it on
+// first use so importing the WordPress extension does not require an installed
+// WP Codebox runtime.
+let runtimeContractSchemasCache;
+function artifactResultEnvelopeSchema() {
+	if (!runtimeContractSchemasCache) {
+		runtimeContractSchemasCache = runtimeContractSchemas();
+	}
+	return runtimeContractSchemasCache.artifact.resultEnvelope;
+}
 
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
-const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.artifact.resultEnvelope;
 const WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA = 'wp-codebox/case-artifact-index/v1';
 const WP_CODEBOX_RUNTIME_ACCESS_SCHEMA = 'wp-codebox/runtime-access/v1';
 
@@ -355,7 +364,7 @@ function firstObject(...values) {
 }
 
 function normalizeArtifactResultEnvelope(envelope) {
-  if (!plainObject(envelope) || envelope.schema !== WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA) {
+  if (!plainObject(envelope) || envelope.schema !== artifactResultEnvelopeSchema()) {
     return null;
   }
   const artifactBundle = normalizeArtifactResultRef(envelope.artifactBundle || envelope.artifact_bundle);
@@ -373,7 +382,7 @@ function normalizeArtifactResultEnvelope(envelope) {
     ...(Array.isArray(envelope.transcript_refs) ? envelope.transcript_refs.map(normalizeArtifactResultRef) : []),
   ].filter(Boolean);
   return cleanObject({
-    schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+    schema: artifactResultEnvelopeSchema(),
     operation: envelope.operation,
     operation_schema: envelope.operation_schema,
     status: envelope.status,
@@ -407,7 +416,7 @@ function normalizeArtifactResultRef(ref) {
     sha256: ref.sha256 || digest.value,
     metadata: cleanObject({
       digest: plainObject(ref.digest) ? ref.digest : undefined,
-      source_schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+      source_schema: artifactResultEnvelopeSchema(),
     }),
   });
 }
@@ -671,9 +680,9 @@ function cleanObject(value) {
 module.exports = {
   TYPED_ARTIFACT_SCHEMA,
   WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA,
-  WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
   WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
   WP_CODEBOX_RUNTIME_ACCESS_SCHEMA,
+  artifactResultEnvelopeSchema,
   artifactResultEnvelopeFromCodeboxResult,
   artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
@@ -689,3 +698,9 @@ module.exports = {
   typedArtifactsFromCodeboxResult,
   typedArtifactFileRefs,
 };
+
+// Resolved from the canonical WP Codebox contract on first access.
+Object.defineProperty(module.exports, 'WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA', {
+  enumerable: true,
+  get: artifactResultEnvelopeSchema,
+});

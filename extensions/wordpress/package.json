@@ -140,6 +140,7 @@
     "test:wordpress-multisite-e2e-rig-integration": "node tests/wp-codebox-multisite-network-rig-integration.mjs",
     "test:wp-codebox-artifacts": "node tests/wp-codebox-artifacts-smoke.js",
     "test:wp-codebox-artifact-contract-boundary": "node tests/wp-codebox-artifact-contract-boundary.test.js",
+    "test:wp-codebox-runtime-contract-source": "node tests/wp-codebox-runtime-contract-source-smoke.mjs",
     "test:wordpress-workload-profile": "node tests/wordpress-workload-profile-smoke.js",
     "test:wordpress-workload-scale-profile": "node tests/wordpress-workload-scale-profile-smoke.js",
     "test:wordpress-fuzz-manifest": "node tests/wordpress-fuzz-manifest-smoke.js",
