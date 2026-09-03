@@ -63,7 +63,9 @@ pub enum AgentTaskFanoutCommand {
     /// List artifacts recorded by a durable batch's child runs.
     Artifacts(AgentTaskFanoutBatchStatusArgs),
     /// Execute each cook in a batch-cook plan through the cook-loop service and
-    /// return a batch summary.
+    /// return a batch summary. Input plans may declare independent repositories
+    /// and per-cell Cook policy; `cook-batch` remains the concise same-repository
+    /// planner.
     ///
     /// Successful child cooks open or update their own pull requests.
     RunPlan(AgentTaskFanoutRunPlanArgs),
@@ -227,7 +229,8 @@ pub struct AgentTaskFanoutCookBatchArgs {
 pub struct AgentTaskFanoutInputArgs {
     /// Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit`
     /// expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`);
-    /// `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec.
+    /// `submit-batch` expects an `AgentTaskPlan` JSON spec; `run-plan` expects a
+    /// batch-cook fanout plan and may carry independent repository cells.
     #[arg(long = "input", value_name = "SPEC")]
     pub input: String,
     /// Stable identity recorded for the submitted batch. Omit to keep the

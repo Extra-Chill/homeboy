@@ -484,6 +484,48 @@ Use `agent-task fanout cook-batch` only when there are multiple independent
 issues that should each get separate worktree materialization, branch/PR
 metadata, and fanout status collation.
 
+For one wave spanning independent repositories, submit a
+`homeboy/agent-task-batch-cook-fanout-plan/v1` to `fanout run-plan`. Its `cooks`
+array is a per-cell Cook contract, so each cell may select its own `repo`,
+`task_url`, `base`, `to_worktree`, gates or verification profile, provider
+policy, and finalization intent. The wave still owns one concurrency limit and
+one durable parent status, while every child retains its normal Cook recipe,
+evidence, PR finalization, and replay identity.
+
+```json
+{
+  "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
+  "fanout_id": "portfolio-repairs",
+  "max_concurrency": 3,
+  "cooks": [
+    {
+      "cook_id": "blocks-engine-101",
+      "repo": "blocks-engine",
+      "task_url": "https://github.com/Automattic/blocks-engine/issues/101",
+      "prompt": "Fix issue 101.",
+      "to_worktree": "blocks-engine@fix-101",
+      "base": "trunk",
+      "verify": ["npm test"]
+    },
+    {
+      "cook_id": "homeboy-11088",
+      "repo": "homeboy",
+      "task_url": "https://github.com/Extra-Chill/homeboy/issues/11088",
+      "prompt": "Fix issue 11088.",
+      "to_worktree": "homeboy@fix-11088",
+      "base": "main",
+      "verify": ["cargo test -p homeboy-cli"]
+    }
+  ]
+}
+```
+
+Run the manifest with `homeboy agent-task fanout run-plan --input
+@portfolio-repairs.json`. Status, artifacts, cancellation, and resume use the
+single `fanout_id`. The durable parent retains a sanitized per-cell manifest;
+private gate commands, provider configuration, and evidence file paths remain
+only in the child Cook recipes.
+
 #### Multi-Issue Cook Batch
 
 Use `agent-task fanout cook-batch` when an operator has a set of GitHub issues

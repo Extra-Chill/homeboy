@@ -1647,6 +1647,7 @@ fn persist_fanout_run_batch_record(
             "source": "fanout-run-plan",
             "durable_child_runs": true,
             "placement": plan.placement,
+            "cell_manifest": plan.cell_manifest()?,
             "replan_command": secure_batch_plan_execution(&plan.fanout_id, placement),
             "dependency_graph": plan.dependency_graph_metadata()?,
             "declared_trackers": plan.cooks.iter().filter_map(|cook| {
@@ -4535,6 +4536,69 @@ impl BatchCookFanoutPlan {
             "nodes": nodes,
             "edges": edges,
             "readiness": readiness,
+        }))
+    }
+
+    /// Public, immutable roster retained with the durable batch record. Child
+    /// Cook recipes remain the execution and replay authority; this lets status
+    /// retain each cell's owning repository and handoff identity after the input
+    /// manifest has gone away without exposing private gate or provider input.
+    fn cell_manifest(&self) -> Result<Value> {
+        Ok(serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-cell-manifest/v1",
+            "cells": self.cooks.iter().map(|cook| {
+                let source_identity = cook_recipe_source_identity(self, cook)?;
+                Ok(serde_json::json!({
+                "cell_id": cook.cook_id,
+                "initial_run_id": cook.run_id(),
+                "task_url": cook.task_url,
+                "repository": {
+                    "repo": cook.repo,
+                    "component_id": cook.component_id,
+                    "identity": cook.repository_identity,
+                },
+                "base": cook.base,
+                "head": cook.head,
+                "worktree": {
+                    "target": cook.to_worktree,
+                    "adopted": cook.adopted_worktree,
+                    "workspace": cook.workspace,
+                    "materialization": cook.workspace_materialization,
+                },
+                "verification": {
+                    "verify": cook.verify,
+                    "private_verify_count": cook.private_verify.len(),
+                    "profile": cook.verification_profile,
+                    "test_execution_plan": cook.test_execution_plan,
+                },
+                "provider": {
+                    "backend": cook.backend,
+                    "selector": cook.selector,
+                    "model": cook.model,
+                    "attempts": cook.attempts,
+                    "same_provider_retries": cook.same_provider_retries,
+                    "provider_rotations": cook.provider_rotations,
+                    "evidence_input_ids": cook.provider_evidence_inputs.iter().map(|input| &input.id).collect::<Vec<_>>(),
+                },
+                "placement": self.placement,
+                "evidence": {
+                    "source_identity": source_identity,
+                    "task_url": cook.task_url,
+                },
+                "finalization": {
+                    "base": cook.base,
+                    "head": cook.head,
+                    "no_finalize": cook.no_finalize,
+                    "draft_pr": cook.draft_pr,
+                },
+                "replay": {
+                    "fanout_id": self.fanout_id,
+                    "cook_id": cook.cook_id,
+                    "initial_run_id": cook.run_id(),
+                    "recipe_id": cook.run_id(),
+                },
+            }))
+            }).collect::<Result<Vec<_>>>()?,
         }))
     }
 }
@@ -8132,6 +8196,108 @@ fi
         });
     }
 
+    #[test]
+    fn durable_cell_manifest_retains_mixed_repository_cook_contracts() {
+        with_isolated_home(|_| {
+            let plan = BatchCookFanoutPlan::from_value(
+                json!({
+                    "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                    "fanout_id": "mixed-repositories",
+                    "max_concurrency": 2,
+                    "cooks": [
+                        {
+                            "cook_id": "blocks-engine-101",
+                            "repo": "blocks-engine",
+                            "task_url": "https://github.com/Automattic/blocks-engine/issues/101",
+                            "prompt": "Fix blocks engine.",
+                            "to_worktree": "blocks-engine@fix-101",
+                            "base": "trunk",
+                            "head": "fix/101",
+                            "verify": ["npm test"],
+                            "verification_profile": "node",
+                            "backend": "sandbox",
+                            "selector": "sandbox-node",
+                            "model": "node-model",
+                            "provider_config": "{\\\"private\\\":true}",
+                            "provider_evidence_inputs": [{"id": "issue-notes", "source": "/private/notes.md"}]
+                        },
+                        {
+                            "cook_id": "homeboy-11088",
+                            "repo": "homeboy",
+                            "task_url": "https://github.com/Extra-Chill/homeboy/issues/11088",
+                            "prompt": "Fix Homeboy.",
+                            "to_worktree": "homeboy@fix-11088",
+                            "base": "main",
+                            "verify": ["cargo test -p homeboy-cli"],
+                            "private_verify": ["private gate"],
+                            "backend": "codex",
+                            "model": "gpt-5.6"
+                        }
+                    ]
+                }),
+                &args(),
+            )
+            .expect("mixed repository plan");
+
+            let manifest = plan.cell_manifest().expect("durable cell manifest");
+            let cells = manifest["cells"].as_array().expect("cell manifest");
+
+            assert_eq!(cells.len(), 2);
+            assert_eq!(cells[0]["repository"]["repo"], "blocks-engine");
+            assert_eq!(cells[0]["base"], "trunk");
+            assert_eq!(cells[0]["worktree"]["target"], "blocks-engine@fix-101");
+            assert_eq!(cells[0]["verification"]["profile"], "node");
+            assert_eq!(cells[0]["provider"]["selector"], "sandbox-node");
+            assert_eq!(
+                cells[0]["provider"]["evidence_input_ids"],
+                json!(["issue-notes"])
+            );
+            assert_eq!(cells[1]["repository"]["repo"], "homeboy");
+            assert_eq!(cells[1]["finalization"]["base"], "main");
+            assert_eq!(cells[1]["verification"]["private_verify_count"], 1);
+            assert_eq!(
+                cells[1]["replay"]["recipe_id"],
+                json!(plan.cooks[1].run_id())
+            );
+            assert!(cells[0]["evidence"]["source_identity"]
+                .as_str()
+                .expect("source identity")
+                .starts_with("homeboy://agent-task/fanout-source/"));
+            assert!(manifest.to_string().contains("issue-notes"));
+            assert!(!manifest.to_string().contains("private gate"));
+            assert!(!manifest.to_string().contains("private/notes.md"));
+            assert!(!manifest.to_string().contains("provider_config"));
+        });
+    }
+
+    #[test]
+    fn durable_cell_manifest_survives_partial_failure_and_replay() {
+        with_isolated_home(|_| {
+            let plan = test_batch_plan();
+            persist_fanout_run_batch_record(&plan, Placement::Auto).expect("persist wave");
+            let before = batch::read_batch_record(&plan.fanout_id)
+                .expect("read persisted wave")
+                .metadata["cell_manifest"]
+                .clone();
+            let claim = batch::claim_fanout_run_batch(&plan.fanout_id)
+                .expect("claim wave")
+                .expect("exclusive claim");
+            batch::record_fanout_run_batch_failure(
+                &plan.fanout_id,
+                &claim,
+                "child_admission",
+                json!({"message": "second repository unavailable"}),
+            )
+            .expect("record partial failure");
+
+            assert!(persist_fanout_run_batch_record(&plan, Placement::Auto)
+                .expect("replay existing wave"));
+            let replayed = batch::read_batch_record(&plan.fanout_id).expect("read replayed wave");
+            assert_eq!(replayed.metadata["cell_manifest"], before);
+            assert!(replayed.metadata["admission_blocker"].is_object());
+        });
+    }
+
     /// Install the executor providers the fanout fixtures dispatch against.
     ///
     /// Provider selection resolves a `--backend`/`--selector` pair against the
@@ -9335,6 +9501,23 @@ fi
             for cook in plan.cooks {
                 assert!(cook.cook_id.starts_with(&format!("{fanout_id}-")));
                 assert!(cook.run_id().starts_with(&format!("cook-{fanout_id}-")));
+            }
+        });
+    }
+
+    #[test]
+    fn same_repository_cook_batch_keeps_its_existing_cell_contract() {
+        with_materialized_cook_batch_worktrees(|| {
+            let plan = build_cook_batch_plan(&cook_batch_args()).expect("same repository plan");
+            let manifest = plan.cell_manifest().expect("cell manifest");
+            let cells = manifest["cells"].as_array().expect("cells");
+
+            assert_eq!(cells.len(), plan.cooks.len());
+            for (cell, cook) in cells.iter().zip(&plan.cooks) {
+                assert_eq!(cell["repository"]["repo"], json!(cook.repo));
+                assert_eq!(cell["base"], json!(cook.base));
+                assert_eq!(cell["worktree"]["target"], json!(cook.to_worktree));
+                assert_eq!(cell["replay"]["initial_run_id"], json!(cook.run_id()));
             }
         });
     }
