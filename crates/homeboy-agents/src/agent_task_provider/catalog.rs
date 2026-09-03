@@ -11,6 +11,31 @@ use super::secrets::{
 };
 use super::*;
 use homeboy_engine_primitives::content_hash;
+use std::sync::OnceLock;
+
+static PROVIDER_EVIDENCE: OnceLock<Arc<Mutex<ProviderEvidenceStore>>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+pub(super) struct ProviderEvidenceStore {
+    pub(super) readiness: ProviderRuntimeReadinessCache,
+    pub(super) usage_caps: ProviderUsageCapRegistry,
+    pub(super) account_blocks: BTreeMap<String, AccountBlockEvidence>,
+    pub(super) launch_credentials: HashMap<String, VecDeque<BoundProviderCredentials>>,
+}
+
+#[derive(Debug)]
+pub(super) struct BoundProviderCredentials {
+    pub(super) env: Vec<(String, String)>,
+}
+
+#[derive(Debug)]
+pub(super) struct AccountBlockEvidence {
+    pub(super) expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn shared_provider_evidence() -> Arc<Mutex<ProviderEvidenceStore>> {
+    Arc::clone(PROVIDER_EVIDENCE.get_or_init(|| Arc::new(Mutex::new(Default::default()))))
+}
 
 /// The discovered catalog, keyed by the config root it was discovered from.
 ///
@@ -27,6 +52,7 @@ static PROVIDER_CATALOG: OnceLock<RwLock<Option<(PathBuf, AgentTaskProviderCatal
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
     diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+    pub(super) evidence: Arc<Mutex<ProviderEvidenceStore>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +300,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers: catalog.providers,
             diagnostics: catalog.diagnostics,
+            evidence: shared_provider_evidence(),
         }
     }
 
@@ -282,6 +309,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers,
             diagnostics: Vec::new(),
+            evidence: shared_provider_evidence(),
         }
     }
 
@@ -507,7 +535,18 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
         crate::agent_task_config_materialization::materialize_provider_config_refs(Value::Object(
             defaults::load_config().settings.into_iter().collect(),
         ))?;
-    let verdict = super::command_runner::run_provider_readiness_invocation(provider, &effective_config).map_err(
+    let credential_env = super::secrets::provider_declared_credential_env(provider).map_err(|error| {
+        Error::validation_invalid_argument(
+            "backend",
+            format!(
+                "agent-task backend '{backend}' could not resolve declared provider credentials: {}",
+                error.message
+            ),
+            Some(backend.to_string()),
+            None,
+        )
+    })?;
+    let verdict = super::command_runner::run_provider_readiness_invocation_with_env(provider, &effective_config, &credential_env).map_err(
         |message| {
             Error::validation_invalid_argument(
                 "backend",
@@ -560,7 +599,9 @@ pub(super) fn provider_not_found_message(
     backend: &str,
     diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
 ) -> String {
-    let base = format!("no extension agent-task provider found for backend '{backend}'");
+    let base = format!(
+        "no extension agent-task provider found for backend '{backend}' (no installed provider can serve this backend)"
+    );
     if diagnostics.is_empty() {
         return base;
     }

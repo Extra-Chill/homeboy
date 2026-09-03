@@ -230,7 +230,7 @@ mod timeout_tests {
             .iter()
             .find(|diagnostic| diagnostic.class == "agent_task.execution_deadline_exceeded")
             .expect("deadline diagnostic");
-        assert_eq!(diagnostic.data["completed_phase"], "materialization");
+        assert_eq!(diagnostic.data["completed_phase"], "provider_readiness");
         assert_eq!(diagnostic.data["remaining_budget_ms"], 0);
     }
 
@@ -264,6 +264,32 @@ mod timeout_tests {
         assert!(
             (59_000..=60_000).contains(&timeout_ms),
             "providers receive the execution-deadline-bounded timeout rather than an implicit default: {timeout_ms}"
+        );
+    }
+
+    #[test]
+    fn task_execution_deadline_caps_the_plan_deadline() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(Arc::new(ConceptPacketExecutor {
+            observed: Arc::clone(&observed),
+            emit_concept_packet: false,
+        }));
+        let mut plan = plan_with_tasks(1);
+        let task_deadline = crate::agent_task_timeout::now_unix_ms().saturating_add(30_000);
+        plan.options.execution_budget.deadline_unix_ms = Some(task_deadline.saturating_add(30_000));
+        plan.tasks[0].limits.execution_deadline_unix_ms = Some(task_deadline);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Succeeded
+        );
+        assert_eq!(
+            observed.lock().expect("observed request")[0]
+                .limits
+                .execution_deadline_unix_ms,
+            Some(task_deadline)
         );
     }
 

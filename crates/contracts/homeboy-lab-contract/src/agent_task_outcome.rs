@@ -52,6 +52,13 @@ pub enum AgentTaskFailureClassification {
     /// Unlike a normal execution failure, another configured provider can
     /// satisfy the request, so this classification is eligible for rotation.
     ProviderAccountBlocked,
+    /// The provider reports that this route's allocated usage quota is spent.
+    /// A configured alternate route may still have quota available.
+    ProviderQuotaExhausted,
+    /// The provider rejected the route for an account billing or payment block.
+    ProviderBillingBlocked,
+    /// The provider rejected the route's credential or authentication material.
+    ProviderCredentialsExhausted,
     PolicyDenied,
     CapabilityMissing,
     InvalidInput,

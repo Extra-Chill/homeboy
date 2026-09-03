@@ -11,7 +11,7 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::Job;
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::process::Command;
@@ -92,10 +92,10 @@ impl RunnerContinuationProvider for ReconciliationProvider {
         Err(Error::internal_unexpected("not used by reconciliation"))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by reconciliation"))
     }
@@ -394,7 +394,7 @@ fn snapshot_reasons_for(
     snapshots
         .iter()
         .find(|snapshot| snapshot.pins.iter().any(|candidate| candidate == pin))
-        .map(|snapshot| snapshot.retention_reasons.clone())
+        .map(|snapshot| snapshot.retention_reasons())
         .expect("snapshot")
 }
 
@@ -498,7 +498,7 @@ fn controller_pin_retention_reclaims_old_terminal_retained_artifacts_under_press
         assert!(applied.snapshots.iter().any(|snapshot| {
             snapshot.pins.contains(&terminal_pin)
                 && snapshot
-                    .retention_reasons
+                    .retention_reasons()
                     .iter()
                     .any(|reason| reason == "reclaimable")
         }));

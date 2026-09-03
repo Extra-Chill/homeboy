@@ -8,6 +8,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+use crate::api::v1::{
+    COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNING_FIXES_CAPABILITY_ID,
+    FINGERPRINT_FILE_CAPABILITY_PREFIX, REFACTOR_FILE_CAPABILITY_PREFIX,
+};
 use crate::autofix_config::*;
 use crate::ci_config::*;
 use crate::extension_contract_producer::*;
@@ -101,7 +105,7 @@ pub struct ExtensionManifest {
 
     /// Extension-owned, opt-in hydration for failed external CI statuses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external_check_detail_resolvers: Vec<ExternalCheckDetailResolverConfig>,
+    pub external_check_detail_resolvers: Vec<ExternalCheckDetailResolverDeclaration>,
 
     /// Runtime requirements needed to execute this extension's runner scripts.
     /// Component-declared requirements still win; these are fallbacks for the
@@ -270,18 +274,6 @@ impl ExtensionManifest {
                     "notification_transports.id",
                     "must be unique within an extension manifest",
                     Some(transport.id.clone()),
-                    None,
-                ));
-            }
-        }
-        let mut providers = std::collections::HashSet::new();
-        for resolver in &self.external_check_detail_resolvers {
-            resolver.validate()?;
-            if !providers.insert(&resolver.provider) {
-                return Err(homeboy_error::Error::validation_invalid_argument(
-                    "external_check_detail_resolvers.provider",
-                    "must be unique within an extension manifest",
-                    Some(resolver.provider.clone()),
                     None,
                 ));
             }
@@ -637,10 +629,159 @@ impl ExtensionManifest {
             .as_ref()
             .and_then(|s| s.compiler_warning_fixes.as_deref())
     }
+
+    /// Capability ids this extension provides over the JSON-stdin invocation
+    /// contract, in deterministic order.
+    ///
+    /// Catalog projection advertises exactly these, and API invocation resolves
+    /// exactly these through [`Self::json_capability_script`]. Deriving both
+    /// from one place is what keeps an advertised capability invocable: the two
+    /// used to be written out separately, and `format-file.<ext>` was advertised
+    /// while the invocation path had no branch for it.
+    ///
+    /// `format-file.<ext>` is deliberately absent. Format scripts take file
+    /// arguments rather than JSON on stdin, so they are a different invocation
+    /// shape and are projected separately.
+    pub fn json_capability_ids(&self) -> Vec<String> {
+        let mut capabilities = Vec::new();
+        if self.compiler_warnings_script().is_some() {
+            capabilities.push(COMPILER_WARNINGS_CAPABILITY_ID.to_string());
+        }
+        if self.compiler_warning_fixes_script().is_some() {
+            capabilities.push(COMPILER_WARNING_FIXES_CAPABILITY_ID.to_string());
+        }
+        if self.fingerprint_script().is_some() {
+            capabilities.extend(
+                self.provided_file_extensions()
+                    .iter()
+                    .map(|file_extension| {
+                        format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}{file_extension}")
+                    }),
+            );
+        }
+        if self.refactor_script().is_some() {
+            capabilities.extend(
+                self.provided_file_extensions()
+                    .iter()
+                    .map(|file_extension| {
+                        format!("{REFACTOR_FILE_CAPABILITY_PREFIX}{file_extension}")
+                    }),
+            );
+        }
+        capabilities
+    }
+
+    /// Script implementing one JSON-stdin capability, if this extension
+    /// provides it. Returns `None` for a capability this extension does not
+    /// advertise, including capabilities that use another invocation shape.
+    pub fn json_capability_script(&self, capability_id: &str) -> Option<&str> {
+        match capability_id {
+            COMPILER_WARNINGS_CAPABILITY_ID => self.compiler_warnings_script(),
+            COMPILER_WARNING_FIXES_CAPABILITY_ID => self.compiler_warning_fixes_script(),
+            capability if capability.starts_with(FINGERPRINT_FILE_CAPABILITY_PREFIX) => self
+                .handles_file_extension(
+                    capability.trim_start_matches(FINGERPRINT_FILE_CAPABILITY_PREFIX),
+                )
+                .then(|| self.fingerprint_script())
+                .flatten(),
+            capability if capability.starts_with(REFACTOR_FILE_CAPABILITY_PREFIX) => self
+                .handles_file_extension(
+                    capability.trim_start_matches(REFACTOR_FILE_CAPABILITY_PREFIX),
+                )
+                .then(|| self.refactor_script())
+                .flatten(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Every advertised JSON-stdin capability must resolve to a script.
+    ///
+    /// This is the invariant that was already broken once: `format-file.<ext>`
+    /// was advertised by catalog projection while the invocation path had no
+    /// branch for it, so it resolved and then failed as not provided.
+    #[test]
+    fn every_advertised_json_capability_resolves_to_a_script() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "name": "Fixture",
+            "version": "1.0.0",
+            "provides": { "file_extensions": ["rs", "ts"] },
+            "scripts": {
+                "fingerprint": "bin/fingerprint",
+                "refactor": "bin/refactor",
+                "format": "bin/format",
+                "compiler_warnings": "bin/warnings",
+                "compiler_warning_fixes": "bin/fixes",
+            }
+        }))
+        .expect("fixture manifest");
+
+        let advertised = manifest.json_capability_ids();
+        assert!(
+            advertised.contains(&format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}rs"))
+                && advertised.contains(&format!("{REFACTOR_FILE_CAPABILITY_PREFIX}ts"))
+                && advertised.contains(&COMPILER_WARNINGS_CAPABILITY_ID.to_string()),
+            "got {advertised:?}"
+        );
+        for capability_id in &advertised {
+            assert!(
+                manifest.json_capability_script(capability_id).is_some(),
+                "advertised capability '{capability_id}' does not resolve to a script"
+            );
+        }
+
+        // Format takes file arguments rather than JSON on stdin, so it is
+        // deliberately not part of this contract and must not be advertised as
+        // though it were invocable here.
+        assert!(!advertised
+            .iter()
+            .any(|id| id.starts_with(crate::api::v1::FORMAT_FILE_CAPABILITY_PREFIX)));
+        assert!(manifest
+            .json_capability_script(&format!(
+                "{}rs",
+                crate::api::v1::FORMAT_FILE_CAPABILITY_PREFIX
+            ))
+            .is_none());
+    }
+
+    #[test]
+    fn a_capability_for_an_unprovided_file_extension_does_not_resolve() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "name": "Fixture",
+            "version": "1.0.0",
+            "provides": { "file_extensions": ["rs"] },
+            "scripts": { "fingerprint": "bin/fingerprint" }
+        }))
+        .expect("fixture manifest");
+
+        assert!(manifest
+            .json_capability_script(&format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}rs"))
+            .is_some());
+        assert!(manifest
+            .json_capability_script(&format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}py"))
+            .is_none());
+    }
+
+    #[test]
+    fn an_extension_without_scripts_advertises_no_json_capabilities() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "name": "Fixture",
+            "version": "1.0.0",
+            "provides": { "file_extensions": ["rs"] }
+        }))
+        .expect("fixture manifest");
+
+        assert!(manifest.json_capability_ids().is_empty());
+        assert!(manifest
+            .json_capability_script("compiler-warnings")
+            .is_none());
+    }
     use super::*;
 
     fn manifest(transports: Vec<NotificationTransportConfig>) -> ExtensionManifest {

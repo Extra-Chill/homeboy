@@ -91,6 +91,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let target_inventory = build_target_inventory(
         &ctx.component_id,
         &workloads,
+        selected_workload,
         args.run_id.clone(),
         args.inventory.as_deref(),
     )?;

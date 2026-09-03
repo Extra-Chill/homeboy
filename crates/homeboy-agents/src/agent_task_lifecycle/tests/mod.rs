@@ -92,12 +92,19 @@ impl RunnerContinuationProvider for IntentReplayProvider {
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        request: RemoteRunnerJobRequest,
+        submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
-        let job = self.store.submit_remote_runner_job(request)?;
+        let job = match submission {
+            RunnerContinuationSubmission::RunnerApi(request) => {
+                self.store.submit_runner_api_request(request)?
+            }
+            RunnerContinuationSubmission::LegacyReplay(request) => {
+                self.store.submit_remote_runner_job(request)?
+            }
+        };
         self.submitted.lock().expect("submission log").push(job.id);
         let mut fail = self.fail_after_accept_once.lock().expect("fault flag");
         if std::mem::take(&mut *fail) {
@@ -190,10 +197,10 @@ impl RunnerContinuationProvider for ConnectedRunnerProvider {
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("no reverse broker job in test"))
     }

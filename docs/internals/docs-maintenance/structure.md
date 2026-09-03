@@ -17,10 +17,10 @@ point. Homeboy's own tree:
 docs/
 ├── index.md                # Entry point for the whole tree
 ├── commands/               # Hand-written command narrative
+│   ├── index.md
 │   └── agent-task.md
 ├── reference/              # Generated reference material
-│   ├── index.md
-│   └── cli/commands/index.md
+│   └── index.md
 ├── concepts/               # Conceptual explanation
 │   └── index.md
 ├── workflows/              # Task-oriented guides
@@ -32,9 +32,9 @@ docs/
     └── docs-maintenance/index.md
 ```
 
-`docs/commands/*.md` and `docs/reference/cli/commands/*.md` are deliberately
-not duplicates: the first is hand-written narrative, the second is generated
-from the clap command tree. They cross-link and must not be consolidated.
+`docs/commands/*.md` contains hand-written concepts and recipes. Exact command
+syntax comes directly from Clap through `homeboy <command> --help`; Homeboy does
+not check in a second generated Markdown projection of that surface.
 
 ### Hierarchical Depth
 Match the depth of code organization. If code has nested extensions, documentation can have nested subdirectories. Avoid unnecessary nesting.
@@ -64,11 +64,10 @@ internals/
     └── architecture-cleanup-map.md
 ```
 
-`{directory}/index.md` is the convention throughout this tree, it is what
-`docs/index.md` and `README.md` link to, and the generated CLI reference emits
-`docs/reference/cli/commands/index.md` as a required page. An earlier revision
-of this file banned `index.md` in subdirectories; that rule never matched the
-repository and is withdrawn.
+`{directory}/index.md` is the convention throughout this tree, and it is what
+`docs/index.md` and `README.md` link to. An earlier revision of this file banned
+`index.md` in subdirectories; that rule never matched the repository and is
+withdrawn.
 
 ### Kebab-Case
 Use kebab-case for all file names: `user-authentication.md`, `api-reference.md`

@@ -1,21 +1,21 @@
+use crate::release::context::ReleaseExtension;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
 use homeboy_core::{self};
-use homeboy_extension_contract::ExtensionManifest;
 
 use super::{build_release_payload, publish_response_output, step_failed, step_success};
 use crate::release::types::{ReleaseState, ReleaseStepResult};
 
 /// Invoke every `release.prepare` action provided by the component's extensions.
 pub(crate) fn run_prepare(
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     state: &ReleaseState,
     component_id: &str,
     component_local_path: &str,
 ) -> Result<ReleaseStepResult> {
-    let providers: Vec<&ExtensionManifest> = extensions
+    let providers: Vec<&ReleaseExtension> = extensions
         .iter()
-        .filter(|m| m.actions.iter().any(|a| a.id == "release.prepare"))
+        .filter(|extension| extension.provides_action("release.prepare"))
         .collect();
 
     if providers.is_empty() {
@@ -33,11 +33,11 @@ pub(crate) fn run_prepare(
     let mut responses = Vec::new();
 
     for extension in providers {
-        let response = extension::invoke::execute_action(
+        let response = extension::invoke::action_api::invoke_action(
             &extension.id,
             "release.prepare",
             None,
-            None,
+            &[],
             Some(&payload),
         )?;
         responses.push(serde_json::json!({

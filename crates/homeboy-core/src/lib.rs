@@ -161,6 +161,7 @@ pub mod repository_integrity;
 pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;
 pub mod resource_policy_context;
+pub mod resource_topology;
 pub mod resources;
 pub mod rig_provider;
 pub mod rig_toolchain_provider;
@@ -210,7 +211,6 @@ pub mod workspace_claim;
 pub mod workspace_snapshot;
 pub mod worktree;
 pub mod worktree_provider;
-pub mod worktree_providers;
 
 // Internal path resolution helpers.
 // paths moved to the internal `homeboy-paths` crate. Re-exported so existing

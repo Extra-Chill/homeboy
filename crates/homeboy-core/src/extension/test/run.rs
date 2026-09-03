@@ -2244,23 +2244,7 @@ fn run_review_test_lifecycle(
 
 impl TestCheckoutGuard {
     fn capture(path: &Path) -> homeboy_core::Result<Self> {
-        let changes = homeboy_core::git::get_uncommitted_changes(&path.to_string_lossy())?;
-        if changes.has_changes {
-            let files = changes
-                .staged
-                .iter()
-                .chain(changes.unstaged.iter())
-                .chain(changes.untracked.iter())
-                .take(10)
-                .cloned()
-                .collect::<Vec<_>>();
-            return Err(Error::validation_invalid_argument(
-                "working_tree",
-                "Review tests require a clean component checkout",
-                None,
-                Some(vec![format!("Dirty files: {}", files.join(", "))]),
-            ));
-        }
+        ensure_clean_review_checkout(path)?;
 
         let head =
             homeboy_core::git::run_git(path, &["rev-parse", "HEAD"], "capture review test HEAD")?;
@@ -2290,6 +2274,33 @@ impl TestCheckoutGuard {
         }
         Ok(())
     }
+}
+
+/// Confirm that a checkout can safely run the review test lifecycle, which
+/// resets tracked files and removes generated files when it completes.
+pub fn ensure_clean_review_checkout(path: &Path) -> homeboy_core::Result<()> {
+    let changes = homeboy_core::git::get_uncommitted_changes(&path.to_string_lossy())?;
+    if !changes.has_changes {
+        return Ok(());
+    }
+
+    let files = changes
+        .staged
+        .iter()
+        .chain(changes.unstaged.iter())
+        .chain(changes.untracked.iter())
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>();
+    Err(Error::validation_invalid_argument(
+        "working_tree",
+        "Review tests require a clean component checkout",
+        None,
+        Some(vec![
+            format!("Dirty files: {}", files.join(", ")),
+            "For dirty changed-file review, run `homeboy review --changed-only audit` and `homeboy review --changed-only lint` separately.".to_string(),
+        ]),
+    ))
 }
 
 fn failed_test_workflow(

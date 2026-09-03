@@ -8,11 +8,17 @@ use serde_json::{json, Value};
 
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_workload_result;
 use homeboy_core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
+use homeboy_core::daemon::{DirectDaemonExecSubmitRequest, WorkspaceOwnerRegisterRequest};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::lab_contract::{run_location_index_path, JobArtifactMetadata, LabRunnerWorkload};
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::{
+    RunnerApiSubmitRequest, WorkspaceIdentity, WorkspaceOwnerLease,
+    RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1, WORKSPACE_CLAIM_PROTOCOL_VERSION,
+    WORKSPACE_OWNER_LEASE_CAPABILITY,
+};
 
 use super::super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
@@ -106,35 +112,56 @@ pub(super) fn exec_via_daemon(
     if workspace_owner_request.is_some() {
         require_daemon_workspace_owner_lease_v2(&client, local_url)?;
     }
-    let mut payload = json!({
-        "runner_id": runner.id,
-        "runner": runner,
-        "project_id": project_id,
-        "cwd": cwd,
-        "command": command,
-        "env": env,
-        "secret_env_names": secret_env_names,
-        "capture_patch": capture_patch,
-        "source_snapshot": source_snapshot.clone(),
-        "path_materialization_plan": path_materialization_plan.clone(),
-        "require_paths": require_paths.clone(),
-        "extension_env_providers": extension_env_providers.clone(),
-        "runner_workload": lab_runner_workload.clone(),
-        "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
-        "lifecycle": lifecycle,
-        // Explicit, first-class idempotency key the daemon dedupes `/exec` on.
-        // The controller asserts it up front instead of the daemon having to
-        // reconstruct it from nested lifecycle/metadata, so a resubmission after
-        // a transport drop is a safe no-op. Uses the durable run id when present.
-        "idempotency_key": run_id,
-    });
-    if let Some((workspace, owner_id)) = workspace_owner_request.as_ref() {
-        payload["workspace_owner_request"] = json!({
-            "workspace": workspace,
-            "owner_id": owner_id,
-            "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
-        });
-    }
+    let submission_key = run_id
+        .clone()
+        .unwrap_or_else(|| format!("direct-daemon:v1:{}:{}", runner.id, uuid::Uuid::new_v4()));
+    let envelope = runner_api_execution_envelope(RunnerApiExecutionInput {
+        runner_id: runner.id.clone(),
+        project_id,
+        command: command.clone(),
+        cwd: cwd.clone(),
+        env: env.clone(),
+        secret_env_names: secret_env_names.clone(),
+        capture_patch,
+        source_snapshot: source_snapshot.clone(),
+        path_materialization_plan: path_materialization_plan.clone(),
+        require_paths: require_paths.clone(),
+        extension_env_providers: extension_env_providers.clone(),
+        workload: lab_runner_workload.clone(),
+        lifecycle,
+        metadata: runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
+    })?;
+    let submission = RunnerApiSubmitRequest {
+        schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+        api_version: RUNNER_API_V1,
+        submission_key,
+        envelope,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+    };
+    let payload = serde_json::to_value(DirectDaemonExecSubmitRequest {
+        submission,
+        runner: Some(serde_json::to_value(runner).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize direct runner descriptor".to_string()),
+            )
+        })?),
+        raw_exec: false,
+        workspace_owner_request: workspace_owner_request.map(|(workspace, owner_id)| {
+            WorkspaceOwnerRegisterRequest {
+                workspace,
+                owner_id,
+                ttl_ms: homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+            }
+        }),
+    })
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize direct runner submission".to_string()),
+        )
+    })?;
     let response = submit_daemon_exec_with_session_recovery(
         local_url,
         accepted_session.as_ref(),
@@ -535,11 +562,9 @@ fn require_daemon_workspace_owner_lease_v2(client: &Client, local_url: &str) -> 
         .is_some_and(|capabilities| {
             capabilities.iter().any(|capability| {
                 capability.get("capability").and_then(Value::as_str)
-                    == Some(homeboy_core::workspace_claim::WORKSPACE_OWNER_LEASE_CAPABILITY)
+                    == Some(WORKSPACE_OWNER_LEASE_CAPABILITY)
                     && capability.get("version").and_then(Value::as_u64)
-                        == Some(
-                            homeboy_core::workspace_claim::WORKSPACE_CLAIM_PROTOCOL_VERSION as u64,
-                        )
+                        == Some(WORKSPACE_CLAIM_PROTOCOL_VERSION as u64)
             })
         });
     supported.then_some(()).ok_or_else(|| {
@@ -559,7 +584,7 @@ pub(crate) enum DaemonAdmissionPolicy {
     DurableLeaseRequired,
 }
 
-type WorkspaceOwnerRegistration = (homeboy_core::workspace_claim::WorkspaceIdentity, String);
+type WorkspaceOwnerRegistration = (WorkspaceIdentity, String);
 
 const ADMISSION_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
 const ADMISSION_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -668,7 +693,7 @@ pub(crate) struct DaemonAdmissionReservation {
     local_url: String,
     job_id: String,
     token: Option<String>,
-    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+    workspace_owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
     renewer_stop: Option<Sender<()>>,
     renewer: Option<std::thread::JoinHandle<()>>,
     authority: DaemonAdmissionReservationAuthority,
@@ -1062,7 +1087,7 @@ fn spawn_admission_renewer(
     local_url: String,
     job_id: String,
     token: String,
-    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+    workspace_owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
     health: Arc<Mutex<AdmissionRenewalHealth>>,
 ) -> (Sender<()>, std::thread::JoinHandle<()>) {
     let (stop, shutdown) = mpsc::channel();

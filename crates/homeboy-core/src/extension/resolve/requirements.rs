@@ -196,6 +196,7 @@ fn extension_source(ext_config: &homeboy_core::component::ScopedExtensionConfig)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension::registry::ExtensionLifecycleValidation;
     use homeboy_core::component::Component;
 
     #[test]
@@ -253,8 +254,12 @@ mod tests {
             // requirement because dev iteration may lag the published constraint.
             let source = home.join("source/wordpress");
             write_extension_manifest(&source, "wordpress", "1.0.0");
-            crate::extension::lifecycle::install(&source.to_string_lossy(), Some("wordpress"))
-                .expect("install linked extension");
+            crate::extension::lifecycle::install(
+                &source.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install linked extension");
             assert!(homeboy_core::extension::catalog::is_extension_linked(
                 "wordpress"
             ));

@@ -69,6 +69,11 @@ pub(crate) fn link_latest_executor_evidence(
     outcome: &mut AgentTaskOutcome,
     run_id: Option<&str>,
 ) {
+    classify_structured_runtime_failure(
+        outcome,
+        &request.request.executor.backend,
+        &request.artifacts_path,
+    );
     let policy = RedactionPolicy::default();
     let dir = executor_evidence_dir(&request.artifact_store_root, run_id, &request.task_id);
     if fs::create_dir_all(&dir).is_err() {
@@ -129,14 +134,6 @@ fn link_runtime_evidence(
         .and_then(|paths| {
             structured_error_from_runtime_files(&request.request.executor.backend, paths)
         });
-    if let Some(classification) = structured_error
-        .as_ref()
-        .and_then(crate::agent_task_provider::normalized_error_failure_classification)
-    {
-        // This is a provider-side account rejection, not a code-level failure.
-        // Rotation remains an explicit scheduler policy decision (#13691).
-        outcome.failure_classification = Some(classification);
-    }
     let index = json!({
         "artifact_root": artifact_root.as_ref().map(|path| format!("file://{}", path.display())),
         "provider_runtime_identities": sessions,
@@ -194,6 +191,31 @@ fn link_runtime_evidence(
             );
         }
     }
+}
+
+/// Classify a generic execution failure from provider-owned runtime evidence.
+/// This deliberately precedes best-effort evidence persistence: scheduler
+/// rotation must not depend on whether the diagnostic files can be linked.
+pub(crate) fn classify_structured_runtime_failure(
+    outcome: &mut AgentTaskOutcome,
+    backend: &str,
+    artifact_root: &Path,
+) {
+    if outcome.failure_classification
+        != Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed)
+    {
+        return;
+    }
+    let runtime_files = discover_runtime_files(artifact_root);
+    let Some(classification) = runtime_files
+        .get(RUNTIME_STDOUT_EVIDENCE_KIND)
+        .and_then(|paths| structured_error_from_runtime_files(backend, paths))
+        .as_ref()
+        .and_then(crate::agent_task_provider::normalized_error_failure_classification)
+    else {
+        return;
+    };
+    outcome.failure_classification = Some(classification);
 }
 
 /// Derive compact progress from structured runtime stdout. The full transcript
@@ -288,7 +310,9 @@ fn structured_session_id(event: &Value) -> Option<&str> {
 /// latest capture file wins: it belongs to the final attempt. Only the
 /// adapter's normalized, redacted output is persisted.
 fn structured_error_from_runtime_files(backend: &str, paths: &[PathBuf]) -> Option<Value> {
-    for path in paths.iter().rev() {
+    let mut paths = paths.iter().collect::<Vec<_>>();
+    paths.sort_by_key(|path| (runtime_capture_attempt(path), path.as_os_str()));
+    for path in paths.into_iter().rev() {
         let Some(tail) =
             crate::agent_task_provider::structured_error::read_runtime_stream_tail(path)
         else {
@@ -304,6 +328,14 @@ fn structured_error_from_runtime_files(backend: &str, paths: &[PathBuf]) -> Opti
         }
     }
     None
+}
+
+fn runtime_capture_attempt(path: &Path) -> u32 {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once('-'))
+        .and_then(|(_, attempt)| attempt.parse().ok())
+        .unwrap_or_default()
 }
 
 fn structured_progress_event(event: &Value) -> Option<Value> {
@@ -765,7 +797,60 @@ mod tests {
 
             assert_eq!(
                 outcome.failure_classification,
-                Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+                Some(AgentTaskFailureClassification::ProviderBillingBlocked)
+            );
+        });
+    }
+
+    #[test]
+    fn classifies_structured_rejection_when_evidence_persistence_fails() {
+        with_artifact_root(|_| {
+            let mut request = executor_test_request();
+            request.request.executor.backend = "opencode".to_string();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout-1.log"),
+                r#"{"type":"error","error":{"data":{"message":"usage quota exhausted","statusCode":403,"isRetryable":false}}}"#,
+            )
+            .expect("write stdout");
+            let evidence_root_file = request.artifact_store_root.join("not-a-directory");
+            fs::write(&evidence_root_file, "block evidence directory").expect("write blocker");
+            request.artifact_store_root = evidence_root_file;
+            let mut outcome = test_outcome();
+            outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(
+                outcome.failure_classification,
+                Some(AgentTaskFailureClassification::ProviderQuotaExhausted)
+            );
+            assert!(outcome.evidence_refs.is_empty());
+        });
+    }
+
+    #[test]
+    fn classifies_the_highest_numbered_runtime_capture_as_the_final_attempt() {
+        with_artifact_root(|_| {
+            let mut request = executor_test_request();
+            request.request.executor.backend = "opencode".to_string();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout-2.log"),
+                r#"{"type":"error","error":{"data":{"message":"repository not accessible","statusCode":403,"isRetryable":false}}}"#,
+            )
+            .expect("write earlier stdout");
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout-10.log"),
+                r#"{"type":"error","error":{"data":{"message":"API key expired","statusCode":403,"isRetryable":false}}}"#,
+            )
+            .expect("write final stdout");
+            let mut outcome = test_outcome();
+            outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(
+                outcome.failure_classification,
+                Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
             );
         });
     }

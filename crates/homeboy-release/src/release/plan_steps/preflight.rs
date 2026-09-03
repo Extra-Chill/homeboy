@@ -1,15 +1,15 @@
 use super::builders::{disabled_step, ready_step, string_config, StepConfig};
+use crate::release::context::ReleaseExtension;
 use crate::release::types::{ReleaseOptions, ReleaseSemverRecommendation};
 use homeboy_core::plan::PlanStep;
 use homeboy_core::quality::{
     build_quality_steps as build_shared_quality_steps, QualityPlanOptions,
 };
-use homeboy_extension_contract::ExtensionManifest;
 
 pub(in crate::release) fn build_preflight_steps(
     options: &ReleaseOptions,
     semver_recommendation: Option<&ReleaseSemverRecommendation>,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
 ) -> Vec<PlanStep> {
     let default_branch_step = if options.pipeline.head {
         disabled_step(
@@ -216,7 +216,7 @@ fn quality_plan_options(options: &ReleaseOptions) -> QualityPlanOptions {
     quality.with_granular_skips(&options.skip_checks_granular)
 }
 
-fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> Vec<PlanStep> {
+fn build_extension_release_preflight_steps(extensions: &[ReleaseExtension]) -> Vec<PlanStep> {
     extensions
         .iter()
         .flat_map(|extension| {

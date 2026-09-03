@@ -14,8 +14,7 @@ use crate::agent_task_dispatch_plan::{
 use crate::agent_task_lifecycle as lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
-    apply_provider_runner_secret_env_contracts, default_backend_for_component,
-    enforce_runtime_preflight_checks_for_plan, preflight_plan_provider_config_with_providers,
+    default_backend_for_component, preflight_plan_provider_config_with_providers,
     preflight_provider_credentials_for_backend, resolve_provider_for_backend,
     AgentTaskProviderCatalog, ProviderResolution,
 };
@@ -158,6 +157,7 @@ pub struct AgentTaskInitialProviderRoute {
     pub backend: String,
     pub selector: Option<String>,
     pub model: Option<String>,
+    pub provider_config: Value,
     pub rotation: Option<AgentTaskProviderRotationPolicy>,
     pub rotation_selected_initial: bool,
 }
@@ -196,32 +196,35 @@ fn dispatch_with_provider_catalog(
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let backend_selection = request.backend_selection.clone();
-    // Credentials first: the selected backend's declared credentials are
-    // knowable before a plan exists, before a workspace is resolved, and before
-    // any provider execution is spent. Discovering a credential gap inside the
-    // provider costs an execution against the task budget and can terminate a
-    // Cook that other backends could have run (#11479).
-    preflight_provider_credentials_for_backend(
-        catalog.providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    )?;
-    let mut plan =
-        build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
-            catalog.provider_requires_cwd_git_checkout(backend, selector)
-        })?;
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-    catalog.validate_selected_models(&plan)?;
-    catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-        &plan,
-        catalog.providers(),
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
+    let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
+        catalog.provider_requires_cwd_git_checkout(backend, selector)
+    })?;
+    let execution_plan =
+        match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        ) {
+            Ok(plan) => {
+                validate_selected_execution_plan(&plan, catalog)?;
+                plan
+            }
+            Err(error) if error.retryable == Some(true) => {
+                return Err(record_retryable_dispatch_admission_failure(
+                    &plan,
+                    request.run_id.as_deref(),
+                    with_declared_credential_hints(error, &plan, catalog),
+                ));
+            }
+            Err(error) => {
+                preflight_dispatch_provider_secrets(&plan)?;
+                return Err(with_declared_credential_hints(error, &plan, catalog));
+            }
+        };
+    // The admitted plan retains the complete route chain while binding execution
+    // to the selected route and its forward-only rotation cursor.
     run_dispatch_plan(
-        plan,
+        execution_plan,
         request.run_id.as_deref(),
         request.core.queue_only,
         backend_selection,
@@ -229,80 +232,134 @@ fn dispatch_with_provider_catalog(
     )
 }
 
-/// Validate every provider declaration needed to dispatch this request without
-/// running live runtime or workspace readiness probes.
+/// Validate the reachable provider routes needed to dispatch this request.
 pub fn preflight_dispatch_provider_admission(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
-    preflight_provider_credentials_for_backend(
-        catalog.providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    )?;
     let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-    catalog.validate_selected_models(&plan)?;
-    preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
-    crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
+    let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         &plan,
         catalog,
         &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            if !matches!(
+                resolve_provider_for_backend(
+                    catalog.providers(),
+                    &request.backend,
+                    request.selector.as_deref()
+                ),
+                ProviderResolution::Resolved(_)
+            ) {
+                crate::agent_task_provider::validate_provider_runner_readiness_for_backend_with_catalog(
+                catalog,
+                &request.backend,
+                request.selector.as_deref(),
+            )?;
+            }
+            preflight_provider_credentials_for_backend(
+                catalog.providers(),
+                &request.backend,
+                request.selector.as_deref(),
+            )?;
+            catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+            catalog.validate_selected_models(&plan)?;
+            preflight_dispatch_provider_secrets(&plan)?;
+            preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
+            crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
+            &plan,
+            catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )?;
+            return Err(error);
+        }
+    };
+    // `plan` is the admission-derived selected route (fixture/gate bypass
+    // already applied). Re-deriving dispatchability from scratch here would
+    // drop that bypass and hard-fail a route admission just approved (#13974).
+    catalog.validate_selected_models(&plan)?;
+    preflight_dispatch_provider_secrets(&plan)?;
+    preflight_plan_provider_config_with_providers(&plan, catalog.providers())
 }
 
-pub fn dispatch_with_provider_requirements(
-    request: AgentTaskDispatchRequest,
-    executor: SharedAgentTaskExecutor,
-    provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
-) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
-    let backend_selection = request.backend_selection.clone();
-    preflight_provider_credentials_for_backend(
-        AgentTaskProviderCatalog::discover().providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    )?;
-    let mut plan = build_dispatch_plan_with_provider_requirements(
-        &request,
-        provider_requires_cwd_git_checkout,
-    )?;
-    apply_provider_runner_secret_env_contracts(&mut plan);
-    AgentTaskProviderCatalog::discover().validate_selected_models(&plan)?;
-    enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(
-        &plan,
-        &AgentTaskProviderCatalog::discover().providers,
-    )?;
-    let catalog = AgentTaskProviderCatalog::discover();
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-        &plan,
-        catalog.providers(),
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
-    run_dispatch_plan(
-        plan,
-        request.run_id.as_deref(),
-        request.core.queue_only,
-        backend_selection,
-        executor,
-    )
+fn validate_selected_execution_plan(
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<()> {
+    // `plan` already cleared full dispatchability (including live runtime
+    // probing) for its selected route during admission, with the fixture/gate
+    // bypass that route selection depends on. Re-deriving dispatchability here
+    // from scratch would re-run that evaluation without the bypass and hard-fail
+    // a plan admission just approved (#13974). Only run the checks admission
+    // does not already cover: declared model support, provider-declared runtime
+    // preflight checks, secret material, and provider config preflight rules.
+    catalog.validate_selected_models(plan)?;
+    catalog.enforce_runtime_preflight_checks_for_plan(plan)?;
+    preflight_dispatch_provider_secrets(plan)?;
+    preflight_plan_provider_config_with_providers(plan, catalog.providers())
+}
+
+fn with_declared_credential_hints(
+    mut error: Error,
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+) -> Error {
+    for provider in catalog.providers().iter().filter(|provider| {
+        plan.tasks
+            .iter()
+            .any(|task| task.executor.backend == provider.backend)
+    }) {
+        for name in crate::agent_task_provider::provider_required_secret_env_names(provider) {
+            if !error.hints.iter().any(|hint| hint.message.contains(&name)) {
+                error.hints.push(homeboy_core::error::Hint {
+                    message: format!("Required provider credential: {name}"),
+                });
+            }
+        }
+    }
+    error
+}
+
+/// A retryable admission denial is still a denied execution. Materialize the
+/// submitted plan and terminal pre-execution diagnostic rather than letting a
+/// scheduler reservation choose a fresh route from the original plan.
+fn record_retryable_dispatch_admission_failure(
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    mut error: Error,
+) -> Error {
+    let result = (|| {
+        let submitted = lifecycle::submit_plan(plan, requested_run_id)?;
+        lifecycle::record_pre_execution_failure(
+            &submitted.run_id,
+            plan,
+            "admit_plan_provider_dispatchability",
+            &error,
+        )?;
+        error.details["run_id"] = serde_json::json!(submitted.run_id);
+        Ok(())
+    })();
+    if let Err(record_error) = result {
+        return record_error;
+    }
+    error
 }
 
 /// The only durable dispatch-to-scheduler path. Both provider-catalog entry
 /// points prepare a plan differently, then share lifecycle transitions,
 /// scheduler execution, aggregate persistence, and report construction here.
 fn run_dispatch_plan(
-    plan: AgentTaskPlan,
+    execution_plan: AgentTaskPlan,
     requested_run_id: Option<&str>,
     queue_only: bool,
     backend_selection: Option<BackendSelection>,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
-    let submitted = lifecycle::submit_plan(&plan, requested_run_id)?;
+    let submitted = lifecycle::submit_plan(&execution_plan, requested_run_id)?;
     let run_id = submitted.run_id.clone();
 
     if queue_only {
@@ -325,7 +382,7 @@ fn run_dispatch_plan(
             Err(error) => {
                 lifecycle::record_pre_execution_failure(
                     &run_id,
-                    &plan,
+                    &execution_plan,
                     "validate_harvest_transport",
                     &error,
                 )?;
@@ -336,8 +393,8 @@ fn run_dispatch_plan(
     let aggregate = AgentTaskScheduler::new_controller(executor)
         .with_harvest_context(harvest_context)
         .with_run_id(run_id.clone())
-        .run(plan.clone());
-    let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
+        .run(execution_plan.clone());
+    let record = lifecycle::record_run_aggregate(&run_id, &execution_plan, &aggregate)?;
     let exit_code = aggregate_exit_code(&aggregate);
 
     Ok(AgentTaskRunResult {
@@ -431,12 +488,18 @@ pub fn resolve_cook_initial_provider_route_with_catalog(
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskInitialProviderRoute> {
     let request = resolve_dispatch_request(command)?;
-    let mut route =
-        initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
-            &request,
-            catalog,
-            configured_rotation_policy(),
-        ));
+    let policy = request
+        .core
+        .resolved_provider_policy
+        .clone()
+        .unwrap_or_else(|| {
+            controller_resolved_execution_policy_with_sources(
+                &request,
+                catalog,
+                configured_rotation_policy(),
+            )
+        });
+    let mut route = initial_provider_route_from_policy(policy);
     // Provider configuration is the configured-model source used by Cook when
     // policy and CLI do not select one. Keep discovery on the same default.
     if route.model.is_none() {
@@ -465,6 +528,7 @@ pub fn initial_provider_route_from_policy(
     let mut backend = policy.backend;
     let mut selector = policy.selector;
     let mut model = policy.model;
+    let mut provider_config = Value::Null;
     let mut rotation = policy.rotation;
     if policy.rotation_starts_with_first_entry {
         if let Some(rotation) = rotation.as_mut() {
@@ -473,6 +537,7 @@ pub fn initial_provider_route_from_policy(
                 backend = first.backend.unwrap_or(backend);
                 selector = first.selector.or(selector);
                 model = first.model.or(model);
+                provider_config = first.provider_config;
             }
         }
     }
@@ -480,6 +545,7 @@ pub fn initial_provider_route_from_policy(
         backend,
         selector,
         model,
+        provider_config,
         rotation,
         rotation_selected_initial: policy.rotation_starts_with_first_entry,
     }
@@ -490,7 +556,7 @@ fn controller_resolved_execution_policy_with_sources(
     catalog: &AgentTaskProviderCatalog,
     rotation: Option<AgentTaskProviderRotationPolicy>,
 ) -> ResolvedAgentTaskProviderPolicy {
-    let runtime_identity = selected_runtime_identity(request, catalog);
+    let requested_runtime_identity = selected_runtime_identity(request, catalog);
     let explicit_backend = request
         .backend_selection
         .as_ref()
@@ -505,7 +571,7 @@ fn controller_resolved_execution_policy_with_sources(
                     .as_deref()
                     .is_none_or(|backend| backend == request.backend)
                     && entry.selector.as_deref().is_none_or(|selector| {
-                        runtime_identity
+                        requested_runtime_identity
                             .as_ref()
                             .is_some_and(|identity| identity.provider_id == selector)
                     })
@@ -513,6 +579,25 @@ fn controller_resolved_execution_policy_with_sources(
         }
         rotation
     });
+    let rotation_starts_with_first_entry = !explicit_backend && request.model.is_none();
+    let runtime_identity = if rotation_starts_with_first_entry {
+        if let Some(entry) = rotation
+            .as_ref()
+            .and_then(|rotation| rotation.entries.first())
+        {
+            let backend = entry.backend.as_deref().unwrap_or(&request.backend);
+            let selector = entry.selector.as_deref().or(request.selector.as_deref());
+            selected_runtime_identity_for_route(backend, selector, catalog).or_else(|| {
+                (backend == request.backend && selector == request.selector.as_deref())
+                    .then(|| requested_runtime_identity.clone())
+                    .flatten()
+            })
+        } else {
+            requested_runtime_identity.clone()
+        }
+    } else {
+        requested_runtime_identity
+    };
     ResolvedAgentTaskProviderPolicy {
         backend: request.backend.clone(),
         selector: request.selector.clone(),
@@ -527,7 +612,7 @@ fn controller_resolved_execution_policy_with_sources(
         rotation,
         // An explicit model is immutable for the initial invocation. Rotation
         // remains available for retries, but cannot silently replace it.
-        rotation_starts_with_first_entry: !explicit_backend && request.model.is_none(),
+        rotation_starts_with_first_entry,
         runtime_identity,
     }
 }
@@ -536,13 +621,25 @@ fn selected_runtime_identity(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
-    let ProviderResolution::Resolved(provider) = resolve_provider_for_backend(
-        catalog.providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    ) else {
+    selected_runtime_identity_for_route(&request.backend, request.selector.as_deref(), catalog)
+}
+
+pub(crate) fn selected_runtime_identity_for_route(
+    backend: &str,
+    selector: Option<&str>,
+    catalog: &AgentTaskProviderCatalog,
+) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
+    let ProviderResolution::Resolved(provider) =
+        resolve_provider_for_backend(catalog.providers(), backend, selector)
+    else {
         return None;
     };
+    runtime_identity_for_provider(provider)
+}
+
+pub(crate) fn runtime_identity_for_provider(
+    provider: &crate::agent_task_provider::AgentTaskExecutorProvider,
+) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
     let plan = provider.extra.get("runtime_materialization_plan")?;
     let plan: homeboy_core::agent_runtime_manifest::AgentRuntimeMaterializationPlan =
         serde_json::from_value(plan.clone()).ok()?;
@@ -850,11 +947,14 @@ mod tests {
         let error = dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
             .expect_err("a missing declared credential must fail dispatch");
 
-        assert_eq!(error.details["field"], "provider_credentials");
+        assert_eq!(error.details["field"], "provider_dispatchability");
         assert!(
-            error.message.contains(&required),
+            error
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains(&required)),
             "the failure must name the credential: {}",
-            error.message
+            error.message,
         );
     }
 
@@ -867,8 +967,269 @@ mod tests {
         }))
         .expect("provider fixture")];
 
-        preflight_provider_credentials_for_backend(&providers, "local-shell", None)
-            .expect("a provider that declares no credential is dispatchable");
+        crate::agent_task_provider::preflight_provider_credentials_for_backend(
+            &providers,
+            "local-shell",
+            None,
+        )
+        .expect("a provider that declares no credential is dispatchable");
+    }
+
+    #[test]
+    fn generic_preflight_admits_a_ready_fallback_when_primary_credentials_are_missing() {
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let primary = serde_json::from_value(serde_json::json!({
+            "id": "test.primary",
+            "backend": "test",
+            "secret_env_requirements": [{ "env": [required] }],
+        }))
+        .expect("primary provider");
+        let fallback = serde_json::from_value(serde_json::json!({
+            "id": "test.fallback",
+            "backend": "test",
+        }))
+        .expect("fallback provider");
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![primary, fallback],
+            ..Default::default()
+        };
+        let request = AgentTaskDispatchRequest {
+            prompt: Some("run".to_string()),
+            prompt_is_literal: false,
+            tasks: Vec::new(),
+            cwd: None,
+            workspace: None,
+            repo: None,
+            component: None,
+            task_url: None,
+            backend: "test".to_string(),
+            selector: Some("test.primary".to_string()),
+            model: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            concurrency: 1,
+            run_id: None,
+            task_id: None,
+            core: DispatchCoreInputs {
+                resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
+                    backend: "test".to_string(),
+                    selector: Some("test.primary".to_string()),
+                    model: None,
+                    rotation: Some(AgentTaskProviderRotationPolicy {
+                        entries: vec![
+                            crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                selector: Some("test.fallback".to_string()),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }),
+                    rotation_starts_with_first_entry: false,
+                    retry: Default::default(),
+                    liveness_timeout_ms: None,
+                    runtime_identity: None,
+                }),
+                ..Default::default()
+            },
+            backend_selection: None,
+        };
+
+        preflight_dispatch_provider_admission(&request, &catalog)
+            .expect("the generic path admits the reachable fallback");
+    }
+
+    #[test]
+    fn queued_dispatch_persists_the_admitted_fallback_binding() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "test.primary",
+                        "backend": "test",
+                        "secret_env_requirements": [{ "env": [required] }],
+                    }))
+                    .expect("primary provider"),
+                    serde_json::from_value(serde_json::json!({
+                        "id": "test.fallback",
+                        "backend": "test",
+                    }))
+                    .expect("fallback provider"),
+                ],
+                ..Default::default()
+            };
+            let run_id = format!("queued-fallback-{}", uuid::Uuid::new_v4());
+            let request = AgentTaskDispatchRequest {
+                prompt: Some("run".to_string()),
+                prompt_is_literal: false,
+                tasks: Vec::new(),
+                cwd: None,
+                workspace: None,
+                repo: None,
+                component: None,
+                task_url: None,
+                backend: "test".to_string(),
+                selector: Some("test.primary".to_string()),
+                model: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                concurrency: 1,
+                run_id: Some(run_id.clone()),
+                task_id: None,
+                core: DispatchCoreInputs {
+                    queue_only: true,
+                    resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
+                        backend: "test".to_string(),
+                        selector: Some("test.primary".to_string()),
+                        model: None,
+                        rotation: Some(AgentTaskProviderRotationPolicy {
+                            entries: vec![
+                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                    selector: Some("test.fallback".to_string()),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }),
+                        rotation_starts_with_first_entry: false,
+                        retry: Default::default(),
+                        liveness_timeout_ms: None,
+                        runtime_identity: None,
+                    }),
+                    ..Default::default()
+                },
+                backend_selection: None,
+            };
+
+            let result =
+                dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
+                    .expect("queue admitted fallback");
+            assert!(result.value.queued);
+            let plan =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store")
+                    .read_controller_plan(&run_id)
+                    .expect("queued controller plan");
+
+            assert_eq!(
+                plan.tasks[0].executor.selector.as_deref(),
+                Some("test.fallback")
+            );
+            assert_eq!(
+                plan.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
+                1
+            );
+            assert_eq!(plan.options.rotation.as_ref().unwrap().entries.len(), 1);
+        });
+    }
+
+    #[test]
+    fn retryable_direct_admission_denial_never_runs_or_rederives_a_route() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("readiness fixture");
+            let script = temp.path().join("temporarily-unavailable.js");
+            std::fs::write(
+                &script,
+                "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'capacity',retryable:true,remediation:'retry later',reason:'temporary capacity',cache_key:input.effective_config.model,identity:{model:input.effective_config.model}}));",
+            )
+            .expect("readiness script");
+            let provider = |id: &str| {
+                let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+                    serde_json::from_value(serde_json::json!({
+                        "id": id,
+                        "backend": "test"
+                    }))
+                    .expect("provider fixture");
+                provider.readiness_invocation = Some(
+                    homeboy_core::command_invocation::CommandInvocation {
+                        argv: vec!["node".to_string(), script.display().to_string()],
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+                provider
+            };
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![provider("test.primary"), provider("test.fallback")],
+                ..Default::default()
+            };
+            let run_id = format!("retryable-admission-{}", uuid::Uuid::new_v4());
+            let request = AgentTaskDispatchRequest {
+                prompt: Some("run".to_string()),
+                prompt_is_literal: false,
+                tasks: Vec::new(),
+                cwd: None,
+                workspace: None,
+                repo: None,
+                component: None,
+                task_url: None,
+                backend: "test".to_string(),
+                selector: Some("test.primary".to_string()),
+                model: Some("primary".to_string()),
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                concurrency: 1,
+                run_id: Some(run_id.clone()),
+                task_id: None,
+                core: DispatchCoreInputs {
+                    resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
+                        backend: "test".to_string(),
+                        selector: Some("test.primary".to_string()),
+                        model: Some("primary".to_string()),
+                        rotation: Some(AgentTaskProviderRotationPolicy {
+                            entries: vec![
+                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                    selector: Some("test.fallback".to_string()),
+                                    model: Some("fallback".to_string()),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }),
+                        rotation_starts_with_first_entry: false,
+                        retry: Default::default(),
+                        liveness_timeout_ms: None,
+                        runtime_identity: None,
+                    }),
+                    ..Default::default()
+                },
+                backend_selection: None,
+            };
+
+            let error =
+                dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
+                    .expect_err("temporary route unavailability denies direct dispatch");
+            let record = crate::agent_task_lifecycle::reconcile_status(&run_id)
+                .expect("durable admission failure");
+            let persisted = crate::agent_task_lifecycle::load_plan(&run_id)
+                .expect("unadmitted plan remains inspectable");
+
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(error.details["run_id"], run_id);
+            assert_ne!(
+                record.lifecycle.execution.state,
+                homeboy_core::run_lifecycle_record::RunExecutionState::Running
+            );
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["phase"],
+                "admit_plan_provider_dispatchability"
+            );
+            assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+            assert!(record
+                .metadata
+                .get("provider_executions")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty));
+            assert_eq!(
+                persisted.tasks[0].executor.selector.as_deref(),
+                Some("test.primary")
+            );
+            assert_eq!(persisted.tasks[0].executor.model(), Some("primary"));
+            assert!(persisted.tasks[0]
+                .metadata
+                .get("provider_readiness_routing")
+                .is_none());
+        });
     }
 
     fn command_with_backend(backend: Option<&str>) -> AgentTaskDispatchCommand {

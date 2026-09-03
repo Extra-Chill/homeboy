@@ -12,7 +12,7 @@ use crate::agent_task::{
     AGENT_TOOL_RESULT_SCHEMA,
 };
 use homeboy_core::stream_capture::StreamCaptureMetadata;
-use homeboy_core::{git, worktree, worktree_provider};
+use homeboy_core::{git, worktree};
 
 pub const AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA: &str = "homeboy/agent-tool-dispatch-evidence/v1";
 
@@ -57,15 +57,6 @@ mod dispatch {
 
     pub trait AgentToolControlPlaneDispatcher {
         fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult;
-    }
-
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct UnsupportedAgentToolControlPlaneDispatcher;
-
-    impl AgentToolControlPlaneDispatcher for UnsupportedAgentToolControlPlaneDispatcher {
-        fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult {
-            unsupported_control_plane_result(request)
-        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -154,7 +145,7 @@ mod dispatch {
         for key in ["command", "cmd", "script", "command_line", "commandLine"] {
             match input.get(key) {
                 Some(Value::String(command)) if !command.trim().is_empty() => {
-                    return Some(command.clone())
+                    return Some(command.clone());
                 }
                 Some(Value::Array(parts)) => {
                     let joined = parts
@@ -243,23 +234,6 @@ mod results {
                 data: json!({ "tool": request.tool }),
             }],
             metadata: json!({ "execution_location": "runner" }),
-        }
-    }
-
-    pub(crate) fn unsupported_control_plane_result(request: &AgentToolRequest) -> AgentToolResult {
-        AgentToolResult {
-            schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
-            request_id: request.request_id.clone(),
-            task_id: request.task_id.clone(),
-            tool: request.tool.clone(),
-            status: AgentToolResultStatus::Failed,
-            output: Value::Null,
-            diagnostics: vec![AgentTaskDiagnostic {
-                class: "agent_tool.control_plane_dispatch_unsupported".to_string(),
-                message: "control-plane tool dispatch is selected by policy, but no dispatcher is registered for this provider execution".to_string(),
-                data: json!({ "tool": request.tool }),
-            }],
-            metadata: json!({ "execution_location": "control_plane" }),
         }
     }
 
@@ -532,7 +506,7 @@ mod tools {
     ) -> Result<Value, AgentTaskDiagnostic> {
         let repo = required_string(input, &["repo", "component_id", "name"])?;
         let branch = required_string(input, &["branch"])?;
-        let created = worktree_provider::create_worktree(worktree::WorktreeCreateOptions {
+        let created = worktree::create(worktree::WorktreeCreateOptions {
             component_id: component_slug(repo).to_string(),
             branch: branch.to_string(),
             from: optional_string(input, &["from", "base_ref"]).map(str::to_string),
@@ -546,12 +520,7 @@ mod tools {
             message: error.to_string(),
             data: Value::Null,
         })?;
-        match created {
-            worktree_provider::WorktreeProviderCreateOutput::Native(output) => to_value(Ok(output)),
-            worktree_provider::WorktreeProviderCreateOutput::Configured(output) => to_value(Ok(
-                worktree_provider::ConfiguredWorktreeCreateEvidence::from(output),
-            )),
-        }
+        to_value(Ok(created))
     }
 
     pub(crate) fn github_issue_get(
@@ -732,14 +701,16 @@ mod workspace_paths {
     }
 
     pub(crate) fn latest_active_worktree_path(component_id: &str) -> Option<String> {
-        worktree_provider::list_worktree_provider_inventory()
+        worktree::list()
             .ok()?
+            .worktrees
             .into_iter()
             .filter(|workspace| {
-                workspace.repository.as_deref() == Some(component_id) && !workspace.safety.missing
+                workspace.component_id == component_id
+                    && workspace.state == worktree::TaskWorktreeState::Active
             })
             .max_by(|left, right| left.created_at.cmp(&right.created_at))
-            .map(|workspace| workspace.ownership.path)
+            .map(|workspace| workspace.worktree_path)
     }
 
     pub(crate) fn workspace_file_path(
@@ -1222,26 +1193,6 @@ mod tests {
         assert_eq!(
             outcome.evidence.result.metadata["authorization"],
             "[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn unsupported_control_plane_dispatch_returns_explicit_diagnostic() {
-        let outcome = dispatch_agent_tool_request(
-            &policy(AgentToolExecutionLocation::ControlPlane),
-            &request("lookup"),
-            &UnsupportedAgentToolControlPlaneDispatcher,
-        );
-
-        assert_eq!(outcome.location, AgentToolExecutionLocation::ControlPlane);
-        assert_eq!(outcome.result.status, AgentToolResultStatus::Failed);
-        assert_eq!(
-            outcome.result.diagnostics[0].class,
-            "agent_tool.control_plane_dispatch_unsupported"
-        );
-        assert_eq!(
-            outcome.evidence.result.diagnostics[0].class,
-            "agent_tool.control_plane_dispatch_unsupported"
         );
     }
 }

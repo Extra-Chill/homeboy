@@ -17,6 +17,9 @@ use crate::observation::{
     OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
 };
 use crate::{activity, component, git};
+use homeboy_resource_topology_contract::{
+    ResourceTopologyResourceKind, ResourceTopologyResourceRef,
+};
 
 mod analysis_job_runner;
 mod sandbox_tools;
@@ -44,6 +47,9 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         }),
         (HttpMethod::Get, ["components", id, "changes"]) => Ok(HttpEndpoint::ComponentChanges {
             id: (*id).to_string(),
+        }),
+        (HttpMethod::Get, ["topology", kind, id]) => Ok(HttpEndpoint::ResourceTopology {
+            root: topology_root(kind, id)?,
         }),
         (HttpMethod::Get, ["rigs"]) => Ok(HttpEndpoint::Rigs),
         (HttpMethod::Get, ["rigs", id]) => Ok(HttpEndpoint::Rig {
@@ -220,6 +226,9 @@ where
         HttpEndpoint::ControlPlaneRunActions { id } => {
             return control_plane_action_response(endpoint.clone(), id, request.body.as_ref());
         }
+        HttpEndpoint::ResourceTopology { root } => {
+            return topology_response(endpoint.clone(), root.clone());
+        }
         _ => {}
     }
     // Boundary: one observation-backed HTTP request is one unit of work, so
@@ -243,6 +252,7 @@ where
             "command": "api.components.changes",
             "changes": git::changes(Some(id), None, false)?,
         }),
+        HttpEndpoint::ResourceTopology { .. } => unreachable!("returned before store open"),
         HttpEndpoint::Rigs => json!({
             "command": "api.rigs.list",
             "rigs": crate::rig_provider::rig_list_json()?,
@@ -1517,6 +1527,57 @@ fn query_value(path: &str, key: &str) -> Option<String> {
     path.split_once('?')?.1.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         (name == key && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn topology_root(kind: &str, id: &str) -> Result<ResourceTopologyResourceRef> {
+    let kind = match kind {
+        "component" => ResourceTopologyResourceKind::Component,
+        "project" => ResourceTopologyResourceKind::Project,
+        "server" => ResourceTopologyResourceKind::Server,
+        "fleet" => ResourceTopologyResourceKind::Fleet,
+        "runner" => ResourceTopologyResourceKind::Runner,
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "kind",
+                format!("Unknown topology resource kind '{kind}'"),
+                Some(kind.to_string()),
+                Some(vec![
+                    "component".to_string(),
+                    "project".to_string(),
+                    "server".to_string(),
+                    "fleet".to_string(),
+                    "runner".to_string(),
+                ]),
+            ));
+        }
+    };
+    Ok(ResourceTopologyResourceRef {
+        kind,
+        id: id.to_string(),
+    })
+}
+
+fn topology_response(
+    endpoint: HttpEndpoint,
+    root: ResourceTopologyResourceRef,
+) -> Result<HttpApiResponse> {
+    let runners = crate::server::list()?
+        .into_iter()
+        .filter(|server| server.runner.is_some())
+        .map(|server| crate::resource_topology::ResourceTopologyRunner {
+            id: server.id.clone(),
+            server_id: Some(server.id),
+        })
+        .collect::<Vec<_>>();
+    let snapshot = crate::resource_topology::resolve(&[root], &runners)?;
+    Ok(HttpApiResponse {
+        status: 200,
+        endpoint: endpoint.name().to_string(),
+        body: json!({
+            "command": "api.resource_topology.show",
+            "snapshot": snapshot,
+        }),
     })
 }
 

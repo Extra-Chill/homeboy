@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+pub(crate) use homeboy_core::test_support::GitFixture;
 
 pub(crate) fn write_rig(package: &Path, id: &str, body: &str) -> PathBuf {
     let rig_dir = package.join("rigs").join(id);
@@ -50,11 +51,7 @@ pub(crate) fn write_stack(package: &Path, id: &str, component: &str) -> PathBuf 
 }
 
 pub(crate) fn run_git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git command");
+    let output = GitFixture::new(dir).execute(args);
     assert!(
         output.status.success(),
         "git {:?} failed: {}{}",
@@ -64,65 +61,44 @@ pub(crate) fn run_git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Test-only helper for the happy-path git flows shared across rig source and
-/// install tests: repository init, identity-stamped commits, bare clones used
-/// as remote sources, and pushes back to that source.
-///
-/// Tests that assert *failure* behavior or inspect raw git output should keep
-/// using [`run_git`] / explicit `Command::new("git")` calls instead.
-pub(crate) struct GitFixture<'a> {
-    /// Repository working directory. Exposed within the support module so
-    /// per-test-file extension `impl`s (see `source_test.rs`) can build their
-    /// own fixtures without re-running `git init`.
-    pub(crate) dir: &'a Path,
+pub(crate) fn init_main(dir: &Path) {
+    run_git(dir, &["init", "-b", "main"]);
 }
 
-impl<'a> GitFixture<'a> {
-    /// Initialize a git repository in `dir` on the `main` branch.
-    pub(crate) fn init(dir: &'a Path) -> Self {
-        run_git(dir, &["init", "-b", "main"]);
-        Self { dir }
-    }
-
-    /// Stage everything and create a commit with a stable test identity.
-    pub(crate) fn commit(&self, message: &str) {
-        run_git(self.dir, &["add", "."]);
-        run_git(
-            self.dir,
-            &[
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                message,
-            ],
-        );
-    }
-
-    /// Clone the repository as a bare `rig-package.git` source inside a fresh
-    /// temp dir, returning the parent [`tempfile::TempDir`] guard so the bare
-    /// clone is cleaned up automatically. Use [`bare_source_path`] to derive
-    /// the source string.
-    pub(crate) fn clone_bare(&self) -> tempfile::TempDir {
-        let bare = tempfile::tempdir().expect("bare parent");
-        let source_path = bare.path().join("rig-package.git");
-        run_git(
-            self.dir,
-            &[
-                "clone",
-                "--bare",
-                self.dir.to_str().expect("package path utf8"),
-                source_path.to_str().expect("bare path utf8"),
-            ],
-        );
-        bare
-    }
+pub(crate) fn commit_all(dir: &Path, message: &str) {
+    run_git(dir, &["add", "."]);
+    run_git(
+        dir,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
 }
 
-/// Path to the bare `rig-package.git` clone produced by
-/// [`GitFixture::clone_bare`].
+pub(crate) fn clone_bare(dir: &Path) -> tempfile::TempDir {
+    let bare = tempfile::tempdir().expect("bare parent");
+    run_git(
+        dir,
+        &[
+            "clone",
+            "--bare",
+            dir.to_str().expect("package path utf8"),
+            bare_source_path(&bare).to_str().expect("bare path utf8"),
+        ],
+    );
+    bare
+}
+
+pub(crate) fn push_main(dir: &Path, source: &str) {
+    run_git(dir, &["push", source, "HEAD:main"]);
+}
+
 #[allow(dead_code)]
 pub(crate) fn bare_source_path(bare: &tempfile::TempDir) -> PathBuf {
     bare.path().join("rig-package.git")

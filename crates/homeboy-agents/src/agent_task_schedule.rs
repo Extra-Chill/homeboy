@@ -10,7 +10,7 @@ use crate::agent_task::{AgentTaskComponentContract, AgentTaskOutcome, AgentTaskR
 use homeboy_core::plan::{
     HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepDependencyKind, PlanStepStatus,
 };
-use homeboy_core::workspace_claim::{WorkspaceIdentity, WorkspaceOwnerLease};
+use homeboy_runner_contract::{WorkspaceIdentity, WorkspaceOwnerLease};
 
 mod plan {
     use super::*;
@@ -750,6 +750,7 @@ mod cancellation {
         pub attempt: u32,
         pub cancellation: AgentTaskCancellationToken,
         pub(crate) lifecycle_store: Option<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+        pub(crate) provider_capacity_key: Option<String>,
     }
 
     impl AgentTaskExecutionContext {

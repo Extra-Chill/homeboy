@@ -324,6 +324,10 @@ fn matrix_execution_state_for_outcome(
                     AgentTaskFailureClassification::Provider
                         | AgentTaskFailureClassification::Transient
                         | AgentTaskFailureClassification::Timeout
+                        | AgentTaskFailureClassification::ProviderAccountBlocked
+                        | AgentTaskFailureClassification::ProviderQuotaExhausted
+                        | AgentTaskFailureClassification::ProviderBillingBlocked
+                        | AgentTaskFailureClassification::ProviderCredentialsExhausted
                         | AgentTaskFailureClassification::CapabilityMissing
                         | AgentTaskFailureClassification::InvalidInput
                         | AgentTaskFailureClassification::ExecutionFailed
@@ -747,6 +751,26 @@ mod tests {
         );
         assert_eq!(aggregate.cells[1].axes["model"], "claude");
         assert_eq!(aggregate.cells[1].diagnostics[0].class, "runner");
+    }
+
+    #[test]
+    fn matrix_marks_permanent_provider_account_rejections_as_execution_failures() {
+        for classification in [
+            AgentTaskFailureClassification::ProviderAccountBlocked,
+            AgentTaskFailureClassification::ProviderQuotaExhausted,
+            AgentTaskFailureClassification::ProviderBillingBlocked,
+            AgentTaskFailureClassification::ProviderCredentialsExhausted,
+        ] {
+            assert_eq!(
+                matrix_execution_state_for_outcome(Some(&AgentTaskOutcome {
+                    status: AgentTaskOutcomeStatus::Failed,
+                    failure_classification: Some(classification),
+                    ..Default::default()
+                })),
+                AgentTaskMatrixExecutionState::ExecutionFailed,
+                "{classification:?}"
+            );
+        }
     }
 
     #[test]

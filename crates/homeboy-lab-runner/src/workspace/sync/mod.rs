@@ -32,9 +32,10 @@ use super::git::{
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
     local_snapshot_stats, materialize_prepared_workspace_update, materialize_snapshot,
-    materialize_snapshot_git, materialize_snapshot_incremental, materialize_snapshot_with_scratch,
-    snapshot_identity, snapshot_manifest_delta, workspace_content_manifest_for_policy,
-    SnapshotManifestDelta, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    materialize_snapshot_git, materialize_snapshot_incremental_before,
+    materialize_snapshot_with_scratch, materialize_snapshot_with_scratch_before, snapshot_identity,
+    snapshot_manifest_delta, workspace_content_manifest_for_policy, SnapshotManifestDelta,
+    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -47,8 +48,8 @@ use super::types::{
     RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
-    deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
-    validate_absolute_path,
+    deterministic_remote_path, git_output, parent_remote_path, run_shell_command_before, ssh_args,
+    ssh_client_for_runner, validate_absolute_path,
 };
 use homeboy_core::engine::shell;
 use homeboy_core::server::{
@@ -83,10 +84,26 @@ pub fn sync_workspace(
     runner_id: &str,
     options: RunnerWorkspaceSyncOptions,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
-    sync_workspace_in_roots(
+    sync_workspace_in_roots_with_deadline(
         &homeboy_core::paths::PathRoots::from_environment()?,
         runner_id,
         options,
+        None,
+    )
+}
+
+/// Runner-exec-only workspace preparation. The caller owns this deadline; the
+/// ordinary sync API deliberately remains unbounded for reusable callers.
+pub fn sync_workspace_before(
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+    deadline: Instant,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    sync_workspace_in_roots_with_deadline(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        options,
+        Some(deadline),
     )
 }
 
@@ -96,10 +113,20 @@ pub fn sync_workspace(
 /// modes take are the same installation's state. Resolving the runner from the
 /// ambient config root while reserving space under an injected data root would
 /// sync one home's runner into another home's disk budget (#7505).
+#[allow(dead_code)]
 pub fn sync_workspace_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     options: RunnerWorkspaceSyncOptions,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    sync_workspace_in_roots_with_deadline(roots, runner_id, options, None)
+}
+
+fn sync_workspace_in_roots_with_deadline(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+    deadline: Option<Instant>,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     let runner = load_in_roots(roots, runner_id)?;
     let local_path = canonical_workspace_path(&options.path)?;
@@ -181,78 +208,118 @@ pub fn sync_workspace_in_roots(
             )?;
             let scratch = admission.scratch();
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
-            let (synthetic_checkout, fallback_reason) = if options.mode
-                == RunnerWorkspaceSyncMode::SnapshotGit
-                && git_backed_snapshot
-            {
-                match materialize_git_snapshot_from_controller_bundle(
-                    &runner,
-                    &local_path,
-                    &remote_path,
-                    &excludes,
-                ) {
-                    Ok(provenance) => {
-                        materialization_plan.controller_git_bundle = provenance;
-                        (None, None)
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                match materialize_snapshot_git(
-                    &runner,
-                    &local_path,
-                    &remote_path,
-                    &excludes,
-                    &snapshot,
-                ) {
-                    Ok(identity) => (Some(identity), None),
-                    Err(error) => {
-                        rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                        return Err(error);
-                    }
-                }
-            } else {
-                let seed = compatible_incremental_snapshot(
-                    &runner,
-                    &local_path,
-                    &excludes,
-                    &content_manifest,
-                )?;
-                materialization_plan.snapshot_transfer = Some(match seed {
-                    Some((seed, delta)) => match materialize_snapshot_incremental(
+            let (synthetic_checkout, fallback_reason) =
+                if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && git_backed_snapshot {
+                    match materialize_git_snapshot_from_controller_bundle(
                         &runner,
                         &local_path,
                         &remote_path,
-                        &seed.remote_path,
                         &excludes,
-                        &delta,
+                        &options.git_fetch_refs,
                     ) {
-                        Ok(transfer) => transfer,
+                        Ok(provenance) => {
+                            materialization_plan.controller_git_bundle = provenance;
+                            (None, None)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+                    match materialize_snapshot_git(
+                        &runner,
+                        &local_path,
+                        &remote_path,
+                        &excludes,
+                        &snapshot,
+                    ) {
+                        Ok(identity) => (Some(identity), None),
                         Err(error) => {
-                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                            rollback_materialized_workspace_before(
+                                &runner,
+                                workspace_root,
+                                &remote_path,
+                                true,
+                            );
                             return Err(error);
-                        }
-                    },
-                    None => {
-                        if let Err(error) = materialize_snapshot_with_scratch(
-                            &runner,
-                            &local_path,
-                            &remote_path,
-                            &excludes,
-                            Some(scratch),
-                        ) {
-                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                            return Err(error);
-                        }
-                        super::types::SnapshotTransferStats {
-                            reused: ByteFileCounts::default(),
-                            transferred: stats,
-                            final_size: stats,
                         }
                     }
-                });
-                (None, None)
-            };
+                } else {
+                    let seed = compatible_incremental_snapshot(
+                        &runner,
+                        &local_path,
+                        &excludes,
+                        &content_manifest,
+                    )?;
+                    materialization_plan.snapshot_transfer = Some(match (seed, deadline) {
+                        (Some((seed, delta)), deadline) => {
+                            match materialize_snapshot_incremental_before(
+                                &runner,
+                                &local_path,
+                                &remote_path,
+                                &seed.remote_path,
+                                &excludes,
+                                &delta,
+                                deadline,
+                            ) {
+                                Ok(transfer) => transfer,
+                                Err(error) => {
+                                    rollback_materialized_workspace_before(
+                                        &runner,
+                                        workspace_root,
+                                        &remote_path,
+                                        deadline.is_some(),
+                                    );
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        (None, Some(deadline)) => {
+                            if let Err(error) = materialize_snapshot_with_scratch_before(
+                                &runner,
+                                &local_path,
+                                &remote_path,
+                                &excludes,
+                                Some(scratch),
+                                Some(deadline),
+                            ) {
+                                rollback_materialized_workspace_before(
+                                    &runner,
+                                    workspace_root,
+                                    &remote_path,
+                                    true,
+                                );
+                                return Err(error);
+                            }
+                            super::types::SnapshotTransferStats {
+                                reused: ByteFileCounts::default(),
+                                transferred: stats,
+                                final_size: stats,
+                            }
+                        }
+                        (None, None) => {
+                            if let Err(error) = materialize_snapshot_with_scratch(
+                                &runner,
+                                &local_path,
+                                &remote_path,
+                                &excludes,
+                                Some(scratch),
+                            ) {
+                                rollback_materialized_workspace_before(
+                                    &runner,
+                                    workspace_root,
+                                    &remote_path,
+                                    deadline.is_some(),
+                                );
+                                return Err(error);
+                            }
+                            super::types::SnapshotTransferStats {
+                                reused: ByteFileCounts::default(),
+                                transferred: stats,
+                                final_size: stats,
+                            }
+                        }
+                    });
+                    (None, None)
+                };
             if fallback_reason.is_some() || options.mode == RunnerWorkspaceSyncMode::Snapshot {
                 materialization_plan.actual_materialization_mode =
                     Some("filesystem_snapshot".to_string());
@@ -299,7 +366,12 @@ pub fn sync_workspace_in_roots(
             ) {
                 Ok(dependencies) => dependencies,
                 Err(err) => {
-                    rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                    rollback_materialized_workspace_before(
+                        &runner,
+                        workspace_root,
+                        &remote_path,
+                        deadline.is_some(),
+                    );
                     return Err(err);
                 }
             };
@@ -2385,6 +2457,48 @@ fn rollback_materialized_workspace(
 ) {
     let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
     let _ = remove_workspace(runner, &lab_workspaces_root, remote_path);
+}
+
+fn rollback_materialized_workspace_before(
+    runner: &super::super::Runner,
+    workspace_root: &str,
+    remote_path: &str,
+    bounded: bool,
+) {
+    if !bounded {
+        rollback_materialized_workspace(runner, workspace_root, remote_path);
+        return;
+    }
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    if validate_workspace_removal_path(Path::new(&lab_workspaces_root), Path::new(remote_path))
+        .is_err()
+    {
+        return;
+    }
+    let remove = format!("rm -rf -- {}", shell::quote_arg(remote_path));
+    let command = match runner.kind {
+        RunnerKind::Local => remove,
+        RunnerKind::Ssh => {
+            let Ok((_server, client)) = ssh_client_for_runner(runner) else {
+                return;
+            };
+            if client.is_local {
+                remove
+            } else {
+                format!(
+                    "ssh {} {} {}",
+                    ssh_args(&client),
+                    shell::quote_arg(&format!("{}@{}", client.user, client.host)),
+                    shell::quote_arg(&remove),
+                )
+            }
+        }
+    };
+    let _ = run_shell_command_before(
+        &command,
+        "rollback timed out workspace synchronization",
+        Some(Instant::now() + Duration::from_secs(5)),
+    );
 }
 
 fn write_workspace_metadata(

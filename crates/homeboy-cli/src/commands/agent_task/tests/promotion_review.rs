@@ -1,7 +1,6 @@
 //! Agent-task command promotion source resolution and review/loop reporting tests.
 
 use super::support::*;
-use crate::agents::agent_task_service::DerivedCookBaselineCapability;
 use clap::Parser;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -503,12 +502,8 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         })
         .expect("Cook evidence reads the selected candidate plan");
 
-        for value in [
-            &status_value,
-            &review_value,
-            &diagnose_value,
-            &evidence_value,
-        ] {
+        assert_eq!(status_value["run"], candidate_run_id);
+        for value in [&review_value, &diagnose_value, &evidence_value] {
             assert_eq!(value["run_id"], candidate_run_id);
             assert_eq!(
                 value["candidate_selection"]["latest_attempt_run_id"],
@@ -551,475 +546,287 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
     });
 }
 
-#[derive(Debug, Clone)]
-struct CommittingExecutor {
-    workspace: std::path::PathBuf,
-}
-
-impl AgentTaskExecutorAdapter for CommittingExecutor {
-    fn execute(
-        &self,
-        request: AgentTaskRequest,
-        _context: AgentTaskExecutionContext,
-    ) -> AgentTaskOutcome {
-        let workspace = std::path::PathBuf::from(
-            request
-                .workspace
-                .root
-                .as_deref()
-                .expect("isolated workspace"),
-        );
-        assert_ne!(
-            workspace, self.workspace,
-            "executor must not receive the source workspace"
-        );
-        std::fs::write(workspace.join("agent-change.txt"), "committed work\n")
-            .expect("write executor change");
-        let status = Command::new("git")
-            .args(["add", "agent-change.txt"])
-            .current_dir(&workspace)
-            .status()
-            .expect("stage executor change");
-        assert!(status.success());
-        let status = Command::new("git")
-            .args(["commit", "-m", "agent: make committed change"])
-            .current_dir(&workspace)
-            .status()
-            .expect("commit executor change");
-        assert!(status.success());
-
-        AgentTaskOutcome {
-            task_id: request.task_id,
-            status: AgentTaskOutcomeStatus::Succeeded,
-            summary: Some("committed work".to_string()),
-            artifacts: vec![
-                AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: "agent-result".to_string(),
-                    kind: "agent_result".to_string(),
-                    name: Some("agent-result.json".to_string()),
-                    label: None,
-                    role: None,
-                    semantic_key: None,
-                    path: Some(workspace.join("plugin.php").display().to_string()),
-                    url: None,
-                    mime: Some("application/json".to_string()),
-                    size_bytes: None,
-                    sha256: None,
-                    metadata: Value::Null,
-                },
-                AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: "transcript".to_string(),
-                    kind: "transcript".to_string(),
-                    name: Some("transcript.log".to_string()),
-                    label: None,
-                    role: None,
-                    semantic_key: None,
-                    path: Some(workspace.join("plugin.php").display().to_string()),
-                    url: None,
-                    mime: Some("text/plain".to_string()),
-                    size_bytes: None,
-                    sha256: None,
-                    metadata: Value::Null,
-                },
-            ],
-            ..Default::default()
-        }
-    }
-}
-
-/// Mimics the typed Lab lifecycle mirror: the provider executes elsewhere, but
-/// the completed aggregate is written under the controller-owned attempt id.
-#[derive(Debug, Clone)]
-struct MirroredAttemptDispatcher {
-    executor: Arc<CommittingExecutor>,
-    prepared: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
-    for MirroredAttemptDispatcher
-{
-    fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
-        Ok(serde_json::json!({ "kind": "local" }))
-    }
-
-    fn prepare_for_cook(&self) -> homeboy::core::Result<()> {
-        self.prepared
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn dispatch_attempt(
-        &self,
-        plan: AgentTaskPlan,
-        run_id: &str,
-        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
-    ) -> homeboy::core::Result<()> {
-        assert!(
-            self.prepared.load(std::sync::atomic::Ordering::SeqCst),
-            "cook must prepare the dispatcher before pinning and dispatching its attempt"
-        );
-        homeboy::agents::agent_tasks::service::run_loaded_plan(
-            plan,
-            Some(run_id),
-            self.executor.clone(),
-        )
-        .map(|_| ())
-    }
-}
-
+#[cfg(unix)]
 #[test]
-fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
+fn direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path() {
     with_temp_home(|| {
-        let mut config = homeboy::core::defaults::load_config();
-        config.agent_task.rotation = Some(
-            serde_json::to_value(
-                homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
-                    entries: vec![
-                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                            model: Some("openai/gpt-5.6-terra".to_string()),
-                            ..Default::default()
-                        },
-                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                            model: Some("fallback-model".to_string()),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-            )
-            .expect("serialize provider rotation policy"),
-        );
-        homeboy::core::defaults::save_config(&config).expect("save provider rotation");
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         let target = temp.path().join("target");
         std::fs::create_dir(&source).expect("create source");
         init_runtime_component_checkout(&source);
-        let status = Command::new("git")
+        assert!(Command::new("git")
             .args([
-                "-C",
-                source.to_str().expect("source path"),
-                "remote",
-                "add",
-                "origin",
-                source.to_str().expect("source path"),
-            ])
-            .status()
-            .expect("configure source remote");
-        assert!(status.success());
-        let status = Command::new("git")
-            .args([
-                "-C",
-                source.to_str().expect("source path"),
-                "fetch",
-                "origin",
-            ])
-            .status()
-            .expect("fetch source base");
-        assert!(status.success());
-        let status = Command::new("git")
-            .args([
-                "-C",
-                source.to_str().expect("source path"),
                 "worktree",
                 "add",
                 "-b",
-                "fixture-promoted",
+                "selected-large-patch",
                 target.to_str().expect("target path"),
                 "main",
             ])
+            .current_dir(&source)
             .status()
-            .expect("create declared target worktree");
-        assert!(status.success());
-        let provider = temp.path().join("worktree-provider.sh");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\nset -eu\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}/.git' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@promoted\",\"path\":\"{}\",\"branch\":\"fixture-promoted\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git -C '{}' worktree add -b \"$5\" '{}' \"$4\" >/dev/null\nfi\n",
-                target.display(),
-                target.display(),
-                source.display(),
-                target.display(),
-            ),
-        )
-        .expect("write worktree provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("worktree provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions)
-            .expect("make worktree provider executable");
-        let mut config = homeboy::core::defaults::load_config();
-        config.worktree_providers.insert(
-            "fixture".to_string(),
-            homeboy::core::defaults::WorktreeProviderConfig {
-                enabled: true,
-                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: homeboy::core::defaults::WorktreeProviderCommands {
-                    resolve: Some(vec![
-                        provider.display().to_string(),
-                        "resolve".to_string(),
-                        "{handle}".to_string(),
-                    ]),
-                    resolve_not_found_exit_codes: vec![1],
-                    ensure: Some(vec![
-                        provider.display().to_string(),
-                        "ensure".to_string(),
-                        "{handle}".to_string(),
-                        "{repo}".to_string(),
-                        "{base}".to_string(),
-                        "{head}".to_string(),
-                        "{task_url}".to_string(),
-                        "{idempotency_key}".to_string(),
-                    ]),
-                    ..Default::default()
-                },
-                list_result_mapping: Some(
-                    homeboy::core::defaults::WorktreeProviderListResultMapping {
-                        items: "$.worktrees".to_string(),
-                        handle: "$.handle".to_string(),
-                        path: "$.path".to_string(),
-                        branch: "$.branch".to_string(),
-                        dirty: "$.safety.dirty".to_string(),
-                        unpushed: "$.safety.unpushed".to_string(),
-                        primary: "$.safety.primary".to_string(),
-                        task_url: None,
-                    },
-                ),
-            },
+            .expect("create target worktree")
+            .success());
+
+        let cook_id = "cook-direct-selected-large-patch";
+        let candidate_run_id = "cook-direct-selected-large-patch-attempt-1";
+        let retry_run_id = "cook-direct-selected-large-patch-attempt-2";
+        let task_id = "provider";
+        let artifact_id = "cook-homeboy-attempt-1-uncommitted-changes";
+        let plan = AgentTaskPlan::new(
+            "cook-direct-selected-large-patch-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": task_id,
+                "executor": {"backend": "fixture", "model": "fixture-model"},
+                "instructions": "produce a retained large patch",
+                "workspace": {"root": source},
+            }))
+            .expect("candidate task")],
         );
-        homeboy::core::defaults::save_config(&config).expect("save worktree provider config");
-        std::fs::write(source.join("pre-existing-candidate.txt"), "preserve me\n")
-            .expect("write pre-existing candidate");
-        std::fs::write(target.join("candidate-commit.txt"), "existing candidate\n")
-            .expect("write candidate commit");
-        let status = Command::new("git")
-            .args(["add", "candidate-commit.txt"])
-            .current_dir(&target)
-            .status()
-            .expect("stage candidate commit");
-        assert!(status.success());
-        let status = Command::new("git")
-            .args([
-                "commit",
-                "-m",
-                "fix: preserve existing candidate title",
-                "-m",
-                "commit body must not become the pull request title",
-            ])
-            .current_dir(&target)
-            .status()
-            .expect("commit existing candidate");
-        assert!(status.success());
-        let expected_patch = temp.path().join("expected.patch");
-        let promotion_request = temp.path().join("promotion-request.json");
-        std::fs::write(
-            &expected_patch,
-            "diff --git a/agent-change.txt b/agent-change.txt\nnew file mode 100644\nindex 0000000..f3f8b32\n--- /dev/null\n+++ b/agent-change.txt\n@@ -0,0 +1 @@\n+committed work\n",
+        let options = homeboy::agents::agent_task_service::CookRequest {
+            identity: homeboy::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: candidate_run_id.to_string(),
+                initial_plan: plan.clone(),
+            },
+            workspace: homeboy::agents::agent_task_service::CookWorkspace {
+                to_worktree: "fixture@selected-large-patch".to_string(),
+                source_worktree_path: Some(source.clone()),
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            gates: Default::default(),
+            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
+            finalization: homeboy::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "selected large patch".to_string(),
+                commit_message: "selected large patch".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: Some("fixture-model".to_string()),
+                ai_used_for: "test".to_string(),
+            },
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(candidate_run_id)).expect("submit candidate");
+
+        let patch = format!(
+            "diff --git a/large.txt b/large.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/large.txt\n@@ -0,0 +1 @@\n+{}\n",
+            "x".repeat(300 * 1024),
+        );
+        assert!(patch.len() > 256 * 1024);
+        let patch_sha256 = homeboy_engine_primitives::content_hash::sha256_hex(patch.as_bytes());
+        let artifact = AgentTaskArtifact {
+            id: artifact_id.to_string(),
+            kind: "patch".to_string(),
+            path: Some("runner-artifact://expired/large.patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(patch_sha256.clone()),
+            metadata: json!({
+                "run_id": candidate_run_id,
+                "task_id": task_id,
+                "producer_attempt": 1,
+                "base_ref": "main",
+                "provider_backend": "fixture",
+                "provider_model": "fixture-model",
+                "repository_identity": "fixture",
+                "workspace_identity": "fixture",
+            }),
+            ..Default::default()
+        };
+        agent_task_lifecycle::record_run_aggregate(
+            candidate_run_id,
+            &plan,
+            &AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: task_id.to_string(),
+                    status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                    artifacts: vec![artifact],
+                    metadata: json!({"model": "fixture-model"}),
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
         )
-        .expect("write expected patch");
+        .expect("record recoverable candidate");
+
+        let observation_store = homeboy::core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        let retained = observation_store
+            .artifact_root()
+            .expect("artifact root")
+            .join("direct-cook-selected-large-patch.patch");
+        std::fs::create_dir_all(retained.parent().expect("retained patch parent"))
+            .expect("create retained patch parent");
+        std::fs::write(&retained, &patch).expect("retain patch under controller ownership");
+        observation_store
+            .record_verified_artifact_with_id(
+                candidate_run_id,
+                "patch",
+                &retained,
+                "direct-cook-selected-large-patch",
+                Some(patch.len() as i64),
+                Some(&patch_sha256),
+                json!({"agent_task": {
+                    "projection": "controller_local",
+                    "task_id": task_id,
+                    "logical_artifact_id": artifact_id,
+                }}),
+            )
+            .expect("record retained patch projection");
+
+        let retry_plan = AgentTaskPlan::new(
+            "cook-direct-selected-large-patch-retry-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "review",
+                "executor": {"backend": "fixture", "model": "fixture-model"},
+                "instructions": "review without changing the candidate",
+                "workspace": {"root": source},
+            }))
+            .expect("retry task")],
+        );
+        agent_task_lifecycle::submit_plan(&retry_plan, Some(retry_run_id)).expect("submit retry");
+        agent_task_lifecycle::record_run_aggregate(
+            retry_run_id,
+            &retry_plan,
+            &AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: retry_plan.plan_id.clone(),
+                status:
+                    homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "review".to_string(),
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    outputs: json!({"review_form": {
+                        "summary": "The retained candidate is ready.",
+                        "what_changed": ["No additional patch was needed."],
+                        "compatibility": "No additional impact.",
+                        "used_for": "Reviewed the retained candidate."
+                    }}),
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("record no-change retry");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            candidate_run_id,
+        )
+        .expect("index candidate attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            retry_run_id,
+        )
+        .expect("index latest retry");
+        agent_task_lifecycle::record_promotion(
+            retry_run_id,
+            json!({
+                "status": "gate_failed",
+                "gate_results": [{"name": "fixture", "exit_code": 1}],
+                "provenance": {"gate_retry": "intentional_no_change"},
+            }),
+        )
+        .expect("record retry provenance");
+
         let provider = temp.path().join("promotion-provider.sh");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nset -eu\ncat > {}\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
-                promotion_request.display(),
-                target.display(),
-                expected_patch.display(),
+                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
                 target.display(),
             ),
         )
         .expect("write promotion provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
 
-        let executor = Arc::new(CommittingExecutor {
-            workspace: target.clone(),
-        });
-        let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (value, exit_code) = run_cook_with_executor_and_dispatcher(
-            AgentTaskCookArgs {
-                help: None,
-                help_full: None,
-                provider_evidence_inputs: Vec::new(),
-                component: None,
-                dispatch: DispatchArgs {
-                    prompt: Some("commit a change".to_string()),
-                    prompt_is_literal: false,
-                    tasks: Vec::new(),
-                    cwd: Some(target.display().to_string()),
-                    workspace: None,
-                    repo: Some("fixture-component".to_string()),
-                    task_url: Some(
-                        "https://github.com/Extra-Chill/homeboy/issues/9908".to_string(),
-                    ),
-                    backend: Some("fixture".to_string()),
-                    selector: None,
-                    model: None,
-                    required_capabilities: Vec::new(),
-                    secret_env: Vec::new(),
-                    concurrency: 1,
-                    run_id: Some("cook-committed-work".to_string()),
-                    core: DispatchCoreArgs {
-                        tasks_json: None,
-                        provider_config: None,
-                        client_context: None,
-                        attempts: Some(1),
-                        same_provider_retries: Some(0),
-                        provider_rotations: Some(0),
-                        queue_only: false,
-                        timeout_ms: None,
-                        resolved_provider_policy: None,
-                        deny_command: Vec::new(),
-                        allow_command: Vec::new(),
-                        command_policy_reason: None,
-                    },
-                },
-                candidate_completion: homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::WaitAll,
-                attempt_run_id: None,
-                attempt_plan: None,
-                preview: false,
-                goal: None,
-                to_worktree: Some(target.display().to_string()),
-                worktree_provider_self_repair: None,
-                provider_command: None,
-                provider_argv: vec!["sh".to_string(), provider.display().to_string()],
-                gates: VerifyGateArgs {
-                    accept_inherited_failures: false,
-                    gate_package_artifacts: Vec::new(),
-                    gate_extension_inputs: Vec::new(),
-                    verify: vec!["true".to_string()],
-                    verify_file: Vec::new(),
-                    private_verify: Vec::new(),
-                    private_verify_file: Vec::new(),
-                    input_sources: Vec::new(),
-                    private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
-                    gate_execution_policy: "ordered-fail-fast".to_string(),
-                    gate_timeout_seconds: 30 * 60,
-                    gate_heartbeat_interval_seconds: 5,
-                    gate_no_progress_timeout_seconds: 5 * 60,
-                    rerun_completed_gates: false,
-                    gate_environment_mode: "inherit".to_string(),
-                    gate_environment: Vec::new(),
-                    gate_environment_preserve: Vec::new(),
-                    gate_toolchains: Vec::new(),
-                    gate_toolchain_specs: Vec::new(),
-                    isolate_gate_home: true,
-                    isolate_gate_xdg: true,
-                    gate_shared_cargo_target: false,
-                    no_gate_shared_cargo_target: false,
-                },
-                max_attempts: 1,
-                allow_provider_rotation: false,
-                no_finalize: true,
-                draft_pr: false,
-                full: true,
-                no_progress: false,
-                base: Some("main".to_string()),
-                head: Some("fixture-promoted".to_string()),
-                title: None,
-                commit_message: None,
-                protected_branches: review::default_protected_branches(),
-                ai_tool: "OpenCode (GPT-5.6 Sol)".to_string(),
-                ai_used_for: "test".to_string(),
-                require_acceptance: false,
-                acceptance_authority: None,
-                acceptance_policy: None,
-                repository_identity: None,
-                base_resolution: None,
-                prompt_snapshot: None,
-            },
-            executor.clone(),
-            Some(Arc::new(MirroredAttemptDispatcher {
-                executor,
-                prepared: prepared.clone(),
-            })),
+        agent_task_lifecycle::materialize_recovered_patch_artifact(
+            candidate_run_id,
+            Some(task_id),
+            Some(artifact_id),
         )
-        .expect("cook completes");
+        .expect("recover retained patch into the canonical aggregate");
+        let (run_source, aggregate_path) =
+            review::read_promotion_source(candidate_run_id).expect("read run source");
+        let aggregate_path = aggregate_path.expect("canonical aggregate path");
+        let (path_source, _) = review::read_promotion_source(&aggregate_path.display().to_string())
+            .expect("read exact aggregate source");
+        assert_eq!(run_source, path_source);
 
-        assert!(prepared.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(exit_code, 0, "{value:#}");
-        assert_eq!(value["status"], "green_no_finalize");
-        let recipe = homeboy::agents::agent_task_service::load_recipe("cook-committed-work")
-            .expect("load persisted Cook recipe");
-        assert_eq!(
-            recipe.finalization["title"],
-            "fix: preserve existing candidate title"
-        );
-        assert_eq!(
-            value["attempts"][0]["feedback"]["status"],
-            "green_completed"
-        );
-        assert!(value["finalization"].is_null());
-        let attempt_run_id = value["attempts"][0]["run_id"]
-            .as_str()
-            .expect("cook report attempt run id");
-        let lifecycle = lifecycle_status(attempt_run_id).expect("local cook lifecycle");
-        assert_eq!(
-            lifecycle.metadata["worktree_provision"]["action"],
-            "existing"
-        );
-        assert_eq!(lifecycle.lifecycle.provider_runtime.len(), 1);
-        assert_eq!(
-            lifecycle.lifecycle.provider_runtime[0].metadata["model"],
-            "openai/gpt-5.6-terra"
-        );
-        assert_eq!(
-            value["attempts"][0]["promotion"]["patch_artifact"]["id"],
-            "cook-fixture-component-attempt-1-committed-changes"
-        );
-        assert_eq!(
-            value["attempts"][0]["promotion"]["changed_files"],
-            json!(["agent-change.txt"])
-        );
-        assert_eq!(
-            value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]["change_source"],
-            "local_commits"
-        );
-        assert_eq!(
-            value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]
-                ["artifact_provenance"],
-            "homeboy_generated_committed_patch"
-        );
-        assert_eq!(
-            value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]["commits"]
-                .as_array()
-                .map(Vec::len),
-            Some(1)
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("agent-change.txt")).expect("target patch applied"),
-            "committed work\n"
-        );
-        let request: Value = serde_json::from_str(
-            &std::fs::read_to_string(&promotion_request).expect("read promotion request"),
-        )
-        .expect("typed promotion request");
-        assert_eq!(
-            request["schema"],
-            "homeboy/agent-task-promotion-apply-request/v1"
-        );
-        assert_eq!(request["to_workspace"], target.display().to_string());
-        assert_eq!(request["changed_files"], json!(["agent-change.txt"]));
-        assert!(request["patch"]
-            .as_str()
-            .expect("inline selected patch")
-            .contains("committed work"));
-        assert!(
-            !request["patch"]
-                .as_str()
-                .expect("inline selected patch")
-                .contains("pre-existing-candidate.txt"),
-            "promotion receives only the provider delta"
-        );
-        assert_eq!(
-            std::fs::read_to_string(source.join("pre-existing-candidate.txt"))
-                .expect("pre-existing candidate preserved"),
-            "preserve me\n"
-        );
+        let mut reports = Vec::new();
+        for source_spec in [
+            candidate_run_id.to_string(),
+            aggregate_path.display().to_string(),
+        ] {
+            let cli = crate::cli_surface::Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "promote",
+                &source_spec,
+                "--artifact-id",
+                artifact_id,
+                "--to-worktree",
+                "fixture@selected-large-patch",
+                "--provider-argv",
+                "sh",
+                "--provider-argv",
+                provider.to_str().expect("provider path"),
+                "--dry-run",
+                "--gates-from-cook-recipe",
+            ])
+            .expect("parse public direct promotion command");
+            let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Promote(args) = agent_task.command else {
+                panic!("promote command");
+            };
+            let (report, exit_code) = review::promote_artifact(*args)
+                .expect("recovered candidate remains directly promotable");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(report["status"], "dry_run");
+            assert_eq!(report["source"]["run_id"], candidate_run_id);
+            assert_eq!(report["patch_artifact"]["id"], artifact_id);
+            reports.push(report);
+        }
+        assert_eq!(reports[0]["patch_artifact"], reports[1]["patch_artifact"]);
     });
 }

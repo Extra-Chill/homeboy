@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -6,6 +7,10 @@ use homeboy::core::engine::text;
 use homeboy_core::extension::catalog::load_all_extensions;
 
 include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
+
+thread_local! {
+    static CURRENT_COMMAND: RefCell<Option<clap::Command>> = const { RefCell::new(None) };
+}
 
 fn docs_index() -> &'static HashMap<&'static str, &'static str> {
     static DOCS: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
@@ -20,6 +25,20 @@ pub struct ResolvedDoc {
 
 pub fn resolve(topic: &[String]) -> homeboy::core::Result<ResolvedDoc> {
     let (_, key, _) = normalize_topic(topic);
+
+    if key == "commands/commands-index" {
+        return Ok(ResolvedDoc {
+            content: crate::cli_surface::reference_docs::generated_command_index(&current_command()),
+        });
+    }
+    if let Some(name) = key.strip_prefix("reference/cli/commands/") {
+        if let Some(content) = crate::cli_surface::reference_docs::generated_command_reference(
+            &current_command(),
+            name,
+        ) {
+            return Ok(ResolvedDoc { content });
+        }
+    }
 
     // Try exact match first (existing behavior)
     if let Some(content) = docs_index().get(key.as_str()).copied() {
@@ -113,6 +132,12 @@ pub(crate) fn available_topics() -> Vec<String> {
         .iter()
         .map(|(key, _)| key.to_string())
         .collect();
+    topics.insert("commands/commands-index".to_string());
+    topics.extend(
+        crate::cli_surface::reference_docs::documented_subcommands(&current_command())
+            .into_iter()
+            .map(|command| format!("reference/cli/commands/{}", command.get_name())),
+    );
 
     // Add extension docs (integrated namespace)
     for extension in load_all_extensions().unwrap_or_default() {
@@ -125,6 +150,26 @@ pub(crate) fn available_topics() -> Vec<String> {
     }
 
     topics.into_iter().collect()
+}
+
+pub(crate) fn with_command<T>(command: Option<clap::Command>, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<clap::Command>);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CURRENT_COMMAND.with(|current| current.replace(self.0.take()));
+        }
+    }
+
+    let previous = CURRENT_COMMAND.with(|current| current.replace(command));
+    let _reset = Reset(previous);
+    run()
+}
+
+fn current_command() -> clap::Command {
+    CURRENT_COMMAND
+        .with(|current| current.borrow().clone())
+        .unwrap_or_else(crate::cli_surface::Cli::command_with_scoped_lab_args)
 }
 
 fn collect_doc_topics(dir: &Path, prefix: &str, topics: &mut BTreeSet<String>) {
@@ -193,5 +238,24 @@ mod tests {
                 "generated doc key '{key}' is not in normalized form (expected '{normalized}')"
             );
         }
+    }
+
+    #[test]
+    fn command_index_is_derived_from_the_current_cli() {
+        let index = resolve(&["commands/commands-index".to_string()]).expect("command index");
+
+        assert!(index.content.contains("# Commands index"));
+        assert!(index.content.contains("- [agent-task](agent-task.md)"));
+        assert!(available_topics().contains(&"commands/commands-index".to_string()));
+    }
+
+    #[test]
+    fn generated_command_reference_topics_remain_resolvable() {
+        let topic = "reference/cli/commands/agent-task".to_string();
+        let reference = resolve(std::slice::from_ref(&topic)).expect("generated reference");
+
+        assert!(reference.content.contains("Run generic agent task plans"));
+        assert!(reference.content.contains("Usage: homeboy agent-task"));
+        assert!(available_topics().contains(&topic));
     }
 }

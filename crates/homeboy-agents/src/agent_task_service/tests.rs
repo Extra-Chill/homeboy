@@ -16,7 +16,7 @@ use crate::agent_task_scheduler::{
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::run_lifecycle_record::RunExecutionState;
-use homeboy_core::test_support::with_isolated_home;
+use homeboy_core::test_support::{with_isolated_home, write_component_registration};
 use homeboy_core::worktree;
 use serde_json::Value;
 use std::path::Path;
@@ -739,6 +739,107 @@ fn submitted_incomplete_run_still_executes_for_recovery() {
 }
 
 #[test]
+fn submitted_run_persists_and_executes_its_admitted_fallback_route() {
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("readiness fixture");
+        let script = temp.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='fallback',classification:model==='fallback'?'ready':'account',retryable:false,remediation:'switch',reason:model==='fallback'?'':'blocked',cache_key:model,identity:{model}}));",
+        )
+        .expect("readiness script");
+        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "service",
+                "backend": "test"
+            }))
+            .expect("provider fixture");
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
+        let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        };
+        let mut plan = test_plan();
+        plan.tasks[0].executor.model = Some("primary".to_string());
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![AgentTaskProviderRotationEntry {
+                model: Some("fallback".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let observed_request = Arc::new(Mutex::new(None));
+        agent_task_lifecycle::submit_plan(&plan, Some("submitted-fallback"))
+            .expect("submitted plan");
+
+        run_submitted_with_timeout_and_catalog(
+            "submitted-fallback".to_string(),
+            None,
+            Arc::new(CapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            }),
+            &catalog,
+        )
+        .expect("admitted fallback executes");
+
+        assert_eq!(
+            observed_request
+                .lock()
+                .expect("observed request")
+                .as_ref()
+                .and_then(|request| request.executor.model()),
+            Some("fallback")
+        );
+        let persisted = agent_task_lifecycle::load_plan("submitted-fallback").expect("plan");
+        assert_eq!(persisted.tasks[0].executor.model(), Some("fallback"));
+        assert_eq!(
+            persisted.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
+            1
+        );
+    });
+}
+
+#[test]
+fn submitted_run_admission_denial_never_enters_running_or_spends_budget() {
+    with_isolated_home(|_| {
+        let missing = "__HOMEBOY_TEST_MISSING_SUBMITTED_ADMISSION_SECRET__";
+        std::env::remove_var(missing);
+        let mut plan = test_plan();
+        plan.tasks[0].executor.secret_env.push(missing.to_string());
+        agent_task_lifecycle::submit_plan(&plan, Some("submitted-missing-secret"))
+            .expect("submitted plan");
+
+        let error = run_submitted_with_timeout_and_catalog(
+            "submitted-missing-secret".to_string(),
+            None,
+            Arc::new(SucceedingExecutor),
+            &crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+        )
+        .expect_err("missing secret blocks admission");
+        let record = lifecycle_status("submitted-missing-secret").expect("durable failure");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_ne!(record.lifecycle.execution.state, RunExecutionState::Running);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "admit_plan_provider_dispatchability"
+        );
+        assert!(record
+            .metadata
+            .get("provider_executions")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty));
+    });
+}
+
+#[test]
 fn service_persists_timed_out_run_record_and_evidence_refs() {
     with_isolated_home(|_| {
         let result = run_loaded_plan(
@@ -1177,10 +1278,13 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
                 "backend": "adversarial-readiness"
             }))
             .expect("provider fixture");
-        provider.readiness_invocation = Some(CommandInvocation {
-            argv: vec!["node".to_string(), script.display().to_string()],
-            ..CommandInvocation::default()
-        });
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         assert_eq!(provider.backend, "adversarial-readiness");
         assert!(provider.readiness_invocation.is_some());
 
@@ -3441,10 +3545,10 @@ impl agent_task_lifecycle::RunnerContinuationProvider for RunnerAuthorityFixture
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: homeboy_core::api_jobs::RemoteRunnerJobRequest,
+        _submission: crate::agent_task_lifecycle::RunnerContinuationSubmission,
     ) -> homeboy_core::Result<homeboy_core::api_jobs::Job> {
         Err(homeboy_core::Error::internal_unexpected(
             "unused in fixture",
@@ -3606,20 +3710,6 @@ fn create_git_repo(path: &Path) {
     std::fs::write(path.join("README.md"), "initial\n").expect("readme");
     homeboy_core::test_support::run_git_fixture_command(path, &["add", "."]);
     homeboy_core::test_support::run_git_fixture_command(path, &["commit", "-q", "-m", "initial"]);
-}
-
-fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
-    let dir = home.join(".config/homeboy/components");
-    std::fs::create_dir_all(&dir).expect("components dir");
-    std::fs::write(
-        dir.join(format!("{id}.json")),
-        serde_json::json!({
-            "local_path": local_path,
-            "remote_path": format!("wp-content/plugins/{id}")
-        })
-        .to_string(),
-    )
-    .expect("component registration");
 }
 
 fn test_plan() -> AgentTaskPlan {

@@ -6,6 +6,7 @@
 
 mod artifact;
 mod capability;
+mod claim;
 mod discovery;
 pub mod env_materialization_plan;
 mod execution_context;
@@ -16,11 +17,16 @@ pub mod secret_env_plan;
 mod session;
 mod submission;
 mod workspace;
+mod workspace_authority;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
     RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
     RunnerToolchainReadinessProbe,
+};
+pub use claim::{
+    RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
+    RunnerApiClaimedExecution, RUNNER_API_CLAIM_REQUEST_SCHEMA, RUNNER_API_CLAIM_RESPONSE_SCHEMA,
 };
 pub use discovery::{
     RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerApiCompatibility,
@@ -38,7 +44,10 @@ pub use discovery::{
     RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA, RUNNER_READINESS_SCHEMA,
 };
 pub use execution_context::{
-    is_internal_control_env, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
+    is_internal_control_env, RunnerJobExecutionContextAssertion, RunnerJobExecutionProtocol,
+    RunnerJobExecutionVerification, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
+    RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
+    RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
@@ -54,6 +63,12 @@ pub use submission::{
 };
 pub use workspace::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
+};
+pub use workspace_authority::{
+    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceClaimProtocol, WorkspaceIdentity,
+    WorkspaceOwnerLease, WorkspaceOwnerLeaseProtocol, WORKSPACE_CLAIM_CAPABILITY,
+    WORKSPACE_CLAIM_PROTOCOL_VERSION, WORKSPACE_CLAIM_SCHEMA, WORKSPACE_IDENTITY_SCHEMA,
+    WORKSPACE_OWNER_LEASE_CAPABILITY, WORKSPACE_OWNER_LEASE_SCHEMA,
 };
 
 use serde::{Deserialize, Serialize};

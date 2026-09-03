@@ -1,7 +1,13 @@
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::{self};
-use homeboy_extension_contract::ExtensionManifest;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiCatalogEntryStatus, ExtensionApiCatalogRequest, ACTION_CAPABILITY_PREFIX,
+    EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
+use homeboy_extension_contract::manifest_capability_config::ReleasePreflightConfig;
+use homeboy_extension_contract::HookEvent;
+use std::collections::BTreeSet;
 
 use super::types::{ReleaseOptions, ReleaseReadinessProvenance};
 
@@ -11,19 +17,107 @@ pub(crate) fn load_component(component_id: &str, options: &ReleaseOptions) -> Re
     component::resolve_effective(Some(component_id), options.path_override.as_deref(), None)
 }
 
-/// Resolve the component's declared extensions for release dispatch.
-pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionManifest>> {
+/// Release's bounded view of a configured extension.
+///
+/// Action ownership comes only from the versioned Extension API descriptor.
+/// Release-preflight declarations are local release policy, not public API data.
+#[derive(Debug, Clone, Default)]
+pub(super) struct ReleaseExtension {
+    pub(super) id: String,
+    action_ids: BTreeSet<String>,
+    pub(super) release_preflights: Vec<ReleasePreflightConfig>,
+    pub(super) post_release_hooks: Vec<String>,
+}
+
+impl ReleaseExtension {
+    pub(super) fn provides_action(&self, action_id: &str) -> bool {
+        self.action_ids.contains(action_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_manifest(manifest: &homeboy_extension_contract::ExtensionManifest) -> Self {
+        Self {
+            id: manifest.id.clone(),
+            action_ids: manifest
+                .actions
+                .iter()
+                .map(|action| action.id.clone())
+                .collect(),
+            release_preflights: manifest.release_preflights.clone(),
+            post_release_hooks: manifest
+                .hooks
+                .get(&HookEvent::PostRelease)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Resolve the component's declared extensions from one Extension API v1 catalog snapshot.
+pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ReleaseExtension>> {
     let mut extensions = Vec::new();
     if let Some(configured) = component.extensions.as_ref() {
         let mut extension_ids: Vec<String> = configured.keys().cloned().collect();
         extension_ids.sort();
-        let suggestions = homeboy_core::extension::catalog::available_extension_ids();
+        let catalog = homeboy_core::extension::catalog::list_api(&ExtensionApiCatalogRequest {
+            schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+        });
+        if let Some(failure) = catalog.failure {
+            return Err(Error::validation_invalid_argument(
+                "extension_api",
+                failure.message,
+                None,
+                None,
+            ));
+        }
+        let suggestions: Vec<String> = catalog
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
         for extension_id in extension_ids {
-            let manifest = homeboy_core::extension::catalog::load_extension(&extension_id)
-                .map_err(|_| {
+            let entry = catalog
+                .entries
+                .iter()
+                .find(|entry| entry.id == extension_id)
+                .ok_or_else(|| {
                     Error::extension_not_found(extension_id.to_string(), suggestions.clone())
                 })?;
-            extensions.push(manifest);
+            if entry.status != ExtensionApiCatalogEntryStatus::Available {
+                return Err(Error::validation_invalid_argument(
+                    "extensions",
+                    format!(
+                        "Configured extension '{}' is not available through Extension API v1",
+                        extension_id
+                    ),
+                    Some(extension_id),
+                    None,
+                ));
+            }
+            let descriptor = entry.descriptor.as_ref().ok_or_else(|| {
+                Error::internal_unexpected(format!(
+                    "Extension API v1 catalog entry '{}' is missing its descriptor",
+                    entry.id
+                ))
+            })?;
+            // Preflight metadata is intentionally kept out of the public catalog.
+            let manifest = homeboy_core::extension::catalog::load_extension(&entry.id)?;
+            extensions.push(ReleaseExtension {
+                id: descriptor.identity.id.clone(),
+                action_ids: descriptor
+                    .capabilities
+                    .iter()
+                    .filter_map(|capability| capability.id.strip_prefix(ACTION_CAPABILITY_PREFIX))
+                    .map(str::to_string)
+                    .collect(),
+                release_preflights: manifest.release_preflights,
+                post_release_hooks: manifest
+                    .hooks
+                    .get(&HookEvent::PostRelease)
+                    .cloned()
+                    .unwrap_or_default(),
+            });
         }
     }
     Ok(extensions)
@@ -53,16 +147,18 @@ pub fn readiness_provenance(component: &Component) -> Result<ReleaseReadinessPro
         }
     }
     for extension in resolve_extensions(component)? {
-        let path = extension.extension_path.as_deref().ok_or_else(|| {
+        // Installation paths remain private to provenance hashing.
+        let manifest = homeboy_core::extension::catalog::load_extension(&extension.id)?;
+        let path = manifest.extension_path.as_deref().ok_or_else(|| {
             Error::internal_unexpected(format!(
                 "resolved extension '{}' has no materialized path",
-                extension.id
+                manifest.id
             ))
         })?;
-        let manifest = std::path::Path::new(path).join(format!("{}.json", extension.id));
-        let revision =
-            homeboy_engine_primitives::content_hash::sha256_file(&manifest).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(manifest.display().to_string()))
+        let manifest_path = std::path::Path::new(path).join(format!("{}.json", manifest.id));
+        let revision = homeboy_engine_primitives::content_hash::sha256_file(&manifest_path)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(manifest_path.display().to_string()))
             })?;
         provenance
             .extensions
@@ -75,7 +171,8 @@ pub fn readiness_provenance(component: &Component) -> Result<ReleaseReadinessPro
 mod tests {
     use super::{load_component, resolve_extensions};
     use crate::release::types::ReleaseOptions;
-    use homeboy_core::component::Component;
+    use homeboy_core::component::{Component, ScopedExtensionConfig};
+    use homeboy_extension_contract::ExtensionManifest;
 
     #[test]
     fn test_load_component() {
@@ -132,5 +229,44 @@ mod tests {
         let extensions = resolve_extensions(&component).expect("missing extensions are optional");
 
         assert!(extensions.is_empty());
+    }
+
+    #[test]
+    fn resolve_extensions_derives_actions_from_the_api_catalog() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+                "name": "Registry",
+                "version": "1.0.0",
+                "actions": [{
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": "true"
+                }],
+                "release_preflights": [{
+                    "id": "publish_token",
+                    "label": "Validate publish token",
+                    "action": "release.preflight.publish-token"
+                }]
+            }))
+            .expect("extension manifest");
+            manifest.id = "registry".to_string();
+            homeboy_core::extension::catalog::save_manifest(&manifest)
+                .expect("save extension manifest");
+            let component = Component {
+                extensions: Some(std::collections::HashMap::from([(
+                    "registry".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Component::default()
+            };
+
+            let extensions = resolve_extensions(&component).expect("resolve extensions");
+
+            assert_eq!(extensions.len(), 1);
+            assert!(extensions[0].provides_action("release.publish"));
+            assert!(!extensions[0].provides_action("release.package"));
+            assert_eq!(extensions[0].release_preflights.len(), 1);
+        });
     }
 }

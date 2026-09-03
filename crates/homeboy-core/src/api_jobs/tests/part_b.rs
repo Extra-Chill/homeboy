@@ -18,7 +18,7 @@ fn remote_runner_submission_lookup_is_non_mutating() {
     let mut request = remote_runner_request("homeboy-lab", None);
     request.metadata = Some(json!({ "submission_key": "lookup-key" }));
     let accepted = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("accept runner submission");
 
     let lookup = store.lookup_remote_runner_submission("lookup-key");
@@ -41,7 +41,7 @@ fn confirmed_recovery_fails_closed_for_unresolved_linked_durable_run() {
         active_cell_count: None,
     });
     let job = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("queue linked job");
 
     let error = store
@@ -153,6 +153,7 @@ fn admitted_staging_dispatch(store: &JobStore, linked_durable_run_id: Option<&st
                 request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
                 public_request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
                 request_digest: format!("digest-{}", Uuid::new_v4()),
+                active_idempotency_key: None,
                 linked_durable_run_id: linked_durable_run_id.map(str::to_string),
                 checkpoint: None,
                 cancellation_requested: false,
@@ -733,7 +734,7 @@ fn leaseless_recovery_fails_before_historical_mutation_when_unowned_work_is_ambi
 fn leaseless_recovery_preserves_queued_remote_jobs_and_expires_claims_through_broker() {
     let queued = JobStore::default().with_daemon_lease("lease-remote".to_string());
     let queued_job = queued
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("queue remote job");
 
     let preserved = queued
@@ -748,7 +749,7 @@ fn leaseless_recovery_preserves_queued_remote_jobs_and_expires_claims_through_br
 
     let expired = JobStore::default().with_daemon_lease("lease-expired".to_string());
     let expired_job = expired
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("queue remote job");
     expired
         .claim_remote_runner_job("homeboy-lab", None, 1, None)
@@ -796,7 +797,7 @@ fn durable_store_stale_restart_classification_preserves_last_child_evidence() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -1277,7 +1278,7 @@ fn oversized_terminal_result_remains_observable_when_it_exceeds_the_byte_budget(
 fn remote_runner_job_submit_targets_runner_and_project() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
 
     assert_eq!(job.status, JobStatus::Queued);
@@ -1288,7 +1289,17 @@ fn remote_runner_job_submit_targets_runner_and_project() {
 
     let events = store.events(job.id).expect("events are readable");
     assert_eq!(events[0].kind, JobEventKind::Status);
-    assert_eq!(events[0].data, Some(json!({ "status": "queued" })));
+    assert_eq!(
+        events[0].data.as_ref().map(|data| &data["status"]),
+        Some(&json!("queued"))
+    );
+    assert_eq!(
+        events[0]
+            .data
+            .as_ref()
+            .map(|data| &data["submission"]["decision"]),
+        Some(&json!("new"))
+    );
 }
 
 #[test]
@@ -1307,7 +1318,7 @@ fn remote_runner_job_rejects_inline_secret_env_before_durable_persistence() {
     request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
 
     let error = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect_err("inline secret must be rejected before durable persistence");
 
     assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
@@ -1344,6 +1355,9 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
     request.metadata = Some(json!({ "submission_key": "agent-task:crash-window" }));
+    let legacy_fingerprint = request
+        .submission_payload_fingerprint()
+        .expect("legacy fingerprint");
 
     // Models POST-before-ack-persist: the recovery POST carries the same key.
     let first = store
@@ -1370,6 +1384,23 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
     let persisted = fs::read_to_string(path).expect("read durable store");
     assert!(!persisted.contains("never-persist"));
     assert!(persisted.contains("RUNNER_SECRET_TOKEN"));
+    let persisted: serde_json::Value =
+        serde_json::from_str(&persisted).expect("parse durable store");
+    assert!(persisted["jobs"][0]["remote_runner"]
+        .get("envelope")
+        .is_some());
+    assert!(persisted["jobs"][0]["remote_runner"]
+        .get("request")
+        .is_none());
+    assert_eq!(
+        store
+            .inner
+            .lock()
+            .expect("job store mutex poisoned")
+            .submission_keys["agent-task:crash-window"]
+            .fingerprint,
+        legacy_fingerprint
+    );
 }
 
 #[test]
@@ -1441,6 +1472,11 @@ fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim envelope")
         .expect("claimed envelope");
+    assert!(claim.request.is_none());
+    assert!(serde_json::to_value(&claim)
+        .expect("claim serializes")
+        .get("request")
+        .is_none());
     assert_eq!(
         claim.envelope.dispatch.as_ref().expect("dispatch").command,
         request.command
@@ -1459,8 +1495,8 @@ fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
     let mut dual: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).expect("store JSON"))
             .expect("parse store JSON");
-    dual["jobs"][0]["remote_runner"]["envelope"] =
-        serde_json::to_value(request.execution_envelope()).expect("envelope JSON");
+    dual["jobs"][0]["remote_runner"]["request"] =
+        serde_json::to_value(&request).expect("request JSON");
     assert!(JobStore::open_without_reconciliation_from_bytes(
         temp.path().join("dual.json"),
         &serde_json::to_vec(&dual).expect("dual JSON"),
@@ -1484,7 +1520,7 @@ fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
 }
 
 #[test]
-fn legacy_request_workspace_owner_lease_renews_in_its_legacy_representation() {
+fn legacy_request_only_record_normalizes_owner_lease_into_canonical_sidecar() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
@@ -1499,13 +1535,66 @@ fn legacy_request_workspace_owner_lease_renews_in_its_legacy_representation() {
         token: "legacy-token".to_string(),
         expires_at_ms: crate::api_jobs::timestamp_ms() + 60_000,
     };
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.workspace_owner_lease = Some(lease.clone());
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_remote_runner_job(request.clone())
         .expect("legacy submit");
+    drop(store);
+
+    let mut persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("persisted JSON"))
+            .expect("parse persisted JSON");
+    let remote = persisted["jobs"][0]["remote_runner"]
+        .as_object_mut()
+        .expect("remote runner state");
+    remote.remove("envelope");
+    remote.remove("workspace_owner_lease");
+    remote.insert(
+        "request".to_string(),
+        serde_json::to_value(&request).expect("legacy request JSON"),
+    );
+    let mut conflicting = persisted.clone();
+    let mut conflicting_lease = lease.clone();
+    conflicting_lease.token = "conflicting-token".to_string();
+    conflicting["jobs"][0]["remote_runner"]["workspace_owner_lease"] =
+        serde_json::to_value(conflicting_lease).expect("conflicting lease JSON");
+    assert!(JobStore::open_without_reconciliation_from_bytes(
+        temp.path().join("conflicting-authority.json"),
+        &serde_json::to_vec(&conflicting).expect("conflicting store JSON"),
+    )
+    .is_err());
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&persisted).expect("encode old durable store"),
+    )
+    .expect("write old durable store");
+
+    let store = JobStore::open_without_reconciliation(&path).expect("reopen legacy record");
+    let protocol = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
+        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
+            .to_string(),
+        version: 1,
+    };
     let claim = store
-        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .claim_remote_runner_job_with_execution_protocol(
+            "homeboy-lab",
+            None,
+            30_000,
+            None,
+            Some(&protocol),
+        )
         .expect("claim")
         .expect("claimed");
+    assert_eq!(
+        claim.request.as_ref().expect("protocol-v1 request").command,
+        request.command
+    );
+    assert_eq!(
+        claim.envelope.dispatch.as_ref().expect("dispatch").command,
+        request.command
+    );
+    assert_eq!(claim.workspace_owner_lease, Some(lease.clone()));
     let renewed = crate::workspace_claim::WorkspaceOwnerLease {
         expires_at_ms: lease.expires_at_ms + 30_000,
         ..lease.clone()
@@ -1516,7 +1605,7 @@ fn legacy_request_workspace_owner_lease_renews_in_its_legacy_representation() {
             "homeboy-lab",
             claim.job.claim_id.as_deref().expect("claim id"),
             30_000,
-            None,
+            Some(&lease),
             Some(renewed.clone()),
         )
         .expect("renew legacy owner lease");
@@ -1530,12 +1619,12 @@ fn legacy_request_workspace_owner_lease_renews_in_its_legacy_representation() {
         serde_json::from_str(&fs::read_to_string(path).expect("persisted JSON"))
             .expect("parse persisted JSON");
     let remote = &persisted["jobs"][0]["remote_runner"];
-    assert!(remote.get("envelope").is_none());
+    assert!(remote.get("envelope").is_some());
+    assert!(remote.get("request").is_none());
     assert_eq!(
-        remote["request"]["workspace_owner_lease"]["expires_at_ms"],
+        remote["workspace_owner_lease"]["expires_at_ms"],
         lease.expires_at_ms + 30_000
     );
-    assert!(remote.get("workspace_owner_lease").is_none());
 }
 
 #[test]
@@ -1547,7 +1636,7 @@ fn remote_runner_submit_and_claim_roll_back_after_a_durable_write_failure() {
     request.metadata = Some(json!({ "submission_key": "write-failure" }));
 
     store.fail_next_durable_writes(1);
-    assert!(store.submit_remote_runner_job(request.clone()).is_err());
+    assert!(store.submit_runner_api_fixture(request.clone()).is_err());
     assert!(store.list().is_empty(), "failed submit rolls back memory");
     assert!(
         JobStore::open_without_reconciliation(&path)
@@ -1558,7 +1647,7 @@ fn remote_runner_submit_and_claim_roll_back_after_a_durable_write_failure() {
     );
 
     let job = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("retry submits");
     store.fail_next_durable_writes(1);
     assert!(store
@@ -1633,9 +1722,9 @@ fn remote_runner_submission_key_concurrent_replay_creates_one_job() {
     request.metadata = Some(json!({ "submission_key": "agent-task:v1:concurrent" }));
     let first_store = store.clone();
     let first_request = request.clone();
-    let first = std::thread::spawn(move || first_store.submit_remote_runner_job(first_request));
+    let first = std::thread::spawn(move || first_store.submit_runner_api_fixture(first_request));
     let second_store = store.clone();
-    let second = std::thread::spawn(move || second_store.submit_remote_runner_job(request));
+    let second = std::thread::spawn(move || second_store.submit_runner_api_fixture(request));
     let first = first.join().expect("first thread").expect("first submit");
     let second = second
         .join()
@@ -1659,11 +1748,11 @@ fn remote_runner_submission_key_concurrent_independent_stores_create_one_job() {
     let first_request = request.clone();
     let first = std::thread::spawn(move || {
         first_barrier.wait();
-        first_store.submit_remote_runner_job(first_request)
+        first_store.submit_runner_api_fixture(first_request)
     });
     let second = std::thread::spawn(move || {
         barrier.wait();
-        second_store.submit_remote_runner_job(request)
+        second_store.submit_runner_api_fixture(request)
     });
 
     let first = first.join().expect("first submit").expect("first job");
@@ -1687,7 +1776,7 @@ fn remote_runner_submission_retry_preserves_concurrent_claim() {
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({ "submission_key": "agent-task:v1:claim-interleaving" }));
     let accepted = submitter
-        .submit_remote_runner_job(request.clone())
+        .submit_runner_api_fixture(request.clone())
         .expect("initial submission");
     let claimer = JobStore::open_without_reconciliation(&path).expect("claimer store");
     let retry = JobStore::open_without_reconciliation(&path).expect("retry store");
@@ -1700,7 +1789,7 @@ fn remote_runner_submission_retry_preserves_concurrent_claim() {
     });
     let replay = std::thread::spawn(move || {
         barrier.wait();
-        retry.submit_remote_runner_job(request)
+        retry.submit_runner_api_fixture(request)
     });
 
     let claimed = claim.join().expect("claim thread").expect("claim result");
@@ -1727,7 +1816,7 @@ fn remote_runner_submission_terminal_replay_returns_original_projection_without_
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({ "submission_key": "agent-task:v1:terminal-lost-response" }));
     let accepted = store
-        .submit_remote_runner_job(request.clone())
+        .submit_runner_api_fixture(request.clone())
         .expect("initial submission");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
@@ -1769,7 +1858,7 @@ fn remote_runner_submission_terminal_replay_returns_original_projection_without_
 
     let replay = JobStore::open_without_reconciliation(&path)
         .expect("restarted broker")
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("lost-response replay");
     let events_after = JobStore::open_without_reconciliation(&path)
         .expect("reopen broker")
@@ -1790,7 +1879,7 @@ fn remote_runner_submission_key_conflicts_on_all_execution_semantic_inputs() {
     let mut base = remote_runner_request("homeboy-lab", Some("extrachill"));
     base.metadata = Some(json!({ "submission_key": "agent-task:v1:semantic-inputs" }));
     store
-        .submit_remote_runner_job(base.clone())
+        .submit_runner_api_fixture(base.clone())
         .expect("accept baseline");
 
     let mut variants = Vec::new();
@@ -1821,7 +1910,7 @@ fn remote_runner_submission_key_conflicts_on_all_execution_semantic_inputs() {
 
     for request in variants {
         let error = store
-            .submit_remote_runner_job(request)
+            .submit_runner_api_fixture(request)
             .expect_err("semantic input reuse fails closed");
         assert_eq!(
             error.details["schema"],
@@ -1840,7 +1929,7 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
         let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
         request.metadata = Some(json!({ "submission_key": key }));
         let job = store
-            .submit_remote_runner_job(request.clone())
+            .submit_runner_api_fixture(request.clone())
             .expect("submit");
         store
             .durable_transaction(|inner| {
@@ -1866,7 +1955,7 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
         .find_map(|(key, request)| (key == expired_key).then_some(request))
         .expect("expired request");
     let error = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect_err("expired replay is explicit");
     assert_eq!(
         error.details["schema"],
@@ -1887,7 +1976,7 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
         request.metadata = Some(json!({ "submission_key": key }));
         request.command.push("x".repeat(32_000));
         let job = store
-            .submit_remote_runner_job(request.clone())
+            .submit_runner_api_fixture(request.clone())
             .expect("submit");
         store
             .durable_transaction(|inner| {
@@ -1922,7 +2011,7 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
     let restarted = JobStore::open_with_retention(&path, 3, 1).expect("restart");
     assert_eq!(restarted.list().len(), 1);
     let error = restarted
-        .submit_remote_runner_job(first.expect("first request"))
+        .submit_runner_api_fixture(first.expect("first request"))
         .expect_err("compacted accepted key stays rejected after restart");
     assert_eq!(
         error.details["schema"],
@@ -1937,7 +2026,7 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
     let store = JobStore::open_with_retention(&path, 3, 1).expect("durable store");
     let mut first = remote_runner_request("homeboy-lab", Some("extrachill"));
     first.metadata = Some(json!({ "submission_key": "agent-task:v1:corrupt-one" }));
-    let job = store.submit_remote_runner_job(first).expect("submit");
+    let job = store.submit_runner_api_fixture(first).expect("submit");
     store
         .inner
         .lock()
@@ -1953,7 +2042,7 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
     let mut second = remote_runner_request("homeboy-lab", Some("extrachill"));
     second.metadata = Some(json!({ "submission_key": "agent-task:v1:corrupt-two" }));
     let second_job = store
-        .submit_remote_runner_job(second)
+        .submit_runner_api_fixture(second)
         .expect("submit second");
     store
         .inner
@@ -1975,7 +2064,7 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
     let restarted = JobStore::open_with_retention(&path, 3, 1).expect("restart");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({ "submission_key": "agent-task:v1:any-key" }));
-    assert!(restarted.submit_remote_runner_job(request).is_err());
+    assert!(restarted.submit_runner_api_fixture(request).is_err());
 }
 
 #[test]
@@ -2006,7 +2095,7 @@ fn jsonl_replay_tombstones_migrate_before_restart_lookup() {
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({ "submission_key": "agent-task:v1:legacy" }));
     let error = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect_err("migrated key remains exactly-once evidence");
     assert_eq!(error.details["expired_job_id"], json!(job_id));
 }
@@ -2022,10 +2111,10 @@ fn remote_runner_job_env_is_scoped_to_submitted_job() {
     let second = remote_runner_request("homeboy-lab", Some("extrachill"));
 
     store
-        .submit_remote_runner_job(first)
+        .submit_runner_api_fixture(first)
         .expect("first job queues");
     store
-        .submit_remote_runner_job(second)
+        .submit_runner_api_fixture(second)
         .expect("second job queues");
 
     let first_claim = store
@@ -2039,13 +2128,19 @@ fn remote_runner_job_env_is_scoped_to_submitted_job() {
 
     assert_eq!(
         first_claim
-            .request
+            .envelope
+            .dispatch
+            .as_ref()
+            .expect("typed dispatch")
             .env
             .get("STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"),
         Some(&"/tmp/sample-runtime".to_string())
     );
     assert!(!second_claim
-        .request
+        .envelope
+        .dispatch
+        .as_ref()
+        .expect("typed dispatch")
         .env
         .contains_key("STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"));
 }

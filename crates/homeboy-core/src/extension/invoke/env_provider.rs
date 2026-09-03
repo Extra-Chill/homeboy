@@ -145,6 +145,7 @@ fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension::registry::ExtensionLifecycleValidation;
 
     #[cfg(unix)]
     fn install_provider_fixture(root: &Path, id: &str, output: &str) {
@@ -164,8 +165,12 @@ mod tests {
             .expect("provider script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("provider executable");
-        crate::extension::lifecycle::install(&source.display().to_string(), Some(id))
-            .expect("install provider fixture");
+        crate::extension::lifecycle::install(
+            &source.display().to_string(),
+            Some(id),
+            ExtensionLifecycleValidation::declaration_only(),
+        )
+        .expect("install provider fixture");
     }
 
     #[cfg(unix)]

@@ -46,9 +46,10 @@ Mental models and vocabulary:
 Exact CLI, configuration, schema, and output details:
 
 - [Reference index](reference/index.md)
-- [Generated CLI reference](reference/cli/commands/index.md)
 - [Root command and global flags](reference/cli/homeboy-root-command.md)
-- [Command index](commands/commands-index.md)
+- [Command concepts and workflows](commands/index.md)
+- Runtime command index: `homeboy self docs commands/commands-index`
+- Exact command help: `homeboy <command> --help`
 - [Configuration reference](reference/configuration.md)
 - [Configuration precedence map](config-precedence.md)
 - [Template variables](reference/template-variables.md)

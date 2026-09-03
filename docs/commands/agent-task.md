@@ -1439,27 +1439,6 @@ homeboy agent-task cook \
 External workspace managers should resolve their own handles to local paths and
 call cook with `--cwd <resolved-path>`.
 
-When a configured worktree provider cannot resolve or create the checkout for a
-repair to its own repository, declare that ownership under
-`settings.worktree_provider_self_repair.<provider-id>.repository`. The failure
-then includes typed replay argv for the explicit bootstrap route:
-
-```bash
-homeboy agent-task cook \
-  --repo workspace-service-component \
-  --task-url https://tracker.example/issues/123 \
-  --cwd /path/to/existing-clean-linked-worktree \
-  --worktree-provider-self-repair workspace-service \
-  --verify "homeboy review test <component>" \
-  --prompt @task.txt
-```
-
-This route never invokes the failed workspace provider. It validates that the
-provider declares the requested repository, pins the explicit checkout branch,
-and runs the ordinary Cook provider, deterministic gates, review, and PR
-finalization. The durable `self_repair_bootstrap` provenance remains marked for
-normal provider lifecycle reconciliation after the repair ships.
-
 When `agent-task cook` is Lab-offloaded with a
 patch-producing provider, `--cwd` must point at a clean git checkout with
 `remote.origin.url` configured. Homeboy uses that contract to materialize a real
@@ -1501,6 +1480,10 @@ belong on each `agent_task_executors[]` entry:
       "remediation": "Configure EXAMPLE_API_TOKEN with homeboy agent-task auth."
     }
   ],
+  "readiness_invocation": {
+    "argv": ["example-provider", "--readiness"],
+    "timeout_ms": 30000
+  },
   "workspace_materialization": {
     "cwd": "git_checkout",
     "requires_git": true,
@@ -1526,6 +1509,10 @@ Homeboy treats these declarations as generic contracts:
 
 - `secret_env_requirements` and `runner_readiness` describe required secret env
   names and redacted readiness probes without exposing values.
+- `readiness_invocation.timeout_ms` bounds the complete provider-owned readiness
+  command, including all child probes. It defaults to 20,000 milliseconds and
+  must be between 1 and 120,000 milliseconds; providers must keep their own
+  sequential child budgets within this total.
 - `workspace_materialization` describes the checkout shape a provider needs; it
   does not name any workspace manager or product runtime.
 - `timeout_artifact_discovery` extends timeout evidence recovery with declared

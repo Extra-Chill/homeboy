@@ -2,6 +2,7 @@
 
 use homeboy_error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Component, Path};
 
@@ -22,6 +23,26 @@ pub struct ExternalCheckDetailResolverConfig {
     pub public_env: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ExternalCheckDetailResolverDeclaration {
+    Config(Box<ExternalCheckDetailResolverConfig>),
+    Malformed(Value),
+}
+
+impl ExternalCheckDetailResolverDeclaration {
+    pub fn declared_provider(&self) -> Option<String> {
+        match self {
+            Self::Config(config) => Some(config.provider.clone()),
+            Self::Malformed(value) => value
+                .as_object()
+                .and_then(|object| object.get("provider"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

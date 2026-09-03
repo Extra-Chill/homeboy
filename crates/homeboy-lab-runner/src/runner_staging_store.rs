@@ -1024,33 +1024,44 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
         let receipt = transport
             .store
             .stage_durable_with_submit(&request.envelope, |envelope| {
-                let job = jobs.submit_remote_runner_job(
-                    homeboy_core::api_jobs::RemoteRunnerJobRequest {
-                        runner_id: envelope.handoff.runner_id.clone(),
-                        project_id: None,
-                        operation: "runner_staged_execution".to_string(),
-                        command: envelope.handoff.recipe.normalized_args.clone(),
-                        cwd: workspace
-                            .as_ref()
-                            .map(|workspace| workspace.remote_cwd.clone()),
-                        env: std::collections::HashMap::new(),
-                        secret_env_names: Vec::new(),
-                        secret_env_plan: Default::default(),
-                        env_materialization: None,
-                        capture_patch: envelope.handoff.recipe.capture_patch,
-                        source_snapshot: None,
-                        path_materialization_plan: None,
-                        require_paths: Vec::new(),
-                        extension_env_providers: Vec::new(),
-                        lab_runner_workload: None,
-                        lifecycle: None,
+                let submission_key = envelope.handoff.idempotency_key.clone();
+                let envelope_id = format!(
+                    "remote-runner:{}:runner_staged_execution",
+                    envelope.handoff.runner_id
+                );
+                let mut execution = homeboy_runner_contract::RunnerExecutionEnvelope::planned(
+                    &envelope_id,
+                    "remote_runner_job_request",
+                );
+                execution.source.ref_id = Some(envelope_id);
+                execution.dispatch = Some(homeboy_runner_contract::RunnerExecutionDispatch {
+                    runner_id: envelope.handoff.runner_id.clone(),
+                    project_id: None,
+                    operation: "runner_staged_execution".to_string(),
+                    command: envelope.handoff.recipe.normalized_args.clone(),
+                    cwd: workspace
+                        .as_ref()
+                        .map(|workspace| workspace.remote_cwd.clone()),
+                    env: Default::default(),
+                    source_snapshot: None,
+                    require_paths: Vec::new(),
+                    extension_env_providers: Vec::new(),
+                });
+                execution.metadata = serde_json::json!({
+                    "submission_key": submission_key,
+                    "staged_source_artifact": source_artifact,
+                    "staged_workspace_materialization": workspace,
+                });
+                execution.mutation_policy.capture_patch = envelope.handoff.recipe.capture_patch;
+                let job = jobs.submit_runner_api_request(
+                    homeboy_runner_contract::RunnerApiSubmitRequest {
+                        schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA
+                            .to_string(),
+                        api_version: homeboy_runner_contract::RUNNER_API_V1,
+                        submission_key,
+                        envelope: execution,
                         workspace_claim_binding: None,
                         workspace_owner_lease: None,
-                        metadata: Some(serde_json::json!({
-                            "submission_key": envelope.handoff.idempotency_key,
-                            "staged_source_artifact": source_artifact,
-                            "staged_workspace_materialization": workspace,
-                        })),
                     },
                 )?;
                 Ok(job.id.to_string())

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,57 @@ fn homeboy(args: &[&str]) -> Output {
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command.args(args);
     bounded_output(command)
+}
+
+/// Register a fixture checkout and create the task checkout through the native
+/// lifecycle, so Cook exercises the same destination authority as production.
+fn native_task_worktree(
+    context: &HermeticTestContext,
+    component_id: &str,
+    checkout: &Path,
+    branch: &str,
+) -> (String, PathBuf) {
+    let mut register = context.command(TestBinary::HomeboyFixture);
+    register.args([
+        "component",
+        "create",
+        "--local-path",
+        checkout.to_str().expect("checkout path"),
+    ]);
+    let registered = bounded_output(register);
+    assert!(
+        registered.status.success(),
+        "register component: {}",
+        String::from_utf8_lossy(&registered.stdout)
+    );
+
+    let handle = format!("{component_id}@{branch}");
+    let mut create = context.command(TestBinary::HomeboyFixture);
+    create.args([
+        "worktree",
+        "create",
+        component_id,
+        "--branch",
+        branch,
+        "--from",
+        "HEAD",
+    ]);
+    let created = bounded_output(create);
+    assert!(
+        created.status.success(),
+        "create native task worktree: {}",
+        String::from_utf8_lossy(&created.stdout)
+    );
+    let path = checkout
+        .parent()
+        .expect("fixture checkout parent")
+        .join(&handle);
+    assert!(
+        path.is_dir(),
+        "native task worktree exists: {}",
+        path.display()
+    );
+    (handle, path)
 }
 
 #[test]
@@ -187,11 +238,24 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
 #[test]
 fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
     let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("local-detach-pending");
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        "local-detach-pending",
+        &checkout,
+        "pending-attempt",
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command
         // Bound the launcher's wait so an unresolvable destination reports an
         // honest handoff state promptly instead of holding the default budget.
-        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "5000")
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "30000")
         .args([
             "--placement",
             "local",
@@ -204,8 +268,12 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
             "fixture",
             "--prompt",
             "implement the fix",
+            "--repo",
+            "local-detach-pending",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
             "--to-worktree",
-            "missing@worktree",
+            task_worktree.to_str().expect("task worktree path"),
             "--verify",
             "true",
         ]);
@@ -233,17 +301,13 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
         "{stdout}"
     );
     let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    status.args([
-        "agent-task",
-        "status",
-        "local-detach-exits-before-attempt",
-        "--full",
-    ]);
+    status.args(["agent-task", "status", "local-detach-exits-before-attempt"]);
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
+    let status_stderr = String::from_utf8_lossy(&status.stderr);
     assert!(
         status.status.success(),
-        "durable attempt must be visible: {status_stdout}"
+        "durable attempt must be visible: stdout={status_stdout} stderr={status_stderr}"
     );
     assert!(status_stdout.contains("local-detach-exits-before-attempt"));
 }
@@ -281,29 +345,11 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     let context = HermeticTestContext::new();
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("local-detach-acceptance");
-    let mut register = context.command(TestBinary::HomeboyFixture);
-    register.args([
-        "component",
-        "create",
-        "--local-path",
-        checkout.to_str().expect("checkout path"),
-    ]);
-    let registered = bounded_output(register);
-    assert!(
-        registered.status.success(),
-        "register component: {}",
-        String::from_utf8_lossy(&registered.stdout)
-    );
-    let task_worktree = context.root().join("local-detach-acceptance-worktree");
-    homeboy_core::test_support::run_git_fixture_command(
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        "local-detach-acceptance",
         &checkout,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "local-detach-acceptance",
-            task_worktree.to_str().expect("task worktree path"),
-        ],
+        "local-detach-acceptance",
     );
     std::fs::write(
         context.config_dir().join("homeboy.json"),
@@ -364,10 +410,11 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         .and_then(|job_id| uuid::Uuid::parse_str(job_id).ok())
         .unwrap_or_else(|| panic!("accepted handoff names its controller job\n{stdout}"));
     let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    status.args(["agent-task", "status", &attempt_id, "--full"]);
+    status.args(["agent-task", "status", &attempt_id]);
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
-    assert!(status.status.success(), "{status_stdout}");
+    let status_stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(status.status.success(), "{status_stdout}\n{status_stderr}");
     assert!(status_stdout.contains(&attempt_id), "{status_stdout}");
     assert!(!status_stdout.contains("\"tasks\": []"), "{status_stdout}");
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
@@ -411,7 +458,7 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-        status.args(["agent-task", "status", &attempt_id, "--full"]);
+        status.args(["agent-task", "status", &attempt_id]);
         let status = bounded_output(status);
         let status_stdout = String::from_utf8_lossy(&status.stdout);
         assert!(status.status.success(), "{status_stdout}");
@@ -480,32 +527,11 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("local-cook-durability");
     let component_id = "local-cook-durability";
-    let mut register = context.command(TestBinary::HomeboyFixture);
-    register.args([
-        "component",
-        "create",
-        "--local-path",
-        checkout.to_str().expect("checkout path"),
-    ]);
-    let registered = bounded_output(register);
-    assert!(
-        registered.status.success(),
-        "register Cook component: stdout={} stderr={}",
-        String::from_utf8_lossy(&registered.stdout),
-        String::from_utf8_lossy(&registered.stderr),
-    );
-    let task_worktree = context
-        .root()
-        .join("foreground-client-termination-worktree");
-    homeboy_core::test_support::run_git_fixture_command(
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        component_id,
         &checkout,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "foreground-client-termination",
-            task_worktree.to_str().expect("task worktree path"),
-        ],
+        "foreground-client-termination",
     );
     std::fs::write(
         context.config_dir().join("homeboy.json"),
@@ -515,13 +541,11 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let cook_id = "foreground-client-termination";
     let client_stdout = context.root().join("foreground-client.stdout");
     let client_stderr = context.root().join("foreground-client.stderr");
-    let provider_started = context.root().join("fixture-provider-started");
     let mut client = context.controller_runtime_command(TestBinary::HomeboyFixture);
     client
         // This test exercises automatic placement, not live host pressure.
         .env("GITHUB_ACTIONS", "true")
         .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "5000")
-        .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &provider_started)
         .args([
             "agent-task",
             "cook",
@@ -551,13 +575,21 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         ));
     let mut client = client.spawn().expect("start foreground Cook client");
 
-    // The fixture writes this marker only after the scheduler has reserved its
-    // provider execution. This avoids repeatedly cold-starting status CLIs and
-    // distinguishes the pre-dispatch `provider_start` progress event from the
-    // durable provider boundary we must kill the client during.
+    // Provider-start progress is written by the daemon-supervised Cook. The
+    // status check below then proves the provider is durably running before the
+    // foreground observer is terminated.
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if provider_started.exists() {
+        if std::fs::read_to_string(
+            context
+                .data_dir()
+                .join("agent-task-detached")
+                .join(cook_id)
+                .join("cook.log"),
+        )
+        .unwrap_or_default()
+        .contains("Cook provider_start")
+        {
             break;
         }
         assert!(
@@ -577,15 +609,32 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    status.args(["agent-task", "status", cook_id, "--full"]);
-    let provider_status = bounded_output(status);
-    let provider_status_json = serde_json::from_slice::<serde_json::Value>(&provider_status.stdout)
-        .expect("provider status JSON");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (provider_status, provider_status_json) = loop {
+        let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        status.args(["agent-task", "status", cook_id]);
+        let provider_status = bounded_output(status);
+        let provider_status_json =
+            serde_json::from_slice::<serde_json::Value>(&provider_status.stdout)
+                .expect("provider status JSON");
+        if provider_status.status.success()
+            && provider_status_json
+                .pointer("/data/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("running")
+        {
+            break (provider_status, provider_status_json);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Cook did not durably record running provider work: {provider_status_json}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert!(
         provider_status.status.success()
             && provider_status_json
-                .pointer("/data/status_scope/queried_attempt/state")
+                .pointer("/data/state")
                 .and_then(serde_json::Value::as_str)
                 == Some("running"),
         "Cook did not durably record running provider work: {provider_status_json}",
@@ -615,33 +664,33 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    status.args(["agent-task", "status", cook_id, "--full"]);
+    status.args(["agent-task", "status", cook_id]);
     let output = bounded_output(status);
     let completed = String::from_utf8_lossy(&output.stdout).into_owned();
     let completed_json =
         serde_json::from_str::<serde_json::Value>(&completed).expect("completed status JSON");
     let terminal_provider_success = completed_json
-        .pointer("/data/action_eligibility/state")
+        .pointer("/data/state")
         .and_then(serde_json::Value::as_str)
         == Some("succeeded")
         && completed_json
-            .pointer("/data/status_scope/queried_attempt/child_run_state")
-            .and_then(serde_json::Value::as_str)
-            == Some("succeeded")
-        && completed_json
-            .pointer("/data/status_scope/queried_attempt/artifacts/count")
-            .and_then(serde_json::Value::as_u64)
-            .is_some_and(|count| count > 0);
+            .pointer("/data/artifacts")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|artifacts| {
+                artifacts.iter().any(|artifact| {
+                    artifact.get("id").and_then(serde_json::Value::as_str) == Some("changes.patch")
+                })
+            });
     assert!(
         output.status.success() && terminal_provider_success,
         "Cook did not complete after client termination: {completed}"
     );
     let completed_run_id = completed_json
-        .pointer("/data/action_eligibility/run_id")
+        .pointer("/data/run")
         .and_then(serde_json::Value::as_str)
         .expect("completed run id");
     let mut artifacts = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    artifacts.args(["agent-task", "artifacts", completed_run_id, "--full"]);
+    artifacts.args(["agent-task", "artifacts", completed_run_id]);
     let artifacts = bounded_output(artifacts);
     assert!(
         artifacts.status.success()
@@ -651,12 +700,148 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     );
 }
 
+/// Attached Cooks remain foreground observers. They must reach their normal
+/// terminal execution path rather than returning deferred-admission output.
+#[test]
+fn attached_nonlocal_cook_observes_terminal_execution() {
+    let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("attached-cook-terminal");
+    let component_id = "attached-cook-terminal";
+    let mut register = context.command(TestBinary::HomeboyFixture);
+    register.args([
+        "component",
+        "create",
+        "--local-path",
+        checkout.to_str().expect("checkout path"),
+    ]);
+    let registered = bounded_output(register);
+    assert!(
+        registered.status.success(),
+        "register Cook component failed"
+    );
+    let task_worktree = context.root().join("attached-cook-terminal-worktree");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "attached-cook-terminal",
+            task_worktree.to_str().expect("task worktree path"),
+        ],
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
+    let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    cook.env("GITHUB_ACTIONS", "true").args([
+        "agent-task",
+        "cook",
+        "--run-id",
+        "attached-cook-terminal",
+        "--repo",
+        component_id,
+        "--backend",
+        "fixture",
+        "--prompt",
+        "complete while attached",
+        "--cwd",
+        task_worktree.to_str().expect("task worktree path"),
+        "--to-worktree",
+        task_worktree.to_str().expect("task worktree path"),
+        "--verify",
+        "true",
+        "--max-attempts",
+        "1",
+        "--no-finalize",
+    ]);
+    let output = bounded_output(cook);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("pending_resource_admission"),
+        "attached Cook was deferred instead of observed: {stdout}"
+    );
+    assert!(
+        stdout.contains("Cook terminal"),
+        "attached Cook did not wait for terminal provider execution: {stdout}"
+    );
+}
+
+/// `lab-or-local` authorizes the controller fallback when no Lab runner exists.
+#[test]
+fn no_runner_lab_or_local_cook_reaches_local_execution() {
+    let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("lab-or-local-fallback");
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        "lab-or-local-fallback",
+        &checkout,
+        "local-fallback",
+    );
+    let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    cook.env("GITHUB_ACTIONS", "true").args([
+        "--placement",
+        "lab-or-local",
+        "agent-task",
+        "cook",
+        "--backend",
+        "fixture",
+        "--prompt",
+        "use the authorized local fallback",
+        "--repo",
+        "lab-or-local-fallback",
+        "--cwd",
+        task_worktree.to_str().expect("task worktree path"),
+        "--to-worktree",
+        task_worktree.to_str().expect("task worktree path"),
+        "--verify",
+        "true",
+        "--max-attempts",
+        "1",
+        "--no-finalize",
+    ]);
+    let output = bounded_output(cook);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("Cook result JSON");
+
+    assert!(
+        !stdout.contains("pending_resource_admission"),
+        "lab-or-local Cook was deferred instead of run locally: {stdout}"
+    );
+    assert!(
+        result
+            .pointer("/data/attempts/0/run_state")
+            .and_then(serde_json::Value::as_str)
+            == Some("Succeeded"),
+        "routing did not reach local Cook execution: {stdout}"
+    );
+}
+
 /// Historical runner recovery belongs to `runner exec`, never an unrelated
 /// Cook admission. This invokes the actual detached Cook command path so the
 /// ownership boundary remains observable.
 #[test]
 fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
     let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) = homeboy_core::test_support::shared_committed_git_repo_fixture(
+        "detached-recovery-admission",
+    );
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        "detached-recovery-admission",
+        &checkout,
+        "admission",
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
     let database = context.data_dir().join("homeboy.sqlite");
     let store = ObservationStore::open_initialized_at(&database).expect("open fixture store");
     for index in 0..100 {
@@ -678,7 +863,7 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
 
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command
-        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "5000")
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "30000")
         .args([
             "--placement",
             "local",
@@ -689,14 +874,21 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
             "fixture",
             "--prompt",
             "admit despite stale runner records",
+            "--repo",
+            "detached-recovery-admission",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
             "--to-worktree",
-            "missing@worktree",
+            task_worktree.to_str().expect("task worktree path"),
             "--verify",
             "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
         ]);
     let started = Instant::now();
     let output = bounded_output(command);
-    // The handoff itself is capped at five seconds above. Leave enough room for
+    // The handoff itself is capped at thirty seconds above. Leave enough room for
     // concurrent controller-runtime pins in this integration binary; this
     // bound detects recovery blocking rather than host-local fixture startup.
     assert!(

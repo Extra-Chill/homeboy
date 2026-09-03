@@ -1,88 +1,181 @@
-//! Extension provider registration and discovery validation.
+//! Validation an extension install, replace, or relink runs after setup.
 //!
-//! When an extension is installed or repaired, core verifies that every
-//! agent-runtime executor provider the extension declares is actually
-//! discoverable. That check reads the extension's agent-task executor provider
-//! catalog, which is agent-task behavior, so it is inverted behind this
-//! provider: core owns extension install/repair, the agent-task layer validates
-//! provider discovery.
+//! The check has two halves, and only one of them belongs to core.
 //!
-//! The check has two halves, and only one of them is agent-task behavior:
+//! - **Is every declared executor registrable?** A malformed
+//!   `agent_runtimes[].agent_task_executors[]` entry, a duplicate executor id,
+//!   or an executor the extension never advertises is wrong whether or not the
+//!   agent-task subsystem exists. Core answers this from the typed Extension API
+//!   registration inventory.
+//! - **Does each registered executor resolve to something dispatchable?** That
+//!   requires the agent-task layer's resolved provider type, which core cannot
+//!   see, so the caller supplies it.
 //!
-//! - **Is the declaration well-formed?** A malformed
-//!   `agent_runtimes[].agent_task_executors[]` entry is malformed whether or not
-//!   the agent-task subsystem is present, so this is validated unconditionally
-//!   against the shared declaration contract.
-//! - **Is the declared provider discoverable?** This reads the extension's
-//!   agent-task executor provider catalog, which *is* agent-task behavior, so it
-//!   stays inverted behind the provider below.
-//!
-//! Collapsing both halves into the inverted hook is what regressed #12206: with
-//! no provider registered the no-op validated *nothing*, so an extension
-//! declaring a provider that cannot be parsed installed silently instead of
-//! being rejected and rolled back.
-//!
-//! With no provider registered (no agent-task subsystem present) the no-op
-//! still validates no *discoverability* — an install without the agent-task
-//! subsystem has no agent-task providers to discover.
+//! The second half used to be an ambient global that the CLI registered at
+//! startup. Nothing in a signature said the check existed, and with no provider
+//! registered the no-op silently validated nothing — which is what regressed
+//! #12206. It is now an explicit parameter: a caller that has the agent-task
+//! subsystem passes it, and a caller that does not cannot accidentally appear to
+//! have run a check it never ran.
 
-use homeboy_extension_contract::agent_task_executor_declaration::parse_agent_task_executor_declaration;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiAgentTaskExecutorInventoryRequest,
+    EXTENSION_API_AGENT_TASK_EXECUTOR_INVENTORY_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
 
-use crate::Result;
+use crate::extension::agent_task_executor_api::AgentTaskExecutorApi;
+use crate::{Error, Result};
 
-/// Validates that an installed extension's declared agent-runtime providers are
-/// discoverable.
-pub trait ExtensionProviderDiscoveryValidator: Send + Sync {
-    /// Validate that the given extension's declared agent-runtime executor
-    /// providers are discoverable. Returns an error describing the first
-    /// missing/duplicate provider.
-    fn validate_installed_extension_provider_discovery(&self, extension_id: &str) -> Result<()>;
-}
-
-struct NoopProvider;
-
-impl ExtensionProviderDiscoveryValidator for NoopProvider {
-    fn validate_installed_extension_provider_discovery(&self, _extension_id: &str) -> Result<()> {
-        Ok(())
-    }
-}
-
-homeboy_engine_primitives::provider_registry! {
-    provider: dyn ExtensionProviderDiscoveryValidator,
-    noop: NoopProvider,
-    /// Register the extension provider-discovery validator. Called once at startup
-    /// by the agent-task layer.
-    register: pub fn register_extension_provider_discovery_validator,
-    /// Run `f` against the registered provider, or the no-op provider if none
-    /// is registered.
-    with: fn with_provider,
-}
-
-/// Validate an installed extension's agent-runtime provider discovery.
+/// Resolves registered agent-task executors into dispatchable providers.
 ///
-/// Declaration well-formedness is checked unconditionally; discoverability is
-/// delegated to the registered validator (or the no-op when the agent-task
-/// subsystem is absent).
-pub fn validate_installed_extension_provider_discovery(extension_id: &str) -> Result<()> {
-    validate_declared_agent_task_executors(extension_id)?;
-    with_provider(|p| p.validate_installed_extension_provider_discovery(extension_id))
+/// Implemented by the agent-task layer, which owns the resolved provider type.
+pub trait ExtensionExecutorDiscovery {
+    /// Confirm every executor the extension registers resolves to a provider
+    /// this host can dispatch. Returns an error describing the first executor
+    /// that does not.
+    fn validate_registered_executors(&self, extension_id: &str) -> Result<()>;
 }
 
-/// Reject an extension that declares an agent-task executor which cannot be
-/// parsed, independently of whether the agent-task subsystem is registered.
+/// The validation an extension lifecycle mutation runs after setup.
 ///
-/// A manifest that cannot be loaded at all is left to the caller's own manifest
-/// handling rather than reported here as a provider-declaration fault.
-fn validate_declared_agent_task_executors(extension_id: &str) -> Result<()> {
-    let Ok(extension) = crate::extension::catalog::load_extension(extension_id) else {
-        return Ok(());
-    };
+/// Construct this at the composition root, where both core and the agent-task
+/// subsystem are visible, and pass it into install, replace, and relink.
+#[derive(Default, Clone, Copy)]
+pub struct ExtensionLifecycleValidation<'a> {
+    executor_discovery: Option<&'a dyn ExtensionExecutorDiscovery>,
+}
 
-    for runtime in &extension.agent_runtimes {
-        for declared in &runtime.agent_task_executors {
-            parse_agent_task_executor_declaration(&extension.id, &runtime.id, declared)?;
+impl<'a> ExtensionLifecycleValidation<'a> {
+    /// Validate declarations only.
+    ///
+    /// This is the correct choice for a host without the agent-task subsystem:
+    /// there are no executors to resolve, so there is no resolution to check.
+    /// It is not a way to skip validation — declaration registrability is still
+    /// enforced.
+    pub fn declaration_only() -> Self {
+        Self {
+            executor_discovery: None,
         }
     }
 
+    pub fn with_executor_discovery(discovery: &'a dyn ExtensionExecutorDiscovery) -> Self {
+        Self {
+            executor_discovery: Some(discovery),
+        }
+    }
+
+    /// Run both halves in order. Declarations are always checked; resolution is
+    /// checked when the caller supplied a discoverer.
+    pub fn validate_installed_extension(&self, extension_id: &str) -> Result<()> {
+        validate_registered_executor_declarations(extension_id)?;
+        match self.executor_discovery {
+            Some(discovery) => discovery.validate_registered_executors(extension_id),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Reject an extension whose declared executors cannot be registered.
+///
+/// The typed inventory is the single place declarations become identities, so an
+/// entry it marks unusable is rejected here rather than installed and then found
+/// undispatchable later.
+fn validate_registered_executor_declarations(extension_id: &str) -> Result<()> {
+    let inventory =
+        AgentTaskExecutorApi::discover(&ExtensionApiAgentTaskExecutorInventoryRequest {
+            schema: EXTENSION_API_AGENT_TASK_EXECUTOR_INVENTORY_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+        });
+
+    for executor in inventory.registered_by(extension_id) {
+        let Some(diagnostic) = executor.diagnostic.as_ref() else {
+            continue;
+        };
+        return Err(Error::validation_invalid_argument(
+            "agent_runtimes.agent_task_executors",
+            format!(
+                "Extension '{}' declares an agent-task executor that cannot be registered: {}",
+                extension_id, diagnostic.message
+            ),
+            Some(if executor.id.is_empty() {
+                executor.runtime_id.clone()
+            } else {
+                executor.id.clone()
+            }),
+            None,
+        ));
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct RecordingDiscovery {
+        called: Cell<bool>,
+        result: Option<&'static str>,
+    }
+
+    impl ExtensionExecutorDiscovery for RecordingDiscovery {
+        fn validate_registered_executors(&self, _extension_id: &str) -> Result<()> {
+            self.called.set(true);
+            match self.result {
+                Some(message) => Err(Error::validation_invalid_argument(
+                    "source", message, None, None,
+                )),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn declaration_only_validation_never_reports_a_resolution_it_did_not_run() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // No agent-task subsystem: there is nothing to resolve, so this must
+            // succeed rather than silently claim a check that never ran.
+            ExtensionLifecycleValidation::declaration_only()
+                .validate_installed_extension("absent-extension")
+                .expect("declaration-only validation accepts an extension with no executors");
+        });
+    }
+
+    #[test]
+    fn supplied_discovery_runs_and_its_rejection_fails_the_lifecycle_mutation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let discovery = RecordingDiscovery {
+                called: Cell::new(false),
+                result: Some("declared provider was not discoverable"),
+            };
+
+            let error = ExtensionLifecycleValidation::with_executor_discovery(&discovery)
+                .validate_installed_extension("absent-extension")
+                .expect_err("a supplied discoverer's rejection must fail the mutation");
+
+            assert!(discovery.called.get(), "the supplied discoverer must run");
+            assert!(
+                error.message.contains("not discoverable"),
+                "got {}",
+                error.message
+            );
+        });
+    }
+
+    #[test]
+    fn supplied_discovery_acceptance_passes_the_lifecycle_mutation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let discovery = RecordingDiscovery {
+                called: Cell::new(false),
+                result: None,
+            };
+
+            ExtensionLifecycleValidation::with_executor_discovery(&discovery)
+                .validate_installed_extension("absent-extension")
+                .expect("an accepted extension installs");
+
+            assert!(discovery.called.get(), "the supplied discoverer must run");
+        });
+    }
 }

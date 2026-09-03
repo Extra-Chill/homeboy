@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(not(test))]
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ pub(crate) use crate::agent_task::{
 use crate::agent_task_gate_executor::{is_repo_local_gate_request, run_repo_local_gate_task};
 use crate::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
+    ProviderRouteDiagnosticData, ProviderRouteReadiness,
 };
 use crate::agent_task_secrets::{
     resolve_secret_env_with_fallbacks, secret_env_status_with_fallbacks,
@@ -70,6 +72,8 @@ pub use admission::{
     AGENT_TASK_PROVIDER_ADMISSION_PLAN_SCHEMA,
 };
 pub use catalog::*;
+#[cfg(test)]
+pub(crate) use command_runner::run_provider_readiness_invocation_with_test_timeout;
 pub use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,
     validate_provider_immediate_failure_patterns, ProviderExecutorResolution,
@@ -83,13 +87,17 @@ pub use credential_readiness::{
     AgentTaskProviderCredentialRequirement, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
 pub use dispatchability::{
-    evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
+    admit_plan_provider_dispatchability_with_providers, evaluate_provider_dispatchability,
+    evaluate_provider_dispatchability_with_cache, evaluate_provider_dispatchability_with_config,
     preflight_plan_provider_dispatchability_with_providers,
     preflight_plan_provider_dispatchability_without_runtime_with_providers,
     preflight_provider_dispatchability, preflight_provider_dispatchability_with_config,
     preflight_provider_dispatchability_without_runtime_with_config,
     AgentTaskProviderConfigurationDiagnosis, AgentTaskProviderCredentialStatus,
-    AgentTaskProviderDispatchability, AgentTaskProviderOwner,
+    AgentTaskProviderDispatchability, AgentTaskProviderDispatchabilityCheck,
+    AgentTaskProviderDispatchabilityChecks, AgentTaskProviderDispatchabilityCredentialCheck,
+    AgentTaskProviderLiveInferenceReadiness, AgentTaskProviderOwner, AgentTaskProviderReadiness,
+    AgentTaskProviderReadinessScope, AgentTaskProviderRuntimeEvidence,
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
@@ -106,7 +114,10 @@ pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
     RuntimePreflightReadiness,
 };
-pub(crate) use runtime_readiness::{effective_provider_config, readiness_verdict};
+pub(crate) use runtime_readiness::{
+    effective_provider_config, readiness_request_key,
+    readiness_verdict_with_credentials_and_deadline,
+};
 pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
 };
@@ -125,8 +136,10 @@ pub use structured_error::{
 };
 pub(crate) use types::wildcard_match;
 pub use types::*;
+pub(crate) use usage_cap::provider_capacity_config;
 pub use usage_cap::{
-    detect_usage_cap, provider_usage_cap_key, reset_at_from_outcome, ProviderUsageCapRegistry,
+    detect_usage_cap, provider_usage_cap_key, provider_usage_cap_key_for_model,
+    provider_usage_cap_key_for_request, reset_at_from_outcome, ProviderUsageCapRegistry,
     AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS,
 };
 pub use workspace_types::*;
