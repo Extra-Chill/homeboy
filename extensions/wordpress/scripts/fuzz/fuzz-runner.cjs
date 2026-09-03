@@ -113,7 +113,7 @@ async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
 	const env = wpCodeboxRuntimeEnv(process.env);
 	const command = wpCodeboxRuntimeCommand(env);
-	const manifest = await discoverRuntimeContractManifest(env);
+	const manifest = await discoverRuntimeContractManifest(command, env);
 	const publicInvocation = wpCodeboxPublicRuntimeInvocation(request, { runtimeContractManifest: manifest });
 
 	if (publicInvocation) {
@@ -134,8 +134,16 @@ async function runWpCodeboxAgentTask(request) {
 	return { json: normalizeWpCodeboxAgentTaskOutput(result, request) };
 }
 
-async function discoverRuntimeContractManifest() {
-	return wpCodeboxRuntimeContractManifest();
+async function discoverRuntimeContractManifest(command, env = process.env) {
+	const result = await spawnJson(command[0], [...command.slice(1), 'runtime', 'descriptor', '--json'], {
+		cwd: process.cwd(),
+		env,
+	});
+	const manifest = result?.contractManifest || result?.contract_manifest;
+	if (!manifest || typeof manifest !== 'object') {
+		throw new Error('Selected WP Codebox runtime descriptor did not provide a contract manifest.');
+	}
+	return manifest;
 }
 
 function wpCodeboxPublicRuntimeInvocation(request, options = {}) {

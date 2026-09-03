@@ -29,6 +29,7 @@ function selectWpCodeboxRuntime(options = {}) {
     settings.runtime_bin,
     settings.wp_codebox_bin,
     settings.wpCodeboxBin,
+    installedExtensionSettingDefaults(options, env).wp_codebox_bin,
   );
   const installDir = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(env.HOME || os.homedir(), '.cache', 'homeboy', 'wp-codebox');
   const managedSource = path.join(installDir, 'source');
@@ -37,7 +38,7 @@ function selectWpCodeboxRuntime(options = {}) {
   const packaged = packagedWpCodeboxBin(env, options);
   const pathCandidate = resolvePathCommand('wp-codebox', env, options);
   const candidates = {
-    configured: candidate(configured, configured && sameFile(expandHome(String(configured), env), managed, options) ? 'managed' : 'configured', options),
+    configured: candidate(configured, configured && sameFile(expandHome(String(configured), env), managed, options) ? 'managed' : configuredRuntimeSource(options, env, settings), options),
     packaged: candidate(packaged, 'packaged', options),
     managed: candidate(managed, 'managed', options),
     path: candidate(pathCandidate, 'path', options),
@@ -151,7 +152,14 @@ function managedCacheUpdateInProgress(installDir, options = {}) {
 function configuredRuntime(options = {}) {
   const env = options.env || process.env;
   const settings = { ...settingsFromEnv(env), ...(options.settings || {}) };
-  return Boolean(firstValue(options.bin, options.runtimeBin, options.runtime_bin, options.wpCodeboxBin, options.wp_codebox_bin, env.HOMEBOY_WP_CODEBOX_BIN, env.WP_CODEBOX_BIN, env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN, settings.runtime_bin, settings.wp_codebox_bin, settings.wpCodeboxBin));
+  return Boolean(firstValue(options.bin, options.runtimeBin, options.runtime_bin, options.wpCodeboxBin, options.wp_codebox_bin, env.HOMEBOY_WP_CODEBOX_BIN, env.WP_CODEBOX_BIN, env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN, settings.runtime_bin, settings.wp_codebox_bin, settings.wpCodeboxBin, installedExtensionSettingDefaults(options, env).wp_codebox_bin));
+}
+
+function configuredRuntimeSource(options = {}, env = process.env, settings = settingsFromEnv(env)) {
+  if (firstValue(options.bin, options.runtimeBin, options.runtime_bin, options.wpCodeboxBin, options.wp_codebox_bin)) return 'explicit';
+  if (firstValue(env.HOMEBOY_WP_CODEBOX_BIN, env.WP_CODEBOX_BIN, env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN)) return 'env';
+  if (firstValue(settings.runtime_bin, settings.wp_codebox_bin, settings.wpCodeboxBin)) return 'settings';
+  return 'manifest-default';
 }
 
 function sameFile(left, right, options = {}) {
@@ -343,6 +351,30 @@ function settingsFromEnv(env) {
   }
 }
 
+function installedExtensionSettingDefaults(options = {}, env = process.env) {
+  const manifestPath = options.extension_manifest_path || env.HOMEBOY_EXTENSION_MANIFEST_PATH || path.resolve(__dirname, '..', 'wordpress.json');
+  try {
+    const manifest = JSON.parse((options.fs || fs).readFileSync(manifestPath, 'utf8'));
+    return Object.fromEntries((manifest.settings || [])
+      .filter((setting) => setting?.id && setting.default !== undefined && setting.default !== '')
+      .map((setting) => [setting.id, setting.default]));
+  } catch {
+    return {};
+  }
+}
+
+function homeboySettings(env = process.env) {
+  return settingsFromEnv(env);
+}
+
+function resolveWpCodeboxIdentity(options = {}) {
+  const selection = selectWpCodeboxRuntime(options).selected;
+  if (!selection.path) {
+    throw new Error('WP Codebox binary is not configured. Set wp_codebox_bin in the installed WordPress extension manifest or HOMEBOY_WP_CODEBOX_BIN.');
+  }
+  return { bin: selection.path, invocation: wpCodeboxCommand(selection.path), selectionSource: selection.source };
+}
+
 module.exports = {
   REQUIRED_WP_CODEBOX_VERSION,
   BROWSER_PREVIEW_SCHEMA,
@@ -350,9 +382,12 @@ module.exports = {
   MANAGED_IDENTITY_SCHEMA,
   compareVersions,
   parseVersion,
+	installedExtensionSettingDefaults,
+	homeboySettings,
 	preflightWpCodeboxCommand,
 	preflightWpCodeboxRuntime,
 	probeWpCodeboxRuntimeDescriptor,
   selectWpCodeboxRuntime,
+	resolveWpCodeboxIdentity,
   wpCodeboxCommand,
 };

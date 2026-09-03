@@ -118,7 +118,7 @@ assert.equal(wpCodeboxProvider.request_schema, providerFields.request_schema);
 assert.equal(wpCodeboxProvider.outcome_schema, providerFields.outcome_schema);
 assert.deepEqual(wpCodeboxProvider.request_required_fields, providerFields.request_required_fields);
 assert.deepEqual(wpCodeboxProvider.outcome_statuses, providerFields.outcome_statuses);
-assert.deepEqual(wpCodeboxProvider.failure_classifications, providerFields.failure_classifications);
+assert.deepEqual(wpCodeboxProvider.failure_classifications, AGENT_TASK_FAILURE_CLASSIFICATIONS);
 assert.deepEqual(wpCodeboxProvider.redacted_metadata_keys, providerFields.redacted_metadata_keys);
 
 // Strong anti-drift guarantee: the fixture is a generated artifact derived from

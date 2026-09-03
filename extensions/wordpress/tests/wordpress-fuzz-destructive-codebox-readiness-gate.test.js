@@ -51,6 +51,11 @@ const runtimeContractManifest = {
 			runFuzzSuite: 'run-fuzz-suite',
 		},
 	},
+	capabilities: {
+		wordpressRuntime: {
+			runner_modes: { 'runtime-backed': true },
+		},
+	},
 };
 
 const destructivePlan = {
@@ -72,6 +77,7 @@ const destructivePlan = {
 
 const destructiveRequest = wpCodeboxFuzzSuiteTaskRequest({
 	taskId: 'destructive-codebox-readiness-gate',
+	runtimeContractManifest,
 	input: {
 		id: 'destructive-codebox-readiness-suite',
 		homeboy_fuzz_workload: { id: 'destructive-workload', plan: destructivePlan },
@@ -126,8 +132,7 @@ const missingReadinessPreflight = preflightWpCodeboxFuzzCapabilityContract({
 
 assert.equal(missingReadinessPreflight.ok, false);
 assert.deepEqual(missingReadinessCliCalls, []);
-assert.equal(missingReadinessPreflight.capabilities.commands['run-fuzz-suite'], false);
-assert.equal(missingReadinessPreflight.capabilities.commands['run-wordpress-workload'], false);
+assert.deepEqual(missingReadinessPreflight.capabilities.commands, {});
 assert.equal(missingReadinessPreflight.missing_contracts.some((contract) => contract.type === 'explicit_public_descriptor'), true);
 assert.equal(missingReadinessPreflight.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_explicit_public_descriptor'), true);
 
@@ -167,6 +172,7 @@ const passedPreflight = preflightWpCodeboxFuzzCapabilityContract({
 });
 
 assert.equal(passedPreflight.ok, true);
+assert.deepEqual(passedPreflight.required.commands, ['run-fuzz-suite']);
 assert.equal(passedPreflight.destructive_readiness.ok, true);
 assert.equal(passedPreflight.destructive_readiness.facts.disposable_runtime, true);
 assert.equal(passedPreflight.destructive_readiness.facts.disposable_sandbox_boundary, true);

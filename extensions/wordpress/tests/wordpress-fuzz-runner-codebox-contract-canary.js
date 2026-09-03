@@ -29,6 +29,7 @@ const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
 const checkoutRoot = path.join(tempDir, 'checkout');
 const pluginRoot = path.join(checkoutRoot, 'plugins', 'woocommerce');
 const fakeCodeboxCoreModule = path.join(tempDir, 'wp-codebox-core-contracts.cjs');
+const fixtureCodeboxCoreModule = path.join(__dirname, '..', '..', 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const fakeCodeboxBin = path.join(tempDir, 'wp-codebox');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
 const { wpCodeboxRuntimeCommand } = require(runnerPath);
@@ -90,17 +91,10 @@ fs.writeFileSync(executionRequestPath, `${JSON.stringify(executionRequest, null,
 fs.mkdirSync(path.join(emptyCodeboxInstallRoot, 'source', 'packages', 'cli'), { recursive: true });
 fs.mkdirSync(pluginRoot, { recursive: true });
 fs.writeFileSync(path.join(pluginRoot, 'woocommerce.php'), '<?php\n/**\n * Plugin Name: WooCommerce\n */\n');
-fs.writeFileSync(fakeCodeboxCoreModule, `module.exports.runtimeContractManifest = () => ({
-  schema: 'wp-codebox/runtime-contract-manifest/v1',
-  version: 1,
-  abilities: { wordpressRuntime: { runFuzzSuite: 'wp-codebox/run-fuzz-suite', runWorkload: 'wp-codebox/run-wordpress-workload' } },
-  commands: { wordpressRuntime: { runFuzzSuite: 'run-fuzz-suite', runWorkload: 'run-wordpress-workload' } },
-  capabilities: { wordpressRuntime: { commands: ['run-fuzz-suite', 'run-wordpress-workload'], capabilities: ['rest', 'disposable-runtime', 'runtime-isolation', 'artifact-export'], runner_modes: { 'runtime-backed': true } } },
-  readiness: { wordpressRuntime: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', mode: 'runtime-backed', command_available: true } },
-  schemas: { wordpressRuntime: { fuzzSuite: 'wp-codebox/fuzz-suite/v1', fuzzSuiteResult: 'wp-codebox/fuzz-suite-result/v1', workloadRun: 'wp-codebox/wordpress-workload-run/v1' } }
-});\n`);
+fs.writeFileSync(fakeCodeboxCoreModule, `module.exports = require(${JSON.stringify(fixtureCodeboxCoreModule)});\n`);
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
+const { runtimeContractManifest } = require(${JSON.stringify(fakeCodeboxCoreModule)});
 
 const command = process.argv[2];
 const inputFileIndex = process.argv.indexOf('--input-file');
@@ -110,9 +104,9 @@ if (process.argv.includes('--version')) {
 }
 if (command === 'runtime' && process.argv[3] === 'descriptor' && process.argv.includes('--json')) {
   process.stdout.write(JSON.stringify({
-    schema: 'wp-codebox/runtime-descriptor/v1',
-    readiness: { status: 'available', browserRuntime: { status: 'ready' } },
-    contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } },
+     schema: 'wp-codebox/runtime-descriptor/v1',
+     readiness: { status: 'available', browserRuntime: { status: 'ready' } },
+     contractManifest: runtimeContractManifest(),
   }));
   process.exit(0);
 }

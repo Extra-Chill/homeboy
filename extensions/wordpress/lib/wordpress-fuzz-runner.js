@@ -286,12 +286,16 @@ function buildWordPressFuzzRunnerSummary({
 async function resolveCodeboxResult(context, options = {}) {
 	const runner = options.runFuzzSuite || options.runRuntimeTask || options.runTask;
 	const runtimeDescriptor = typeof runner === 'function' ? {} : await readWpCodeboxFuzzRuntimeDescriptor({ ...options, env: context.env });
+	const input = {
+		...context.wpCodeboxInput,
+		schema: runtimeDescriptor.runtimeContractManifest?.schemas?.wordpressRuntime?.fuzzSuite || context.wpCodeboxInput.schema,
+	};
 	return runWpCodeboxFuzzSuite({
 		...options,
 		...runtimeDescriptor,
 		env: context.env,
 		taskId: context.runId,
-		input: context.wpCodeboxInput,
+		input,
 		provider: context.workload.provider,
 		runtimeId: context.workload.runtime_id || context.workload.runtimeId || 'wp-codebox',
 		runtimeRequirements: context.runtimeRequirements,
