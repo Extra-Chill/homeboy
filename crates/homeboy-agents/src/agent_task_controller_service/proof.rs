@@ -200,48 +200,6 @@ fn build_run_inputs(profile: &ControllerProofProfile, identity: &ControllerProof
     })
 }
 
-/// Environment lookup used by secret readiness. Abstracted so tests can supply a
-/// deterministic environment instead of the live process env.
-pub trait ProofSecretEnv {
-    fn get(&self, key: &str) -> Option<String>;
-}
-
-/// Live process environment.
-pub struct ProcessSecretEnv;
-
-impl ProofSecretEnv for ProcessSecretEnv {
-    fn get(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
-    }
-}
-
-/// Readiness probe for provider/runner/extension parity. Abstracted so tests can
-/// inject deterministic outcomes without a live provider catalog or runner.
-pub trait ProofReadinessProbe {
-    /// Validate that the backend/selector resolves to an available provider with
-    /// satisfied runner readiness and extension/runtime parity. Returns the
-    /// underlying error message on failure.
-    fn validate_runner_readiness(
-        &self,
-        backend: &str,
-        selector: Option<&str>,
-    ) -> std::result::Result<(), String>;
-}
-
-/// Live readiness probe backed by the discovered provider catalog.
-pub struct CatalogReadinessProbe;
-
-impl ProofReadinessProbe for CatalogReadinessProbe {
-    fn validate_runner_readiness(
-        &self,
-        backend: &str,
-        selector: Option<&str>,
-    ) -> std::result::Result<(), String> {
-        agent_task_provider::validate_provider_runner_readiness_for_backend(backend, selector)
-            .map_err(|error| error.message.clone())
-    }
-}
-
 /// Prepare a controller proof: derive identity, materialize run inputs, and run
 /// preflight reconciliation. The returned preparation is dispatch-ready only
 /// when `preflight_passed` is true; otherwise the caller must surface the failed
@@ -254,8 +212,25 @@ pub fn prepare_controller_proof(
     profile: ControllerProofProfile,
     runner: &str,
     seed_material: &str,
-    env: &dyn ProofSecretEnv,
-    readiness: &dyn ProofReadinessProbe,
+) -> ControllerProofPreparation {
+    prepare_controller_proof_with_dependencies(
+        profile,
+        runner,
+        seed_material,
+        |key| std::env::var(key).ok(),
+        |backend, selector| {
+            agent_task_provider::validate_provider_runner_readiness_for_backend(backend, selector)
+                .map_err(|error| error.message.clone())
+        },
+    )
+}
+
+fn prepare_controller_proof_with_dependencies(
+    profile: ControllerProofProfile,
+    runner: &str,
+    seed_material: &str,
+    env: impl Fn(&str) -> Option<String>,
+    readiness: impl Fn(&str, Option<&str>) -> std::result::Result<(), String>,
 ) -> ControllerProofPreparation {
     let identity = derive_proof_identity(&profile.name, runner, seed_material);
     let run_inputs = build_run_inputs(&profile, &identity);
@@ -295,7 +270,7 @@ pub fn prepare_controller_proof(
     //    backend/selector resolution dispatch uses). Only run when a backend is
     //    declared; a profile without a backend defers selection to the spec.
     if let Some(backend) = profile.dispatch_backend.as_deref() {
-        match readiness.validate_runner_readiness(backend, profile.dispatch_selector.as_deref()) {
+        match readiness(backend, profile.dispatch_selector.as_deref()) {
             Ok(()) => checks.push(ControllerProofPreflightCheck::ok(
                 "proof.runner_readiness",
                 format!("Provider readiness satisfied for backend '{backend}'"),
@@ -322,11 +297,7 @@ pub fn prepare_controller_proof(
     let missing_secrets: Vec<String> = profile
         .required_secret_env
         .iter()
-        .filter(|name| {
-            env.get(name)
-                .filter(|value| !value.trim().is_empty())
-                .is_none()
-        })
+        .filter(|name| env(name).filter(|value| !value.trim().is_empty()).is_none())
         .cloned()
         .collect();
     if profile.required_secret_env.is_empty() {
@@ -431,38 +402,6 @@ pub fn resolve_proof_profile(
 mod tests {
     use super::*;
 
-    struct FakeEnv {
-        values: BTreeMap<String, String>,
-    }
-
-    impl ProofSecretEnv for FakeEnv {
-        fn get(&self, key: &str) -> Option<String> {
-            self.values.get(key).cloned()
-        }
-    }
-
-    struct OkProbe;
-    impl ProofReadinessProbe for OkProbe {
-        fn validate_runner_readiness(
-            &self,
-            _backend: &str,
-            _selector: Option<&str>,
-        ) -> std::result::Result<(), String> {
-            Ok(())
-        }
-    }
-
-    struct FailProbe;
-    impl ProofReadinessProbe for FailProbe {
-        fn validate_runner_readiness(
-            &self,
-            _backend: &str,
-            _selector: Option<&str>,
-        ) -> std::result::Result<(), String> {
-            Err("no extension agent-task provider found for backend".to_string())
-        }
-    }
-
     fn profile_with(required_secret_env: Vec<String>) -> ControllerProofProfile {
         ControllerProofProfile {
             name: "example-proof".to_string(),
@@ -491,10 +430,13 @@ mod tests {
     #[test]
     fn preflight_fails_before_dispatch_on_missing_secret_with_fix_command() {
         let profile = profile_with(vec!["EXAMPLE_TOKEN".to_string()]);
-        let env = FakeEnv {
-            values: BTreeMap::new(),
-        };
-        let prep = prepare_controller_proof(profile, "homeboy-lab", "seed", &env, &OkProbe);
+        let prep = prepare_controller_proof_with_dependencies(
+            profile,
+            "homeboy-lab",
+            "seed",
+            |_| None,
+            |_, _| Ok(()),
+        );
 
         assert!(
             !prep.preflight_passed,
@@ -522,10 +464,13 @@ mod tests {
     #[test]
     fn preflight_fails_before_dispatch_on_unmet_readiness_with_fix_command() {
         let profile = profile_with(Vec::new());
-        let env = FakeEnv {
-            values: BTreeMap::new(),
-        };
-        let prep = prepare_controller_proof(profile, "homeboy-lab", "seed", &env, &FailProbe);
+        let prep = prepare_controller_proof_with_dependencies(
+            profile,
+            "homeboy-lab",
+            "seed",
+            |_| None,
+            |_, _| Err("no extension agent-task provider found for backend".to_string()),
+        );
 
         assert!(!prep.preflight_passed);
         let readiness = prep
@@ -544,10 +489,13 @@ mod tests {
     #[test]
     fn preflight_passes_and_composes_primitives_when_dependencies_met() {
         let profile = profile_with(vec!["EXAMPLE_TOKEN".to_string()]);
-        let env = FakeEnv {
-            values: BTreeMap::from([("EXAMPLE_TOKEN".to_string(), "secret-value".to_string())]),
-        };
-        let prep = prepare_controller_proof(profile, "homeboy-lab", "seed", &env, &OkProbe);
+        let prep = prepare_controller_proof_with_dependencies(
+            profile,
+            "homeboy-lab",
+            "seed",
+            |key| (key == "EXAMPLE_TOKEN").then(|| "secret-value".to_string()),
+            |_, _| Ok(()),
+        );
 
         assert!(
             prep.preflight_passed,
@@ -583,10 +531,13 @@ mod tests {
     #[test]
     fn empty_runner_fails_preflight() {
         let profile = profile_with(Vec::new());
-        let env = FakeEnv {
-            values: BTreeMap::new(),
-        };
-        let prep = prepare_controller_proof(profile, "  ", "seed", &env, &OkProbe);
+        let prep = prepare_controller_proof_with_dependencies(
+            profile,
+            "  ",
+            "seed",
+            |_| None,
+            |_, _| Ok(()),
+        );
         assert!(!prep.preflight_passed);
         assert!(prep
             .checks

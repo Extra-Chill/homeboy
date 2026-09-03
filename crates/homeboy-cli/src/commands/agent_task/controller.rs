@@ -467,14 +467,10 @@ fn controller_proof_with_executor(
         .clone()
         .unwrap_or_else(default_proof_seed_material);
 
-    let env = agent_task_controller_service::ProcessSecretEnv;
-    let readiness = agent_task_controller_service::CatalogReadinessProbe;
     let preparation = agent_task_controller_service::prepare_controller_proof(
         profile,
         &args.runner,
         &seed_material,
-        &env,
-        &readiness,
     );
 
     let preflight_value = command_json_value(&preparation)?;
