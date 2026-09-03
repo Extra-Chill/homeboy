@@ -2,6 +2,42 @@
 
 use super::support::*;
 
+#[derive(Parser)]
+struct FinalizePrCli {
+    #[command(flatten)]
+    args: FinalizePrArgs,
+}
+
+#[test]
+fn finalize_pr_parses_supplied_review_form_spec_and_authorship() {
+    for spec in ["{}", "@/tmp/review-form.json", "-"] {
+        let cli = FinalizePrCli::try_parse_from([
+            "homeboy",
+            "--recover",
+            "cook-9866-attempt-1",
+            "--review-form",
+            spec,
+            "--review-form-tool",
+            "OpenCode",
+            "--review-form-model",
+            "openai/gpt-5.6-terra",
+            "--review-form-author",
+            "operator@example.test",
+        ])
+        .expect("parse supplied review form");
+        assert_eq!(cli.args.review_form.as_deref(), Some(spec));
+        assert_eq!(cli.args.review_form_tool.as_deref(), Some("OpenCode"));
+        assert_eq!(
+            cli.args.review_form_model.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
+        assert_eq!(
+            cli.args.review_form_author.as_deref(),
+            Some("operator@example.test")
+        );
+    }
+}
+
 #[test]
 fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
     with_isolated_home(|_| {
