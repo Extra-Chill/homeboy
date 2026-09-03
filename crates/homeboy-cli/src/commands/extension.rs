@@ -343,6 +343,17 @@ impl ExtensionArgs {
         )
     }
 
+    /// A valid local refresh replaces controller extension state from an
+    /// already-present resource. It is not a portable workload unless the
+    /// operator explicitly selects Lab.
+    pub(crate) fn refreshes_local_source(&self) -> bool {
+        matches!(
+            &self.command,
+            ExtensionCommand::Refresh { source, .. }
+                if homeboy_core::extension::lifecycle::is_local_source(source)
+        )
+    }
+
     pub(crate) fn is_readiness_repair_command(&self) -> bool {
         matches!(self.command, ExtensionCommand::Setup { .. })
     }

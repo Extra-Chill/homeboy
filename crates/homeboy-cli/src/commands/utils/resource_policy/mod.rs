@@ -52,7 +52,7 @@ pub(crate) fn parsed_command_preflight_input(
     let normalized_args = crate::command_capability::homeboy_owned_args(normalized_args);
 
     let resource_admission =
-        hot_command(&cli.command).map_or(ResourceAdmissionRequirement::Exempt, |command| {
+        hot_command_for_cli(cli).map_or(ResourceAdmissionRequirement::Exempt, |command| {
             ResourceAdmissionRequirement::Required {
                 label: command.label.to_string(),
                 engages_at: if command.offload_only_when_hot {
@@ -538,6 +538,21 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
+}
+
+/// Local extension replacement is bounded controller configuration work. Its
+/// source has already been admitted by existence, so stale Lab inventory must
+/// not block it. An explicit Lab placement or runner remains an operator-owned
+/// portable routing request and retains the ordinary workload policy.
+pub(crate) fn hot_command_for_cli(cli: &Cli) -> Option<HotCommand> {
+    let local_extension_refresh = matches!(
+        &cli.command,
+        Commands::Extension(args) if args.refreshes_local_source()
+    );
+    if local_extension_refresh && cli.runner.is_none() && cli.placement != Placement::Lab {
+        return None;
+    }
+    hot_command(&cli.command)
 }
 
 /// Classify a descriptor-composed route with the exact portable/local-only and
