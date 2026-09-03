@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.41.1] - 2026-09-03
+
+### Fixed
+- enforce packaged eslint runtime
+- hydrate packaged eslint runtime
+
 ## [3.41.0] - 2026-09-03
 
 ### Added
