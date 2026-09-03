@@ -1549,7 +1549,9 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
                 initial_plan: plan.clone(),
             },
             workspace: homeboy::agents::agent_task_service::CookWorkspace {
-                to_worktree: "fixture@pre-execution-runtime-recovery".to_string(),
+                // The recovery must use the same verified linked worktree rather
+                // than an unregistered legacy handle.
+                to_worktree: workspace.to_string_lossy().into_owned(),
                 source_worktree_path: Some(workspace.clone()),
                 task_base_sha: None,
                 source_refs: Vec::new(),
@@ -1613,7 +1615,7 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
         .expect("persist historical local recipe");
 
         let executor = Arc::new(CountingCookExecutor::default());
-        let retried = retry_with(
+        let (retried, exit_code) = retry_with(
             RetryArgs {
                 run_id: run_id.to_string(),
                 new_run_id: None,
@@ -1631,6 +1633,10 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
         )
         .expect("queued retry recovers under the current runtime");
 
+        // Provider execution succeeded, but this fixture produces no patch
+        // artifact, so Cook must retain its durable failure exit contract.
+        assert_eq!(exit_code, 1, "{retried:#?}");
+        assert_eq!(retried["status"], "durable_failure");
         assert_eq!(
             executor.executions.load(Ordering::SeqCst),
             1,

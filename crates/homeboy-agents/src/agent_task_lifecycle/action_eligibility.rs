@@ -163,6 +163,24 @@ fn retry_availability(
     }) {
         return unavailable("acceptance rejection repair budget is exhausted for this lineage");
     }
+    if record.metadata["cook_id"].is_string() {
+        match crate::agent_task_service::retry_admission_for_projection(&record.run_id) {
+            Ok(crate::agent_task_service::RetryProjectionAdmission::DurableCook) => {
+                return available(
+                "durable Cook retry is admitted; runtime admission will be revalidated before execution",
+            )
+            }
+            Ok(crate::agent_task_service::RetryProjectionAdmission::GenericLifecycle) => {
+                return available(
+                    "generic lifecycle retry is admitted; runtime admission will be revalidated before execution",
+                )
+            }
+            Err(error) => return unavailable(format!(
+                "durable Cook retry is unavailable: {}; inspect this exact attempt with: homeboy agent-task status {}",
+                error.message, record.run_id
+            )),
+        }
+    }
     match plan {
         Some(plan) if super::plan_has_retry_materialization_identity(plan) => {
             indeterminate(
