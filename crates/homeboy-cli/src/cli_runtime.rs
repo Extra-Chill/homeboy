@@ -315,6 +315,7 @@ enum StartupFastPath {
 /// builder the binary never called.
 enum StartupFastPathOutput {
     Help(String),
+    ArgumentError(String),
     Version(String),
     Identity(serde_json::Value),
 }
@@ -339,10 +340,13 @@ fn startup_fast_path_output(
             let Err(error) = runtime.build_augmented_command().try_get_matches_from(args) else {
                 return None;
             };
-            if error.kind() != clap::error::ErrorKind::DisplayHelp {
-                return None;
+            if error.kind() == clap::error::ErrorKind::DisplayHelp {
+                StartupFastPathOutput::Help(error.to_string())
+            } else {
+                // A request containing Homeboy's help flag must never initialize
+                // the runtime just to report invalid arguments.
+                StartupFastPathOutput::ArgumentError(error.to_string())
             }
-            StartupFastPathOutput::Help(error.to_string())
         }
         StartupFastPath::Version => {
             StartupFastPathOutput::Version(upgrade::current_build_version())
@@ -357,9 +361,35 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
     CliRuntime::new().run_startup_fast_path(args)
 }
 
+/// Reject the retired root `update` spelling before building any CLI command
+/// surface. Constructing that surface discovers extensions, which is unrelated
+/// to a local typo diagnostic and can block on a damaged installation.
+pub fn run_update_help_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
+    let diagnostic = update_help_diagnostic(args)?;
+    eprint!("{diagnostic}");
+    Some(std::process::ExitCode::from(2))
+}
+
+pub fn update_help_diagnostic(args: &[String]) -> Option<&'static str> {
+    let owned_args = homeboy_owned_args(args.get(1..)?);
+    if owned_args.first().map(String::as_str) != Some("update")
+        || !owned_args.iter().any(|arg| arg == "--help" || arg == "-h")
+    {
+        return None;
+    }
+    Some(
+        "error: unrecognized subcommand 'update'\n\n  tip: a similar subcommand exists: 'upgrade'\n\nUsage: homeboy <COMMAND>\n\nFor more information, try '--help'.\n",
+    )
+}
+
 fn emit_startup_fast_path_output(output: StartupFastPathOutput) -> std::process::ExitCode {
+    let exit_code = match &output {
+        StartupFastPathOutput::ArgumentError(_) => std::process::ExitCode::from(2),
+        _ => std::process::ExitCode::SUCCESS,
+    };
     match output {
         StartupFastPathOutput::Help(help) => print!("{help}"),
+        StartupFastPathOutput::ArgumentError(error) => eprint!("{error}"),
         StartupFastPathOutput::Version(version) => println!("{version}"),
         StartupFastPathOutput::Identity(identity) => {
             output_runtime::emit_json_result_for_identity(
@@ -371,7 +401,7 @@ fn emit_startup_fast_path_output(output: StartupFastPathOutput) -> std::process:
         }
     }
 
-    std::process::ExitCode::SUCCESS
+    exit_code
 }
 
 pub(crate) fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
