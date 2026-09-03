@@ -91,8 +91,12 @@ cat > "$FAKE_EXTENSION/node_modules/.bin/eslint" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$ESLINT_ARGS_FILE"
 if [ "${ESLINT_FATAL:-}" = "1" ]; then
-    echo "simulated ESLint configuration failure" >&2
-    exit 2
+    for arg in "$@"; do
+        if [ "$arg" = "--config" ]; then
+            echo "simulated ESLint configuration failure" >&2
+            exit 2
+        fi
+    done
 fi
 for arg in "$@"; do
     if [ "$arg" = "--format" ]; then
@@ -187,13 +191,14 @@ HOMEBOY_LINT_FILE='assets/admin.js' \
 fatal_status=$?
 set -e
 
-if [ "$fatal_status" -eq 0 ]; then
-    echo "Expected ESLint fatal failure to propagate" >&2
+if [ "$fatal_status" -ne 2 ]; then
+    echo "Expected ESLint fatal failure to be classified as bootstrap infrastructure" >&2
     cat "$TMP_DIR/js-fatal.out" >&2
     exit 1
 fi
 
 assert_contains "$TMP_DIR/js-fatal.out" "simulated ESLint configuration failure"
+assert_contains "$TMP_DIR/js-fatal.out" "bootstrap failure: ESLint could not execute its configured runtime (exit 2)"
 
 cat > "$COMPONENT_DIR/assets/bad.js" <<'JS'
 const bad = true;

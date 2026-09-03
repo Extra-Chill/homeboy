@@ -1019,6 +1019,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     # Run ESLint in summary mode
     ESLINT_RUNNER="${EXTENSION_PATH}/scripts/lint/eslint-runner.sh"
     ESLINT_PASSED=1
+    ESLINT_EXIT=0
 
     if ! should_run_step "eslint"; then
         echo ""
@@ -1034,6 +1035,10 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         if [ "$ESLINT_EXIT" -ne 0 ]; then
             ESLINT_PASSED=0
         fi
+    else
+        echo "bootstrap failure: ESLint runner not found at $ESLINT_RUNNER" >&2
+        ESLINT_PASSED=0
+        ESLINT_EXIT=2
     fi
 
     # Run PHPStan in summary mode
@@ -1094,6 +1099,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         if [ "${fixable_count:-0}" -gt 0 ] 2>/dev/null; then
             echo "Auto-fixable findings remain; run the refactor command above before pushing."
         fi
+        [ "$ESLINT_EXIT" -ge 2 ] && exit 2
         exit 1
     fi
 fi
@@ -1113,6 +1119,7 @@ fi
 # Run ESLint for JavaScript files
 ESLINT_RUNNER="${EXTENSION_PATH}/scripts/lint/eslint-runner.sh"
 ESLINT_PASSED=1
+ESLINT_EXIT=0
 
 if ! should_run_step "eslint"; then
     echo ""
@@ -1128,6 +1135,10 @@ elif [ -f "$ESLINT_RUNNER" ]; then
     if [ "$ESLINT_EXIT" -ne 0 ]; then
         ESLINT_PASSED=0
     fi
+else
+    echo "bootstrap failure: ESLint runner not found at $ESLINT_RUNNER" >&2
+    ESLINT_PASSED=0
+    ESLINT_EXIT=2
 fi
 
 # Run PHPStan in warn-only mode (optional static analysis)
@@ -1191,5 +1202,6 @@ else
     if [ "${fixable_count:-0}" -gt 0 ] 2>/dev/null; then
         echo "Auto-fixable findings remain; run the refactor command above before pushing."
     fi
+    [ "$ESLINT_EXIT" -ge 2 ] && exit 2
     exit 1
 fi
