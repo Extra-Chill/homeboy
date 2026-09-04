@@ -63,6 +63,16 @@ expect_reject malformed-doctor doctor_json_malformed --candidate managed --mode 
 DOCTOR_OUTPUT='{"schema":"wp-codebox/doctor/v1","status":"warning","checks":[]}'
 expect_reject missing-provenance provenance_check_missing --candidate managed --mode release --expected-version 0.23.3 --expected-dist fresh-dist
 
+# A binary predating provenance emission reports a healthy source check with no
+# provenance object at all. That is absence, not a schema mismatch: the operator
+# has to reinstall from a managed path, not reconcile a version skew.
+DOCTOR_OUTPUT='{"schema":"wp-codebox/doctor/v1","status":"warning","checks":[{"id":"wp-codebox.source","status":"ok","message":"wp-codebox source resolved","details":{"packageRoot":"/tmp/pkg"}}]}'
+expect_reject absent-provenance provenance_missing --candidate ambient --mode release --expected-version 0.23.3 --expected-dist fresh-dist
+
+# A present-but-wrong provenance schema stays a mismatch.
+DOCTOR_OUTPUT='{"schema":"wp-codebox/doctor/v1","status":"ok","checks":[{"id":"wp-codebox.source","status":"ok","message":"fixture","details":{"provenance":{"schema":"wp-codebox/cli-build-provenance/v0","package":{"version":"0.23.3"},"dist":{"sha256":"fresh-dist"}}}}]}'
+expect_reject skewed-provenance provenance_schema_mismatch --candidate managed --mode release --expected-version 0.23.3 --expected-dist fresh-dist
+
 DOCTOR_OUTPUT="$(doctor_json warning 0.23.3 fresh-dist main fresh-commit unavailable)"
 expect_reject unavailable-provenance provenance_unavailable --candidate managed --mode source --expected-ref main
 

@@ -65,7 +65,10 @@ function inspect() {
   if (source.status !== 'ok') {
     return rejected(source.status === 'warning' ? 'provenance_unavailable' : 'provenance_invalid', observed, source.message);
   }
-  if (provenance?.schema !== 'wp-codebox/cli-build-provenance/v1') {
+  if (!provenance) {
+    return rejected('provenance_missing', observed, 'doctor reported no build provenance for the candidate binary');
+  }
+  if (provenance.schema !== 'wp-codebox/cli-build-provenance/v1') {
     return rejected('provenance_schema_mismatch', observed);
   }
   if (!observed.version || !observed.dist_sha256) {
