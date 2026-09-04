@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.41.5] - 2026-09-04
+
+### Fixed
+- distinguish absent wp-codebox provenance from a schema mismatch
+
 ## [3.41.4] - 2026-09-03
 
 ### Changed
