@@ -120,6 +120,27 @@ NODE
         node -e 'const { createHash } = require("node:crypto"); process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex"));' "$1"
     }
 
+    # Upstream publishes a prebuilt CLI tarball for a subset of platforms only
+    # (currently macos-arm64). On every other platform the release path is not a
+    # transient registry outage that a retry could clear -- it is a permanent gap,
+    # and source is the only supported authority. Report that up front so setup
+    # selects source directly instead of burning a guaranteed-404 download and
+    # logging it as a retryable failure.
+    #
+    # An explicit HOMEBOY_WP_CODEBOX_DOWNLOAD_URL is an operator assertion that an
+    # artifact exists (used by tests and private mirrors) and always wins.
+    wp_codebox_release_artifact_is_published() {
+        local candidate_platform="$1"
+        local candidate_arch="$2"
+        if [ -n "${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-}" ]; then
+            return 0
+        fi
+        case "${candidate_platform}-${candidate_arch}" in
+            macos-arm64) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
     report_wp_codebox_freshness() {
         local result_file="$1"
         local authority="$2"
@@ -400,11 +421,21 @@ NODE
 
     prune_stale_wp_codebox_wrapper "${HOME}/.local/bin/wp-codebox"
 
+    # Resolve the effective mode before any download is attempted. A platform with
+    # no published artifact is downgraded to source here, so the release branch is
+    # only ever entered when it can actually succeed.
     if [ "${install_mode}" != "source" ]; then
         platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
         arch="$(uname -m)"
         case "${platform}" in darwin) platform="macos" ;; esac
         case "${arch}" in x86_64|amd64) arch="x64" ;; aarch64) arch="arm64" ;; esac
+        if ! wp_codebox_release_artifact_is_published "${platform}" "${arch}"; then
+            echo "WP Codebox publishes no release artifact for ${platform}-${arch}; using managed source ref ${ref} (the only supported authority on this platform)" >&2
+            install_mode="source"
+        fi
+    fi
+
+    if [ "${install_mode}" != "source" ]; then
         artifact_name="wp-codebox-cli-${platform}-${arch}.tar.gz"
         download_url="${download_url:-https://github.com/Automattic/wp-codebox/releases/latest/download/${artifact_name}}"
         release_authority_digest="$(wp_codebox_authority_digest "${download_url}")"
@@ -500,6 +531,12 @@ EOF
     # and explicitly requested source installs. Discard only values owned by
     # this managed release before resolving the source CLI/core pair.
     clear_rejected_release_runtime "${install_root}/release" "${bin_path}"
+
+    # Reaching here means source is the authority in play, whether it was selected
+    # up front or fallen back to. The label may still describe the release artifact
+    # that was just abandoned, so restate it before announcing the install --
+    # otherwise this banner names an authority that is not being used.
+    source_authority_label="managed source ref ${ref}"
 
     echo "Installing WP Codebox CLI from ${source_authority_label}..."
     mkdir -p "${install_root}" "${bin_dir}"
