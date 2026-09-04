@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.42.0] - 2026-09-04
+
+### Added
+- support multiple named PHPUnit suites per component
+
 ## [3.41.6] - 2026-09-04
 
 ### Fixed
