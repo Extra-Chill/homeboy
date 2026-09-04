@@ -1356,7 +1356,14 @@
       "label": "WP Codebox PHPUnit config",
       "type": "string",
       "default": "",
-      "description": "Optional sandbox path to phpunit.xml or phpunit.xml.dist for wordpress.phpunit discovery. Leave empty for the mounted component phpunit.xml.dist."
+      "description": "Optional sandbox path to phpunit.xml or phpunit.xml.dist for wordpress.phpunit discovery. Leave empty for the mounted component phpunit.xml.dist. For a component whose tests span several configs, declare wp_codebox_phpunit_suites instead."
+    },
+    {
+      "id": "wp_codebox_phpunit_suites",
+      "label": "WP Codebox PHPUnit suites",
+      "type": "array",
+      "default": [],
+      "description": "Optional ordered list of named PHPUnit suites, each { name, config }, run in one managed pass and reported individually. Use instead of wp_codebox_phpunit_config when a component's tests span several configs; setting both is an error."
     },
     {
       "id": "wp_codebox_phpunit_cwd",

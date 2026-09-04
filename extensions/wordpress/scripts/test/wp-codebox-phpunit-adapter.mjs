@@ -39,7 +39,11 @@ const slug = process.env.HOMEBOY_COMPONENT_ID || process.env.COMPONENT_ID || pat
 const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
-const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug);
+// Discovery reports the component's test files and is suite-independent, so it
+// always resolves against the first declared suite.
+const phpunitSuites = resolvePhpunitSuites(settings);
+const activeSuite = phpunitSuites[0];
+const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug, activeSuite.config);
 const phpunitBootstrap = resolvePhpunitBootstrap(settings, phpunitProfile);
 const topology = await resolveWordPressTopology(settings, pluginSourceDirectory);
 const databaseService = resolveDatabaseService(settings, process.env);
@@ -51,7 +55,9 @@ const directory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-phpunit-
 const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
 const artifacts = process.env.HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR || path.join(directory, 'artifacts');
-const runArtifacts = path.join(artifacts, `wp-codebox-phpunit.${process.pid}`);
+// A named suite carries its name in the artifact directory so each suite's
+// evidence is attributable. An unnamed single suite keeps the original path.
+const runArtifacts = path.join(artifacts, `wp-codebox-phpunit.${process.pid}${activeSuite.name ? `.${activeSuite.name}` : ''}`);
 // Validation dependencies are external checkouts nobody built, so the recipe
 // declares that they may need Composer preparation. It does not decide whether
 // they do: WP Codebox owns the detection (no composer.json, or an existing
@@ -151,14 +157,72 @@ try {
     }
   } else {
     const artifactStatus = await handoffArtifacts(runArtifacts, execution);
-    if (execution.status !== 0 || !['passed', 'skipped'].includes(artifactStatus)) {
+    let failed = execution.status !== 0 || !['passed', 'skipped'].includes(artifactStatus);
+    if (activeSuite.name) {
+      process.stdout.write(`PHPUNIT_SUITE_RESULT:name=${activeSuite.name} status=${failed ? 'failed' : artifactStatus}\n`);
+    }
+    if (failed) {
       process.exitCode = execution.timedOut ? 124 : (execution.status || 1);
-    } else {
+    }
+    // Remaining suites each get their own sandbox run. Every suite executes even
+    // when an earlier one fails, so one failure never hides the rest, and the
+    // first failing exit code is preserved as the phase status.
+    for (const suite of phpunitSuites.slice(1)) {
+      const suiteResult = await runAdditionalSuite(suite);
+      process.stdout.write(`PHPUNIT_SUITE_RESULT:name=${suite.name} status=${suiteResult.status}\n`);
+      if (suiteResult.status === 'failed' && !failed) {
+        failed = true;
+        process.exitCode = suiteResult.exitCode;
+      }
+    }
+    if (!failed) {
       process.stdout.write('WP Codebox test run complete.\n');
     }
   }
 } finally {
   await rm(directory, { recursive: true, force: true });
+}
+
+// Execute one additional declared suite in its own sandbox.
+//
+// Each suite needs its own recipe because the PHPUnit config, and therefore the
+// bootstrap and environment the profile derives from it, differ per suite.
+// Artifacts are kept under a per-suite directory so a failing suite's evidence
+// is attributable rather than overwriting the previous run's.
+async function runAdditionalSuite(suite) {
+  const suiteDirectory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-phpunit-suite-'));
+  const suiteArtifacts = path.join(artifacts, `wp-codebox-phpunit.${process.pid}.${suite.name}`);
+  try {
+    const profile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug, suite.config);
+    const bootstrap = resolvePhpunitBootstrap(settings, profile);
+    const suiteOptions = clean({
+      ...options,
+      testRoot: profile.testRoot,
+      phpunitXml: profile.config,
+      cwd: profile.cwd,
+      bootstrapMode: bootstrap.mode,
+      projectBootstrap: bootstrap.projectBootstrap,
+    });
+    const suiteOptionsPath = path.join(suiteDirectory, 'options.json');
+    const suiteRecipePath = path.join(suiteDirectory, 'recipe.json');
+    await writeFile(suiteOptionsPath, `${JSON.stringify(suiteOptions)}\n`);
+    run(['recipe', 'build', 'phpunit', '--options', suiteOptionsPath, '--output', suiteRecipePath]);
+    await applyDatabaseServiceAuthorization(suiteRecipePath);
+    await mkdir(suiteArtifacts, { recursive: true });
+    await persistRecipeEvidence(suiteArtifacts, suiteOptions, suiteRecipePath, profile, dependencies);
+    const suiteArgs = ['recipe-run', '--recipe', suiteRecipePath, '--artifacts', suiteArtifacts, '--json'];
+    if (databaseService?.boundary) {
+      suiteArgs.push('--approve-external-service-writes', '--policy', JSON.stringify(databaseService.policy));
+    }
+    const suiteExecution = await runCaptured(suiteArgs, phpunitTimeoutSeconds, suiteArtifacts);
+    const suiteStatus = await handoffArtifacts(suiteArtifacts, suiteExecution);
+    if (suiteExecution.status !== 0 || !['passed', 'skipped'].includes(suiteStatus)) {
+      return { status: 'failed', exitCode: suiteExecution.timedOut ? 124 : (suiteExecution.status || 1) };
+    }
+    return { status: suiteStatus, exitCode: 0 };
+  } finally {
+    await rm(suiteDirectory, { recursive: true, force: true });
+  }
 }
 async function readDiscoveryResult(stdoutPath) {
   const payload = JSON.parse(await readFile(stdoutPath, 'utf8'));
@@ -175,8 +239,8 @@ async function readDiscoveryResult(stdoutPath) {
   }
   return result;
 }
-async function runCaptured(args, timeoutSeconds) {
-  const logsDirectory = path.join(runArtifacts, 'logs');
+async function runCaptured(args, timeoutSeconds, artifactRoot = runArtifacts) {
+  const logsDirectory = path.join(artifactRoot, 'logs');
   const stdoutPath = path.join(logsDirectory, 'recipe-run.stdout.log');
   const stderrPath = path.join(logsDirectory, 'recipe-run.stderr.log');
   await mkdir(logsDirectory, { recursive: true });
@@ -1615,9 +1679,56 @@ function phpunitAggregate(output) {
   const skipped = count('Skipped') + count('Incomplete');
   return { total, passed: Math.max(0, total - failed - skipped), failed, skipped, assertions };
 }
-async function resolvePhpunitProfile(configuration, pluginDirectory, pluginSlug) {
+// Resolve the ordered suite list a component declares.
+//
+// `wp_codebox_phpunit_config` names a single config, which cannot express a
+// component whose tests are split across several. Such components previously
+// dropped out of the managed runner and invoked PHPUnit directly, forfeiting
+// structured counts and per-suite attribution. `wp_codebox_phpunit_suites`
+// declares those configs so one managed run reports each of them.
+//
+// A single config stays exactly equivalent to a one-entry list, so existing
+// components are unaffected and the two settings never both apply.
+function resolvePhpunitSuites(configuration) {
+  const declared = configuration.wp_codebox_phpunit_suites;
+  const legacy = typeof configuration.wp_codebox_phpunit_config === 'string'
+    ? configuration.wp_codebox_phpunit_config
+    : '';
+  if (declared !== undefined && !Array.isArray(declared)) {
+    throw new Error('wp_codebox_phpunit_suites must be an array of { name, config } entries.');
+  }
+  if (!Array.isArray(declared) || declared.length === 0) {
+    return [{ name: '', config: legacy }];
+  }
+  if (legacy) {
+    throw new Error('Set either wp_codebox_phpunit_config or wp_codebox_phpunit_suites, not both.');
+  }
+  const seen = new Set();
+  return declared.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`wp_codebox_phpunit_suites[${index}] must be an object with name and config.`);
+    }
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    const config = typeof entry.config === 'string' ? entry.config.trim() : '';
+    if (!name || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+      throw new Error(`wp_codebox_phpunit_suites[${index}].name must match [A-Za-z0-9][A-Za-z0-9._-]*.`);
+    }
+    if (!config) {
+      throw new Error(`wp_codebox_phpunit_suites[${index}].config is required.`);
+    }
+    if (seen.has(name)) {
+      throw new Error(`wp_codebox_phpunit_suites contains a duplicate suite name: ${name}.`);
+    }
+    seen.add(name);
+    return { name, config };
+  });
+}
+
+async function resolvePhpunitProfile(configuration, pluginDirectory, pluginSlug, configOverride) {
   const sandboxRoot = sandboxPluginDirectory(pluginSlug);
-  const configured = typeof configuration.wp_codebox_phpunit_config === 'string' ? configuration.wp_codebox_phpunit_config : '';
+  const configured = typeof configOverride === 'string' && configOverride !== ''
+    ? configOverride
+    : (typeof configuration.wp_codebox_phpunit_config === 'string' ? configuration.wp_codebox_phpunit_config : '');
   let config = configured;
   let hostConfig = '';
   if (configured) {
