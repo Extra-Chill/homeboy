@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.41.6] - 2026-09-04
+
+### Fixed
+- select source install on platforms with no published wp-codebox artifact
+
 ## [3.41.5] - 2026-09-04
 
 ### Fixed
