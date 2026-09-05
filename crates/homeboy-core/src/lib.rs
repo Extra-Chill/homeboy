@@ -62,12 +62,12 @@ pub mod artifact_inputs;
 pub mod artifact_links;
 pub mod artifact_manifest;
 pub mod artifact_metadata;
-pub mod artifact_origin;
+pub(crate) mod artifact_origin;
 pub mod artifact_postprocess;
-pub mod artifact_preview;
+pub(crate) mod artifact_preview;
 pub mod artifact_ref;
 pub mod broker_auth;
-pub mod browser_evidence;
+pub(crate) mod browser_evidence;
 pub mod build_identity;
 pub mod capacity;
 pub mod change_artifact;
@@ -93,10 +93,10 @@ pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
 // `crate::error::*` call sites keep working unchanged.
 pub use homeboy_error as error;
-pub mod build_artifact_path;
-pub mod component_build_provider;
-pub mod component_install_provider;
-pub mod component_script_provider;
+pub(crate) mod build_artifact_path;
+pub(crate) mod component_build_provider;
+pub(crate) mod component_install_provider;
+pub(crate) mod component_script_provider;
 pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
@@ -149,7 +149,7 @@ pub mod process;
 pub use homeboy_product_identity as product_identity;
 pub mod project;
 pub mod proof;
-pub mod publication_artifacts;
+pub(crate) mod publication_artifacts;
 pub mod quality;
 // redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
 // existing `crate::redaction::*` call sites keep working unchanged.
@@ -193,7 +193,7 @@ pub mod server;
 pub mod setup;
 pub mod source_snapshot;
 pub mod stream_capture;
-pub mod structured_sidecar;
+pub(crate) mod structured_sidecar;
 pub mod tag_gap;
 pub mod trace_secrets;
 pub(crate) mod transient_workspace_policy;
