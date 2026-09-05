@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.11] - 2026-09-05
+
+### Changed
+- share one work-job phase and liveness check
+
 ## [0.367.10] - 2026-09-05
 
 ### Changed
