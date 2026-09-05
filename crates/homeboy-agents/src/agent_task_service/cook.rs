@@ -7832,20 +7832,65 @@ fn pin_cook_workspace_base_at(options: &mut CookRequest, workspace: &Path) -> Re
     {
         counter.count.fetch_add(1, Ordering::SeqCst);
     }
-    let Some(base) = crate::agent_task_promotion::capture_declared_base(
-        workspace,
-        Some(&options.finalization.base),
-    )?
-    else {
-        return Ok(());
+    let declared = &options.finalization.base;
+    let pinned = match crate::agent_task_promotion::capture_declared_base(workspace, Some(declared))
+    {
+        Ok(Some(base)) => CookWorkspaceBasePin {
+            base: base.base,
+            sha: base.sha,
+            provenance: "origin_ls_remote",
+            remote_freshness: "checked",
+        },
+        Ok(None) => return Ok(()),
+        // The controller's authenticated transport is not the only authority
+        // for a base that is already present locally. A previously fetched
+        // remote-tracking ref names the exact commit this run would have
+        // pinned, so admit it rather than terminalizing with zero provider
+        // executions. Its unverified freshness is recorded, not hidden.
+        Err(error) if error.retryable == Some(true) => {
+            match local_tracking_cook_base(workspace, declared) {
+                Some(pin) => pin,
+                None => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
     };
-    options.workspace.task_base_sha = Some(base.sha.clone());
+    options.workspace.task_base_sha = Some(pinned.sha.clone());
     options.identity.initial_plan.metadata["cook_workspace_base"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base/v1",
-        "base": base.base,
-        "sha": base.sha,
+        "base": pinned.base,
+        "sha": pinned.sha,
+        "provenance": pinned.provenance,
+        "remote_freshness": pinned.remote_freshness,
     });
     Ok(())
+}
+
+struct CookWorkspaceBasePin {
+    base: String,
+    sha: String,
+    provenance: &'static str,
+    remote_freshness: &'static str,
+}
+
+/// Resolve a declared base from the checkout's existing remote-tracking ref.
+/// This reads only local objects, so it stays available when the controller
+/// cannot authenticate to the remote.
+fn local_tracking_cook_base(workspace: &Path, base: &str) -> Option<CookWorkspaceBasePin> {
+    let reference = format!("refs/remotes/origin/{base}");
+    let sha = homeboy_core::git::output_optional(
+        workspace,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )?;
+    let sha = sha.trim();
+    (sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| {
+        CookWorkspaceBasePin {
+            base: base.to_string(),
+            sha: sha.to_string(),
+            provenance: "local_remote_tracking_ref",
+            remote_freshness: "unverified",
+        }
+    })
 }
 
 fn preflight_cook_workspace_base_ancestry_with_provider(

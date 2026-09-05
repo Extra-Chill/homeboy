@@ -9666,6 +9666,110 @@ fn workspace_base_capture_lock_times_out_while_another_controller_holds_it() {
     });
 }
 
+/// Build a checkout whose `origin` is unreachable, optionally retaining the
+/// remote-tracking ref a previous fetch would have left behind.
+#[cfg(test)]
+fn unreachable_origin_repository(temp: &Path, with_tracking_ref: bool) -> (PathBuf, String) {
+    let repository = temp.join("repository");
+    std::fs::create_dir(&repository).expect("create repository");
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&repository)
+            .status()
+            .expect("run git")
+            .success());
+    };
+    git(&["init", "-b", "main"]);
+    std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+    git(&["add", "fixture.txt"]);
+    git(&[
+        "-c",
+        "user.name=Homeboy Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "base",
+    ]);
+    let head = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository)
+            .output()
+            .expect("resolve HEAD")
+            .stdout,
+    )
+    .expect("HEAD is UTF-8")
+    .trim()
+    .to_string();
+    if with_tracking_ref {
+        git(&["update-ref", "refs/remotes/origin/main", &head]);
+    }
+    // Port 1 refuses immediately, so the preflight fails as transport without
+    // depending on any external network.
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://127.0.0.1:1/repository.git",
+    ]);
+    (repository, head)
+}
+
+/// The controller's authenticated transport is not the only authority for a
+/// base that was already fetched. Terminalizing here consumed zero provider
+/// executions and produced no worktree, purely because one network call failed.
+#[test]
+fn cook_base_pin_falls_back_to_the_fetched_tracking_ref_when_origin_is_unreachable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let (repository, head) = unreachable_origin_repository(temp.path(), true);
+
+        let mut options = batch_cook_options(
+            "cook-base-transport-fallback",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.source_worktree_path = Some(repository.clone());
+        pin_cook_workspace_base_at(&mut options, &repository)
+            .expect("an already-fetched base admits the cook");
+
+        assert_eq!(
+            options.workspace.task_base_sha.as_deref(),
+            Some(head.as_str())
+        );
+        let recorded = &options.identity.initial_plan.metadata["cook_workspace_base"];
+        assert_eq!(recorded["sha"], head);
+        assert_eq!(recorded["base"], "main");
+        assert_eq!(
+            recorded["provenance"], "local_remote_tracking_ref",
+            "evidence must show the base was not verified against the remote"
+        );
+        assert_eq!(recorded["remote_freshness"], "unverified");
+    });
+}
+
+/// Without a local base the run has nothing immutable to pin, so it must still
+/// fail before provider execution rather than invent a base.
+#[test]
+fn cook_base_pin_still_fails_when_origin_is_unreachable_and_nothing_was_fetched() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let (repository, _) = unreachable_origin_repository(temp.path(), false);
+
+        let mut options = batch_cook_options(
+            "cook-base-transport-no-fallback",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.source_worktree_path = Some(repository.clone());
+        let error = pin_cook_workspace_base_at(&mut options, &repository)
+            .expect_err("no local base is available to pin");
+
+        assert_eq!(error.retryable, Some(true));
+        assert!(options.workspace.task_base_sha.is_none());
+    });
+}
+
 #[test]
 fn workspace_base_capture_repairs_controller_plan_after_recipe_write_interruption() {
     homeboy_core::test_support::with_isolated_home(|_| {
