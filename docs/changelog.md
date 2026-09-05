@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.10] - 2026-09-05
+
+### Changed
+- assert continuation state through lifecycle records
+- own Cook continuation state in lifecycle records
+
+### Fixed
+- admit fetched base when origin is unreachable
+
 ## [0.367.9] - 2026-09-03
 
 ### Changed
