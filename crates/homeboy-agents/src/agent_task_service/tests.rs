@@ -1241,7 +1241,7 @@ fn run_next_bounds_malformed_continuation_admission_and_progresses_on_retry() {
                 .filter_map(std::result::Result::ok)
                 .filter(
                     |entry| entry.path().extension().and_then(|value| value.to_str())
-                        == Some("failed")
+                        == Some("malformed")
                 )
                 .count(),
             agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
