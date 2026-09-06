@@ -27,7 +27,7 @@
     "lint": [
       "jq empty wordpress.json",
       "bash -n scripts/build/install-composer-dependencies.sh scripts/build/setup.sh scripts/build/setup-wp-codebox-smoke.sh scripts/build/inspect-wp-codebox-freshness-smoke.sh scripts/build/update-wp-codebox-cache.sh scripts/build/update-wp-codebox-cache-smoke.sh scripts/lib/wp-codebox-paths.sh scripts/test/test-runner.sh scripts/test/test-runner-wp-codebox.sh scripts/test/wp-codebox-cli-resolution-smoke.sh scripts/bench/bench-runner.sh scripts/bench/bench-runner-wp-codebox.sh scripts/doctor/wp-codebox-doctor.sh scripts/test/wp-codebox-doctor-smoke.sh scripts/test/test-runner-file-routing-smoke.sh tests/extension-composer-vendor-integrity-smoke.sh tests/installed-build-helper-resolution-smoke.sh tests/installed-agent-runtime-resolution-smoke.sh tests/js-test-framework-routing-smoke.sh scripts/lint/eslint-dependency-tree-scope-smoke.sh",
-      "node --check index.js lib/codebox-client.js lib/wp-codebox-resolver.js lib/wp-codebox-fuzz-run.js scripts/build/inspect-wp-codebox-freshness.mjs scripts/lib/agent-runtime-paths.cjs scripts/agent/homeboy-opencode-agent-task-executor.cjs scripts/fuzz/fuzz-runner.cjs scripts/bench/wp-codebox-bench-adapter.mjs scripts/bench/wp-codebox-bench-selection.mjs scripts/lib/wp-codebox-timeout-diagnostics.mjs scripts/lib/wp-codebox-phpunit-timeout.mjs scripts/lib/wp-codebox-runtime-crash.mjs scripts/test/wp-codebox-phpunit-adapter.mjs tests/wp-codebox-phpunit-recipe-run-ledger-smoke.mjs tests/wp-codebox-phpunit-managed-selection-smoke.mjs tests/wp-codebox-phpunit-multi-suite-smoke.mjs"
+      "node --check index.js lib/codebox-client.js lib/wp-codebox-resolver.js lib/wp-codebox-fuzz-run.js scripts/build/inspect-wp-codebox-freshness.mjs scripts/lib/agent-runtime-paths.cjs scripts/agent/homeboy-opencode-agent-task-executor.cjs scripts/fuzz/fuzz-runner.cjs scripts/bench/wp-codebox-bench-adapter.mjs scripts/bench/wp-codebox-bench-selection.mjs scripts/lib/wp-codebox-timeout-diagnostics.mjs scripts/lib/wp-codebox-phpunit-timeout.mjs scripts/lib/wp-codebox-runtime-crash.mjs scripts/test/wp-codebox-phpunit-adapter.mjs tests/wp-codebox-phpunit-recipe-run-ledger-smoke.mjs tests/wp-codebox-phpunit-managed-selection-smoke.mjs tests/wp-codebox-phpunit-multi-suite-smoke.mjs tests/wp-codebox-phpunit-host-suite-smoke.mjs"
     ],
     "test": [
       "node tests/wp-codebox-canonical-cli-adapters-smoke.mjs",
@@ -54,7 +54,7 @@
       "node tests/wp-codebox-runtime-crash-detector-smoke.mjs",
       "node tests/wp-codebox-phpunit-runtime-crash-smoke.mjs",
       "node tests/wp-codebox-phpunit-managed-selection-smoke.mjs",
-      "node tests/wp-codebox-phpunit-multi-suite-smoke.mjs",
+      "node tests/wp-codebox-phpunit-multi-suite-smoke.mjs tests/wp-codebox-phpunit-host-suite-smoke.mjs",
       "bash scripts/test/test-runner-file-routing-smoke.sh",
       "bash scripts/test/wp-codebox-mount-translation-smoke.sh",
       "bash scripts/build/build-clean-vendor-smoke.sh",

@@ -39,10 +39,27 @@ const slug = process.env.HOMEBOY_COMPONENT_ID || process.env.COMPONENT_ID || pat
 const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
-// Discovery reports the component's test files and is suite-independent, so it
-// always resolves against the first declared suite.
+// Where a declared suite executes. `sandbox` runs it inside WP Codebox;
+// `host` runs it against the component checkout with the project's own
+// PHPUnit, which is what components with WordPress-free unit suites otherwise
+// hand-roll in a shell step outside the managed runner.
+const PHPUNIT_SUITE_RUNTIMES = ['sandbox', 'host'];
+
+// Discovery reports the component's test files by asking the sandbox, so it
+// must resolve against a sandbox suite. A component may declare a host suite
+// first, and a host suite's config describes an environment the sandbox does
+// not provide.
 const phpunitSuites = resolvePhpunitSuites(settings);
-const activeSuite = phpunitSuites[0];
+const sandboxSuites = phpunitSuites.filter((suite) => suite.runtime === 'sandbox');
+const hostSuites = phpunitSuites.filter((suite) => suite.runtime === 'host');
+// Runtime mismatches are checked first. A component that mislabels its only
+// WordPress suite as `host` would otherwise be told it declared no sandbox
+// suite, which is a symptom rather than the mistake it made.
+await assertSuiteRuntimesMatchConfigs(phpunitSuites, pluginSourceDirectory);
+if (sandboxSuites.length === 0) {
+  throw new Error('wp_codebox_phpunit_suites must declare at least one sandbox suite; discovery has no environment to resolve against otherwise.');
+}
+const activeSuite = sandboxSuites[0];
 const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug, activeSuite.config);
 const phpunitBootstrap = resolvePhpunitBootstrap(settings, phpunitProfile);
 const topology = await resolveWordPressTopology(settings, pluginSourceDirectory);
@@ -167,8 +184,21 @@ try {
     // Remaining suites each get their own sandbox run. Every suite executes even
     // when an earlier one fails, so one failure never hides the rest, and the
     // first failing exit code is preserved as the phase status.
-    for (const suite of phpunitSuites.slice(1)) {
+    for (const suite of sandboxSuites.slice(1)) {
       const suiteResult = await runAdditionalSuite(suite);
+      process.stdout.write(`PHPUNIT_SUITE_RESULT:name=${suite.name} status=${suiteResult.status}\n`);
+      if (suiteResult.status === 'failed' && !failed) {
+        failed = true;
+        process.exitCode = suiteResult.exitCode;
+      }
+    }
+    // Host suites run last. They need no sandbox, so running them after the
+    // sandboxed ones keeps the expensive provisioning in one contiguous block.
+    for (const suite of hostSuites) {
+      const suiteResult = await runHostSuite(suite);
+      if (suiteResult.diagnostic) {
+        process.stdout.write(`${suiteResult.diagnostic}\n`);
+      }
       process.stdout.write(`PHPUNIT_SUITE_RESULT:name=${suite.name} status=${suiteResult.status}\n`);
       if (suiteResult.status === 'failed' && !failed) {
         failed = true;
@@ -224,6 +254,84 @@ async function runAdditionalSuite(suite) {
     await rm(suiteDirectory, { recursive: true, force: true });
   }
 }
+// Execute one declared host suite against the component checkout.
+//
+// A host suite's tests bootstrap without WordPress, so there is nothing for a
+// sandbox to provide and its discovery matches none of their files. Running
+// them here is what components already do by hand in a shell step; doing it
+// through this path means the result reaches the same reporting as every
+// sandboxed suite, with counts and per-suite attribution preserved.
+async function runHostSuite(suite) {
+  const suiteArtifacts = path.join(artifacts, `wp-codebox-phpunit.${process.pid}.${suite.name}`);
+  await mkdir(suiteArtifacts, { recursive: true });
+
+  const binary = path.join(pluginSourceDirectory, 'vendor', 'bin', 'phpunit');
+  try {
+    await access(binary);
+  } catch {
+    return {
+      status: 'failed',
+      exitCode: 1,
+      diagnostic: `Host suite "${suite.name}" needs the component's own PHPUnit at vendor/bin/phpunit; install dependencies before running host suites.`,
+    };
+  }
+
+  const logPath = path.join(suiteArtifacts, 'phpunit.log');
+  const execution = spawnSync(binary, ['--configuration', suite.config], {
+    cwd: pluginSourceDirectory,
+    encoding: 'utf8',
+    timeout: phpunitTimeoutSeconds * 1000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const output = `${execution.stdout || ''}${execution.stderr || ''}`;
+  await writeFile(logPath, output);
+
+  const summary = parseHostPhpunitSummary(output);
+  await writeFile(
+    path.join(suiteArtifacts, 'wp-codebox-phpunit-results.json'),
+    `${JSON.stringify({ schema: 'wp-codebox/phpunit-results/v1', suite: suite.name, runtime: 'host', summary }, null, 2)}\n`,
+  );
+
+  process.stdout.write(output);
+
+  if (execution.error?.code === 'ETIMEDOUT') {
+    return { status: 'failed', exitCode: 124, summary };
+  }
+  if (execution.status !== 0) {
+    return { status: 'failed', exitCode: execution.status || 1, summary };
+  }
+  // A host suite that executed nothing is the failure this runtime exists to
+  // prevent being reported as a pass.
+  if (summary.total === 0) {
+    return {
+      status: 'failed',
+      exitCode: 1,
+      summary,
+      diagnostic: `Host suite "${suite.name}" executed zero tests. Check that ${suite.config} declares a non-empty testsuite.`,
+    };
+  }
+  return { status: 'passed', exitCode: 0, summary };
+}
+
+// Read counts from PHPUnit's own summary line so a host suite reports the same
+// shape as a sandboxed one rather than a bare pass/fail.
+function parseHostPhpunitSummary(output) {
+  const ok = output.match(/OK \((\d+) tests?, (\d+) assertions?\)/);
+  if (ok) {
+    return { total: Number(ok[1]), passed: Number(ok[1]), failed: 0, skipped: 0, assertions: Number(ok[2]) };
+  }
+  const counts = output.match(/Tests:\s*(\d+)[^\n]*/);
+  if (!counts) {
+    return { total: 0, passed: 0, failed: 0, skipped: 0, assertions: 0 };
+  }
+  const line = counts[0];
+  const read = (label) => Number(line.match(new RegExp(`${label}:\\s*(\\d+)`))?.[1] || 0);
+  const total = Number(counts[1]);
+  const failed = read('Failures') + read('Errors');
+  const skipped = read('Skipped') + read('Incomplete');
+  return { total, passed: Math.max(0, total - failed - skipped), failed, skipped, assertions: read('Assertions') };
+}
+
 async function readDiscoveryResult(stdoutPath) {
   const payload = JSON.parse(await readFile(stdoutPath, 'utf8'));
   const execution = Array.isArray(payload?.executions)
@@ -1689,6 +1797,12 @@ function phpunitAggregate(output) {
 //
 // A single config stays exactly equivalent to a one-entry list, so existing
 // components are unaffected and the two settings never both apply.
+//
+// A suite also declares where it runs. Every suite executed in a sandbox was
+// the implicit rule, which silently mis-ran suites whose tests bootstrap
+// without WordPress: the sandbox discovered none of their files and reported
+// zero executed tests rather than a clear error. `runtime` makes the choice
+// explicit and defaults to `sandbox`, so existing declarations are unchanged.
 function resolvePhpunitSuites(configuration) {
   const declared = configuration.wp_codebox_phpunit_suites;
   const legacy = typeof configuration.wp_codebox_phpunit_config === 'string'
@@ -1698,7 +1812,7 @@ function resolvePhpunitSuites(configuration) {
     throw new Error('wp_codebox_phpunit_suites must be an array of { name, config } entries.');
   }
   if (!Array.isArray(declared) || declared.length === 0) {
-    return [{ name: '', config: legacy }];
+    return [{ name: '', config: legacy, runtime: 'sandbox' }];
   }
   if (legacy) {
     throw new Error('Set either wp_codebox_phpunit_config or wp_codebox_phpunit_suites, not both.');
@@ -1720,8 +1834,60 @@ function resolvePhpunitSuites(configuration) {
       throw new Error(`wp_codebox_phpunit_suites contains a duplicate suite name: ${name}.`);
     }
     seen.add(name);
-    return { name, config };
+    const runtime = entry.runtime === undefined ? 'sandbox' : entry.runtime;
+    if (!PHPUNIT_SUITE_RUNTIMES.includes(runtime)) {
+      throw new Error(`wp_codebox_phpunit_suites[${index}].runtime must be one of ${PHPUNIT_SUITE_RUNTIMES.join(', ')}.`);
+    }
+    return { name, config, runtime };
   });
+}
+
+// Fail a declared runtime that contradicts what the suite's config bootstraps.
+//
+// Inference alone is what produced seven silently-failing suites rather than
+// one clear error, so the declaration wins and inference is used only to say
+// when the two disagree. A config whose bootstrap cannot be read is left alone:
+// absence of evidence is not a mismatch.
+async function assertSuiteRuntimesMatchConfigs(suites, pluginDirectory) {
+  const problems = [];
+  for (const suite of suites) {
+    if (!suite.name || !suite.config) {
+      continue;
+    }
+    const environment = await inferSuiteEnvironment(suite.config, pluginDirectory);
+    if (environment === '') {
+      continue;
+    }
+    if (suite.runtime === 'host' && environment === 'wordpress-integration') {
+      problems.push(`"${suite.name}" is declared runtime "host" but ${suite.config} bootstraps WordPress; declare it as "sandbox".`);
+    }
+    if (suite.runtime === 'sandbox' && environment === 'standalone-php') {
+      problems.push(`"${suite.name}" is declared runtime "sandbox" but ${suite.config} bootstraps without WordPress; declare it as "host".`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`wp_codebox_phpunit_suites declares runtimes that contradict their configs:\n  ${problems.join('\n  ')}`);
+  }
+}
+
+// Read a config's bootstrap to tell a WordPress suite from a standalone one.
+//
+// Returns an empty string when the config or its bootstrap cannot be read, or
+// when the config declares no bootstrap at all, so an unreadable file never
+// becomes a false mismatch.
+async function inferSuiteEnvironment(config, pluginDirectory) {
+  const hostConfig = path.isAbsolute(config) ? config : path.join(pluginDirectory, config);
+  try {
+    const xml = await readFile(hostConfig, 'utf8');
+    const bootstrap = xml.match(/\bbootstrap\s*=\s*["\']([^"\']+)["\']/i)?.[1] || '';
+    if (!bootstrap) {
+      return '';
+    }
+    const source = await readFile(path.resolve(path.dirname(hostConfig), bootstrap), 'utf8');
+    return /WP_UnitTestCase|wp-load\.php|WP_TESTS_DIR|wp-tests-config/i.test(source) ? 'wordpress-integration' : 'standalone-php';
+  } catch {
+    return '';
+  }
 }
 
 async function resolvePhpunitProfile(configuration, pluginDirectory, pluginSlug, configOverride) {

@@ -1363,7 +1363,7 @@
       "label": "WP Codebox PHPUnit suites",
       "type": "array",
       "default": [],
-      "description": "Optional ordered list of named PHPUnit suites, each { name, config }, run in one managed pass and reported individually. Use instead of wp_codebox_phpunit_config when a component's tests span several configs; setting both is an error."
+      "description": "Optional ordered list of named PHPUnit suites, each { name, config, runtime? }, run in one pass and reported individually. runtime is 'sandbox' (default) or 'host'; a host suite runs against the component checkout with its own PHPUnit for tests that bootstrap without WordPress. Use instead of wp_codebox_phpunit_config when a component's tests span several configs; setting both is an error."
     },
     {
       "id": "wp_codebox_phpunit_cwd",
