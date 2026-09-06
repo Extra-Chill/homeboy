@@ -7,6 +7,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ## [0.367.13] - 2026-09-06
 
 ### Changed
+- return the canonical control-plane action acknowledgement from applied agent-task reconciliation
 - use the shared git fixture helper
 - narrow the agent-tasks facade to its consumers
 - use canonical status resources
@@ -22,7 +23,6 @@ All notable changes to Homeboy CLI are documented in this file.
 ## [0.367.12] - 2026-09-06
 
 ### Changed
-- return the canonical control-plane action acknowledgement from applied agent-task reconciliation
 - delete superseded agent-task status-scope and status-summary projections
 - stop publishing internal-only modules
 
