@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.7.3] - 2026-09-06
+
+### Fixed
+- declare package fuzz workload
+
 ## [3.7.2] - 2026-08-30
 
 ### Fixed
