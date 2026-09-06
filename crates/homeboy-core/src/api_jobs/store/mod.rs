@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use fs4::fs_std::FileExt;
 use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
@@ -38,6 +39,7 @@ const LOCAL_CHILD_RESERVATION_LEASE_MS: u64 = 60_000;
 /// Admissions protect the controller-to-daemon handoff window. A stopped
 /// controller must eventually stop consuming daemon replacement capacity.
 pub(crate) const ADMISSION_RESERVATION_LEASE_MS: u64 = 30_000;
+const LOCAL_CHILD_CANCELLATION_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionReservation {
@@ -217,7 +219,7 @@ pub(super) struct LocalChildExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reservation_expires_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    process: Option<LocalChildProcessIdentity>,
+    pub(super) process: Option<LocalChildProcessIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1573,7 +1575,10 @@ impl JobStore {
                 Some(vec![format!("POST /controller/jobs/{job_id}/cancel")]),
             ));
         }
-        self.transition(job_id, JobStatus::Cancelled, reason.into())
+        let child = self.local_child_process(job_id)?;
+        let job = self.transition(job_id, JobStatus::Cancelled, reason.into())?;
+        reap_cancelled_local_child(child.as_ref())?;
+        Ok(job)
     }
 
     #[cfg(test)]
@@ -2831,6 +2836,59 @@ impl JobStore {
             .map(|persistence| persistence.event_retention_limit)
             .unwrap_or(usize::MAX)
     }
+
+    fn local_child_process(&self, job_id: Uuid) -> Result<Option<LocalChildProcessIdentity>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        Ok(stored
+            .local_child
+            .as_ref()
+            .and_then(|child| child.process.clone()))
+    }
+}
+
+/// Stop the isolated group recorded before the job became visible as running.
+/// The executor owns reaping its direct child; waiting for the group here also
+/// prevents a cancelled job from leaving its descendants available to later work.
+pub(super) fn reap_cancelled_local_child(child: Option<&LocalChildProcessIdentity>) -> Result<()> {
+    let Some(child) = child else {
+        return Ok(());
+    };
+    let Some(process_group_id) = child.process_group_id else {
+        return Ok(());
+    };
+    if process_group_id != child.pid {
+        return Err(Error::internal_unexpected(format!(
+            "refuse to reap recorded process group {process_group_id}: expected isolated leader {}",
+            child.pid
+        )));
+    }
+    if let LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks } =
+        &child.discriminator
+    {
+        match crate::process::linux_process_starttime_ticks(child.pid) {
+            Ok(Some(actual)) if actual != *ticks => {
+                return Err(Error::internal_unexpected(format!(
+                    "refuse to reap reused local child process group {process_group_id}"
+                )));
+            }
+            Ok(_) => {}
+            Err(evidence) => {
+                return Err(Error::internal_unexpected(format!(
+                    "inspect local child {}/process group {process_group_id} before cancellation: {evidence}",
+                    child.pid
+                )));
+            }
+        }
+    }
+    crate::process::terminate_isolated_process_group_with_grace(
+        process_group_id,
+        LOCAL_CHILD_CANCELLATION_GRACE,
+    )?;
+    Ok(())
 }
 
 impl JobStore {

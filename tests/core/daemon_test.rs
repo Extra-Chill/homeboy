@@ -2812,7 +2812,9 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
             "cwd": cwd.display().to_string(),
             "command": [
                 "__homeboy_test_process_tree__",
-                format!("sleep 30 & echo $! > {child_pid_path}; wait; touch {marker_path}"),
+                format!(
+                    "trap '' TERM; sleep 30 & echo $! > {child_pid_path}; while :; do :; done; touch {marker_path}"
+                ),
             ],
         })),
         &store,
@@ -2844,6 +2846,27 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         !marker.exists(),
         "cancelled daemon runner exec left a child process running"
     );
+
+    let follow_up = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": cwd.display().to_string(),
+            "command": ["__homeboy_test_process_tree__", "sleep 0.1"],
+        })),
+        &store,
+    );
+    assert_eq!(follow_up.status_code, 200);
+    let follow_up_id = uuid::Uuid::parse_str(
+        follow_up.body["body"]["job"]["id"]
+            .as_str()
+            .expect("follow-up job id"),
+    )
+    .expect("parse follow-up job id");
+    wait_for("follow-up daemon exec job to complete", || {
+        store.get(follow_up_id).expect("follow-up job").status == JobStatus::Succeeded
+    });
 }
 
 #[cfg(unix)]
