@@ -144,8 +144,10 @@ Both the summary and the project dashboard now carry a `controller` object:
 **Cost.** No network call is made by `status`. The latest published release is
 read from the same daily cache the startup update check already maintains, so
 the whole surface is one small file read per command and at most one network
-call per day. A failure to check degrades to `unknown`; it never fails a
-command.
+call per day. A cache older than one day is reported as an aged cached
+observation, not a current-version verdict; it includes its age and directs you
+to `homeboy upgrade --check` for a live answer. A failure to check degrades to
+`unknown`; it never fails a command.
 
 **What is not reported.** The commit delta (`215 commits behind`) needs a source
 checkout with a fresh `origin/main`, which a packaged install does not have. The
