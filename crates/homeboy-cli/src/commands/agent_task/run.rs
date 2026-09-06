@@ -8310,18 +8310,20 @@ where
             None,
         ));
     }
-    let record: AgentTaskRunRecord =
-        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("decode retry action result".to_string()),
-            )
-        })?;
     let execute = args.run
         && acknowledgement.result.data["runnable"]
             .as_bool()
             .unwrap_or(false);
     if execute {
+        let record: AgentTaskRunRecord = serde_json::from_value(
+            acknowledgement.result.data["record"].clone(),
+        )
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode retry action result".to_string()),
+            )
+        })?;
         if record.metadata["cook_id"].is_string() {
             return continue_cook_with_queued_execution(
                 CookContinueArgs {
@@ -8345,10 +8347,11 @@ where
         }
         return run_submitted_with_executor(record.run_id, None, executor);
     }
-    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
-    value["action_acknowledgement"] = json!(acknowledgement.acknowledgement);
-    value["idempotency_key"] = json!(acknowledgement.idempotency_key);
-    Ok((value, 0))
+    Ok((
+        serde_json::to_value(acknowledgement)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        0,
+    ))
 }
 
 #[cfg(test)]

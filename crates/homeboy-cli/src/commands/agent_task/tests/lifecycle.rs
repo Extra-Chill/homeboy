@@ -4434,7 +4434,7 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
 }
 
 #[test]
-fn retry_command_submits_new_queued_run() {
+fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-retry-source"))
             .expect("submitted");
@@ -4452,13 +4452,32 @@ fn retry_command_submits_new_queued_run() {
             provider_rotations: None,
         })
         .expect("retry queued");
-        let action_acknowledgement = value["action_acknowledgement"].clone();
-        let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(value.clone()).expect("canonical action acknowledgement");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(record.run_id, "run-retry-cli");
-        assert_eq!(record.state, AgentTaskRunState::Queued);
-        assert_eq!(record.metadata["retry_of"], json!("run-retry-source"));
+        assert_eq!(
+            acknowledgement.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(
+            acknowledgement.action,
+            homeboy_control_plane_contract::ControlPlaneAction::Retry
+        );
+        assert_eq!(acknowledgement.idempotency_key, "retry-cli-1");
+        assert_eq!(
+            acknowledgement.result.data["record"]["run_id"],
+            "run-retry-cli"
+        );
+        assert_eq!(acknowledgement.result.data["record"]["state"], "queued");
+        assert_eq!(
+            acknowledgement.result.data["record"]["metadata"]["retry_of"],
+            json!("run-retry-source")
+        );
+        assert_eq!(
+            value,
+            serde_json::to_value(&acknowledgement).expect("serialize canonical acknowledgement")
+        );
         let replay = retry(RetryArgs {
             run_id: "run-retry-source".to_string(),
             new_run_id: Some("run-retry-cli".to_string()),
@@ -4473,7 +4492,7 @@ fn retry_command_submits_new_queued_run() {
         })
         .expect("replayed retry")
         .0;
-        assert_eq!(replay["action_acknowledgement"], action_acknowledgement);
+        assert_eq!(replay, value);
         assert_eq!(
             agent_task_lifecycle::list_records().expect("records").len(),
             2,
