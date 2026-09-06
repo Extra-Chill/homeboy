@@ -1643,6 +1643,16 @@ impl JobStore {
         };
         self.ensure_transition(job_id, status)?;
 
+        // Runner output is bounded and redacted before it becomes a remote
+        // result. Project it into the event stream as well so job logs do not
+        // have to wait for or decode the terminal result to show child stdio.
+        if let Some(stdout) = result.stdout.as_deref().filter(|stdout| !stdout.is_empty()) {
+            self.append_event(job_id, JobEventKind::Stdout, Some(stdout.to_string()), None)?;
+        }
+        if let Some(stderr) = result.stderr.as_deref().filter(|stderr| !stderr.is_empty()) {
+            self.append_event(job_id, JobEventKind::Stderr, Some(stderr.to_string()), None)?;
+        }
+
         let result_data = serde_json::to_value(&result).map_err(|err| {
             Error::internal_json(
                 err.to_string(),
