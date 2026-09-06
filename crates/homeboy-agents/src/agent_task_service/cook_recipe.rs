@@ -1622,18 +1622,6 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     Ok(record)
 }
 
-/// Validate an existing continuation target without refreshing runner state or
-/// materializing its artifact projection.
-pub fn preflight_recipe_attempt_for_continuation(
-    recipe: &AgentTaskCookRecipe,
-    run_id: &str,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    preflight_recipe_attempt_for_continuation_in_store(&lifecycle_store, recipe, run_id)
-        .map(|(record, _)| record)
-}
-
 pub fn preflight_recipe_attempt_for_continuation_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     recipe: &AgentTaskCookRecipe,

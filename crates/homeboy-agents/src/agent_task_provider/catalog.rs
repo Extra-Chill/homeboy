@@ -659,11 +659,6 @@ pub(super) fn enforce_runtime_preflight_checks_for_plan_with_providers(
     Ok(())
 }
 
-pub fn provider_runner_secret_env_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
-    let catalog = AgentTaskProviderCatalog::discover();
-    provider_runner_secret_env_for_plan_with_providers(plan, catalog.providers())
-}
-
 pub fn provider_secret_sources_for_plan(
     plan: &AgentTaskPlan,
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
@@ -702,28 +697,6 @@ pub fn provider_secret_env_scopes(
             },
         )
         .collect()
-}
-
-/// Secret sources scoped to a single backend (and optional provider selector).
-///
-/// Mirrors the backend/selector resolution `agent-task doctor` uses so auth
-/// status reports readiness for the exact backend cook/dispatch would target.
-/// When `selector` is `None`, all providers for `backend` are included.
-pub fn provider_secret_sources_for_backend(
-    providers: &[AgentTaskExecutorProvider],
-    backend: &str,
-    selector: Option<&str>,
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let scoped: Vec<&AgentTaskExecutorProvider> = providers
-        .iter()
-        .filter(|provider| provider.backend == backend)
-        .filter(|provider| selector.is_none_or(|selector| provider.id == selector))
-        .collect();
-    let mut sources = HashMap::new();
-    for provider in scoped {
-        sources.extend(provider_declared_secret_sources(provider));
-    }
-    sources
 }
 
 fn default_backend_from_policy(component_id: Option<&str>) -> homeboy_core::Result<Option<String>> {

@@ -123,24 +123,6 @@ pub fn adopt_cook_candidate(
     )
 }
 
-/// Compatibility entry point for callers that previously supplied attempt
-/// transport reconstruction. Candidate adoption never replays provider work,
-/// so the dispatcher is intentionally not reconstructed or prepared.
-pub fn adopt_cook_candidate_with_dispatcher(
-    cook_or_run_id: &str,
-    candidate_ref: &str,
-    reconstruct_dispatcher: impl FnOnce(
-        &Value,
-    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    adopt_cook_candidate_with_options_and_dispatcher(
-        cook_or_run_id,
-        candidate_ref,
-        AgentTaskCandidateAdoptionOptions::default(),
-        reconstruct_dispatcher,
-    )
-}
-
 /// Adopt a candidate with provenance supplied by the external preparer.
 pub fn adopt_cook_candidate_with_options_and_dispatcher(
     cook_or_run_id: &str,
