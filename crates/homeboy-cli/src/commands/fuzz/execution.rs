@@ -665,6 +665,18 @@ pub(super) fn fuzz_run_outcome(
         };
     }
 
+    if results.is_none() {
+        return FuzzRunOutcome {
+            status: "failed",
+            success: false,
+            exit_code: if runner_exit_code == 0 {
+                1
+            } else {
+                runner_exit_code
+            },
+        };
+    }
+
     if let Some(non_proof_status) = results.and_then(fuzz_campaign_non_proof_status) {
         return FuzzRunOutcome {
             status: non_proof_status,
