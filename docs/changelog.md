@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.13] - 2026-09-06
+
+### Changed
+- use the shared git fixture helper
+- narrow the agent-tasks facade to its consumers
+- use canonical status resources
+- remove the orphaned gate-feedback baseline seam
+- delete unreferenced public functions
+
+### Fixed
+- cook homeboy
+- retrieve persisted comparison artifacts
+- preview directory comparison artifacts
+- expose comparison result refs
+
 ## [0.367.12] - 2026-09-06
 
 ### Changed
