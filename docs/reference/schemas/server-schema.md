@@ -134,7 +134,7 @@ cancellation policy on the runner instead of relying on process environment:
 | Setting | Per-run env override | Unset default |
 | --- | --- | --- |
 | `runner_exec_wait_timeout_secs` | `HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS` | 1200 seconds; `0` detaches immediately |
-| `cancel_on_wait_timeout` | `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT` | `false`; set `true` to request best-effort cancellation after wait expiry |
+| `cancel_on_wait_timeout` | `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT` | `true` for agent-task workloads and `false` otherwise; set explicitly to override |
 
 The timeout environment value overrides the configured number when it parses as
 whole seconds. A truthy cancellation environment value (`1`, `true`, `yes`,

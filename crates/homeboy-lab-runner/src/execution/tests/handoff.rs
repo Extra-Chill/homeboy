@@ -47,27 +47,81 @@ fn runner_wait_settings_and_environment_resolve_at_the_controller() {
 }
 
 #[test]
-fn cancellation_requires_explicit_runner_setting_or_truthy_env() {
+fn cancellation_defaults_to_agent_task_workloads_after_overrides() {
     let _env = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
     let settings = homeboy_core::server::RunnerSettings::default();
-    assert!(!cancel_on_wait_timeout_enabled(&settings));
+    assert!(!cancel_on_wait_timeout_enabled(&settings, None));
+    assert!(cancel_on_wait_timeout_enabled(
+        &settings,
+        Some(&agent_task_workload())
+    ));
 
     let settings = homeboy_core::server::RunnerSettings {
         cancel_on_wait_timeout: Some(false),
         ..Default::default()
     };
-    assert!(!cancel_on_wait_timeout_enabled(&settings));
+    assert!(!cancel_on_wait_timeout_enabled(
+        &settings,
+        Some(&agent_task_workload())
+    ));
 
     let settings = homeboy_core::server::RunnerSettings {
         cancel_on_wait_timeout: Some(true),
         ..Default::default()
     };
-    assert!(cancel_on_wait_timeout_enabled(&settings));
+    assert!(cancel_on_wait_timeout_enabled(&settings, None));
 
     let _env = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
     assert!(cancel_on_wait_timeout_enabled(
-        &homeboy_core::server::RunnerSettings::default()
+        &homeboy_core::server::RunnerSettings {
+            cancel_on_wait_timeout: Some(false),
+            ..Default::default()
+        },
+        Some(&agent_task_workload()),
     ));
+}
+
+fn agent_task_workload() -> homeboy_core::lab_contract::LabRunnerWorkload {
+    let plan = homeboy_core::plan::HomeboyPlan::builder_for_description(
+        homeboy_core::plan::PlanKind::LabOffload,
+        "wait expiry test",
+    )
+    .build();
+    let command = crate::LabOffloadCommand {
+        command: homeboy_core::lab_contract::LabCommandContract::portable(
+            "agent-task cook",
+            None,
+            false,
+            &[],
+        ),
+        required_extensions: Vec::new(),
+        required_capabilities: Vec::new(),
+        workload: None,
+    };
+    let mut workload =
+        crate::workload::build_lab_runner_workload(crate::workload::LabRunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: false,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab",
+            runner_mode: "daemon",
+            assignment_source: "test",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/project"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+    workload.agent_task = crate::workload::lab_runner_workload_agent_task_from_command(
+        &["homeboy", "agent-task", "cook"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        Some("agent-task-wait-expiry"),
+    );
+    workload
 }
 
 #[test]
@@ -638,11 +692,11 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
 }
 
 #[test]
-fn zero_wait_direct_daemon_projects_terminal_cancellation() {
+fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
     homeboy_core::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
         let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
-        let _cancel = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
         let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
         let workspace = tempfile::tempdir().expect("workspace");
         let started = workspace.path().join("started");
@@ -669,7 +723,7 @@ fn zero_wait_direct_daemon_projects_terminal_cancellation() {
             None,
             Vec::new(),
             Vec::new(),
-            None,
+            Some(agent_task_workload()),
             None,
             false,
             false,
@@ -853,11 +907,11 @@ fn zero_wait_reverse_broker_preserves_accepted_running_handoff() {
 }
 
 #[test]
-fn zero_wait_reverse_broker_projects_terminal_cancellation() {
+fn zero_wait_reverse_broker_cancels_unset_agent_task_workload() {
     homeboy_core::test_support::with_isolated_home(|_| {
         allow_unauthenticated_loopback_broker();
         let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
-        let _cancel = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
         let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let broker_url = format!("http://{}", listener.local_addr().expect("address"));
@@ -879,7 +933,7 @@ fn zero_wait_reverse_broker_projects_terminal_cancellation() {
             None,
             Vec::new(),
             Vec::new(),
-            None,
+            Some(agent_task_workload()),
             None,
             false,
             false,
@@ -890,6 +944,7 @@ fn zero_wait_reverse_broker_projects_terminal_cancellation() {
 
         assert_eq!(exit_code, 1);
         assert!(!output.is_in_flight());
+        let job_id = output.job_id.as_deref().expect("accepted job id");
         assert_eq!(
             output.job.as_ref().map(|job| job.status),
             Some(JobStatus::Cancelled)
@@ -902,6 +957,8 @@ fn zero_wait_reverse_broker_projects_terminal_cancellation() {
             Some("failed")
         );
         assert!(!output.stderr.contains("still in flight"));
+        let client = Client::builder().build().expect("broker client");
+        wait_for_cancelled_daemon_job(&client, &broker_url, job_id);
     });
 }
 

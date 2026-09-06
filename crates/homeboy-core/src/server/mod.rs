@@ -79,8 +79,8 @@ pub struct RunnerSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_exec_wait_timeout_secs: Option<u64>,
     /// Whether an accepted remote runner job is cancelled when the controller
-    /// stops waiting. Unset preserves accepted work for every runner command.
-    /// The
+    /// stops waiting. Unset cancels agent-task workloads and preserves other
+    /// accepted work. The
     /// `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT` env var can enable this for one run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_on_wait_timeout: Option<bool>,

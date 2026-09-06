@@ -195,9 +195,8 @@ remain authoritative. Homeboy reports an in-flight handoff with
 `homeboy runner job logs <runner> <job> --follow` when cancellation is disabled,
 fails, or returns a nonterminal job. If cancellation returns a terminal job,
 Homeboy projects that terminal non-success result instead of claiming the remote
-command continues. Unset `cancel_on_wait_timeout` does not cancel any workload,
-including agent-task workloads; set it explicitly to request best-effort
-cancellation.
+command continues. Unset `cancel_on_wait_timeout` cancels agent-task workloads
+and leaves other workloads in flight; set it explicitly to override that default.
 
 ## Detached handoff evidence
 

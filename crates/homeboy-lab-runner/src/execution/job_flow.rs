@@ -205,7 +205,10 @@ where
             let cancellation = attempt_wait_timeout_cancel(
                 &flow.runner.id,
                 &job_id,
-                cancel_on_wait_timeout_enabled(&flow.runner.settings),
+                cancel_on_wait_timeout_enabled(
+                    &flow.runner.settings,
+                    flow.lab_runner_workload.as_ref(),
+                ),
             );
             if let WaitTimeoutCancelOutcome::Cancelled(cancelled_job) = &cancellation {
                 if cancelled_job.status.is_terminal() {
