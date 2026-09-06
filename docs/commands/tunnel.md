@@ -88,8 +88,8 @@ unit.
 
 Verify a real persisted artifact from the reviewer-equivalent Lab network, not
 from the controller. Substitute values copied from `homeboy runs artifacts
-<run-id>`; the command follows redirects and fails unless the final body has the
-expected status, length, and SHA-256.
+<run-id>`; the command follows redirects and fails unless the final response is
+exactly HTTP 200 and the final body has the expected length and SHA-256.
 
 ```sh
 set -eu
@@ -100,17 +100,19 @@ PUBLIC_BASE='https://<artifact-public-host>'
 EXPECTED_SIZE='<size_bytes from runs artifacts>'
 EXPECTED_SHA256='<sha256 from runs artifacts>'
 PUBLIC_URL="$PUBLIC_BASE/runs/$RUN_ID/artifacts/$ARTIFACT_ID"
-BODY="${TMPDIR:-/tmp}/homeboy-artifact-$ARTIFACT_ID"
+BODY="$(mktemp "${TMPDIR:-/tmp}/homeboy-artifact.XXXXXX")"
+trap 'rm -f "$BODY"' 0 HUP INT TERM
 
 test "$(wc -c < "$ARTIFACT_PATH" | tr -d ' ')" = "$EXPECTED_SIZE"
 test "$(shasum -a 256 "$ARTIFACT_PATH" | cut -d ' ' -f 1)" = "$EXPECTED_SHA256"
-curl --fail --connect-timeout 10 --max-time 30 --location --show-error --silent \
+METADATA="$(curl --connect-timeout 10 --max-time 30 --location --show-error --silent \
   --dump-header - --output "$BODY" \
   --write-out 'final_url=%{url_effective}\nstatus=%{http_code}\nredirects=%{num_redirects}\ncontent_type=%{content_type}\nsize_download=%{size_download}\n' \
-  "$PUBLIC_URL"
+  "$PUBLIC_URL")"
+printf '%s\n' "$METADATA"
+test "$(printf '%s\n' "$METADATA" | awk -F= '$1 == "status" { print $2; exit }')" = 200
 test "$(wc -c < "$BODY" | tr -d ' ')" = "$EXPECTED_SIZE"
 test "$(shasum -a 256 "$BODY" | cut -d ' ' -f 1)" = "$EXPECTED_SHA256"
-rm -f "$BODY"
 ```
 
 The public check is successful only when `status=200`, the final URL is the
