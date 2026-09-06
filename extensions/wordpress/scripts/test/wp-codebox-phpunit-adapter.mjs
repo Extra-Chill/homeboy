@@ -127,7 +127,7 @@ const options = clean({
   bootstrapMode: phpunitBootstrap.mode,
   projectBootstrap: phpunitBootstrap.projectBootstrap,
   multisite: discoveryOnly ? false : topology.multisite,
-  preloadFiles: settings.wp_codebox_phpunit_preload_files,
+  preloadFiles: activeSuite.preloadFiles === null ? settings.wp_codebox_phpunit_preload_files : activeSuite.preloadFiles,
   mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), ...(!discoveryOnly ? [{ source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' }] : [])],
 });
 
@@ -232,6 +232,10 @@ async function runAdditionalSuite(suite) {
       cwd: profile.cwd,
       bootstrapMode: bootstrap.mode,
       projectBootstrap: bootstrap.projectBootstrap,
+      // A declared list replaces the component-wide one rather than adding to
+      // it, so a suite can state exactly what it needs without inheriting
+      // another suite's bootstrap.
+      preloadFiles: suite.preloadFiles === null ? options.preloadFiles : suite.preloadFiles,
     });
     const suiteOptionsPath = path.join(suiteDirectory, 'options.json');
     const suiteRecipePath = path.join(suiteDirectory, 'recipe.json');
@@ -1812,7 +1816,7 @@ function resolvePhpunitSuites(configuration) {
     throw new Error('wp_codebox_phpunit_suites must be an array of { name, config } entries.');
   }
   if (!Array.isArray(declared) || declared.length === 0) {
-    return [{ name: '', config: legacy, runtime: 'sandbox' }];
+    return [{ name: '', config: legacy, runtime: 'sandbox', preloadFiles: null }];
   }
   if (legacy) {
     throw new Error('Set either wp_codebox_phpunit_config or wp_codebox_phpunit_suites, not both.');
@@ -1838,7 +1842,15 @@ function resolvePhpunitSuites(configuration) {
     if (!PHPUNIT_SUITE_RUNTIMES.includes(runtime)) {
       throw new Error(`wp_codebox_phpunit_suites[${index}].runtime must be one of ${PHPUNIT_SUITE_RUNTIMES.join(', ')}.`);
     }
-    return { name, config, runtime };
+    // Under managed bootstrap the config's own bootstrap attribute never runs,
+    // so a suite whose base classes live there needs them preloaded. Declaring
+    // that per suite is the difference between the shared list every suite
+    // gets and the one this suite actually needs.
+    const preloadFiles = entry.preload_files === undefined ? null : entry.preload_files;
+    if (preloadFiles !== null && (!Array.isArray(preloadFiles) || preloadFiles.some((file) => typeof file !== 'string' || file === ''))) {
+      throw new Error(`wp_codebox_phpunit_suites[${index}].preload_files must be an array of non-empty strings.`);
+    }
+    return { name, config, runtime, preloadFiles };
   });
 }
 

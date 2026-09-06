@@ -42,6 +42,9 @@ if (args.slice(-3).join(' ') === 'runtime descriptor --json') {
 if (args[0] === 'recipe' && args[1] === 'build') {
   const options = JSON.parse(fs.readFileSync(args[args.indexOf('--options') + 1], 'utf8'));
   fs.appendFileSync(process.env.CAPTURED_CONFIGS, options.phpunitXml + '\\n');
+  if (process.env.CAPTURED_PRELOADS) {
+    fs.appendFileSync(process.env.CAPTURED_PRELOADS, JSON.stringify(options.preloadFiles || []) + '\\n');
+  }
   fs.writeFileSync(args[args.indexOf('--output') + 1], '{"schema":"wp-codebox/workspace-recipe/v1"}');
   process.exit(0);
 }
@@ -80,6 +83,7 @@ function execute(name, settings, { failingSuite = '' } = {}) {
     env: {
       ...process.env,
       CAPTURED_CONFIGS: capturedConfigs,
+      CAPTURED_PRELOADS: path.join(root, `${name}-preloads.txt`),
       FAILING_SUITE: failingSuite,
       HOMEBOY_COMPONENT_PATH: component,
       COMPONENT_ID: 'sample-plugin',
@@ -89,7 +93,7 @@ function execute(name, settings, { failingSuite = '' } = {}) {
     },
     encoding: 'utf8',
   });
-  return { run, capturedConfigs };
+  return { run, capturedConfigs, capturedPreloads: path.join(root, `${name}-preloads.txt`) };
 }
 
 // --- Every declared suite runs and reports individually --------------------
@@ -170,6 +174,24 @@ for (const [label, suites, expected] of [
   const { run } = execute(`invalid-${label.replace(/\s+/g, '-')}`, { wp_codebox_phpunit_suites: suites });
   assert.notEqual(run.status, 0, `expected ${label} to fail`);
   assert.match(`${run.stdout}${run.stderr}`, expected, `unexpected diagnostic for ${label}`);
+}
+
+// --- A suite's own preload_files replace the component-wide list ----------
+// Under managed bootstrap a config's own bootstrap never runs, so a suite
+// whose base classes live there must be able to preload them without every
+// other suite inheriting that bootstrap.
+{
+  const { run, capturedPreloads } = execute('multi-preload', {
+    wp_codebox_phpunit_preload_files: ['/shared/boot.php'],
+    wp_codebox_phpunit_suites: [
+      { name: 'alpha', config: 'phpunit-alpha.xml.dist' },
+      { name: 'beta', config: 'phpunit-beta.xml.dist', preload_files: ['/suite/beta-boot.php'] },
+    ],
+  });
+  assert.equal(run.status, 0, `expected a passing run, got ${run.status}\n${run.stdout}\n${run.stderr}`);
+  const preloads = (await readFile(capturedPreloads, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(preloads[0], ['/shared/boot.php'], 'a suite without preload_files inherits the component-wide list');
+  assert.deepEqual(preloads[1], ['/suite/beta-boot.php'], "a suite's own preload_files replace the shared list");
 }
 
 await rm(root, { recursive: true, force: true });
