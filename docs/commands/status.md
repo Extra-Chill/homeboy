@@ -25,6 +25,10 @@ homeboy status --global
   any CWD. It reads the controller update cache, local daemon state, persisted
   runner sessions, bounded observation pages, and registered inventory counts.
   It does not fetch component remotes, inspect releases, or contact runners.
+  Its filesystem-backed snapshot runs in a supervised child with a 25-second
+  budget inside the shared 30-second deadline; if it stalls, the parent returns
+  `partial` controller freshness and per-subsystem follow-up commands instead of
+  waiting indefinitely.
 
 `--global` is the fast answer to "is this controller able to operate?" Its
 payload is count-only for runners, activities, projects, and components, with

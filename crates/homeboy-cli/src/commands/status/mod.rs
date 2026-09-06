@@ -50,6 +50,7 @@ use types::{
 
 const STATUS_PROBE_CAPTURE_LIMIT: usize = 1024 * 1024;
 const STATUS_PROBE_HEARTBEAT: Duration = Duration::from_secs(1);
+const GLOBAL_STATUS_PROBE_BUDGET: Duration = Duration::from_secs(25);
 
 pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     if args.full && (requires_component_enrichment(&args) || args.refresh) {
@@ -103,10 +104,10 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     timer.finish("read_controller_cache");
     log_controller_staleness(&controller);
 
-    // Context reports and registry resolution can block in filesystem or
-    // inventory providers that do not expose cancellation. Put that boundary in
-    // a separately killable process while retaining the parent's controller
-    // observation for a useful partial result.
+    // Context reports, registry resolution, and the global snapshot can block
+    // in filesystem-backed providers that do not expose cancellation. Put that
+    // boundary in a separately killable process while retaining the parent's
+    // controller observation for a useful partial result.
     if requires_isolated_probe(&args) {
         return run_isolated_probe(&args, controller, timer);
     }
@@ -234,7 +235,8 @@ fn requires_isolated_probe(args: &StatusArgs) -> bool {
     }
     #[cfg(not(test))]
     {
-        args.full
+        args.global
+            || args.full
             || args.all
             || matches!(args.scope.selection(), Some(scope) if !matches!(scope, Scope::Path { .. }))
     }
@@ -267,7 +269,13 @@ fn run_isolated_probe(
     guard
         .attach(&child)
         .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    // Leave headroom below the command-wide 30-second status deadline for the
+    // parent to kill the child and serialize its partial snapshot.
     let remaining = timer.remaining().unwrap_or(Duration::ZERO);
+    let remaining = args
+        .global
+        .then_some(remaining.min(GLOBAL_STATUS_PROBE_BUDGET))
+        .unwrap_or(remaining);
     let supervised = wait_with_bounded_output_supervised_with_progress(
         &mut child,
         STATUS_PROBE_CAPTURE_LIMIT,
@@ -300,7 +308,7 @@ fn run_isolated_probe(
                     omitted_components: Vec::new(),
                     degraded_components: Vec::new(),
                     degraded_component_phases: Vec::new(),
-                    replay_commands: vec![status_probe_replay(args)],
+                    replay_commands: status_probe_replay_commands(args),
                 },
                 diagnostic,
             }),
@@ -353,6 +361,7 @@ fn status_probe_argv(args: &StatusArgs) -> Vec<String> {
         argv.push("--workspace".to_string());
     }
     for (enabled, flag) in [
+        (args.global, "--global"),
         (args.full, "--full"),
         (args.uncommitted, "--uncommitted"),
         (args.needs_release, "--needs-release"),
@@ -373,6 +382,20 @@ fn status_probe_argv(args: &StatusArgs) -> Vec<String> {
 
 fn status_probe_replay(args: &StatusArgs) -> String {
     status_probe_argv(args).join(" ")
+}
+
+fn status_probe_replay_commands(args: &StatusArgs) -> Vec<String> {
+    if args.global {
+        return vec![
+            "homeboy daemon status".to_string(),
+            "homeboy runner status --full".to_string(),
+            "homeboy activity".to_string(),
+            "homeboy runs list --limit 100".to_string(),
+            "homeboy component list".to_string(),
+        ];
+    }
+
+    vec![status_probe_replay(args)]
 }
 
 /// Entry point used only by the private same-binary child protocol.
@@ -1469,6 +1492,23 @@ mod tests {
             Commands::Status(args) => assert!(args.timings),
             _ => panic!("expected status command"),
         }
+    }
+
+    #[test]
+    fn global_probe_replays_the_global_snapshot_and_omitted_subsystems() {
+        let args = parse_status(&["homeboy", "status", "--global"]);
+
+        assert_eq!(status_probe_argv(&args), ["homeboy", "status", "--global"]);
+        assert_eq!(
+            status_probe_replay_commands(&args),
+            [
+                "homeboy daemon status",
+                "homeboy runner status --full",
+                "homeboy activity",
+                "homeboy runs list --limit 100",
+                "homeboy component list",
+            ]
+        );
     }
 
     #[test]
