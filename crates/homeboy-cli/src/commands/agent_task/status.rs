@@ -1271,7 +1271,7 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
 /// `--apply` is the explicit operator authorization.
 pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
     let run_id = args.run_id;
-    let (mut value, exit, acknowledgement) = if args.apply {
+    if args.apply {
         let acknowledgement =
             homeboy::agents::orchestration::execute_action_from_current_environment(
                 &run_id,
@@ -1292,20 +1292,15 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
             acknowledgement.outcome,
             homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
         ));
-        (
-            acknowledgement.result.data.clone(),
+        return Ok((
+            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
             exit,
-            Some(acknowledgement),
-        )
-    } else {
-        let report = agent_task_service_direct::reconcile_run(&run_id, true)?;
-        let exit = i32::from(report.failed > 0);
-        (
-            serde_json::to_value(report).unwrap_or(Value::Null),
-            exit,
-            None,
-        )
-    };
+        ));
+    }
+
+    let report = agent_task_service_direct::reconcile_run(&run_id, true)?;
+    let exit = i32::from(report.failed > 0);
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
     if let Value::Object(object) = &mut value {
         object.insert("owner".to_string(), json!("durable_agent_tasks"));
         object.insert(
@@ -1314,22 +1309,8 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
         );
         object.insert(
             "postcondition".to_string(),
-            json!(if !args.apply {
-                "reports the selected durable records against authoritative provider state without persisted mutation"
-            } else {
-                "every selected durable record is reconciled to authoritative provider state"
-            }),
+            json!("reports the selected durable records against authoritative provider state without persisted mutation"),
         );
-        if let Some(acknowledgement) = acknowledgement {
-            object.insert(
-                "action_acknowledgement".to_string(),
-                json!(acknowledgement.acknowledgement),
-            );
-            object.insert(
-                "idempotency_key".to_string(),
-                json!(acknowledgement.idempotency_key),
-            );
-        }
     }
     Ok((value, exit))
 }
