@@ -115,6 +115,8 @@ fn render_comparison_summary(output: &Value) -> String {
     if !rig_lines.is_empty() {
         lines.extend(rig_lines);
     }
+    lines.extend(comparison_metric_lines(output));
+    lines.extend(comparison_run_lines(output));
 
     let regressions = usize_value(output, &["regressions"])
         .or_else(|| array_len(output, &["failures"]))
@@ -472,11 +474,20 @@ fn comparison_artifact_lines(output: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     for rig in rigs {
         let rig_id = string_value(rig, &["rig_id"]).unwrap_or("<rig>");
+        let run_id = string_value(rig, &["persisted_run", "run_id"]);
         let Some(artifacts) = value_at(rig, &["artifacts"]).and_then(Value::as_array) else {
             continue;
         };
         for artifact in artifacts {
             let name = string_value(artifact, &["name"]).unwrap_or("artifact");
+            if let (Some(run_id), Some(artifact_id)) =
+                (run_id, string_value(artifact, &["observation_artifact_id"]))
+            {
+                lines.push(format!(
+                    "  {rig_id}/{name}: homeboy runs artifact get {run_id} {artifact_id} -o <path>"
+                ));
+                continue;
+            }
             if let Some(locator) = artifact_locator(artifact) {
                 lines.push(format!("  {rig_id}/{name}: {locator}"));
             }
@@ -484,6 +495,51 @@ fn comparison_artifact_lines(output: &Value) -> Vec<String> {
     }
     if !lines.is_empty() {
         lines.insert(0, "Artifacts:".to_string());
+    }
+    lines
+}
+
+fn comparison_metric_lines(output: &Value) -> Vec<String> {
+    let Some(summaries) = value_at(output, &["summary"]).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for summary in summaries.iter().take(3) {
+        let scenario = string_value(summary, &["scenario"]).unwrap_or("<scenario>");
+        let Some(rows) = value_at(summary, &["rows"]).and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows.iter().take(4) {
+            let rig_id = string_value(row, &["rig_id"]).unwrap_or("<rig>");
+            let Some(mean) = row.get("mean_ms").and_then(Value::as_f64) else {
+                continue;
+            };
+            lines.push(format!(
+                "  {scenario}/{rig_id}: mean_ms={}",
+                format_metric(mean)
+            ));
+        }
+    }
+    if !lines.is_empty() {
+        lines.insert(0, "Comparison means:".to_string());
+    }
+    lines
+}
+
+fn comparison_run_lines(output: &Value) -> Vec<String> {
+    let Some(rigs) = value_at(output, &["rigs"]).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut lines = rigs
+        .iter()
+        .filter_map(|rig| {
+            let rig_id = string_value(rig, &["rig_id"])?;
+            let run_id = string_value(rig, &["persisted_run", "run_id"])?;
+            Some(format!("  {rig_id}: {run_id}"))
+        })
+        .collect::<Vec<_>>();
+    if !lines.is_empty() {
+        lines.insert(0, "Runs:".to_string());
     }
     lines
 }
