@@ -713,6 +713,9 @@ full trust model.
 ### `job`
 
 ```sh
+homeboy runner job list <runner-id>
+homeboy runner job list <runner-id> --all
+homeboy runner job list <runner-id> --json
 homeboy runner job logs <runner-id> <job-id>
 homeboy runner job logs <runner-id> <job-id> --follow --poll-ms 1000
 homeboy runner job logs <runner-id> <job-id> --follow --cursor 65028
@@ -724,6 +727,10 @@ has submitted work to a connected runner. `logs` fetches the persisted job plus
 its event stream; `--follow` keeps polling until the job reaches a terminal state
 and prints newly observed events as they arrive. Use this when a controller exits
 after dispatching runner work and you need to inspect the already-started job.
+
+`job list` defaults to a compact table of live daemon jobs. Use `--all` (or
+`--retained`) to include retained durable projections, and `--json` for the
+structured response, including both live and retained counts.
 
 `cancel` requests cancellation for a queued or running durable runner daemon job
 through the connected runner daemon.

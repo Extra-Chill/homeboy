@@ -19,6 +19,87 @@ pub(super) enum RunnerJobCommandOutput {
     Broker(RunnerBrokerJobOutput),
 }
 
+pub(super) fn compact_list_command_run(
+    stdout_result: homeboy::core::Result<serde_json::Value>,
+    exit_code: i32,
+) -> super::super::output_runtime::CommandRun {
+    let output_file_result = stdout_result.clone();
+    let table = stdout_result
+        .as_ref()
+        .map(render_compact_job_table)
+        .map_err(Clone::clone);
+    super::super::output_runtime::CommandRun::from_raw_stdout(
+        "runner",
+        table,
+        exit_code,
+        Some(output_file_result),
+    )
+}
+
+fn render_compact_job_table(payload: &serde_json::Value) -> String {
+    let live = payload
+        .get("live_daemon_job_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let retained = payload
+        .get("retained_durable_projection_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let mut rows = vec![(
+        "JOB ID".to_string(),
+        "STATE".to_string(),
+        "COMMAND".to_string(),
+    )];
+    if let Some(jobs) = payload.get("jobs").and_then(serde_json::Value::as_array) {
+        rows.extend(jobs.iter().filter_map(|job| {
+            Some((
+                job.get("job_id")?.as_str()?.to_string(),
+                job.get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("retained")
+                    .to_string(),
+                job.get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-")
+                    .chars()
+                    .take(60)
+                    .collect(),
+            ))
+        }));
+    }
+    let widths = (0..3)
+        .map(|column| {
+            rows.iter()
+                .map(|row| [row.0.len(), row.1.len(), row.2.len()][column])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let mut output = format!("Live: {live}  Retained: {retained}\n");
+    for (index, row) in rows.iter().enumerate() {
+        output.push_str(&format!(
+            "{:<width0$}  {:<width1$}  {}\n",
+            row.0,
+            row.1,
+            row.2,
+            width0 = widths[0],
+            width1 = widths[1],
+        ));
+        if index == 0 {
+            output.push_str(&format!(
+                "{:-<width0$}  {:-<width1$}  {:-<width2$}\n",
+                "",
+                "",
+                "",
+                width0 = widths[0],
+                width1 = widths[1],
+                width2 = widths[2],
+            ));
+        }
+    }
+    output
+}
+
 pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput> {
     match command {
         RunnerJobCommand::List {
@@ -26,8 +107,10 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
             active,
             queued,
             terminal,
+            all,
             generation,
             correlation,
+            ..
         } => Ok((
             RunnerJobCommandOutput::List(Box::new(job_list(
                 &runner_id,
@@ -35,6 +118,7 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
                     active,
                     queued,
                     terminal,
+                    all,
                     generation,
                     correlation,
                 },
@@ -70,6 +154,7 @@ struct JobListFilter {
     active: bool,
     queued: bool,
     terminal: bool,
+    all: bool,
     generation: Option<String>,
     correlation: Option<String>,
 }
@@ -113,7 +198,12 @@ fn project_job_list(
     };
     let mut jobs: Vec<_> = active
         .iter()
-        .chain(terminal)
+        .chain(
+            (filter.all || filter.terminal)
+                .then_some(terminal)
+                .into_iter()
+                .flatten(),
+        )
         .map(|job| {
             let unknown_owner = job.lifecycle_state.as_deref() == Some("unknown_owner")
                 && job.job_id.starts_with("unknown-daemon-owner-");
@@ -142,24 +232,26 @@ fn project_job_list(
             }
         })
         .collect();
-    for owner in owners {
-        for job_id in &owner.job_ids {
-            if jobs.iter().all(|job| job.job_id != *job_id) {
-                jobs.push(RunnerJobListEntry {
-                    job_id: job_id.clone(),
-                    source: "retained_durable_projection",
-                    daemon_source: None,
-                    state: None,
-                    command: None,
-                    owner: None,
-                    correlation: None,
-                    generation: Some(owner.generation.clone()),
-                    started_at_ms: None,
-                    logs_command: Some(format!(
-                        "homeboy runner job logs {runner_id} {job_id} --follow"
-                    )),
-                    cancel_command: None,
-                });
+    if filter.all {
+        for owner in owners {
+            for job_id in &owner.job_ids {
+                if jobs.iter().all(|job| job.job_id != *job_id) {
+                    jobs.push(RunnerJobListEntry {
+                        job_id: job_id.clone(),
+                        source: "retained_durable_projection",
+                        daemon_source: None,
+                        state: None,
+                        command: None,
+                        owner: None,
+                        correlation: None,
+                        generation: Some(owner.generation.clone()),
+                        started_at_ms: None,
+                        logs_command: Some(format!(
+                            "homeboy runner job logs {runner_id} {job_id} --follow"
+                        )),
+                        cancel_command: None,
+                    });
+                }
             }
         }
     }
@@ -715,21 +807,29 @@ mod tests {
             &JobListFilter::default(),
         );
 
-        assert_eq!(jobs.len(), 3);
-        assert_eq!(jobs[1].job_id, "job-retained");
-        assert_eq!(jobs[1].source, "retained_durable_projection");
-        assert_eq!(jobs[1].state, None);
-        assert_eq!(jobs[1].generation.as_deref(), Some("generation-a"));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].source, "live_daemon");
+
+        let all = project_job_list(
+            "lab",
+            &active,
+            &terminal,
+            &owners,
+            &JobListFilter {
+                all: true,
+                ..JobListFilter::default()
+            },
+        );
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[1].job_id, "job-retained");
+        assert_eq!(all[1].source, "retained_durable_projection");
+        assert_eq!(all[1].state, None);
+        assert_eq!(all[1].generation.as_deref(), Some("generation-a"));
         assert_eq!(
-            jobs[1].logs_command.as_deref(),
+            all[1].logs_command.as_deref(),
             Some("homeboy runner job logs lab job-retained --follow")
         );
-        assert_eq!(jobs[1].cancel_command, None);
-        assert_eq!(jobs[2].source, "live_daemon");
-        assert!(jobs[2]
-            .cancel_command
-            .as_deref()
-            .is_some_and(|command| command.contains("job-running")));
+        assert_eq!(all[1].cancel_command, None);
 
         let running = project_job_list(
             "lab",
@@ -755,12 +855,46 @@ mod tests {
             &terminal,
             &owners,
             &JobListFilter {
+                all: true,
                 correlation: Some("11770".to_string()),
                 ..JobListFilter::default()
             },
         );
         assert_eq!(correlated.len(), 2);
         assert!(correlated.iter().all(|job| job.source == "live_daemon"));
+    }
+
+    #[test]
+    fn compact_job_list_table_reports_both_counts() {
+        let table = render_compact_job_table(&serde_json::json!({
+            "live_daemon_job_count": 1,
+            "retained_durable_projection_count": 42,
+            "jobs": [{
+                "job_id": "job-running",
+                "state": "running",
+                "command": "cargo test"
+            }]
+        }));
+
+        assert!(table.starts_with("Live: 1  Retained: 42\n"));
+        assert!(table.contains("JOB ID"));
+        assert!(table.contains("job-running"));
+    }
+
+    #[test]
+    fn job_list_json_keeps_live_and_retained_counts() {
+        let payload = serde_json::to_value(RunnerJobListOutput {
+            variant: "job_list",
+            command: "runner.job.list",
+            runner_id: "lab".to_string(),
+            live_daemon_job_count: 1,
+            retained_durable_projection_count: 42,
+            jobs: Vec::new(),
+        })
+        .expect("serialize job list");
+
+        assert_eq!(payload["live_daemon_job_count"], 1);
+        assert_eq!(payload["retained_durable_projection_count"], 42);
     }
 
     #[test]
