@@ -1254,7 +1254,7 @@ fn candidate(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
             state: bounded(&adoption.state, STATE_BOUND),
         });
     }
-    record
+    let promoted = record
         .metadata
         .pointer("/latest_promotion/status")
         .and_then(|value| value.as_str())
@@ -1266,7 +1266,27 @@ fn candidate(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
                 .and_then(|value| value.as_str())
                 .and_then(|value| nonempty_bounded(value, ID_BOUND)),
             state: bounded(state, STATE_BOUND),
-        })
+        });
+    if promoted.is_some() {
+        return promoted;
+    }
+    if matches!(
+        record.state,
+        AgentTaskRunState::CandidateRecoverable | AgentTaskRunState::PartialRecoverable
+    ) {
+        return record
+            .artifact_refs
+            .iter()
+            .find(|artifact| artifact.kind == "patch")
+            .map(|artifact| ControlPlaneStateSummary {
+                id: nonempty_redacted_bounded(
+                    artifact.label.as_deref().unwrap_or(&artifact.task_id),
+                    ID_BOUND,
+                ),
+                state: "patch_available".to_string(),
+            });
+    }
+    None
 }
 
 fn gates(record: &AgentTaskRunRecord) -> Vec<ControlPlaneStateSummary> {

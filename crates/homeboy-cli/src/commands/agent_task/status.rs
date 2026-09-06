@@ -336,20 +336,28 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     } else {
         0
     };
-    let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
-    if matches!(
-        value.get("state").and_then(Value::as_str),
-        Some("candidate_recoverable" | "partial_recoverable")
-    ) {
-        value["durable_candidate"] = durable_candidate_projection(&target.run_id);
-        if let Some(selection) = target.selection {
-            value["selected_candidate"] = selection;
-        }
-    }
-    Ok((value, exit_code))
+    Ok((serde_json::to_value(run).unwrap_or(Value::Null), exit_code))
 }
 
-fn durable_candidate_projection(run_id: &str) -> Value {
+fn control_plane_run_requires_action(
+    run: &homeboy_control_plane_contract::ControlPlaneRun,
+) -> bool {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
+    run.action_eligibility.as_ref().is_some_and(|report| {
+        report.actions.iter().any(|action| {
+            matches!(
+                action.action,
+                ControlPlaneAction::Resume
+                    | ControlPlaneAction::Retry
+                    | ControlPlaneAction::Review
+                    | ControlPlaneAction::Promote
+            ) && action.availability == ControlPlaneActionAvailability::Available
+        })
+    })
+}
+
+fn compact_cook_candidate_projection(run_id: &str) -> Value {
     match agent_task_lifecycle::durable_local_read(run_id) {
         Ok(snapshot) => {
             let Some(aggregate) = snapshot.aggregate else {
@@ -393,24 +401,6 @@ fn durable_candidate_projection(run_id: &str) -> Value {
             "reason": bounded_value(&Value::String(error.message)),
         }),
     }
-}
-
-fn control_plane_run_requires_action(
-    run: &homeboy_control_plane_contract::ControlPlaneRun,
-) -> bool {
-    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
-
-    run.action_eligibility.as_ref().is_some_and(|report| {
-        report.actions.iter().any(|action| {
-            matches!(
-                action.action,
-                ControlPlaneAction::Resume
-                    | ControlPlaneAction::Retry
-                    | ControlPlaneAction::Review
-                    | ControlPlaneAction::Promote
-            ) && action.availability == ControlPlaneActionAvailability::Available
-        })
-    })
 }
 
 /// Automatic retention runs while a task completes but can inventory every
@@ -743,17 +733,10 @@ fn status_run_id(status: &Value) -> Option<&str> {
         .get("run")
         .or_else(|| status.get("run_id"))
         .and_then(Value::as_str)
-        .or_else(|| {
-            status
-                .pointer("/control_plane_run/run")
-                .and_then(Value::as_str)
-        })
 }
 
 fn status_run_state(status: &Value) -> Option<&Value> {
-    status
-        .get("state")
-        .or_else(|| status.pointer("/control_plane_run/state"))
+    status.get("state")
 }
 
 pub(super) fn parse_event_cursor(
@@ -5043,7 +5026,6 @@ fn compact_mandatory_field(field: &str) -> bool {
             | "latest_run_id"
             | "status"
             | "state"
-            | "status_scope"
             | "lab_transport_failure"
             | "full_command"
     )
@@ -5108,7 +5090,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         .flatten();
     let candidate_projection = candidate_run_id
         .as_deref()
-        .map(durable_candidate_projection);
+        .map(compact_cook_candidate_projection);
     if full {
         if let Some(candidate) = candidate_projection.as_ref() {
             value["durable_candidate"] = candidate.clone();
