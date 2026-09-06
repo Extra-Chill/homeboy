@@ -1496,7 +1496,10 @@ fn direct_readiness_fence_before_detached_staging(
         selection,
         plan,
         &readiness.status,
+        &readiness.homeboy_path,
         &runner_homeboy,
+        &readiness.capability_admission,
+        require_exact_runner_version(&readiness.runner.settings),
         readiness.runner.settings.concurrency_limit,
         hot_label,
         release_gate,
@@ -1512,7 +1515,10 @@ fn detached_direct_staging_fallback_or_refusal(
     selection: &LabRunnerSelection,
     plan: &HomeboyPlan,
     status: &RunnerStatusReport,
+    homeboy_path: &str,
     runner_homeboy: &serde_json::Value,
+    capability_admission: &homeboy_lab_runner_contract::LabCapabilityAdmission,
+    require_exact_runner_version: bool,
     concurrency_limit: Option<usize>,
     hot_label: &str,
     release_gate: bool,
@@ -1530,6 +1536,9 @@ fn detached_direct_staging_fallback_or_refusal(
         return Ok(Some(outcome));
     }
     require_available_lab_runner(runner_id, status, concurrency_limit, hot_label)?;
+    if capability_admission_has_blocking_drift(capability_admission, require_exact_runner_version) {
+        return Err(stale_runner_homeboy_error(runner_id, homeboy_path, status));
+    }
     Ok(None)
 }
 
@@ -3750,6 +3759,10 @@ mod tests {
             mode: RunnerTunnelMode::DirectSsh,
         };
         let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
+        let admission = matching_capability_admission(
+            true,
+            homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+        );
 
         homeboy_core::test_support::with_isolated_home(|_| {
             let run_id = "late-identity-drift-fallback";
@@ -3831,7 +3844,10 @@ mod tests {
             &selection,
             &base_lab_plan(None),
             &status,
+            "/runner/homeboy",
             &runner_homeboy,
+            &admission,
+            false,
             None,
             "cook",
             false,
@@ -3902,6 +3918,61 @@ mod tests {
         )
         .expect("disallowed fallback fails closed")
         .is_none());
+    }
+
+    #[test]
+    fn detached_staging_refuses_capability_or_strict_ancestry_drift_before_submission() {
+        let args = Vec::new();
+        let request = LabOffloadRequest {
+            normalized_args: &args,
+            ..LabOffloadRequest::for_test(&args)
+        };
+        let selection = LabRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: RunnerTunnelMode::DirectSsh,
+        };
+        let status = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
+        let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
+        let mut controller_staging_submissions = 0;
+
+        for admission in [
+            matching_capability_admission(
+                false,
+                homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+            ),
+            matching_capability_admission(
+                true,
+                homeboy_lab_runner_contract::LabRuntimeAncestry::Unknown,
+            ),
+        ] {
+            let error = detached_direct_staging_fallback_or_refusal(
+                "homeboy-lab",
+                &request,
+                &selection,
+                &base_lab_plan(None),
+                &status,
+                "/runner/homeboy",
+                &runner_homeboy,
+                &admission,
+                true,
+                None,
+                "cook",
+                false,
+                &mut LabOffloadOverhead::start(),
+            )
+            .map(|outcome| {
+                if outcome.is_none() {
+                    controller_staging_submissions += 1;
+                }
+            })
+            .expect_err("capability or strict ancestry drift must block staging");
+
+            assert!(error
+                .message
+                .contains("Lab offload refused runner `homeboy-lab`"));
+        }
+        assert_eq!(controller_staging_submissions, 0);
     }
 
     #[test]
@@ -4223,6 +4294,30 @@ mod tests {
         status.session = Some(session);
         status.configured_job_binary_build_identity = configured_identity.map(str::to_string);
         status
+    }
+
+    fn matching_capability_admission(
+        compatible: bool,
+        ancestry: homeboy_lab_runner_contract::LabRuntimeAncestry,
+    ) -> homeboy_lab_runner_contract::LabCapabilityAdmission {
+        let identity = homeboy_lab_runner_contract::LabRuntimeIdentity {
+            build_identity: "homeboy 0.339.0+83a9bd058619".to_string(),
+            source_revision: "83a9bd058619".to_string(),
+            clean: true,
+        };
+        homeboy_lab_runner_contract::LabCapabilityAdmission {
+            compatible,
+            provenance: homeboy_lab_runner_contract::LabCapabilityNegotiationProvenance {
+                schema: "homeboy/lab-capability-negotiation/v1".to_string(),
+                controller_requirement: identity.clone(),
+                executed_runner_command: identity.clone(),
+                active_daemon: identity,
+                ancestry,
+                negotiated_capabilities: Vec::new(),
+                compatible,
+                rejection_reason: (!compatible).then(|| "missing capabilities".to_string()),
+            },
+        }
     }
 
     fn test_direct_runner() -> Runner {
