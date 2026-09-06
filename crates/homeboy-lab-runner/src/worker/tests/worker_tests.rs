@@ -742,7 +742,7 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
         .expect("configure named runner secret");
         let store = JobStore::default();
         let mut request = run_id_echo_request();
-        request.command[2] = "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"import\",\"current_item\":\"%s\",\"completed\":1,\"total\":2,\"metadata\":{\"api_key\":\"%s\"}}\\n' \"$TOKEN\" \"$TOKEN\"; printf 'HOMEBOY_RUNNER_PROGRESS {not-json}\\n'; printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"done\",\"status\":\"succeeded\"}\\n'; sleep 0.1; dd if=/dev/zero bs=1024 count=4097 2>/dev/null; printf tail".to_string();
+        request.command[2] = "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"import\",\"current_item\":\"%s\",\"completed\":1,\"total\":2,\"metadata\":{\"api_key\":\"%s\"}}\\n' \"$TOKEN\" \"$TOKEN\"; printf 'HOMEBOY_RUNNER_PROGRESS {not-json}\\n'; printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"done\",\"status\":\"succeeded\"}\\n'; printf 'worker stderr' >&2; sleep 0.1; dd if=/dev/zero bs=1024 count=4097 2>/dev/null; printf tail".to_string();
         request.secret_env_names = vec!["TOKEN".to_string()];
         store
             .submit_runner_api_fixture(request)
@@ -782,6 +782,9 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
         assert_eq!(progress["metadata"]["api_key"], "[REDACTED]");
         assert!(events.iter().all(|event| event.kind != JobEventKind::Status
             || event.message.as_deref() != Some("succeeded")));
+        assert!(events.iter().any(|event| {
+            event.kind == JobEventKind::Stderr && event.message.as_deref() == Some("worker stderr")
+        }));
         let result = result_event_data(&store, job.id);
         assert!(result["stdout"].as_str().expect("stdout").ends_with("tail"));
         assert_eq!(result["capture"]["stdout"]["truncated"], true);
