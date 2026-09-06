@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.43.0] - 2026-09-06
+
+### Added
+- let a component declare host-PHP versus sandboxed suites
+
 ## [3.42.0] - 2026-09-04
 
 ### Added
