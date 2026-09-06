@@ -1320,6 +1320,270 @@ fn apply_direct_ssh_configured_identity_freshness(
     }
 }
 
+/// The daemon tuple that binds direct-SSH readiness evidence to one daemon
+/// generation. A reconnect may replace only the local tunnel, while a refresh
+/// changes this tuple and requires a new observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectReadinessGeneration {
+    configured_job_binary_build_identity: Option<String>,
+    connected: bool,
+    local_url: Option<String>,
+    tunnel_pid: Option<u32>,
+    remote_daemon_address: Option<String>,
+    remote_daemon_lease_id: Option<String>,
+    remote_daemon_pid: Option<u32>,
+    daemon_build_identity: Option<String>,
+}
+
+fn direct_readiness_generation(status: &RunnerStatusReport) -> Option<DirectReadinessGeneration> {
+    let session = status
+        .session
+        .as_ref()
+        .filter(|session| session.mode == RunnerTunnelMode::DirectSsh)?;
+    Some(DirectReadinessGeneration {
+        configured_job_binary_build_identity: status.configured_job_binary_build_identity.clone(),
+        connected: status.connected,
+        local_url: session.local_url.clone(),
+        tunnel_pid: session.tunnel_pid,
+        remote_daemon_address: session.remote_daemon_address.clone(),
+        remote_daemon_lease_id: session.remote_daemon_lease_id.clone(),
+        remote_daemon_pid: session.remote_daemon_pid,
+        daemon_build_identity: session.homeboy_build_identity.clone(),
+    })
+}
+
+struct DirectReadinessEvidence {
+    runner: Runner,
+    status: RunnerStatusReport,
+    homeboy_path: String,
+    configured_build_identity: Option<String>,
+    capability_admission: homeboy_lab_runner_contract::LabCapabilityAdmission,
+    controller_build_identity: String,
+    observed_at: String,
+    generation: DirectReadinessGeneration,
+    attempts: usize,
+}
+
+#[derive(Debug)]
+struct GenerationStampedReadiness<T> {
+    runner: Runner,
+    status: RunnerStatusReport,
+    collected: T,
+    controller_build_identity: String,
+    observed_at: String,
+    generation: DirectReadinessGeneration,
+    attempts: usize,
+}
+
+/// Collect all direct-SSH provenance used by readiness against one stamped
+/// daemon generation. A refresh/reconnect can otherwise make the configured
+/// executable and daemon observations disagree for one status pass. Retry only
+/// when the generation changes; a stable identity mismatch remains evidence of
+/// an unsafe runner and must still refuse admission.
+fn collect_direct_readiness_with<T, Collect, Refresh>(
+    runner_id: &str,
+    mut runner: Runner,
+    mut status: RunnerStatusReport,
+    mut collect: Collect,
+    mut refresh_status: Refresh,
+) -> Result<GenerationStampedReadiness<T>>
+where
+    Collect: FnMut(&Runner, &mut RunnerStatusReport, bool) -> Result<T>,
+    Refresh: FnMut() -> Result<(Runner, RunnerStatusReport)>,
+{
+    for attempt in 1..=2 {
+        let controller_build_identity = homeboy_product_identity::build_identity().display;
+        let collected = collect(&runner, &mut status, attempt == 1)?;
+        let Some(generation) = direct_readiness_generation(&status) else {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!("runner `{runner_id}` stopped using a direct SSH daemon while collecting readiness evidence"),
+                Some(runner_id.to_string()),
+                None,
+            ));
+        };
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        let (next_runner, next_status) = refresh_status()?;
+        if direct_readiness_generation(&next_status).as_ref() == Some(&generation) {
+            return Ok(GenerationStampedReadiness {
+                runner,
+                status,
+                collected,
+                controller_build_identity,
+                observed_at,
+                generation,
+                attempts: attempt,
+            });
+        }
+        if attempt == 2 {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "runner `{runner_id}` changed daemon generation twice while collecting readiness evidence; retry after refresh or reconnect settles"
+                ),
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        runner = next_runner;
+        status = next_status;
+    }
+    unreachable!("the bounded readiness collection returns from its loop")
+}
+
+fn collect_direct_readiness_evidence(
+    runner_id: &str,
+    runner: Runner,
+    status: RunnerStatusReport,
+    converged_homeboy_path: Option<&str>,
+) -> Result<DirectReadinessEvidence> {
+    collect_direct_readiness_with(
+        runner_id,
+        runner,
+        status,
+        |runner, status, use_converged_path| {
+            let homeboy_path =
+                direct_readiness_homeboy_path(runner, converged_homeboy_path, use_converged_path)?;
+            let configured_build_identity =
+                configured_build_identity_for_admission(status, || {
+                    configured_runner_homeboy_build_identity(runner, &homeboy_path)
+                })?;
+            // A fallback probe is authoritative for this collection too; retain
+            // it so the generation stamp and later command use the same identity.
+            status.configured_job_binary_build_identity = configured_build_identity.clone();
+            apply_direct_ssh_configured_identity_freshness(
+                status,
+                runner_id,
+                &homeboy_path,
+                configured_build_identity.clone(),
+            );
+            Ok((
+                homeboy_path.clone(),
+                configured_build_identity,
+                direct_runner_capability_admission(runner, status, &homeboy_path)?,
+            ))
+        },
+        || Ok((load(runner_id)?, status_for_admission(runner_id)?)),
+    )
+    .map(|readiness| DirectReadinessEvidence {
+        runner: readiness.runner,
+        status: readiness.status,
+        homeboy_path: readiness.collected.0,
+        configured_build_identity: readiness.collected.1,
+        capability_admission: readiness.collected.2,
+        controller_build_identity: readiness.controller_build_identity,
+        observed_at: readiness.observed_at,
+        generation: readiness.generation,
+        attempts: readiness.attempts,
+    })
+}
+
+fn direct_readiness_homeboy_path(
+    runner: &Runner,
+    converged_homeboy_path: Option<&str>,
+    use_converged_path: bool,
+) -> Result<String> {
+    // A refresh may replace the configured executable. The converged path is
+    // valid only for its initial generation.
+    if use_converged_path {
+        final_preflight_homeboy_path(converged_homeboy_path, runner).map(str::to_string)
+    } else {
+        remote_runner_homeboy_path(runner, "Lab offload readiness refresh").map(str::to_string)
+    }
+}
+
+/// Fence detached controller staging behind the same direct-SSH identity
+/// evidence as synchronous execution. A permitted automatic route may return
+/// locally here; every other stable mismatch remains unavailable to staging.
+fn direct_readiness_fence_before_detached_staging(
+    runner_id: &str,
+    runner: Runner,
+    status: RunnerStatusReport,
+    request: &LabOffloadRequest<'_>,
+    selection: &LabRunnerSelection,
+    plan: &HomeboyPlan,
+    hot_label: &str,
+    release_gate: bool,
+    overhead: &mut LabOffloadOverhead,
+) -> Result<(Runner, RunnerStatusReport, Option<LabOffloadOutcome>)> {
+    if !status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+    {
+        return Ok((runner, status, None));
+    }
+
+    let readiness = collect_direct_readiness_evidence(runner_id, runner, status, None)?;
+    let mut runner_homeboy =
+        lab_runner_homeboy_metadata(runner_id, &readiness.homeboy_path, &readiness.status);
+    runner_homeboy["readiness_observation"] = serde_json::json!({
+        "controller_build_identity": &readiness.controller_build_identity,
+        "configured_executable": &readiness.homeboy_path,
+        "configured_job_binary_build_identity": &readiness.configured_build_identity,
+        "daemon_build_identity": &readiness.generation.daemon_build_identity,
+        "daemon_lease_id": &readiness.generation.remote_daemon_lease_id,
+        "daemon_address": &readiness.generation.remote_daemon_address,
+        "daemon_pid": readiness.generation.remote_daemon_pid,
+        "observed_at": &readiness.observed_at,
+        "collection_attempts": readiness.attempts,
+    });
+    runner_homeboy["capability_admission"] = serde_json::to_value(&readiness.capability_admission)
+        .expect("Lab capability admission serializes");
+    let fallback = detached_direct_staging_fallback_or_refusal(
+        runner_id,
+        request,
+        selection,
+        plan,
+        &readiness.status,
+        &runner_homeboy,
+        &readiness.capability_admission,
+        require_exact_runner_version(&readiness.runner.settings),
+        readiness.runner.settings.concurrency_limit,
+        hot_label,
+        release_gate,
+        overhead,
+    )?;
+    Ok((readiness.runner, readiness.status, fallback))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detached_direct_staging_fallback_or_refusal(
+    runner_id: &str,
+    request: &LabOffloadRequest<'_>,
+    selection: &LabRunnerSelection,
+    plan: &HomeboyPlan,
+    status: &RunnerStatusReport,
+    runner_homeboy: &serde_json::Value,
+    capability_admission: &homeboy_lab_runner_contract::LabCapabilityAdmission,
+    require_exact_runner_version: bool,
+    concurrency_limit: Option<usize>,
+    hot_label: &str,
+    release_gate: bool,
+    overhead: &mut LabOffloadOverhead,
+) -> Result<Option<LabOffloadOutcome>> {
+    if let Some(outcome) = late_direct_identity_fallback(
+        request,
+        selection,
+        plan,
+        status,
+        runner_homeboy,
+        release_gate,
+        overhead,
+    )? {
+        return Ok(Some(outcome));
+    }
+    require_available_lab_runner(runner_id, status, concurrency_limit, hot_label)?;
+    if capability_admission_has_blocking_drift(capability_admission, require_exact_runner_version) {
+        return Err(capability_admission_error(
+            runner_id,
+            capability_admission,
+            require_exact_runner_version,
+        ));
+    }
+    Ok(None)
+}
+
 /// A direct-SSH identity comparison happens after selection but before daemon
 /// admission. Only an automatic policy-selected runner may return locally here.
 fn late_direct_identity_fallback(
@@ -1415,38 +1679,6 @@ pub(crate) fn run_lab_offload_inner(
         ));
     }
 
-    // This must precede detached staging: staging would create a Lab proxy and
-    // submit controller work before this authorized local fallback is recorded.
-    if runner_status
-        .session
-        .as_ref()
-        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
-    {
-        let early_homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
-        let configured_identity = configured_build_identity_for_admission(&runner_status, || {
-            configured_runner_homeboy_build_identity(&runner, early_homeboy_path)
-        })?;
-        apply_direct_ssh_configured_identity_freshness(
-            &mut runner_status,
-            runner_id,
-            early_homeboy_path,
-            configured_identity,
-        );
-        let runner_homeboy =
-            lab_runner_homeboy_metadata(runner_id, early_homeboy_path, &runner_status);
-        if let Some(outcome) = late_direct_identity_fallback(
-            &request,
-            &selection,
-            &plan,
-            &runner_status,
-            &runner_homeboy,
-            contract.routing_policy.release_gate,
-            &mut overhead,
-        )? {
-            return Ok(outcome);
-        }
-    }
-
     // Detached commands without an agent-task argv shape receive their durable
     // plan and identity from routing. Admit the controller job before capacity
     // checks or remote preparation so caller loss cannot orphan staging.
@@ -1455,6 +1687,20 @@ pub(crate) fn run_lab_offload_inner(
         request.durable_agent_task_plan,
         request.durable_run_id,
     ) {
+        let (_, _, fallback) = direct_readiness_fence_before_detached_staging(
+            runner_id,
+            runner,
+            runner_status,
+            &request,
+            &selection,
+            &plan,
+            contract.hot_label,
+            contract.routing_policy.release_gate,
+            &mut overhead,
+        )?;
+        if let Some(outcome) = fallback {
+            return Ok(outcome);
+        }
         emit_durable_run_id_before_execution(
             run_id,
             runner_id,
@@ -1518,19 +1764,6 @@ pub(crate) fn run_lab_offload_inner(
         runner = converged.runner;
         runner_status = converged.status;
         converged_homeboy_path = Some(converged.homeboy_path);
-        require_available_lab_runner(
-            runner_id,
-            &runner_status,
-            runner.settings.concurrency_limit,
-            contract.hot_label,
-        )?;
-    } else {
-        require_available_lab_runner(
-            runner_id,
-            &runner_status,
-            runner.settings.concurrency_limit,
-            contract.hot_label,
-        )?;
     }
 
     let runner_workspace_root = request
@@ -1678,32 +1911,62 @@ pub(crate) fn run_lab_offload_inner(
             },
         )?;
     }
-    let homeboy_path = final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?;
-    let require_exact_runner_version = require_exact_runner_version(&runner.settings);
-    let configured_build_identity =
-        configured_build_identity_for_admission(&runner_status, || {
-            configured_runner_homeboy_build_identity(&runner, homeboy_path)
-        })?;
-    apply_direct_ssh_configured_identity_freshness(
-        &mut runner_status,
-        runner_id,
-        homeboy_path,
-        configured_build_identity.clone(),
-    );
-    let direct_capability_admission = if runner_status
+    let direct_readiness = if runner_status
         .session
         .as_ref()
         .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
     {
-        Some(direct_runner_capability_admission(
-            &runner,
-            &runner_status,
-            homeboy_path,
+        Some(collect_direct_readiness_evidence(
+            runner_id,
+            runner.clone(),
+            runner_status.clone(),
+            converged_homeboy_path.as_deref(),
         )?)
     } else {
         None
     };
-    let mut runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
+    let (homeboy_path, configured_build_identity, direct_capability_admission, readiness_metadata) =
+        if let Some(readiness) = direct_readiness {
+            runner = readiness.runner;
+            runner_status = readiness.status;
+            let metadata = serde_json::json!({
+                "controller_build_identity": &readiness.controller_build_identity,
+                "configured_executable": &readiness.homeboy_path,
+                "configured_job_binary_build_identity": &readiness.configured_build_identity,
+                "daemon_build_identity": &readiness.generation.daemon_build_identity,
+                "daemon_lease_id": &readiness.generation.remote_daemon_lease_id,
+                "daemon_address": &readiness.generation.remote_daemon_address,
+                "daemon_pid": readiness.generation.remote_daemon_pid,
+                "observed_at": &readiness.observed_at,
+                "collection_attempts": readiness.attempts,
+            });
+            (
+                readiness.homeboy_path,
+                readiness.configured_build_identity,
+                Some(readiness.capability_admission),
+                Some(metadata),
+            )
+        } else {
+            let homeboy_path =
+                final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?
+                    .to_string();
+            let configured_build_identity =
+                configured_build_identity_for_admission(&runner_status, || {
+                    configured_runner_homeboy_build_identity(&runner, &homeboy_path)
+                })?;
+            apply_direct_ssh_configured_identity_freshness(
+                &mut runner_status,
+                runner_id,
+                &homeboy_path,
+                configured_build_identity.clone(),
+            );
+            (homeboy_path, configured_build_identity, None, None)
+        };
+    let require_exact_runner_version = require_exact_runner_version(&runner.settings);
+    let mut runner_homeboy = lab_runner_homeboy_metadata(runner_id, &homeboy_path, &runner_status);
+    if let Some(readiness_metadata) = readiness_metadata {
+        runner_homeboy["readiness_observation"] = readiness_metadata;
+    }
     if let Some(admission) = &direct_capability_admission {
         runner_homeboy["capability_admission"] =
             serde_json::to_value(admission).expect("Lab capability admission serializes");
@@ -1720,6 +1983,23 @@ pub(crate) fn run_lab_offload_inner(
                 require_exact_runner_version,
             )
         });
+    if let Some(outcome) = late_direct_identity_fallback(
+        &request,
+        &selection,
+        &plan,
+        &runner_status,
+        &runner_homeboy,
+        contract.routing_policy.release_gate,
+        &mut overhead,
+    )? {
+        return Ok(outcome);
+    }
+    require_available_lab_runner(
+        runner_id,
+        &runner_status,
+        runner.settings.concurrency_limit,
+        contract.hot_label,
+    )?;
     plan = with_step(
         plan,
         PlanStep::builder(
@@ -1740,12 +2020,19 @@ pub(crate) fn run_lab_offload_inner(
     );
     eprintln!(
         "{}",
-        lab_offload_runner_homeboy_progress(runner_id, homeboy_path, &runner_homeboy)
+        lab_offload_runner_homeboy_progress(runner_id, &homeboy_path, &runner_homeboy)
     );
     if blocking_runner_homeboy_drift {
+        if let Some(admission) = direct_capability_admission.as_ref() {
+            return Err(capability_admission_error(
+                runner_id,
+                admission,
+                require_exact_runner_version,
+            ));
+        }
         return Err(stale_runner_homeboy_error(
             runner_id,
-            homeboy_path,
+            &homeboy_path,
             &runner_status,
         ));
     }
@@ -1755,7 +2042,7 @@ pub(crate) fn run_lab_offload_inner(
         eprintln!("{warning}");
         messages.push(warning);
     }
-    let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
+    let command_prefix = lab_offload_command_prefix(&source_path, &homeboy_path);
     eprintln!(
         "Lab offload preflight: source checkout `{}` at {}; active Homeboy command `{}` from runner `{}`.",
         source_path.display(),
@@ -2095,7 +2382,7 @@ pub(crate) fn run_lab_offload_inner(
         .collect::<Vec<_>>();
     let runtime = materialize_lab_runtime(
         &runner,
-        homeboy_path,
+        &homeboy_path,
         &remote_cwd,
         &changed_since_preflight.args,
         &synced.local_path,
@@ -2439,7 +2726,7 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["execution_bundle"] = serde_json::json!({
         "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
         "binary": crate::execution_bundle::binary(
-            homeboy_path,
+            &homeboy_path,
             configured_build_identity.as_deref(),
         ),
         // The materialized workspace deletes this artifact root on every known
@@ -2915,6 +3202,7 @@ mod tests {
     use crate::{
         RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
     };
+    use std::collections::VecDeque;
     use std::sync::{Arc, Barrier, Mutex};
 
     #[test]
@@ -3295,6 +3583,133 @@ mod tests {
     }
 
     #[test]
+    fn direct_readiness_retries_once_after_a_generation_change_and_admits_the_stable_generation() {
+        let status_a = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
+        let status_b = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-b");
+        let mut refreshed = VecDeque::from([
+            (test_direct_runner(), status_b.clone()),
+            (test_direct_runner(), status_b),
+        ]);
+        let mut collections = 0;
+
+        let readiness = collect_direct_readiness_with(
+            "homeboy-lab",
+            test_direct_runner(),
+            status_a,
+            |_, _, _| {
+                collections += 1;
+                Ok(())
+            },
+            || Ok(refreshed.pop_front().expect("bounded status refresh")),
+        )
+        .expect("the stable replacement generation is ready for admission");
+
+        assert_eq!(collections, 2);
+        assert_eq!(readiness.attempts, 2);
+        assert_eq!(
+            readiness.generation.remote_daemon_lease_id.as_deref(),
+            Some("lease-b")
+        );
+        require_available_lab_runner("homeboy-lab", &readiness.status, None, "cook")
+            .expect("only coherent replacement evidence reaches admission");
+    }
+
+    #[test]
+    fn direct_readiness_refresh_re_resolves_the_configured_executable_path() {
+        let status_a = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
+        let status_b = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-b");
+        let stale_runner = test_direct_runner_with_path("/runner/stale-homeboy");
+        let current_runner = test_direct_runner_with_path("/runner/current-homeboy");
+        let mut refreshed = VecDeque::from([
+            (current_runner.clone(), status_b.clone()),
+            (current_runner, status_b),
+        ]);
+        let mut paths = Vec::new();
+
+        collect_direct_readiness_with(
+            "homeboy-lab",
+            stale_runner,
+            status_a,
+            |runner, _, use_converged_path| {
+                paths.push(direct_readiness_homeboy_path(
+                    runner,
+                    Some("/runner/converged-before-refresh"),
+                    use_converged_path,
+                )?);
+                Ok(())
+            },
+            || Ok(refreshed.pop_front().expect("bounded status refresh")),
+        )
+        .expect("the refreshed generation stabilizes");
+
+        assert_eq!(
+            paths,
+            vec![
+                "/runner/converged-before-refresh".to_string(),
+                "/runner/current-homeboy".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_readiness_refuses_a_stable_provenance_mismatch_without_retrying() {
+        let status = direct_identity_status(Some("homeboy 0.339.0+configured"), "lease-a");
+        let mut collections = 0;
+
+        let readiness = collect_direct_readiness_with(
+            "homeboy-lab",
+            test_direct_runner(),
+            status.clone(),
+            |_, status, _| {
+                collections += 1;
+                let configured = status.configured_job_binary_build_identity.clone();
+                apply_direct_ssh_configured_identity_freshness(
+                    status,
+                    "homeboy-lab",
+                    "/runner/homeboy",
+                    configured,
+                );
+                Ok(())
+            },
+            || Ok((test_direct_runner(), status.clone())),
+        )
+        .expect("a stable observation is collected once");
+
+        assert_eq!(collections, 1);
+        assert_eq!(readiness.attempts, 1);
+        assert!(
+            require_available_lab_runner("homeboy-lab", &readiness.status, None, "cook").is_err()
+        );
+    }
+
+    #[test]
+    fn direct_readiness_refuses_after_a_second_generation_change() {
+        let status_a = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
+        let status_b = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-b");
+        let status_c = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-c");
+        let mut refreshed = VecDeque::from([
+            (test_direct_runner(), status_b),
+            (test_direct_runner(), status_c),
+        ]);
+        let mut collections = 0;
+
+        let error = collect_direct_readiness_with(
+            "homeboy-lab",
+            test_direct_runner(),
+            status_a,
+            |_, _, _| {
+                collections += 1;
+                Ok(())
+            },
+            || Ok(refreshed.pop_front().expect("two status refreshes")),
+        )
+        .expect_err("two generation changes must not use mixed evidence");
+
+        assert_eq!(collections, 2);
+        assert!(error.message.contains("changed daemon generation twice"));
+    }
+
+    #[test]
     fn direct_ssh_admission_without_configured_identity_fails_closed() {
         let mut status = runner_status(true);
         status.session = Some(admission_session(
@@ -3345,7 +3760,7 @@ mod tests {
     }
 
     #[test]
-    fn late_identity_drift_falls_back_only_for_auto_policy_with_local_permission() {
+    fn detached_identity_drift_falls_back_without_controller_staging() {
         use homeboy_lab_runner_contract::{
             EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
             ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
@@ -3393,6 +3808,10 @@ mod tests {
             mode: RunnerTunnelMode::DirectSsh,
         };
         let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
+        let admission = matching_capability_admission(
+            true,
+            homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+        );
 
         homeboy_core::test_support::with_isolated_home(|_| {
             let run_id = "late-identity-drift-fallback";
@@ -3467,6 +3886,28 @@ mod tests {
             ..LabOffloadRequest::for_test(&args)
         };
 
+        let mut controller_staging_submissions = 0;
+        if detached_direct_staging_fallback_or_refusal(
+            "homeboy-lab",
+            &request,
+            &selection,
+            &base_lab_plan(None),
+            &status,
+            &runner_homeboy,
+            &admission,
+            false,
+            None,
+            "cook",
+            false,
+            &mut LabOffloadOverhead::start(),
+        )
+        .expect("detached admission fence")
+        .is_none()
+        {
+            controller_staging_submissions += 1;
+        }
+        assert_eq!(controller_staging_submissions, 0);
+
         let explicit = LabRunnerSelection {
             source: LabRunnerSelectionSource::Explicit,
             ..selection.clone()
@@ -3525,6 +3966,78 @@ mod tests {
         )
         .expect("disallowed fallback fails closed")
         .is_none());
+    }
+
+    #[test]
+    fn detached_staging_refuses_capability_or_strict_ancestry_drift_before_submission() {
+        let args = Vec::new();
+        let request = LabOffloadRequest {
+            normalized_args: &args,
+            ..LabOffloadRequest::for_test(&args)
+        };
+        let selection = LabRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: LabRunnerSelectionSource::Default,
+            mode: RunnerTunnelMode::DirectSsh,
+        };
+        let status = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
+        let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
+        let mut controller_staging_submissions = 0;
+
+        for (admission, expected_cause_class, expected_message) in [
+            (
+                matching_capability_admission(
+                    false,
+                    homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+                ),
+                "capability_incompatible",
+                "Lab offload refused runner `homeboy-lab` because its capability admission is incompatible: missing capabilities. Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
+            ),
+            (
+                matching_capability_admission(
+                    true,
+                    homeboy_lab_runner_contract::LabRuntimeAncestry::Unknown,
+                ),
+                "strict_ancestry_unknown",
+                "Lab offload refused runner `homeboy-lab` because strict identity fencing requires exact-source ancestry, but admission reported Unknown. Reconnect the runner to collect exact source provenance, then retry.",
+            ),
+        ] {
+            let error = detached_direct_staging_fallback_or_refusal(
+                "homeboy-lab",
+                &request,
+                &selection,
+                &base_lab_plan(None),
+                &status,
+                &runner_homeboy,
+                &admission,
+                true,
+                None,
+                "cook",
+                false,
+                &mut LabOffloadOverhead::start(),
+            )
+            .map(|outcome| {
+                if outcome.is_none() {
+                    controller_staging_submissions += 1;
+                }
+            })
+            .expect_err("capability or strict ancestry drift must block staging");
+
+            assert_eq!(error.code, ErrorCode::RunnerCapabilityMissing);
+            assert_eq!(error.message, expected_message);
+            assert_eq!(error.details["admission_cause_class"], expected_cause_class);
+            assert_eq!(
+                error.details["rejection_reason"],
+                serde_json::to_value(&admission.provenance.rejection_reason)
+                    .expect("rejection reason serializes")
+            );
+            assert_eq!(
+                error.details["ancestry"],
+                serde_json::to_value(admission.provenance.ancestry)
+                    .expect("ancestry serializes")
+            );
+        }
+        assert_eq!(controller_staging_submissions, 0);
     }
 
     #[test]
@@ -3846,6 +4359,42 @@ mod tests {
         status.session = Some(session);
         status.configured_job_binary_build_identity = configured_identity.map(str::to_string);
         status
+    }
+
+    fn matching_capability_admission(
+        compatible: bool,
+        ancestry: homeboy_lab_runner_contract::LabRuntimeAncestry,
+    ) -> homeboy_lab_runner_contract::LabCapabilityAdmission {
+        let identity = homeboy_lab_runner_contract::LabRuntimeIdentity {
+            build_identity: "homeboy 0.339.0+83a9bd058619".to_string(),
+            source_revision: "83a9bd058619".to_string(),
+            clean: true,
+        };
+        homeboy_lab_runner_contract::LabCapabilityAdmission {
+            compatible,
+            provenance: homeboy_lab_runner_contract::LabCapabilityNegotiationProvenance {
+                schema: "homeboy/lab-capability-negotiation/v1".to_string(),
+                controller_requirement: identity.clone(),
+                executed_runner_command: identity.clone(),
+                active_daemon: identity,
+                ancestry,
+                negotiated_capabilities: Vec::new(),
+                compatible,
+                rejection_reason: (!compatible).then(|| "missing capabilities".to_string()),
+            },
+        }
+    }
+
+    fn test_direct_runner() -> Runner {
+        test_direct_runner_with_path("/runner/homeboy")
+    }
+
+    fn test_direct_runner_with_path(homeboy_path: &str) -> Runner {
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh",
+            "homeboy_path": homeboy_path,
+        }))
+        .expect("direct SSH runner")
     }
 
     fn runner_status(connected: bool) -> RunnerStatusReport {
