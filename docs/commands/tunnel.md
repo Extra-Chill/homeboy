@@ -62,6 +62,62 @@ HOMEBOY_PREVIEW_TUNNEL_TOKEN='<configured-secret>' \
 
 The process prints a structured `ready` record containing the artifact root, origin bind, ingress URL, exact public host, and token environment-variable name. It keeps serving while the reverse client reconnects with bounded backoff after a disconnected or restarted ingress. The default one-second long poll bounds service shutdown latency; `--poll-timeout` can tune it.
 
+### Publication Recovery And Verification
+
+A declared artifact service is not evidence that a process is listening. Recover a
+Lab-local origin with the declared service ID and the same persistent artifact
+root, then confirm the listener before relying on its public route:
+
+```sh
+homeboy tunnel service start homeboy-artifact-origin \
+  --runner homeboy-lab \
+  --detach-after-handoff \
+  --host 127.0.0.1 \
+  --port 7351 \
+  --require-listener \
+  --command 'exec homeboy tunnel artifact-origin serve --root "$HOME/.local/share/homeboy/artifacts" --bind 127.0.0.1:7351'
+
+homeboy tunnel service status homeboy-artifact-origin
+```
+
+If the public host is attached through an outbound preview client, restore that
+client in its supervisor with the configured ingress, public host, and
+`HOMEBOY_PREVIEW_TUNNEL_TOKEN`; `service start` only restores the loopback
+origin. Do not invent or expose a token value in a shell history or service
+unit.
+
+Verify a real persisted artifact from the reviewer-equivalent Lab network, not
+from the controller. Substitute values copied from `homeboy runs artifacts
+<run-id>`; the command follows redirects and fails unless the final body has the
+expected status, length, and SHA-256.
+
+```sh
+set -eu
+RUN_ID='<run-id>'
+ARTIFACT_ID='<artifact-id>'
+ARTIFACT_PATH="$HOME/.local/share/homeboy/artifacts/$RUN_ID/<artifact-file-name>"
+PUBLIC_BASE='https://<artifact-public-host>'
+EXPECTED_SIZE='<size_bytes from runs artifacts>'
+EXPECTED_SHA256='<sha256 from runs artifacts>'
+PUBLIC_URL="$PUBLIC_BASE/runs/$RUN_ID/artifacts/$ARTIFACT_ID"
+BODY="${TMPDIR:-/tmp}/homeboy-artifact-$ARTIFACT_ID"
+
+test "$(wc -c < "$ARTIFACT_PATH" | tr -d ' ')" = "$EXPECTED_SIZE"
+test "$(shasum -a 256 "$ARTIFACT_PATH" | cut -d ' ' -f 1)" = "$EXPECTED_SHA256"
+curl --fail --connect-timeout 10 --max-time 30 --location --show-error --silent \
+  --dump-header - --output "$BODY" \
+  --write-out 'final_url=%{url_effective}\nstatus=%{http_code}\nredirects=%{num_redirects}\ncontent_type=%{content_type}\nsize_download=%{size_download}\n' \
+  "$PUBLIC_URL"
+test "$(wc -c < "$BODY" | tr -d ' ')" = "$EXPECTED_SIZE"
+test "$(shasum -a 256 "$BODY" | cut -d ' ' -f 1)" = "$EXPECTED_SHA256"
+rm -f "$BODY"
+```
+
+The public check is successful only when `status=200`, the final URL is the
+intended reviewer URL after the configured redirects, and both byte checks
+pass. A 404 body must never be treated as artifact evidence, even if the public
+host itself is reachable.
+
 For Lab-generated Workflow Bench artifacts, publish the bundle under the configured artifact root first, then inspect, then serve:
 
 ```sh
