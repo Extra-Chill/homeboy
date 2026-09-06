@@ -1348,3 +1348,34 @@ fn owned_remote_wrapper_executes_a_large_payload() {
         output.stderr
     );
 }
+
+#[test]
+fn materialized_env_keeps_large_cook_payloads_off_the_probe_command() {
+    let prompt = "prompt-14304-".repeat(16 * 1024);
+    let plan = "plan-14304-".repeat(16 * 1024);
+    let mut client = SshClient {
+        host: "localhost".to_string(),
+        user: "tester".to_string(),
+        port: 22,
+        identity_file: None,
+        auth: None,
+        is_local: true,
+        env: HashMap::new(),
+    };
+    client.env.insert("COOK_PROMPT".to_string(), prompt.clone());
+    client.env.insert("COOK_PLAN".to_string(), plan.clone());
+    client
+        .env
+        .insert("HOMEBOY_COMMAND".to_string(), "sh".to_string());
+
+    let output = client.execute_with_materialized_env(
+        "[ ${#COOK_PROMPT} -gt 128000 ] && [ ${#COOK_PLAN} -gt 128000 ] && \"$HOMEBOY_COMMAND\" -c 'exit 0' && git --version >/dev/null && printf 'homeboy-git-probe-ok'",
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.stdout, "homeboy-git-probe-ok");
+    assert!(
+        prompt.len() + plan.len() > 128 * 1024,
+        "test payload must exceed argv safety margin"
+    );
+}
