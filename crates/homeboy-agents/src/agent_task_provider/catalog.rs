@@ -6,7 +6,6 @@ use super::resolution::{
 use super::runner_readiness::provider_executable_env;
 use super::secrets::{
     apply_provider_runner_secret_env_contracts_with_providers, provider_declared_secret_sources,
-    provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers,
 };
 use super::*;
