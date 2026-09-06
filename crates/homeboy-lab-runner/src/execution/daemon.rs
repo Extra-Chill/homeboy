@@ -7,7 +7,7 @@ use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_workload_result;
-use homeboy_core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
+use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleMetadata};
 use homeboy_core::daemon::{DirectDaemonExecSubmitRequest, WorkspaceOwnerRegisterRequest};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::error::{Error, ErrorCode, Result};
@@ -2187,6 +2187,29 @@ pub(crate) fn result_event_data(events: &[JobEvent]) -> Option<Value> {
         .rev()
         .find(|event| matches!(event.kind, homeboy_core::api_jobs::JobEventKind::Result))
         .and_then(|event| event.data.clone())
+}
+
+/// Cancellation can terminalize queued work before a worker has emitted its
+/// normal result event. Supply the equivalent non-success result locally so the
+/// shared terminal evidence path can project the authoritative job snapshot.
+pub(super) fn append_cancelled_result_if_absent(job: &Job, events: &mut Vec<JobEvent>) {
+    if job.status != JobStatus::Cancelled || result_event_data(events).is_some() {
+        return;
+    }
+    events.push(JobEvent {
+        sequence: events
+            .last()
+            .map(|event| event.sequence.saturating_add(1))
+            .unwrap_or(1),
+        job_id: job.id,
+        kind: JobEventKind::Result,
+        timestamp_ms: job.updated_at_ms,
+        message: Some("runner job cancelled before producing a result".to_string()),
+        data: Some(json!({
+            "exit_code": 1,
+            "stderr": "runner job cancelled",
+        })),
+    });
 }
 
 pub(super) fn append_agent_task_lifecycle_workload_event(

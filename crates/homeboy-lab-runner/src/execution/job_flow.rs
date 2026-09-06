@@ -202,6 +202,20 @@ where
                 &events,
                 &mut reported_progress_sequence,
             );
+            let cancellation = attempt_wait_timeout_cancel(
+                &flow.runner.id,
+                &job_id,
+                cancel_on_wait_timeout_enabled(&flow.runner.settings),
+            );
+            if let WaitTimeoutCancelOutcome::Cancelled(cancelled_job) = &cancellation {
+                if cancelled_job.status.is_terminal() {
+                    // Cancellation returns the daemon's authoritative snapshot.
+                    // Project terminal work through the normal lifecycle instead
+                    // of claiming a cancelled remote command still runs.
+                    job = cancelled_job.clone();
+                    continue;
+                }
+            }
             let (mut output, _) = detached_handoff_output(
                 flow.runner,
                 flow.mode,
@@ -214,14 +228,9 @@ where
                 flow.run_id,
                 persisted_run_id,
             );
-            let cancellation = attempt_wait_timeout_cancel(
-                &flow.runner.id,
-                &job_id,
-                cancel_on_wait_timeout_enabled(&flow.runner.settings),
-            );
             let cancellation_message = match cancellation {
                 WaitTimeoutCancelOutcome::Disabled => "remote job remains in flight".to_string(),
-                WaitTimeoutCancelOutcome::Cancelled => {
+                WaitTimeoutCancelOutcome::Cancelled(_) => {
                     "remote cancellation was requested".to_string()
                 }
                 WaitTimeoutCancelOutcome::Failed(reason) => {
@@ -251,6 +260,7 @@ where
     let mut job_events = events(&job).map(|events| {
         redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names)
     })?;
+    append_cancelled_result_if_absent(&job, &mut job_events);
     record_and_report_promotion_progress_frames(
         flow.run_id.as_deref(),
         &job_id,

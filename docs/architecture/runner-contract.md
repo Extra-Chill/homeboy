@@ -192,8 +192,10 @@ submitted; workload settings inside the remote command cannot change them.
 
 When the wait expires after acceptance, the runner job and its durable run IDs
 remain authoritative. Homeboy reports an in-flight handoff with
-`homeboy runner job logs <runner> <job> --follow`; it does not report the remote
-command as failed. Unset `cancel_on_wait_timeout` does not cancel any workload,
+`homeboy runner job logs <runner> <job> --follow` when cancellation is disabled,
+fails, or returns a nonterminal job. If cancellation returns a terminal job,
+Homeboy projects that terminal non-success result instead of claiming the remote
+command continues. Unset `cancel_on_wait_timeout` does not cancel any workload,
 including agent-task workloads; set it explicitly to request best-effort
 cancellation.
 

@@ -103,7 +103,7 @@ pub(super) fn print_lab_offload_handoff(
 #[derive(Debug)]
 pub(super) enum WaitTimeoutCancelOutcome {
     Disabled,
-    Cancelled,
+    Cancelled(Job),
     Failed(String),
 }
 
@@ -132,7 +132,8 @@ pub(super) fn cancel_on_wait_timeout_enabled(
 /// opt-in is off so callers preserve the byte-identical default contract. When
 /// the opt-in is on, the existing `runner_job_cancel` primitive is invoked and
 /// any error is captured rather than propagated (the controller still needs to
-/// surface the timeout).
+/// surface the timeout). A successful cancellation retains the daemon's
+/// authoritative job projection, which may already be terminal.
 pub(super) fn attempt_wait_timeout_cancel(
     runner_id: &str,
     job_id: &str,
@@ -142,13 +143,13 @@ pub(super) fn attempt_wait_timeout_cancel(
         return WaitTimeoutCancelOutcome::Disabled;
     }
     match invoke_runner_job_cancel(runner_id, job_id) {
-        Ok(()) => WaitTimeoutCancelOutcome::Cancelled,
+        Ok(job) => WaitTimeoutCancelOutcome::Cancelled(job),
         Err(err) => WaitTimeoutCancelOutcome::Failed(err.message),
     }
 }
 
-fn invoke_runner_job_cancel(runner_id: &str, job_id: &str) -> Result<()> {
-    runner_job_cancel(runner_id, job_id).map(|_| ())
+fn invoke_runner_job_cancel(runner_id: &str, job_id: &str) -> Result<Job> {
+    runner_job_cancel(runner_id, job_id).map(|(job, _)| job)
 }
 
 pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobEvent>)> {

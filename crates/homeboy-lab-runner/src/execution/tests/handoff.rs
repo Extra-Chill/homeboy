@@ -584,7 +584,7 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
 }
 
 #[test]
-fn zero_wait_direct_daemon_explicitly_cancels_accepted_job_after_typed_handoff() {
+fn zero_wait_direct_daemon_projects_terminal_cancellation() {
     homeboy_core::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
         let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
@@ -623,22 +623,23 @@ fn zero_wait_direct_daemon_explicitly_cancels_accepted_job_after_typed_handoff()
             false,
             None,
         )
-        .expect("zero-wait direct daemon cancellation handoff");
+        .expect("zero-wait direct daemon cancellation result");
 
-        assert_eq!(exit_code, 0);
-        assert!(output.is_in_flight());
+        assert_eq!(exit_code, 1);
+        assert!(!output.is_in_flight());
         let job_id = output.job_id.as_deref().expect("accepted job id");
-        let run_id = output.mirror_run_id.as_deref().expect("durable run id");
-        let envelope: homeboy_core::lab_contract::LabRunnerHandoffEnvelope =
-            serde_json::from_str(&output.stdout).expect("typed running handoff");
-        assert_eq!(envelope.status, "running");
-        assert_eq!(envelope.identity.runner_job_id, job_id);
-        assert_eq!(envelope.mirror_run_id.as_deref(), Some(run_id));
-        assert!(
-            output.stderr.contains("remote cancellation was requested."),
-            "{}",
-            output.stderr
+        assert_eq!(
+            output.job.as_ref().map(|job| job.status),
+            Some(JobStatus::Cancelled)
         );
+        assert_eq!(
+            output
+                .execution_record
+                .as_ref()
+                .map(|record| record.status.as_str()),
+            Some("failed")
+        );
+        assert!(!output.stderr.contains("still in flight"));
 
         let client = Client::builder().no_proxy().build().expect("daemon client");
         wait_for_cancelled_daemon_job(&client, &daemon_url, job_id);
@@ -681,7 +682,51 @@ fn persist_direct_daemon_cancel_session(daemon_url: &str) {
         connected_at: chrono::Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,
-        last_seen_at: None,
+        last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
+        leaseless_recovery_evidence: None,
+    };
+    let path = homeboy_core::paths::runner_controller_session_file("lab", "handoff-cancel-test")
+        .expect("session path");
+    std::fs::create_dir_all(path.parent().expect("session directory"))
+        .expect("create session directory");
+    std::fs::write(
+        path,
+        serde_json::to_vec(&session).expect("serialize session"),
+    )
+    .expect("persist session");
+}
+
+fn persist_reverse_broker_cancel_session(broker_url: &str) {
+    let runner_dir = homeboy_core::paths::homeboy()
+        .expect("homeboy directory")
+        .join("runners");
+    std::fs::create_dir_all(&runner_dir).expect("create runner directory");
+    std::fs::write(
+        runner_dir.join("lab.json"),
+        r#"{"id":"lab","kind":"local","workspace_root":"/srv/homeboy"}"#,
+    )
+    .expect("persist runner config");
+    let session = RunnerSession {
+        runner_id: "lab".to_string(),
+        mode: RunnerTunnelMode::Reverse,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("srv".to_string()),
+        controller_id: Some("handoff-cancel-test".to_string()),
+        broker_url: Some(broker_url.to_string()),
+        remote_daemon_address: None,
+        local_port: None,
+        local_url: None,
+        tunnel_pid: None,
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: None,
+        remote_daemon_lease_id: None,
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: None,
+        connected_at: chrono::Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
         leaseless_recovery_evidence: None,
     };
     let path = homeboy_core::paths::runner_controller_session_file("lab", "handoff-cancel-test")
@@ -750,6 +795,59 @@ fn zero_wait_reverse_broker_preserves_accepted_running_handoff() {
         let client = Client::builder().build().expect("broker client");
         let job = fetch_daemon_job(&client, &broker_url, job_id).expect("accepted broker job");
         assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
+    });
+}
+
+#[test]
+fn zero_wait_reverse_broker_projects_terminal_cancellation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        allow_unauthenticated_loopback_broker();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
+        let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let broker_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        persist_reverse_broker_cancel_session(&broker_url);
+
+        let (output, exit_code) = exec_via_reverse_broker(
+            &ssh_runner(),
+            &broker_url,
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "test".to_string()],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            false,
+        )
+        .expect("zero-wait reverse broker cancellation result");
+
+        assert_eq!(exit_code, 1);
+        assert!(!output.is_in_flight());
+        assert_eq!(
+            output.job.as_ref().map(|job| job.status),
+            Some(JobStatus::Cancelled)
+        );
+        assert_eq!(
+            output
+                .execution_record
+                .as_ref()
+                .map(|record| record.status.as_str()),
+            Some("failed")
+        );
+        assert!(!output.stderr.contains("still in flight"));
     });
 }
 

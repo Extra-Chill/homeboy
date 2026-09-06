@@ -139,8 +139,9 @@ cancellation policy on the runner instead of relying on process environment:
 The timeout environment value overrides the configured number when it parses as
 whole seconds. A truthy cancellation environment value (`1`, `true`, `yes`,
 `on`) enables cancellation for one run. On expiry Homeboy returns a successful
-in-flight handoff, preserves the runner job and run IDs, and prints the runner
-job follow command; it does not claim that the remote command failed.
+in-flight handoff only when cancellation is disabled, fails, or returns a
+nonterminal job. A terminal cancellation result is projected as a terminal
+non-success result; it does not claim that the remote command continues.
 
 ```json
 {

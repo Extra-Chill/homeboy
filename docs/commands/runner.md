@@ -870,7 +870,8 @@ Arbitrary runner updates must use `--json` or `--base64`; positional `key=value`
 runner accepts a job (`0` returns an in-flight handoff immediately).
 `cancel_on_wait_timeout` controls whether an expired controller wait requests
 remote cancellation. Its unset default is `false` for every runner command,
-including agent-task workloads.
+including agent-task workloads. If cancellation returns a terminal job, Homeboy
+returns its terminal non-success result rather than an in-flight handoff.
 
 ### `trust`
 
