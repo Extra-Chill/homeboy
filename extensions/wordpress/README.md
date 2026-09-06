@@ -244,6 +244,97 @@ adjustments. Text domain is auto-detected from the plugin header. When
 PHPCS reports auto-fixable findings, the runner surfaces a CTA showing
 the exact `homeboy refactor` command to clean them up.
 
+#### Shared ruleset for consumers
+
+[`rulesets/homeboy-wordpress-project.xml`](rulesets/homeboy-wordpress-project.xml)
+is the reusable half of `phpcs.xml.dist`, shipped so any WordPress
+component can reference it instead of hand-rolling PHPCS config. It
+includes `WordPress-Extra` with the PSR-4 naming exclusions, the
+PEAR/Squiz spacing exclusions (they fight WordPress spacing rules and
+cause PHPCBF infinite loops), `testVersion`, and exclude-patterns for
+`vendor/` (plus its prefixed/scoped variants), `node_modules/`,
+`build/`, `dist/`, `tools/`, and `scoper.inc.php`. `phpcs.xml.dist`
+above references this same file (`<rule ref="rulesets/homeboy-wordpress-project.xml"/>`),
+so the extension's own lint run is the proof that the shipped artifact
+works — it is not a parallel, drifting copy.
+
+**Running it standalone** — a WordPress extension install exposes its
+own path via `homeboy extension exec`, which sets `HOMEBOY_EXTENSION_PATH`
+in the child process environment:
+
+```bash
+homeboy extension exec wordpress -c <component-id> -- \
+    vendor/bin/phpcs --standard="$HOMEBOY_EXTENSION_PATH/rulesets/homeboy-wordpress-project.xml" .
+```
+
+Drop `-c <component-id>` to run against the current working directory
+instead of a Homeboy-registered component. `vendor/bin/phpcs` there is
+the *consumer's own* Composer-installed PHPCS binary (`squizlabs/php_codesniffer`
++ `wp-coding-standards/wpcs` as `require-dev`) resolved relative to the
+component's working directory — the extension only supplies the
+ruleset file, not the PHPCS binary itself, unless the consumer has none
+installed and falls back to the extension's own `vendor/bin/phpcs`.
+
+> **Note on `{{extensionPath}}`:** this repository's own `composer.json`
+> (`"test": "phpunit --configuration={{extensionPath}}/phpunit.xml.dist"`)
+> looks like a working example of a `{{extensionPath}}` substitution
+> that Composer scripts can use directly. It is not — `{{extensionPath}}`
+> is only substituted inside `runtime.run_command` and action `command`
+> templates that Homeboy itself invokes (`homeboy extension run` /
+> `extension.run` pipeline steps); Composer never sees or expands it.
+> Running `composer test` in this repo fails literally
+> (`Could not read "{{extensionPath}}/phpunit.xml.dist"`) — confirmed
+> while building this ruleset. The one-liner above using
+> `homeboy extension exec` + the real `HOMEBOY_EXTENSION_PATH`
+> environment variable is the actual, currently-working resolution
+> path. A follow-up issue tracks fixing or removing the misleading
+> `composer.json` entry; it is unrelated to the PHPCS ruleset and out
+> of scope here.
+
+**Consumer overrides** — reference the whole file with a single `<rule
+ref>` and layer overrides in your own `phpcs.xml.dist` without copying
+the exclusion list. PHPCS's `<rule ref>` does not expand shell
+variables or `~`, so a static ruleset file needs the extension's
+resolved absolute path — get it once with
+`homeboy extension exec wordpress -- pwd` (or `homeboy extension show wordpress`)
+and hardcode it, same as any other vendored tool path in a project
+config:
+
+```xml
+<?xml version="1.0"?>
+<ruleset name="My Component">
+    <rule ref="/home/you/.config/homeboy/extensions/wordpress/rulesets/homeboy-wordpress-project.xml"/>
+
+    <!-- Add an exclusion the shared file doesn't have -->
+    <exclude-pattern>*/legacy/*</exclude-pattern>
+
+    <!-- Re-enable a specific message the shared ruleset excludes.
+         A bare <rule ref="Code"/> does NOT undo an inherited exclusion —
+         PHPCS only resets severity when you set it explicitly. -->
+    <rule ref="WordPress.NamingConventions.ValidVariableName.VariableNotSnakeCase">
+        <severity>5</severity>
+    </rule>
+</ruleset>
+```
+
+This is a real limitation, not a templating gap this PR could paper
+over: it is inherent to how PHPCS parses `<rule ref>` paths (verified
+directly — `~/...` in a `<rule ref>` fails with "Referenced sniff ...
+does not exist"). Consumers who never need to override anything are
+better served by the CLI one-liner above, which resolves
+`$HOMEBOY_EXTENSION_PATH` in the shell before PHPCS ever sees the path.
+
+Adding an `<exclude-pattern>` is always safe to layer on top. Removing
+one is not possible once inherited through `<rule ref="...">` — PHPCS
+exclude-patterns are additive only. That is why `*/tests/*` is **not**
+part of the shared default: a consumer who wants tests out of scope can
+add the pattern above in one line, but a consumer who wants tests
+linted could never undo it if the shared file excluded them. Consumers
+whose `tests/` trees are not WordPress-Extra-clean (PHPUnit fixtures,
+smoke harnesses, etc., as in this extension's own `tests/`) add the
+exclusion locally — see how `phpcs.xml.dist` in this repo does exactly
+that as a host-specific addition on top of the shared file.
+
 ### PHPStan
 
 `phpstan.neon.dist` runs at **level 7** with WordPress + WP-CLI +

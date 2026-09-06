@@ -2,23 +2,14 @@
 <ruleset name="WordPress Module PHPCS Configuration">
     <description>PHPCS configuration for WordPress components using the WordPress module.</description>
 
-    <!-- WordPress-Extra includes WordPress-Core + WordPress-Docs -->
-    <rule ref="WordPress-Extra">
-        <!-- Exclude naming convention rules to support PSR-4 codebases -->
-        <exclude name="WordPress.Files.FileName.NotHyphenatedLowercase"/>
-        <exclude name="WordPress.Files.FileName.InvalidClassFileName"/>
-        <exclude name="WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid"/>
-        <exclude name="WordPress.NamingConventions.ValidVariableName.VariableNotSnakeCase"/>
-        <exclude name="WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase"/>
-        <exclude name="WordPress.NamingConventions.ValidVariableName.PropertyNotSnakeCase"/>
-        <exclude name="WordPress.NamingConventions.ValidVariableName.InterpolatedVariableNotSnakeCase"/>
-
-        <!-- Exclude PEAR/Squiz function spacing rules that conflict with WordPress formatting -->
-        <!-- These rules fight with WordPress spacing rules, causing PHPCBF infinite loops -->
-        <exclude name="PEAR.Functions.FunctionCallSignature"/>
-        <exclude name="Squiz.Functions.FunctionDeclarationArgumentSpacing"/>
-        <exclude name="Squiz.Functions.MultiLineFunctionDeclaration"/>
-    </rule>
+    <!--
+        Dogfoods the shipped consumer ruleset (rulesets/homeboy-wordpress-project.xml):
+        WordPress-Extra with PSR-4 naming exclusions, PEAR/Squiz spacing exclusions,
+        testVersion, the shared non-source exclude-patterns, and the report args.
+        Running this extension's own lint against that file is what proves the
+        shipped artifact actually works for consumers who reference it the same way.
+    -->
+    <rule ref="rulesets/homeboy-wordpress-project.xml"/>
 
     <!--
         Custom homeboy-extensions sniffs (WP handbook rules not covered by WPCS).
@@ -30,30 +21,13 @@
         <severity>0</severity>
     </rule>
 
-    <!-- PHP 7.4+ compatibility -->
-    <config name="testVersion" value="7.4-"/>
-
-    <!-- Exclude common non-source directories -->
-    <exclude-pattern>*/vendor/*</exclude-pattern>
-    <exclude-pattern>*/vendor_prefixed/*</exclude-pattern>
-    <exclude-pattern>*/vendor-prefixed/*</exclude-pattern>
-    <exclude-pattern>*/vendor_scoped/*</exclude-pattern>
-    <exclude-pattern>*/vendor-scoped/*</exclude-pattern>
-    <exclude-pattern>*/node_modules/*</exclude-pattern>
-    <exclude-pattern>*/dist/*</exclude-pattern>
-    <exclude-pattern>*/build/*</exclude-pattern>
-    <exclude-pattern>*/tools/*</exclude-pattern>
-    <exclude-pattern>*/scoper.inc.php</exclude-pattern>
+    <!--
+        Host-specific: exclude this extension's own tests/ directory (PHPUnit
+        fixtures, smoke harnesses) from the WordPress runtime lint profile. Not
+        part of the shared ruleset — see rulesets/homeboy-wordpress-project.xml
+        for why tests/ is intentionally left in scope by default there.
+    -->
     <exclude-pattern>*/tests/*</exclude-pattern>
 
     <!-- Text domain is auto-detected from plugin header by test-runner.sh -->
-
-    <!-- Show sniff codes in reports for easier targeting -->
-    <arg value="s"/>
-
-    <!-- Use colors in output -->
-    <arg name="colors"/>
-
-    <!-- Check PHP files only -->
-    <arg name="extensions" value="php"/>
 </ruleset>
