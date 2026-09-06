@@ -1348,12 +1348,12 @@ fn collect_direct_readiness_with<T, Collect, Refresh>(
     mut refresh_status: Refresh,
 ) -> Result<GenerationStampedReadiness<T>>
 where
-    Collect: FnMut(&Runner, &mut RunnerStatusReport) -> Result<T>,
+    Collect: FnMut(&Runner, &mut RunnerStatusReport, bool) -> Result<T>,
     Refresh: FnMut() -> Result<(Runner, RunnerStatusReport)>,
 {
     for attempt in 1..=2 {
         let controller_build_identity = homeboy_product_identity::build_identity().display;
-        let collected = collect(&runner, &mut status)?;
+        let collected = collect(&runner, &mut status, attempt == 1)?;
         let Some(generation) = direct_readiness_generation(&status) else {
             return Err(Error::validation_invalid_argument(
                 "runner",
@@ -1401,9 +1401,9 @@ fn collect_direct_readiness_evidence(
         runner_id,
         runner,
         status,
-        |runner, status| {
+        |runner, status, use_converged_path| {
             let homeboy_path =
-                final_preflight_homeboy_path(converged_homeboy_path, runner)?.to_string();
+                direct_readiness_homeboy_path(runner, converged_homeboy_path, use_converged_path)?;
             let configured_build_identity =
                 configured_build_identity_for_admission(status, || {
                     configured_runner_homeboy_build_identity(runner, &homeboy_path)
@@ -1436,6 +1436,101 @@ fn collect_direct_readiness_evidence(
         generation: readiness.generation,
         attempts: readiness.attempts,
     })
+}
+
+fn direct_readiness_homeboy_path(
+    runner: &Runner,
+    converged_homeboy_path: Option<&str>,
+    use_converged_path: bool,
+) -> Result<String> {
+    // A refresh may replace the configured executable. The converged path is
+    // valid only for its initial generation.
+    if use_converged_path {
+        final_preflight_homeboy_path(converged_homeboy_path, runner).map(str::to_string)
+    } else {
+        remote_runner_homeboy_path(runner, "Lab offload readiness refresh").map(str::to_string)
+    }
+}
+
+/// Fence detached controller staging behind the same direct-SSH identity
+/// evidence as synchronous execution. A permitted automatic route may return
+/// locally here; every other stable mismatch remains unavailable to staging.
+fn direct_readiness_fence_before_detached_staging(
+    runner_id: &str,
+    runner: Runner,
+    status: RunnerStatusReport,
+    request: &LabOffloadRequest<'_>,
+    selection: &LabRunnerSelection,
+    plan: &HomeboyPlan,
+    hot_label: &str,
+    release_gate: bool,
+    overhead: &mut LabOffloadOverhead,
+) -> Result<(Runner, RunnerStatusReport, Option<LabOffloadOutcome>)> {
+    if !status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+    {
+        return Ok((runner, status, None));
+    }
+
+    let readiness = collect_direct_readiness_evidence(runner_id, runner, status, None)?;
+    let mut runner_homeboy =
+        lab_runner_homeboy_metadata(runner_id, &readiness.homeboy_path, &readiness.status);
+    runner_homeboy["readiness_observation"] = serde_json::json!({
+        "controller_build_identity": &readiness.controller_build_identity,
+        "configured_executable": &readiness.homeboy_path,
+        "configured_job_binary_build_identity": &readiness.configured_build_identity,
+        "daemon_build_identity": &readiness.generation.daemon_build_identity,
+        "daemon_lease_id": &readiness.generation.remote_daemon_lease_id,
+        "daemon_address": &readiness.generation.remote_daemon_address,
+        "daemon_pid": readiness.generation.remote_daemon_pid,
+        "observed_at": &readiness.observed_at,
+        "collection_attempts": readiness.attempts,
+    });
+    runner_homeboy["capability_admission"] = serde_json::to_value(&readiness.capability_admission)
+        .expect("Lab capability admission serializes");
+    let fallback = detached_direct_staging_fallback_or_refusal(
+        runner_id,
+        request,
+        selection,
+        plan,
+        &readiness.status,
+        &runner_homeboy,
+        readiness.runner.settings.concurrency_limit,
+        hot_label,
+        release_gate,
+        overhead,
+    )?;
+    Ok((readiness.runner, readiness.status, fallback))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detached_direct_staging_fallback_or_refusal(
+    runner_id: &str,
+    request: &LabOffloadRequest<'_>,
+    selection: &LabRunnerSelection,
+    plan: &HomeboyPlan,
+    status: &RunnerStatusReport,
+    runner_homeboy: &serde_json::Value,
+    concurrency_limit: Option<usize>,
+    hot_label: &str,
+    release_gate: bool,
+    overhead: &mut LabOffloadOverhead,
+) -> Result<Option<LabOffloadOutcome>> {
+    if let Some(outcome) = late_direct_identity_fallback(
+        request,
+        selection,
+        plan,
+        status,
+        runner_homeboy,
+        release_gate,
+        overhead,
+    )? {
+        return Ok(Some(outcome));
+    }
+    require_available_lab_runner(runner_id, status, concurrency_limit, hot_label)?;
+    Ok(None)
 }
 
 /// A direct-SSH identity comparison happens after selection but before daemon
@@ -1541,6 +1636,20 @@ pub(crate) fn run_lab_offload_inner(
         request.durable_agent_task_plan,
         request.durable_run_id,
     ) {
+        let (_, _, fallback) = direct_readiness_fence_before_detached_staging(
+            runner_id,
+            runner,
+            runner_status,
+            &request,
+            &selection,
+            &plan,
+            contract.hot_label,
+            contract.routing_policy.release_gate,
+            &mut overhead,
+        )?;
+        if let Some(outcome) = fallback {
+            return Ok(outcome);
+        }
         emit_durable_run_id_before_execution(
             run_id,
             runner_id,
@@ -3429,7 +3538,7 @@ mod tests {
             "homeboy-lab",
             test_direct_runner(),
             status_a,
-            |_, _| {
+            |_, _, _| {
                 collections += 1;
                 Ok(())
             },
@@ -3448,6 +3557,43 @@ mod tests {
     }
 
     #[test]
+    fn direct_readiness_refresh_re_resolves_the_configured_executable_path() {
+        let status_a = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
+        let status_b = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-b");
+        let stale_runner = test_direct_runner_with_path("/runner/stale-homeboy");
+        let current_runner = test_direct_runner_with_path("/runner/current-homeboy");
+        let mut refreshed = VecDeque::from([
+            (current_runner.clone(), status_b.clone()),
+            (current_runner, status_b),
+        ]);
+        let mut paths = Vec::new();
+
+        collect_direct_readiness_with(
+            "homeboy-lab",
+            stale_runner,
+            status_a,
+            |runner, _, use_converged_path| {
+                paths.push(direct_readiness_homeboy_path(
+                    runner,
+                    Some("/runner/converged-before-refresh"),
+                    use_converged_path,
+                )?);
+                Ok(())
+            },
+            || Ok(refreshed.pop_front().expect("bounded status refresh")),
+        )
+        .expect("the refreshed generation stabilizes");
+
+        assert_eq!(
+            paths,
+            vec![
+                "/runner/converged-before-refresh".to_string(),
+                "/runner/current-homeboy".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn direct_readiness_refuses_a_stable_provenance_mismatch_without_retrying() {
         let status = direct_identity_status(Some("homeboy 0.339.0+configured"), "lease-a");
         let mut collections = 0;
@@ -3456,7 +3602,7 @@ mod tests {
             "homeboy-lab",
             test_direct_runner(),
             status.clone(),
-            |_, status| {
+            |_, status, _| {
                 collections += 1;
                 let configured = status.configured_job_binary_build_identity.clone();
                 apply_direct_ssh_configured_identity_freshness(
@@ -3493,7 +3639,7 @@ mod tests {
             "homeboy-lab",
             test_direct_runner(),
             status_a,
-            |_, _| {
+            |_, _, _| {
                 collections += 1;
                 Ok(())
             },
@@ -3556,7 +3702,7 @@ mod tests {
     }
 
     #[test]
-    fn late_identity_drift_falls_back_only_for_auto_policy_with_local_permission() {
+    fn detached_identity_drift_falls_back_without_controller_staging() {
         use homeboy_lab_runner_contract::{
             EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
             ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
@@ -3677,6 +3823,26 @@ mod tests {
             normalized_args: &args,
             ..LabOffloadRequest::for_test(&args)
         };
+
+        let mut controller_staging_submissions = 0;
+        if detached_direct_staging_fallback_or_refusal(
+            "homeboy-lab",
+            &request,
+            &selection,
+            &base_lab_plan(None),
+            &status,
+            &runner_homeboy,
+            None,
+            "cook",
+            false,
+            &mut LabOffloadOverhead::start(),
+        )
+        .expect("detached admission fence")
+        .is_none()
+        {
+            controller_staging_submissions += 1;
+        }
+        assert_eq!(controller_staging_submissions, 0);
 
         let explicit = LabRunnerSelection {
             source: LabRunnerSelectionSource::Explicit,
@@ -4060,9 +4226,13 @@ mod tests {
     }
 
     fn test_direct_runner() -> Runner {
+        test_direct_runner_with_path("/runner/homeboy")
+    }
+
+    fn test_direct_runner_with_path(homeboy_path: &str) -> Runner {
         serde_json::from_value(serde_json::json!({
             "kind": "ssh",
-            "settings": { "homeboy_path": "/runner/homeboy" },
+            "homeboy_path": homeboy_path,
         }))
         .expect("direct SSH runner")
     }
