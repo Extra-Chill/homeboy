@@ -2,6 +2,7 @@ use super::*;
 use base64::Engine;
 use homeboy_core::api_jobs::JobEventKind;
 use homeboy_core::observation::{NewRunRecord, ObservationStore};
+use homeboy_runner_contract::RunnerSessionRole;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,244 +31,97 @@ fn accepted_handoff_persistence_error_carries_an_explicit_remote_boundary() {
 }
 
 #[test]
-fn timeout_mirrors_remote_job_without_cancelling() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let runner = ssh_runner();
-        let job_id = uuid::Uuid::new_v4();
-        let job = Job {
-            id: job_id,
-            operation: "runner.exec".to_string(),
-            status: JobStatus::Running,
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_001_000,
-            started_at_ms: Some(1_700_000_000_000),
-            finished_at_ms: None,
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: None,
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
-        let err = daemon_job_wait_timeout(
-            &runner,
-            "/srv/homeboy/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &[],
-            "runner daemon job",
-            true,
-        );
-        let run_id = format!("runner-exec-bench-lab-{job_id}");
+fn runner_wait_settings_and_environment_resolve_at_the_controller() {
+    let settings = homeboy_core::server::RunnerSettings {
+        runner_exec_wait_timeout_secs: Some(2400),
+        ..Default::default()
+    };
+    let _env = EnvVarGuard::unset(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
+    assert_eq!(
+        runner_exec_wait_timeout(&settings),
+        Duration::from_secs(2400)
+    );
 
-        assert!(err.message.contains("runner daemon job"));
-        assert!(err.message.contains(job_id.to_string().as_str()));
-        assert!(err.message.contains("lab"));
-        assert!(err.message.contains("was not cancelled"));
-        assert_eq!(err.details["status"], "controller_wait_expired");
-        assert_eq!(err.details["reason"], "controller_wait_expired");
-        assert_eq!(err.retryable, Some(true));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains(&format!("homeboy runs show {run_id}"))));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains(&format!("homeboy runs artifacts {run_id}"))));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("Lab offload handoff: runner `lab` has daemon job")));
-        assert!(err.hints.iter().any(|hint| hint.message.contains(
-            "homeboy runner exec --cwd /srv/homeboy/project lab -- homeboy runs list --status running --limit 20"
-        )));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains(&format!("homeboy runner job cancel lab {job_id}"))));
-        assert!(err.hints.iter().any(|hint| {
-            hint.message.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
-                && hint.message.contains("controller-side")
-                && hint.message.contains("workload settings")
-        }));
-
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        let mirrored = store
-            .get_run(&run_id)
-            .expect("get mirrored run")
-            .expect("mirrored run");
-        assert_eq!(mirrored.status, "running");
-        assert_eq!(
-            mirrored.metadata_json["lab"]["remote_job"]["id"].as_str(),
-            Some(job_id.to_string().as_str())
-        );
-    });
+    let _env = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "60");
+    assert_eq!(runner_exec_wait_timeout(&settings), Duration::from_secs(60));
 }
 
 #[test]
-fn controller_wait_expiry_is_distinct_from_a_remote_job_failure() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let runner = ssh_runner();
-        let job = running_job_with_id(uuid::Uuid::new_v4());
-        let error = daemon_job_wait_timeout(
-            &runner,
-            "/srv/homeboy/project",
-            &["homeboy".to_string(), "agent-task".to_string()],
-            &job,
-            &[],
-            "runner daemon job",
-            true,
-        );
+fn cancellation_defaults_to_agent_task_workloads_after_overrides() {
+    let _env = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+    let settings = homeboy_core::server::RunnerSettings::default();
+    assert!(!cancel_on_wait_timeout_enabled(&settings, None));
+    assert!(cancel_on_wait_timeout_enabled(
+        &settings,
+        Some(&agent_task_workload())
+    ));
 
-        assert_eq!(
-            error.details["job_id"].as_str(),
-            Some(job.id.to_string().as_str())
-        );
-        assert_eq!(error.details["reason"], "controller_wait_expired");
-    });
+    let settings = homeboy_core::server::RunnerSettings {
+        cancel_on_wait_timeout: Some(false),
+        ..Default::default()
+    };
+    assert!(!cancel_on_wait_timeout_enabled(
+        &settings,
+        Some(&agent_task_workload())
+    ));
+
+    let settings = homeboy_core::server::RunnerSettings {
+        cancel_on_wait_timeout: Some(true),
+        ..Default::default()
+    };
+    assert!(cancel_on_wait_timeout_enabled(&settings, None));
+
+    let _env = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
+    assert!(cancel_on_wait_timeout_enabled(
+        &homeboy_core::server::RunnerSettings {
+            cancel_on_wait_timeout: Some(false),
+            ..Default::default()
+        },
+        Some(&agent_task_workload()),
+    ));
 }
 
-fn running_job_with_id(id: uuid::Uuid) -> Job {
-    Job {
-        id,
-        operation: "runner.exec".to_string(),
-        status: JobStatus::Running,
-        created_at_ms: 1_700_000_000_000,
-        updated_at_ms: 1_700_000_001_000,
-        started_at_ms: Some(1_700_000_000_000),
-        finished_at_ms: None,
-        event_count: 0,
-        source_snapshot: None,
-        path_materialization_plan: None,
-        stale_reason: None,
-        daemon_lease_id: None,
-        target_runner_id: None,
-        target_project_id: None,
-        claim_id: None,
-        claimed_by_runner_id: None,
-        claimed_at_ms: None,
-        claim_expires_at_ms: None,
-        artifacts: Vec::new(),
-        runner_job_projection: None,
-    }
-}
-
-#[test]
-fn opt_in_cancels_remote_job_on_wait_timeout() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _env = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "1");
-        let calls: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
-        let recorder = calls.clone();
-        let _hook = test_cancel_hook::install(Box::new(move |runner_id: &str, job_id: &str| {
-            recorder
-                .borrow_mut()
-                .push((runner_id.to_string(), job_id.to_string()));
-            Ok(())
-        }));
-
-        let runner = ssh_runner();
-        let job_id = uuid::Uuid::new_v4();
-        let job = running_job_with_id(job_id);
-        let err = daemon_job_wait_timeout(
-            &runner,
-            "/srv/homeboy/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
+fn agent_task_workload() -> homeboy_core::lab_contract::LabRunnerWorkload {
+    let plan = homeboy_core::plan::HomeboyPlan::builder_for_description(
+        homeboy_core::plan::PlanKind::LabOffload,
+        "wait expiry test",
+    )
+    .build();
+    let command = crate::LabOffloadCommand {
+        command: homeboy_core::lab_contract::LabCommandContract::portable(
+            "agent-task cook",
+            None,
+            false,
             &[],
-            "runner daemon job",
-            true,
-        );
-
-        // The opt-in cancel primitive fired exactly once, targeting this job.
-        assert_eq!(calls.borrow().len(), 1);
-        assert_eq!(calls.borrow()[0], ("lab".to_string(), job_id.to_string()));
-        // The timeout still surfaces, but no longer claims the job was left running.
-        assert!(!err.message.contains("was not cancelled"));
-        assert!(err.message.contains("remote cancellation was requested"));
-        assert_eq!(err.details["cancel_on_wait_timeout"], "requested");
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("requested remote cancellation of job")));
-    });
-}
-
-#[test]
-fn opt_in_off_leaves_remote_job_uncancelled() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _env = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
-        let calls: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
-        let recorder = calls.clone();
-        let _hook = test_cancel_hook::install(Box::new(move |_runner_id: &str, _job_id: &str| {
-            *recorder.borrow_mut() += 1;
-            Ok(())
-        }));
-
-        let runner = ssh_runner();
-        let job_id = uuid::Uuid::new_v4();
-        let job = running_job_with_id(job_id);
-        let err = daemon_job_wait_timeout(
-            &runner,
-            "/srv/homeboy/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &[],
-            "runner daemon job",
-            true,
-        );
-
-        // Default contract: the cancel primitive is never invoked.
-        assert_eq!(*calls.borrow(), 0);
-        assert!(err.message.contains("was not cancelled"));
-        assert_eq!(err.details["cancel_on_wait_timeout"], "disabled");
-    });
-}
-
-#[test]
-fn opt_in_surfaces_remote_cancel_failure_on_wait_timeout() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _env = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
-        let calls: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
-        let recorder = calls.clone();
-        let _hook = test_cancel_hook::install(Box::new(move |_runner_id: &str, _job_id: &str| {
-            *recorder.borrow_mut() += 1;
-            Err(homeboy_core::error::Error::internal_unexpected(
-                "runner is not connected",
-            ))
-        }));
-
-        let runner = ssh_runner();
-        let job_id = uuid::Uuid::new_v4();
-        let job = running_job_with_id(job_id);
-        let err = daemon_job_wait_timeout(
-            &runner,
-            "/srv/homeboy/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &[],
-            "runner daemon job",
-            true,
-        );
-
-        assert_eq!(*calls.borrow(), 1);
-        assert!(err.message.contains("remote cancellation was requested"));
-        assert!(err.message.contains("but failed"));
-        assert!(err.message.contains("runner is not connected"));
-        assert_eq!(err.details["cancel_on_wait_timeout"], "failed");
-        assert!(err
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("remote cancellation failed")));
-    });
+        ),
+        required_extensions: Vec::new(),
+        required_capabilities: Vec::new(),
+        workload: None,
+    };
+    let mut workload =
+        crate::workload::build_lab_runner_workload(crate::workload::LabRunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: false,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab",
+            runner_mode: "daemon",
+            assignment_source: "test",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/project"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+    workload.agent_task = crate::workload::lab_runner_workload_agent_task_from_command(
+        &["homeboy", "agent-task", "cook"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        Some("agent-task-wait-expiry"),
+    );
+    workload
 }
 
 #[test]
@@ -368,6 +222,60 @@ fn terminal_handoff_hints_reflect_cancelled_job_state() {
     assert!(joined.contains("Final daemon job events/result"));
     assert!(!joined.contains("still in flight"));
     assert!(!joined.contains("--status running"));
+}
+
+#[test]
+fn cancelled_terminal_snapshot_overrides_a_preexisting_success_result() {
+    let mut job = running_job();
+    job.status = JobStatus::Cancelled;
+    job.finished_at_ms = Some(job.updated_at_ms);
+    let result = json!({
+        "exit_code": 0,
+        "stdout": "completed before cancellation won",
+        "stderr": "",
+    });
+    let mut events = vec![JobEvent {
+        sequence: 1,
+        job_id: job.id,
+        kind: JobEventKind::Result,
+        timestamp_ms: job.updated_at_ms,
+        message: Some("worker result".to_string()),
+        data: Some(result.clone()),
+    }];
+
+    append_cancelled_result_if_absent(&job, &mut events);
+    let fields = runner_job_result_fields(&events, job.status, &Default::default(), &[]);
+    let runner_result = runner_result(
+        Some(&job),
+        fields.exit_code,
+        &fields.stdout,
+        &fields.stderr,
+        None,
+        None,
+    );
+    let execution_record = runner_execution_record_for_output(
+        &ssh_runner(),
+        "daemon",
+        fields.exit_code,
+        Some(job.id.to_string()),
+        None,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+    );
+
+    // This shared projection is used by both direct-daemon and reverse-broker
+    // terminal paths. The worker result remains evidence, while cancellation
+    // controls the reported command and lifecycle outcomes.
+    assert_eq!(events.len(), 1);
+    assert_eq!(fields.result, result);
+    assert_eq!(fields.exit_code, 1);
+    assert_eq!(runner_result.exit_code, 1);
+    assert_eq!(runner_result.status, JobStatus::Cancelled);
+    assert_eq!(execution_record.status, "failed");
 }
 
 #[test]
@@ -735,6 +643,368 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 }
 
 #[test]
+fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let workspace = tempfile::tempdir().expect("workspace");
+        let started = workspace.path().join("started");
+        let release = workspace.path().join("release");
+        let _release_on_drop = ReleaseBlockedWorkload(release.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let daemon_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+
+        let (output, exit_code) = exec_via_daemon(
+            &ssh_runner(),
+            &daemon_url,
+            None,
+            workspace.path().display().to_string(),
+            None,
+            blocked_workload_command(&started, &release),
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            false,
+            None,
+        )
+        .expect("zero-wait direct daemon handoff");
+
+        assert_zero_wait_handoff(&output, exit_code);
+        wait_for_path(&started, "direct daemon workload start");
+        let job_id = output.job_id.as_deref().expect("accepted job id");
+        let client = Client::builder().no_proxy().build().expect("daemon client");
+        let job = fetch_daemon_job(&client, &daemon_url, job_id).expect("accepted daemon job");
+        assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
+    });
+}
+
+#[test]
+fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let started = workspace.path().join("started");
+        let release = workspace.path().join("release");
+        let _release_on_drop = ReleaseBlockedWorkload(release.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let daemon_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        persist_direct_daemon_cancel_session(&daemon_url);
+
+        let (output, exit_code) = exec_via_daemon(
+            &ssh_runner(),
+            &daemon_url,
+            None,
+            workspace.path().display().to_string(),
+            None,
+            blocked_workload_command(&started, &release),
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Some(agent_task_workload()),
+            None,
+            false,
+            false,
+            true,
+            false,
+            None,
+        )
+        .expect("zero-wait direct daemon cancellation result");
+
+        assert_eq!(exit_code, 1);
+        assert!(!output.is_in_flight());
+        let job_id = output.job_id.as_deref().expect("accepted job id");
+        assert_eq!(
+            output.job.as_ref().map(|job| job.status),
+            Some(JobStatus::Cancelled)
+        );
+        assert_eq!(
+            output
+                .execution_record
+                .as_ref()
+                .map(|record| record.status.as_str()),
+            Some("failed")
+        );
+        assert!(!output.stderr.contains("still in flight"));
+
+        let client = Client::builder().no_proxy().build().expect("daemon client");
+        wait_for_cancelled_daemon_job(&client, &daemon_url, job_id);
+    });
+}
+
+fn persist_direct_daemon_cancel_session(daemon_url: &str) {
+    let local_port = daemon_url
+        .rsplit_once(':')
+        .expect("daemon URL port")
+        .1
+        .parse()
+        .expect("daemon port");
+    let runner_dir = homeboy_core::paths::homeboy()
+        .expect("homeboy directory")
+        .join("runners");
+    std::fs::create_dir_all(&runner_dir).expect("create runner directory");
+    std::fs::write(
+        runner_dir.join("lab.json"),
+        r#"{"id":"lab","kind":"local","workspace_root":"/srv/homeboy"}"#,
+    )
+    .expect("persist runner config");
+    let session = RunnerSession {
+        runner_id: "lab".to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("srv".to_string()),
+        controller_id: Some("handoff-cancel-test".to_string()),
+        broker_url: None,
+        remote_daemon_address: None,
+        local_port: Some(local_port),
+        local_url: Some(daemon_url.to_string()),
+        tunnel_pid: None,
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: Some(std::process::id()),
+        remote_daemon_lease_id: None,
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: None,
+        connected_at: chrono::Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
+        leaseless_recovery_evidence: None,
+    };
+    let path = homeboy_core::paths::runner_controller_session_file("lab", "handoff-cancel-test")
+        .expect("session path");
+    std::fs::create_dir_all(path.parent().expect("session directory"))
+        .expect("create session directory");
+    std::fs::write(
+        path,
+        serde_json::to_vec(&session).expect("serialize session"),
+    )
+    .expect("persist session");
+}
+
+fn persist_reverse_broker_cancel_session(broker_url: &str) {
+    let runner_dir = homeboy_core::paths::homeboy()
+        .expect("homeboy directory")
+        .join("runners");
+    std::fs::create_dir_all(&runner_dir).expect("create runner directory");
+    std::fs::write(
+        runner_dir.join("lab.json"),
+        r#"{"id":"lab","kind":"local","workspace_root":"/srv/homeboy"}"#,
+    )
+    .expect("persist runner config");
+    let session = RunnerSession {
+        runner_id: "lab".to_string(),
+        mode: RunnerTunnelMode::Reverse,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("srv".to_string()),
+        controller_id: Some("handoff-cancel-test".to_string()),
+        broker_url: Some(broker_url.to_string()),
+        remote_daemon_address: None,
+        local_port: None,
+        local_url: None,
+        tunnel_pid: None,
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: None,
+        remote_daemon_lease_id: None,
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: None,
+        connected_at: chrono::Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
+        leaseless_recovery_evidence: None,
+    };
+    let path = homeboy_core::paths::runner_controller_session_file("lab", "handoff-cancel-test")
+        .expect("session path");
+    std::fs::create_dir_all(path.parent().expect("session directory"))
+        .expect("create session directory");
+    std::fs::write(
+        path,
+        serde_json::to_vec(&session).expect("serialize session"),
+    )
+    .expect("persist session");
+}
+
+fn wait_for_cancelled_daemon_job(client: &Client, daemon_url: &str, job_id: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let job = fetch_daemon_job(client, daemon_url, job_id).expect("accepted daemon job");
+        if job.status.is_terminal() {
+            assert_eq!(job.status, JobStatus::Cancelled);
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for cancellation of accepted daemon job"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn zero_wait_reverse_broker_preserves_accepted_running_handoff() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        allow_unauthenticated_loopback_broker();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let broker_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+
+        let (output, exit_code) = exec_via_reverse_broker(
+            &ssh_runner(),
+            &broker_url,
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "test".to_string()],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            false,
+        )
+        .expect("zero-wait reverse broker handoff");
+
+        assert_zero_wait_handoff(&output, exit_code);
+        let job_id = output.job_id.as_deref().expect("accepted job id");
+        let client = Client::builder().build().expect("broker client");
+        let job = fetch_daemon_job(&client, &broker_url, job_id).expect("accepted broker job");
+        assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
+    });
+}
+
+#[test]
+fn zero_wait_reverse_broker_cancels_unset_agent_task_workload() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        allow_unauthenticated_loopback_broker();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let broker_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        persist_reverse_broker_cancel_session(&broker_url);
+
+        let (output, exit_code) = exec_via_reverse_broker(
+            &ssh_runner(),
+            &broker_url,
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "test".to_string()],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Some(agent_task_workload()),
+            None,
+            false,
+            false,
+            true,
+            false,
+        )
+        .expect("zero-wait reverse broker cancellation result");
+
+        assert_eq!(exit_code, 1);
+        assert!(!output.is_in_flight());
+        let job_id = output.job_id.as_deref().expect("accepted job id");
+        assert_eq!(
+            output.job.as_ref().map(|job| job.status),
+            Some(JobStatus::Cancelled)
+        );
+        assert_eq!(
+            output
+                .execution_record
+                .as_ref()
+                .map(|record| record.status.as_str()),
+            Some("failed")
+        );
+        assert!(!output.stderr.contains("still in flight"));
+        let client = Client::builder().build().expect("broker client");
+        wait_for_cancelled_daemon_job(&client, &broker_url, job_id);
+    });
+}
+
+fn blocked_workload_command(started: &std::path::Path, release: &std::path::Path) -> Vec<String> {
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
+        "sh".to_string(),
+        started.display().to_string(),
+        release.display().to_string(),
+    ]
+}
+
+fn assert_zero_wait_handoff(output: &RunnerExecOutput, exit_code: i32) {
+    assert_eq!(exit_code, 0);
+    assert!(output.is_in_flight());
+    assert!(output.job_id.is_some());
+    let run_id = output.mirror_run_id.as_deref().expect("durable run id");
+    assert_eq!(
+        output
+            .execution_record
+            .as_ref()
+            .map(|record| record.status.as_str()),
+        Some("running")
+    );
+    let envelope: homeboy_core::lab_contract::LabRunnerHandoffEnvelope =
+        serde_json::from_str(&output.stdout).expect("typed running handoff");
+    assert_eq!(envelope.status, "running");
+    assert_eq!(
+        envelope.identity.runner_job_id,
+        output.job_id.as_deref().expect("accepted job id")
+    );
+    assert_eq!(envelope.mirror_run_id.as_deref(), Some(run_id));
+    let store = ObservationStore::open_initialized().expect("observation store");
+    assert_eq!(
+        store
+            .get_run(run_id)
+            .expect("read durable run")
+            .expect("durable run")
+            .status,
+        "running"
+    );
+}
+
+#[test]
 fn reverse_broker_rejects_inline_secret_before_detached_intent_persistence() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "agent-task-inline-secret-rejected";
@@ -1089,7 +1359,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         let job = running_job();
         let job_id = job.id.to_string();
 
-        let (output, exit_code) = detached_handoff_output(
+        let (output, _) = detached_handoff_output(
             &runner,
             RunnerExecMode::Daemon,
             "/srv/homeboy/project".to_string(),
@@ -1109,8 +1379,10 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             Some("agent-task-run-6454".to_string()),
             Some("mirrored-run-6454".to_string()),
         );
+        let (output, exit_code) = RunnerExecCompletion::InFlight(output).into_output();
 
         assert_eq!(exit_code, 0);
+        assert!(output.is_in_flight());
         assert_eq!(output.job_id.as_deref(), Some(job_id.as_str()));
         assert_eq!(output.mirror_run_id.as_deref(), Some("mirrored-run-6454"));
         assert_eq!(

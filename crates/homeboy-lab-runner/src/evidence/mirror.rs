@@ -587,25 +587,6 @@ fn record_reverse_broker_metadata(
     context.store.update_run_metadata(&run.id, metadata)
 }
 
-pub fn mirror_daemon_job_progress(
-    runner: &Runner,
-    cwd: &str,
-    command: &[String],
-    job: &Job,
-    events: &[JobEvent],
-    run_id: Option<&str>,
-) -> Result<RunRecord> {
-    mirror_daemon_job_progress_with_ownership(
-        runner,
-        cwd,
-        command,
-        job,
-        events,
-        run_id,
-        MirrorRunOwnership::Inferred,
-    )
-}
-
 pub(crate) fn mirror_daemon_job_progress_with_ownership(
     runner: &Runner,
     cwd: &str,

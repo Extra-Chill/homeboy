@@ -80,6 +80,14 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         concurrency_limit: Option<usize>,
 
+        /// Seconds the controller waits for an accepted runner job; zero detaches immediately
+        #[arg(long)]
+        runner_exec_wait_timeout_secs: Option<u64>,
+
+        /// Cancel an in-flight remote job when the controller wait expires
+        #[arg(long)]
+        cancel_on_wait_timeout: Option<bool>,
+
         /// Artifact retention/copying policy label for future execution commands
         #[arg(long)]
         artifact_policy: Option<String>,
@@ -104,6 +112,14 @@ pub(super) enum RunnerCommand {
         /// Maximum concurrent workflows this server should accept
         #[arg(long)]
         concurrency_limit: Option<usize>,
+
+        /// Seconds the controller waits for an accepted runner job; zero detaches immediately
+        #[arg(long)]
+        runner_exec_wait_timeout_secs: Option<u64>,
+
+        /// Cancel an in-flight remote job when the controller wait expires
+        #[arg(long)]
+        cancel_on_wait_timeout: Option<bool>,
 
         /// Artifact retention/copying policy label for future execution commands
         #[arg(long)]

@@ -868,10 +868,17 @@ homeboy runner show <id>
 homeboy runner set <id> --json <JSON>
 homeboy runner set <id> --base64 <BASE64_JSON>
 homeboy runner set <id> --json '{"workspace_root":"/srv/homeboy","concurrency_limit":4}'
+homeboy runner set <id> --json '{"runner_exec_wait_timeout_secs":2400,"cancel_on_wait_timeout":true}'
 ```
 
 Updates a runner by merging a JSON object into the runner config. SSH runner settings live under `servers/<id>.json` as the server's `runner` capability; local runners live under `runners/<id>.json`.
 Arbitrary runner updates must use `--json` or `--base64`; positional `key=value` and trailing arbitrary `--key value` updates are not accepted.
+`runner_exec_wait_timeout_secs` controls how long the controller waits after a
+runner accepts a job (`0` returns an in-flight handoff immediately).
+`cancel_on_wait_timeout` controls whether an expired controller wait requests
+remote cancellation. Its unset default is `true` for agent-task workloads and
+`false` for other runner commands. If cancellation returns a terminal job,
+Homeboy returns its terminal non-success result rather than an in-flight handoff.
 
 ### `trust`
 

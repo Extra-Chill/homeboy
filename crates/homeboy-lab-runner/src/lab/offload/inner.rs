@@ -835,10 +835,17 @@ pub(crate) fn exec_lab_context(
         }
     };
 
-    context.plan = with_step(
-        context.plan,
-        PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Success).build(),
-    );
+    let in_flight = exec_output.is_in_flight();
+    let exec_step = if in_flight {
+        PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::PartialSuccess)
+            .skip_reason(
+                "controller wait expired after durable runner handoff; remote command outcome remains pending",
+            )
+            .build()
+    } else {
+        PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Success).build()
+    };
+    context.plan = with_step(context.plan, exec_step);
     if let Some(run_id) = context.agent_task_run_id.as_deref() {
         // This route's decision is the authoritative one for the execution
         // being verified. Adopt it when the record carries none, or carries
@@ -867,6 +874,39 @@ pub(crate) fn exec_lab_context(
             run_id,
             outcome,
         )?;
+    }
+    if in_flight {
+        if let Some(workspace) = context.materialized_workspace.as_mut() {
+            workspace.preserve();
+        }
+        if let (Some(run_id), Some(job_id)) = (
+            context.agent_task_run_id.as_deref(),
+            exec_output.job_id.as_deref(),
+        ) {
+            agent_task_lifecycle::record_detached_lab_run_in_store(
+                &lab_lifecycle_store,
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id,
+                    runner_job_id: job_id,
+                    remote_workspace: &remote_cwd,
+                    remote_command: &context.remote_command,
+                },
+            )?;
+        }
+        let mut stderr = String::new();
+        for message in context.messages {
+            stderr.push_str(&message);
+            stderr.push('\n');
+        }
+        stderr.push_str(&exec_output.stderr);
+        return Ok(LabOffloadOutcome::InFlight {
+            plan: context.plan,
+            stdout: exec_output.stdout.clone(),
+            stderr,
+            exit_code,
+            output_file_content: Some(exec_output.stdout),
+        });
     }
     let dependency_cache_save_outputs =
         save_dependency_caches(runner_id, &context.dependency_cache_saves)?;
