@@ -1894,7 +1894,7 @@ impl JobStore {
             ));
         }
 
-        self.durable_transaction(|inner| {
+        let (job, child) = self.durable_transaction(|inner| {
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -1945,7 +1945,15 @@ impl JobStore {
                 ));
             }
             if stored.job.status.is_terminal() {
-                return Ok(stored.job.clone());
+                let child = (stored.job.status == JobStatus::Cancelled)
+                    .then(|| {
+                        stored
+                            .local_child
+                            .as_ref()
+                            .and_then(|child| child.process.clone())
+                    })
+                    .flatten();
+                return Ok((stored.job.clone(), child));
             }
             validate_transition(stored.job.status, JobStatus::Cancelled)?;
             let now = timestamp_ms();
@@ -1963,8 +1971,16 @@ impl JobStore {
             stored.events.push(event);
             apply_event_retention(&mut stored.events, self.event_retention_limit());
             stored.job.event_count = stored.events.len();
-            Ok(stored.job.clone())
-        })
+            Ok((
+                stored.job.clone(),
+                stored
+                    .local_child
+                    .as_ref()
+                    .and_then(|child| child.process.clone()),
+            ))
+        })?;
+        super::store::reap_cancelled_local_child(child.as_ref())?;
+        Ok(job)
     }
 
     pub fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
