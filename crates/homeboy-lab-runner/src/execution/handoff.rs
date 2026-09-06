@@ -108,12 +108,10 @@ pub(super) enum WaitTimeoutCancelOutcome {
 }
 
 /// Resolve wait-timeout cancellation. A truthy environment override takes
-/// precedence; otherwise an explicit runner setting wins. Agent-task workloads
-/// default to cancellation so an expired controller cannot leave their rig lock
-/// held indefinitely, while all other runner commands retain the prior default.
+/// precedence; otherwise an explicit runner setting wins. Accepted work always
+/// remains in flight by default, including agent-task workloads.
 pub(super) fn cancel_on_wait_timeout_enabled(
     settings: &homeboy_core::server::RunnerSettings,
-    is_agent_task: bool,
 ) -> bool {
     if std::env::var(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV)
         .ok()
@@ -127,7 +125,7 @@ pub(super) fn cancel_on_wait_timeout_enabled(
     {
         return true;
     }
-    settings.cancel_on_wait_timeout.unwrap_or(is_agent_task)
+    settings.cancel_on_wait_timeout.unwrap_or(false)
 }
 
 /// Best-effort remote cancellation on wait-timeout. Returns `Disabled` when the

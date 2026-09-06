@@ -217,12 +217,7 @@ where
             let cancellation = attempt_wait_timeout_cancel(
                 &flow.runner.id,
                 &job_id,
-                cancel_on_wait_timeout_enabled(
-                    &flow.runner.settings,
-                    flow.lab_runner_workload
-                        .as_ref()
-                        .is_some_and(|workload| workload.agent_task.is_some()),
-                ),
+                cancel_on_wait_timeout_enabled(&flow.runner.settings),
             );
             let cancellation_message = match cancellation {
                 WaitTimeoutCancelOutcome::Disabled => "remote job remains in flight".to_string(),

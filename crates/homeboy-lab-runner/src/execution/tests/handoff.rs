@@ -46,20 +46,27 @@ fn runner_wait_settings_and_environment_resolve_at_the_controller() {
 }
 
 #[test]
-fn cancellation_defaults_to_agent_task_and_honors_runner_setting_or_env() {
+fn cancellation_requires_explicit_runner_setting_or_truthy_env() {
     let _env = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
     let settings = homeboy_core::server::RunnerSettings::default();
-    assert!(!cancel_on_wait_timeout_enabled(&settings, false));
-    assert!(cancel_on_wait_timeout_enabled(&settings, true));
+    assert!(!cancel_on_wait_timeout_enabled(&settings));
 
     let settings = homeboy_core::server::RunnerSettings {
         cancel_on_wait_timeout: Some(false),
         ..Default::default()
     };
-    assert!(!cancel_on_wait_timeout_enabled(&settings, true));
+    assert!(!cancel_on_wait_timeout_enabled(&settings));
+
+    let settings = homeboy_core::server::RunnerSettings {
+        cancel_on_wait_timeout: Some(true),
+        ..Default::default()
+    };
+    assert!(cancel_on_wait_timeout_enabled(&settings));
 
     let _env = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
-    assert!(cancel_on_wait_timeout_enabled(&settings, false));
+    assert!(cancel_on_wait_timeout_enabled(
+        &homeboy_core::server::RunnerSettings::default()
+    ));
 }
 
 #[test]
@@ -524,6 +531,139 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
                 && handoff.runner_job_id.as_deref() == Some(job_id)
         }));
     });
+}
+
+#[test]
+fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let workspace = tempfile::tempdir().expect("workspace");
+        let started = workspace.path().join("started");
+        let release = workspace.path().join("release");
+        let _release_on_drop = ReleaseBlockedWorkload(release.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let daemon_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+
+        let (output, exit_code) = exec_via_daemon(
+            &ssh_runner(),
+            &daemon_url,
+            None,
+            workspace.path().display().to_string(),
+            None,
+            blocked_workload_command(&started, &release),
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            false,
+            None,
+        )
+        .expect("zero-wait direct daemon handoff");
+
+        assert_zero_wait_handoff(&output, exit_code);
+        wait_for_path(&started, "direct daemon workload start");
+        let job_id = output.job_id.as_deref().expect("accepted job id");
+        let client = Client::builder().no_proxy().build().expect("daemon client");
+        let job = fetch_daemon_job(&client, &daemon_url, job_id).expect("accepted daemon job");
+        assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
+    });
+}
+
+#[test]
+fn zero_wait_reverse_broker_preserves_accepted_running_handoff() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        allow_unauthenticated_loopback_broker();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let broker_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+
+        let (output, exit_code) = exec_via_reverse_broker(
+            &ssh_runner(),
+            &broker_url,
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "test".to_string()],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            false,
+        )
+        .expect("zero-wait reverse broker handoff");
+
+        assert_zero_wait_handoff(&output, exit_code);
+        let job_id = output.job_id.as_deref().expect("accepted job id");
+        let client = Client::builder().build().expect("broker client");
+        let job = fetch_daemon_job(&client, &broker_url, job_id).expect("accepted broker job");
+        assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
+    });
+}
+
+fn blocked_workload_command(started: &std::path::Path, release: &std::path::Path) -> Vec<String> {
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
+        "sh".to_string(),
+        started.display().to_string(),
+        release.display().to_string(),
+    ]
+}
+
+fn assert_zero_wait_handoff(output: &RunnerExecOutput, exit_code: i32) {
+    assert_eq!(exit_code, 0);
+    assert!(output.is_in_flight());
+    assert!(output.job_id.is_some());
+    let run_id = output.mirror_run_id.as_deref().expect("durable run id");
+    assert_eq!(
+        output
+            .execution_record
+            .as_ref()
+            .map(|record| record.status.as_str()),
+        Some("running")
+    );
+    let envelope: homeboy_core::lab_contract::LabRunnerHandoffEnvelope =
+        serde_json::from_str(&output.stdout).expect("typed running handoff");
+    assert_eq!(envelope.status, "running");
+    assert_eq!(
+        envelope.identity.runner_job_id,
+        output.job_id.as_deref().expect("accepted job id")
+    );
+    assert_eq!(envelope.mirror_run_id.as_deref(), Some(run_id));
+    let store = ObservationStore::open_initialized().expect("observation store");
+    assert_eq!(
+        store
+            .get_run(run_id)
+            .expect("read durable run")
+            .expect("durable run")
+            .status,
+        "running"
+    );
 }
 
 #[test]
