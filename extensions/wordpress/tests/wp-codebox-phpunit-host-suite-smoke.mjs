@@ -29,7 +29,13 @@ await writeFile(path.join(component, 'tests/Unit/FirstTest.php'), '<?php\nuse PH
 // A WordPress bootstrap and a standalone one, so runtime inference has real
 // files to read rather than a stubbed answer.
 await writeFile(path.join(component, 'tests/wp-bootstrap.php'), '<?php\nrequire getenv( "WP_TESTS_DIR" ) . "/includes/bootstrap.php";\n');
-await writeFile(path.join(component, 'tests/plain-bootstrap.php'), '<?php\nrequire __DIR__ . "/../vendor/autoload.php";\n');
+// The standalone bootstrap mentions WP_UnitTestCase in a docblock while
+// deliberately not using it, which is what real components do. Inference must
+// read code rather than comments or this suite is misclassified.
+await writeFile(
+  path.join(component, 'tests/plain-bootstrap.php'),
+  '<?php\n/**\n * Existing tests extend WP_UnitTestCase and need WP_TESTS_DIR.\n * These do not.\n */\nrequire __DIR__ . "/../vendor/autoload.php";\n',
+);
 await writeFile(
   path.join(component, 'phpunit-sandbox.xml.dist'),
   '<?xml version="1.0"?>\n<phpunit bootstrap="tests/wp-bootstrap.php"><testsuites><testsuite name="s"><directory>tests</directory></testsuite></testsuites></phpunit>\n',

@@ -1842,6 +1842,20 @@ function resolvePhpunitSuites(configuration) {
   });
 }
 
+// Decide whether a bootstrap actually loads WordPress.
+//
+// Comments are stripped first. A bootstrap that only *mentions* WP_UnitTestCase
+// while explaining that it deliberately avoids it would otherwise be read as a
+// WordPress bootstrap, which misclassifies a standalone suite and, since #2788,
+// rejects a correct `host` declaration with a diagnostic that is itself wrong.
+function bootstrapLoadsWordPress(source) {
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+    .replace(/(^|\n)\s*#[^\n]*/g, '$1 ');
+  return /WP_UnitTestCase|wp-load\.php|WP_TESTS_DIR|wp-tests-config/i.test(code);
+}
+
 // Fail a declared runtime that contradicts what the suite's config bootstraps.
 //
 // Inference alone is what produced seven silently-failing suites rather than
@@ -1884,7 +1898,7 @@ async function inferSuiteEnvironment(config, pluginDirectory) {
       return '';
     }
     const source = await readFile(path.resolve(path.dirname(hostConfig), bootstrap), 'utf8');
-    return /WP_UnitTestCase|wp-load\.php|WP_TESTS_DIR|wp-tests-config/i.test(source) ? 'wordpress-integration' : 'standalone-php';
+    return bootstrapLoadsWordPress(source) ? 'wordpress-integration' : 'standalone-php';
   } catch {
     return '';
   }
@@ -1915,7 +1929,7 @@ async function resolvePhpunitProfile(configuration, pluginDirectory, pluginSlug,
       if (bootstrap) {
         const bootstrapPath = path.resolve(path.dirname(hostConfig), bootstrap);
         const source = await readFile(bootstrapPath, 'utf8').catch(() => '');
-        environment = /WP_UnitTestCase|wp-load\.php|WP_TESTS_DIR|wp-tests-config/i.test(source) ? 'wordpress-integration' : 'standalone-php';
+        environment = bootstrapLoadsWordPress(source) ? 'wordpress-integration' : 'standalone-php';
       }
     } catch {}
   }
