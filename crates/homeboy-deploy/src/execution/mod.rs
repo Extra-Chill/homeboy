@@ -65,7 +65,6 @@ mod tests {
     };
     use homeboy_core::project::Project;
     use std::io::Write;
-    use std::process::Command;
 
     #[test]
     fn bound_captured_read_retains_full_source_within_limit() {
@@ -533,20 +532,7 @@ mod tests {
         assert!(zip.by_name("demo-plugin/node_modules/junk.js").is_err());
     }
 
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}{}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 
     #[test]
     fn cleanup_deploy_build_artifact_preserves_non_empty_build_dir() {

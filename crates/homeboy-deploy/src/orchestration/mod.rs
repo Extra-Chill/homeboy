@@ -1025,20 +1025,7 @@ mod tests {
             .success());
     }
 
-    fn run_git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: stdout={} stderr={}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as run_git;
 
     fn git_stdout(path: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")

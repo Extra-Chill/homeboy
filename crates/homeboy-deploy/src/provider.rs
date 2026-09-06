@@ -619,7 +619,6 @@ mod tests {
     use homeboy_core::component::{Component, DeploymentProviderAttachment};
     use homeboy_core::error::Error;
     use homeboy_core::project::{Project, ProjectComponentAttachment};
-    use std::process::Command;
 
     /// Three of these steps used to emit the identical literal
     /// `"Could not prepare deployment provider input"`, so a report named the
@@ -767,14 +766,7 @@ mod tests {
         );
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command");
-        assert!(output.status.success(), "git {:?} failed", args);
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 
     fn provider_repository(id: &str) -> tempfile::TempDir {
         let repository = tempfile::tempdir().expect("repository");
