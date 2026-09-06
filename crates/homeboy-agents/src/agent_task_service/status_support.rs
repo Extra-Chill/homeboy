@@ -13,7 +13,6 @@ use crate::agent_task_provider::structured_error::{
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::agent_tasks::AgentTaskEvidenceRef;
-use homeboy_core::observation::ObservationStore;
 use homeboy_core::redaction::{self, RedactionPolicy};
 use homeboy_core::Result;
 
