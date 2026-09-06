@@ -345,6 +345,15 @@
   "fuzz": {
     "extension_script": "scripts/fuzz/fuzz-runner.sh",
     "capabilities": ["nodejs-fuzz-workload"],
+    "workload_json_probes": [
+      {
+        "path": "package.json",
+        "pointer": "/scripts/fuzz",
+        "id": "package-script-fuzz",
+        "label": "package.json scripts.fuzz",
+        "description": "The package.json fuzz script executed by the Node.js fuzz runner."
+      }
+    ],
     "runtime_helpers": [
       { "id": "runtime-settings" }
     ],
