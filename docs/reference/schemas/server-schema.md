@@ -24,6 +24,8 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     "homeboy_path": "string",
     "daemon": boolean,
     "concurrency_limit": number,
+    "runner_exec_wait_timeout_secs": number,
+    "cancel_on_wait_timeout": boolean,
     "artifact_policy": "string",
     "require_exact_homeboy_version": boolean,
     "require_fresh_runtime_overlay": boolean,
@@ -77,6 +79,8 @@ Server configuration defines SSH server connections stored in `servers/<id>.json
     "homeboy_path": "/usr/local/bin/homeboy",
     "daemon": false,
     "concurrency_limit": 4,
+    "runner_exec_wait_timeout_secs": 2400,
+    "cancel_on_wait_timeout": true,
     "artifact_policy": "copy",
     "policy": {
       "snapshot_excludes": ["generated-state", "generated-state/**"]
@@ -121,6 +125,31 @@ Use `runner.secret_env` for values that must be read at execution time instead o
 ```
 
 Homeboy rejects likely credential names in newly persisted `runner.env` entries. Use `secret_env` for those values; it is also the explicit sensitivity declaration for non-obvious names. Existing legacy entries can be inspected without values using `homeboy runner doctor <id> --scope secret-env` and migrated into OS keychain-backed references with `--repair`. Homeboy command output redacts sensitive names in `env` and keeps `secret_env` as references only. Secret file contents and referenced environment variable values are not printed by runner config/status diagnostics.
+
+### Controller Wait Lifecycle
+
+Runner jobs remain durable after controller wait expiry. Configure the wait and
+cancellation policy on the runner instead of relying on process environment:
+
+| Setting | Per-run env override | Unset default |
+| --- | --- | --- |
+| `runner_exec_wait_timeout_secs` | `HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS` | 1200 seconds; `0` detaches immediately |
+| `cancel_on_wait_timeout` | `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT` | `true` for agent-task workloads, `false` otherwise |
+
+The timeout environment value overrides the configured number when it parses as
+whole seconds. A truthy cancellation environment value (`1`, `true`, `yes`,
+`on`) enables cancellation for one run. On expiry Homeboy returns a successful
+in-flight handoff, preserves the runner job and run IDs, and prints the runner
+job follow command; it does not claim that the remote command failed.
+
+```json
+{
+  "runner": {
+    "runner_exec_wait_timeout_secs": 2400,
+    "cancel_on_wait_timeout": true
+  }
+}
+```
 
 ### Lab Offload Safety Gates
 

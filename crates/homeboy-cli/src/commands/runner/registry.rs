@@ -373,6 +373,12 @@ pub(super) fn enable(
     if let Some(concurrency_limit) = settings.concurrency_limit {
         spec.insert("concurrency_limit".to_string(), concurrency_limit.into());
     }
+    if let Some(timeout) = settings.runner_exec_wait_timeout_secs {
+        spec.insert("runner_exec_wait_timeout_secs".to_string(), timeout.into());
+    }
+    if let Some(cancel) = settings.cancel_on_wait_timeout {
+        spec.insert("cancel_on_wait_timeout".to_string(), cancel.into());
+    }
     if let Some(artifact_policy) = settings.artifact_policy {
         spec.insert("artifact_policy".to_string(), artifact_policy.into());
     }

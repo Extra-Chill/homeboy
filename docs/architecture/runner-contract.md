@@ -178,6 +178,24 @@ is parsed from standard Homeboy JSON error envelopes (`error.details.field`,
 `error.field`, or `contract_field`) when present; otherwise it is omitted and the
 raw execution evidence remains under `execution`.
 
+### Controller runner wait
+
+These controller-only variables are resolved before a runner command is
+submitted; workload settings inside the remote command cannot change them.
+
+| Variable | Runner setting | Meaning |
+|----------|----------------|---------|
+| `HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS` | `runner_exec_wait_timeout_secs` | Per-run whole-second wait override. Unset falls back to the runner setting, then 1200 seconds. `0` returns after durable handoff. |
+| `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT` | `cancel_on_wait_timeout` | Truthy values (`1`, `true`, `yes`, `on`) request best-effort cancellation after expiry. Otherwise the runner setting applies. |
+| `HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION` | `require_exact_homeboy_version` | Truthy values require an exact controller and runner Homeboy version. |
+| `HOMEBOY_REQUIRE_FRESH_RUNTIME_OVERLAY` | `require_fresh_runtime_overlay` | Truthy values reject a provably stale runtime overlay. |
+
+When the wait expires after acceptance, the runner job and its durable run IDs
+remain authoritative. Homeboy reports an in-flight handoff with
+`homeboy runner job logs <runner> <job> --follow`; it does not report the remote
+command as failed. Unset `cancel_on_wait_timeout` defaults to cancellation for
+agent-task workloads and no cancellation for all other runner commands.
+
 ## Detached handoff evidence
 
 Detached Lab offload handoffs return a `homeboy/runner-exec-handoff/v1`

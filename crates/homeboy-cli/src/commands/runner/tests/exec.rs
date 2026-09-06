@@ -388,6 +388,39 @@ fn compact_exec_output_shows_metadata_and_streams_once() {
 }
 
 #[test]
+fn compact_exec_output_marks_durable_in_flight_job_without_a_failure() {
+    let output = RunnerExecOutput {
+        execution_record: Some(
+            homeboy::core::runner_execution_envelope::RunnerExecutionRecord::in_flight(
+                "job-123", "lab", "daemon",
+            )
+            .with_job_id("job-123")
+            .with_next_actions([
+                homeboy::core::runner_execution_envelope::RunnerExecutionNextAction {
+                    label: "runner_job_follow".to_string(),
+                    command: vec![
+                        "homeboy".to_string(),
+                        "runner".to_string(),
+                        "job".to_string(),
+                        "logs".to_string(),
+                        "lab".to_string(),
+                        "job-123".to_string(),
+                        "--follow".to_string(),
+                    ],
+                },
+            ]),
+        ),
+        ..runner_exec_output("lab", RunnerExecMode::Daemon, "/workspace")
+    };
+
+    let rendered = render_compact_exec_output(&output);
+
+    assert!(rendered.contains("Status: remote job still in flight"));
+    assert!(rendered.contains("Follow: homeboy runner job logs lab job-123 --follow"));
+    assert!(rendered.contains("Exit status: 0"));
+}
+
+#[test]
 fn compact_exec_command_run_preserves_full_output_file_payload() {
     let output = RunnerExecOutput {
         variant: "exec",

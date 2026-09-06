@@ -34,10 +34,9 @@ use super::{
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
-/// Opt-in: when set to a truthy value, a controller-side wait-timeout best-effort
-/// cancels the still-running remote runner job (freeing its rig lock) instead of
-/// only mirroring it. Off by default — the default contract leaves the remote job
-/// in flight and uncancelled (#6891).
+/// Per-run override: when set to a truthy value, a controller-side wait-timeout
+/// best-effort cancels the still-running remote runner job. Otherwise the runner
+/// setting applies; unset settings cancel agent-task workloads only.
 pub(crate) const RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT";
 // These runner env-var markers now live in the shared runner-contract crate so
 // core can reference them without a core -> runner edge. Re-exported here so the
@@ -411,6 +410,16 @@ pub struct RunnerExecOutput {
     pub handoff: Option<LabRunnerHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
+}
+
+impl RunnerExecOutput {
+    /// An accepted remote job is still authoritative when its controller-side
+    /// execution record remains running; no remote exit status is implied.
+    pub fn is_in_flight(&self) -> bool {
+        self.execution_record
+            .as_ref()
+            .is_some_and(|record| record.status == "running")
+    }
 }
 
 #[expect(

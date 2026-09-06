@@ -74,6 +74,7 @@ pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::Com
             json: false,
             raw: false,
             command,
+            ..
         } => dispatch::run_exec_command(
             exec::RunnerExecInput {
                 runner_id: id,

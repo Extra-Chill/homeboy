@@ -376,7 +376,8 @@ pub(super) fn exec_via_reverse_broker(
         },
         || Ok(()),
         |_, _| Ok(()),
-    );
+    )
+    .map(RunnerExecCompletion::into_output);
 }
 
 /// Preserve file-backed argv values past controller cleanup. Values are content
