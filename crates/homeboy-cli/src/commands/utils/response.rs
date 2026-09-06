@@ -2311,8 +2311,8 @@ mod tests {
         for subject_state in ["queued", "running", "failed", "succeeded"] {
             let response = cli_response_for_json_result_for_identity(
                 &Ok(json!({
-                    "schema": "homeboy/agent-task-status-summary/v1",
-                    "run_id": "run-1",
+                    "schema": "homeboy/control-plane-run/v1",
+                    "run": "run-1",
                     "state": subject_state,
                 })),
                 0,
@@ -2735,8 +2735,8 @@ mod tests {
     #[test]
     fn failed_results_always_name_their_cause() {
         let causeless = json!({
-            "schema": "homeboy/agent-task-status-summary/v1",
-            "run_id": "run-1",
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "run-1",
             "state": "succeeded",
         });
         for (label, result, exit_code) in [

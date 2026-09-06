@@ -469,7 +469,6 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
                     "/data/state",
                     "/data/child_run_state",
                     "/data/lifecycle/execution/state",
-                    "/data/status_scope/queried_attempt/state",
                 ]
                 .iter()
                 .filter_map(|pointer| status.pointer(pointer).and_then(serde_json::Value::as_str))

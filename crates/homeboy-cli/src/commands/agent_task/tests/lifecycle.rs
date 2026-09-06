@@ -272,7 +272,7 @@ fn canonical_status_refs_hydrate_through_the_agent_task_resolver() {
 }
 
 #[test]
-fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry() {
+fn status_returns_control_plane_run_for_a_cancelled_retry() {
     with_isolated_home(|_| {
         let cook_id = "status-scope-cook";
         let source_run_id = "status-scope-attempt-1";
@@ -380,13 +380,16 @@ fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry()
             timeout: "30m".to_string(),
         };
         let value = status(status_args()).expect("canonical status").0;
+        assert_eq!(value["schema"], "homeboy/control-plane-run/v1");
         assert_eq!(value["run"], retry_run_id);
         assert_eq!(value["state"], "cancelled");
+        assert!(value.get("status_scope").is_none());
+        assert!(value.get("control_plane_run").is_none());
     });
 }
 
 #[test]
-fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
+fn status_returns_control_plane_run_when_cook_selection_is_bounded() {
     with_isolated_home(|_| {
         let cook_id = "status-scope-degraded-cook";
         let plan = test_plan();
@@ -418,8 +421,10 @@ fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
         })
         .expect("canonical status")
         .0;
+        assert_eq!(value["schema"], "homeboy/control-plane-run/v1");
         assert_eq!(value["run"], retry_run_id.as_str());
         assert_eq!(value["state"], "cancelled");
+        assert!(value.get("status_scope").is_none());
     });
 }
 
@@ -437,8 +442,10 @@ fn status_omits_scope_for_an_ordinary_non_cook_attempt() {
         })
         .expect("status");
 
+        assert_eq!(value["schema"], "homeboy/control-plane-run/v1");
         assert_eq!(value["run"], run_id);
         assert_eq!(value["state"], "queued");
+        assert!(value.get("status_scope").is_none());
     });
 }
 
@@ -496,20 +503,14 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
 
         assert_eq!(exit_code, 0);
         assert_eq!(value["state"], "candidate_recoverable");
-        assert_eq!(
-            value["durable_candidate"]["canonical_candidate"]["state"],
-            "patch_available"
-        );
+        assert_eq!(value["candidate"]["state"], "patch_available");
+        assert!(value.get("durable_candidate").is_none());
         assert!(
             rendered.contains("Status: candidate_recoverable"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("Candidate state: patch_available"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("Patch candidates: 1 non-empty / 0 empty"),
+            rendered.contains("Candidate: patch_available"),
             "{rendered}"
         );
         assert!(rendered.contains("Artifacts: 1"), "{rendered}");
