@@ -174,6 +174,7 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
       { name: 'sandbox-suite', config: 'phpunit-sandbox.xml.dist' },
       { name: 'unit', config: 'phpunit-unit.xml.dist' },
     ],
+    wp_codebox_phpunit_bootstrap_mode: 'project',
   });
   assert.notEqual(run.status, 0, 'a standalone config declared as sandbox must fail');
   assert.match(`${run.stdout}${run.stderr}`, /bootstraps without WordPress; declare it as "host"/);
@@ -185,9 +186,24 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
       { name: 'sandbox-suite', config: 'phpunit-sandbox.xml.dist', runtime: 'host' },
       { name: 'unit', config: 'phpunit-unit.xml.dist', runtime: 'host' },
     ],
+    wp_codebox_phpunit_bootstrap_mode: 'project',
   });
   assert.notEqual(run.status, 0, 'a WordPress config declared as host must fail');
   assert.match(`${run.stdout}${run.stderr}`, /bootstraps WordPress; declare it as "sandbox"/);
+}
+
+// --- Managed bootstrap must not infer from the config's own bootstrap ------
+// Under managed bootstrap the runner supplies WordPress, so a sandbox suite
+// may legitimately point at a WordPress-free bootstrap. Inferring there
+// rejected correct declarations and took a consumer's main branch red.
+{
+  const { run } = execute('managed-no-inference', {
+    wp_codebox_phpunit_suites: [
+      { name: 'sandbox-suite', config: 'phpunit-unit.xml.dist' },
+    ],
+  });
+  assert.equal(run.status, 0, `managed bootstrap must not infer runtime from the config, got ${run.status}\n${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout, /PHPUNIT_SUITE_RESULT:name=sandbox-suite status=passed/);
 }
 
 // --- Discovery needs a sandbox suite ---------------------------------------

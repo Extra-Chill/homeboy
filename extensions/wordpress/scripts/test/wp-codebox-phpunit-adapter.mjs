@@ -55,7 +55,7 @@ const hostSuites = phpunitSuites.filter((suite) => suite.runtime === 'host');
 // Runtime mismatches are checked first. A component that mislabels its only
 // WordPress suite as `host` would otherwise be told it declared no sandbox
 // suite, which is a symptom rather than the mistake it made.
-await assertSuiteRuntimesMatchConfigs(phpunitSuites, pluginSourceDirectory);
+await assertSuiteRuntimesMatchConfigs(phpunitSuites, pluginSourceDirectory, settings.wp_codebox_phpunit_bootstrap_mode || 'auto');
 if (sandboxSuites.length === 0) {
   throw new Error('wp_codebox_phpunit_suites must declare at least one sandbox suite; discovery has no environment to resolve against otherwise.');
 }
@@ -1862,7 +1862,15 @@ function bootstrapLoadsWordPress(source) {
 // one clear error, so the declaration wins and inference is used only to say
 // when the two disagree. A config whose bootstrap cannot be read is left alone:
 // absence of evidence is not a mismatch.
-async function assertSuiteRuntimesMatchConfigs(suites, pluginDirectory) {
+async function assertSuiteRuntimesMatchConfigs(suites, pluginDirectory, bootstrapMode) {
+  // Under managed bootstrap the extension supplies WordPress itself, so a
+  // config's own bootstrap attribute says nothing about whether the suite runs
+  // with WordPress. Inferring from it there rejects correct declarations: a
+  // sandbox suite legitimately points at a WordPress-free bootstrap and lets
+  // the runner provide the rest.
+  if (bootstrapMode === 'managed') {
+    return;
+  }
   const problems = [];
   for (const suite of suites) {
     if (!suite.name || !suite.config) {
