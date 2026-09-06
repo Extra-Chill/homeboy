@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.0] - 2026-09-06
+
+### Added
+- ship the PHPCS ruleset as a consumer-consumable default
+
 ## [3.44.0] - 2026-09-06
 
 ### Added
