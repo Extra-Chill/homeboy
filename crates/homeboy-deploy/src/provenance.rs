@@ -101,19 +101,7 @@ pub(crate) use homeboy_core::tag_gap::{detect_tag_gap, warn_tag_gap};
 mod provenance_tests {
     use super::*;
 
-    fn run_git(dir: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as run_git;
 
     fn committed_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("tempdir");

@@ -1357,19 +1357,7 @@ mod tests {
         );
     }
 
-    fn run_git(path: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as run_git;
 
     #[test]
     fn release_state_status_uses_needs_release_public_name() {

@@ -1014,19 +1014,7 @@ mod tests {
     use homeboy_core::server::SshClient;
     use tempfile::TempDir;
 
-    fn run_git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as run_git;
 
     fn init_source_repo(path: &Path) {
         run_git(path, &["init", "-q", "-b", "main"]);
