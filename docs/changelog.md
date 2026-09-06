@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.12] - 2026-09-06
+
+### Changed
+- stop publishing internal-only modules
+
 ## [0.367.11] - 2026-09-05
 
 ### Changed
