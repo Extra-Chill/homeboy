@@ -109,6 +109,45 @@ fn release_inspection_targets_use_component_first_grammar() {
 }
 
 #[test]
+fn changelog_history_repair_requires_recovery_and_parses_apply() {
+    let args = release(&[
+        "homeboy",
+        "release",
+        "fixture",
+        "--recover",
+        "--repair-changelog-history",
+        "1.0.0,1.1.0",
+        "--repair-changelog-history",
+        "1.2.0",
+        "--apply",
+    ]);
+    assert!(args.execute.recover);
+    assert_eq!(
+        args.execute.repair_changelog_history,
+        ["1.0.0", "1.1.0", "1.2.0"]
+    );
+    assert!(args.execute.apply);
+
+    let missing_recover = Cli::try_parse_from([
+        "homeboy",
+        "release",
+        "fixture",
+        "--repair-changelog-history",
+        "1.0.0",
+    ]);
+    assert!(missing_recover.is_err());
+
+    let missing_versions = Cli::try_parse_from([
+        "homeboy",
+        "release",
+        "fixture",
+        "--recover",
+        "--repair-changelog-history",
+    ]);
+    assert!(missing_versions.is_err());
+}
+
+#[test]
 fn release_inspection_help_includes_copy_paste_examples() {
     let expectations = [
         (

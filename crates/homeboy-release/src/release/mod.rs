@@ -14,6 +14,7 @@ mod executor;
 // Durable operation/finalization records. Lived in homeboy-core until #11143;
 // the release workspace finalizer is their only consumer. Public because
 // `homeboy release readiness show` reads records back out of the store.
+mod changelog_history;
 pub mod operation_record;
 mod orchestrator;
 mod package_recovery;

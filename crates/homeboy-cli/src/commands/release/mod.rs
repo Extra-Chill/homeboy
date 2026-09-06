@@ -169,6 +169,12 @@ pub struct ReleaseExecuteArgs {
     #[arg(long)]
     recover: bool,
 
+    /// With --recover, inspect these finalized versions against their release
+    /// tags and, with --apply, remove proven post-release entries. Repeat or
+    /// comma-separate versions to repair multiple sections.
+    #[arg(long, requires = "recover", value_delimiter = ',', num_args = 1.., value_name = "VERSION")]
+    repair_changelog_history: Vec<String>,
+
     /// Provider workspace owner reference to reconcile during --recover.
     #[arg(long, value_name = "OWNER_RUN_REF")]
     owner_run_ref: Option<String>,
@@ -429,7 +435,10 @@ impl ReleaseExecuteArgs {
         .filter_map(|(enabled, flag)| enabled.then_some(flag))
         .collect::<Vec<_>>();
 
-        let requires_apply = !self.apply && !self.dry_run_args.dry_run && !apply_risks.is_empty();
+        let requires_apply = self.repair_changelog_history.is_empty()
+            && !self.apply
+            && !self.dry_run_args.dry_run
+            && !apply_risks.is_empty();
 
         ReleaseExecutionPlan::new(phase, requires_apply, apply_risks)
     }
@@ -1039,8 +1048,12 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         let input = ReleaseCommandInput {
             component_id: component_id.clone(),
             path_override: args.path.clone(),
-            dry_run: args.dry_run_args.dry_run,
+            // Changelog-history recovery is detection-only unless the operator
+            // explicitly applies it. An explicit dry run remains authoritative.
+            dry_run: args.dry_run_args.dry_run
+                || (!args.repair_changelog_history.is_empty() && !args.apply),
             recover: args.recover,
+            repair_changelog_history: args.repair_changelog_history.clone(),
             retag: args.retag,
             skip_checks,
             skip_checks_granular: skip_checks_granular.clone(),
@@ -1120,6 +1133,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         path_override: None,
         dry_run: args.dry_run_args.dry_run,
         recover: false,
+        repair_changelog_history: Vec::new(),
         retag: false,
         skip_checks,
         skip_checks_granular,
@@ -1692,6 +1706,7 @@ mod tests {
             apply: false,
             deploy: false,
             recover: false,
+            repair_changelog_history: Vec::new(),
             owner_run_ref: None,
             retag: false,
             head: false,
@@ -1869,6 +1884,7 @@ mod tests {
             apply: false,
             deploy: false,
             recover: false,
+            repair_changelog_history: Vec::new(),
             owner_run_ref: None,
             retag: false,
             head: false,
@@ -2205,6 +2221,7 @@ jobs:
             deployment: None,
             continuation_command: Some(continuation.clone()),
             release_summary: vec!["Git state recovered; publication is incomplete".to_string()],
+            changelog_history_recovery: None,
             readiness: None,
         };
         let output = ReleaseOutput {
