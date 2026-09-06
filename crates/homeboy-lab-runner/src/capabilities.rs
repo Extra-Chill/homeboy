@@ -512,8 +512,8 @@ impl RunnerCapabilitySnapshot {
         let probe = move || {
             let output = preflight
                 .timeout
-                .map(|timeout| client.execute_with_timeout(&script, timeout))
-                .unwrap_or_else(|| client.execute(&script));
+                .map(|timeout| client.execute_with_materialized_env_and_timeout(&script, timeout))
+                .unwrap_or_else(|| client.execute_with_materialized_env(&script));
             if output.timed_out {
                 return Err(Error::new(
                     ErrorCode::RemoteCommandTimeout,

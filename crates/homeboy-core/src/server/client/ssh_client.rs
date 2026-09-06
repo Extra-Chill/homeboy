@@ -576,6 +576,52 @@ impl SshClient {
         self.execute_ssh_with_timeout(&effective, None, timeout)
     }
 
+    /// Execute with this client's environment delivered over stdin instead of
+    /// interpolated into the remote command argv.
+    ///
+    /// This preserves the configured environment while keeping request-sized
+    /// values out of the controller and remote shell command lines.
+    pub fn execute_with_materialized_env(&self, command: &str) -> CommandOutput {
+        let env = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let command = wrap_command_with_secret_env_read_loop(&format!(
+            "{} && {}",
+            remote_shell_path_preamble(),
+            command
+        ));
+        let input = build_secret_env_stdin_block(&env);
+        if self.is_local {
+            return execute_local_command_with_stdin(&command, &input);
+        }
+        self.execute_with_stdin(&command, SshStdin::Inline(&input))
+    }
+
+    /// Execute with a materialized environment and a hard wall-clock deadline.
+    pub fn execute_with_materialized_env_and_timeout(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> CommandOutput {
+        let env = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let command = wrap_command_with_secret_env_read_loop(&format!(
+            "{} && {}",
+            remote_shell_path_preamble(),
+            command
+        ));
+        let input = build_secret_env_stdin_block(&env);
+        if self.is_local {
+            return execute_local_command_with_stdin_and_timeout(&command, &input, timeout);
+        }
+        self.execute_ssh_with_timeout(&command, Some(&input), timeout)
+    }
+
     /// Execute a command with replayable bytes delivered over stdin and a hard
     /// wall-clock deadline.
     pub fn execute_with_input_and_timeout(
