@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.43.2] - 2026-09-06
+
+### Fixed
+- do not infer suite runtime under managed bootstrap
+
 ## [3.43.1] - 2026-09-06
 
 ### Fixed
