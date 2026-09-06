@@ -158,7 +158,9 @@ worker command and the output directory is enough to understand the result.
 
 Set the controller's `artifact_origin.public_base_url` only when its persisted
 artifacts are served from a stable HTTPS origin. With that controller setting,
-Homeboy can derive canonical reviewer links for fetchable run artifacts. The
+Homeboy confirms each canonical reviewer URL before including it in a terminal
+handoff; an unreachable URL is withheld and the controller fetch command is
+retained. The
 legacy `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` remains a controller-process
 compatibility input; setting it on a runner has no effect on reviewer links.
 

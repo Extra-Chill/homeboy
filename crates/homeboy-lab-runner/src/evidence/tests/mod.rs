@@ -190,10 +190,7 @@ fn reverse_broker_fixture(
 fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_bytes() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
-        std::env::set_var(
-            "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL",
-            "https://artifacts.example.test",
-        );
+        std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(NewRunRecord::builder("runner-exec").build())
@@ -211,9 +208,21 @@ fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_b
                 .record_artifact_with_id(&run.id, "visual_compare", &path, id, json!({}))
                 .expect("controller artifact");
         }
+        std::env::set_var(
+            "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL",
+            "https://artifacts.example.test",
+        );
 
-        let metadata =
-            controller_artifact_metadata(std::slice::from_ref(&run)).expect("terminal metadata");
+        let metadata = super::mirror::controller_artifact_metadata_with_validation(
+            std::slice::from_ref(&run),
+            |url| homeboy_core::artifact_links::PublicArtifactUrlValidation {
+                url: url.to_string(),
+                reachable: true,
+                status_code: Some(200),
+                error: None,
+            },
+        )
+        .expect("terminal metadata");
         assert_eq!(
             metadata
                 .iter()
@@ -251,6 +260,57 @@ fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_b
         fs::write(&source.path, b"corrupt data").expect("corrupt controller bytes");
         let error = controller_artifact_metadata(&[run]).expect_err("checksum mismatch");
         assert_eq!(error.details["field"], "artifact.sha256");
+        match prior_public_base {
+            Some(value) => std::env::set_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL", value),
+            None => std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"),
+        }
+    });
+}
+
+#[test]
+fn controller_terminal_metadata_withholds_unserved_public_url() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
+        std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let path = home.path().join("report.txt");
+        fs::write(&path, b"controller bytes").expect("artifact");
+        store
+            .record_artifact_with_id(&run.id, "report", &path, "report", json!({}))
+            .expect("controller artifact");
+        std::env::set_var(
+            "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL",
+            "https://artifacts.example.test",
+        );
+
+        let metadata = super::mirror::controller_artifact_metadata_with_validation(
+            std::slice::from_ref(&run),
+            |url| homeboy_core::artifact_links::PublicArtifactUrlValidation {
+                url: url.to_string(),
+                reachable: false,
+                status_code: Some(404),
+                error: Some("public artifact URL returned HTTP 404".to_string()),
+            },
+        )
+        .expect("terminal metadata");
+
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].url, None);
+        let details = metadata[0].metadata.as_ref().expect("metadata");
+        assert_eq!(
+            details["fetch_command"],
+            format!("homeboy runs artifact get {} report -o <path>", run.id)
+        );
+        assert_eq!(details["public_url_unavailable"]["status_code"], 404);
+        assert_eq!(
+            details["public_url_unavailable"]["error"],
+            "public artifact URL returned HTTP 404"
+        );
+        assert!(!details.to_string().contains("artifacts.example.test"));
+
         match prior_public_base {
             Some(value) => std::env::set_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL", value),
             None => std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"),

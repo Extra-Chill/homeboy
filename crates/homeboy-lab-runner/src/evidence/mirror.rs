@@ -153,6 +153,21 @@ fn discard_owned_synthetic_run(store: &ObservationStore, run: &MirroredJobRun) {
 /// Terminal responses expose only controller-owned records, never the runner's
 /// original artifact metadata or paths.
 pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifactMetadata>> {
+    controller_artifact_metadata_with_validation(
+        runs,
+        homeboy_core::artifact_links::validate_public_artifact_url,
+    )
+}
+
+/// Project controller-owned artifacts into a terminal response only after a
+/// public origin confirms it can serve each configured URL.
+pub(super) fn controller_artifact_metadata_with_validation<F>(
+    runs: &[RunRecord],
+    validate_public_url: F,
+) -> Result<Vec<JobArtifactMetadata>>
+where
+    F: Fn(&str) -> homeboy_core::artifact_links::PublicArtifactUrlValidation,
+{
     let store = ObservationStore::open_initialized()?;
     let artifacts = runs.iter().try_fold(Vec::new(), |mut artifacts, run| {
         artifacts.extend(store.list_artifacts(&run.id)?);
@@ -163,11 +178,30 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
         .map(|artifact| {
             validate_controller_artifact(&artifact)?;
             let controller_run_id = artifact.run_id.clone();
-            let url = homeboy_core::artifact_links::controller_artifact_url(&artifact)?;
+            let configured_url = homeboy_core::artifact_links::controller_artifact_url(&artifact)?;
+            let validation = configured_url.as_deref().map(&validate_public_url);
+            let url = configured_url.filter(|_| {
+                validation
+                    .as_ref()
+                    .is_none_or(|validation| validation.reachable)
+            });
             let fetch_command = format!(
                 "homeboy runs artifact get {} {} -o <path>",
                 controller_run_id, artifact.id
             );
+            let mut metadata = json!({
+                "controller_run_id": controller_run_id,
+                "controller_owned": true,
+                "fetch_command": fetch_command,
+            });
+            if let Some(validation) = validation.filter(|validation| !validation.reachable) {
+                // Do not repeat an unserved URL in terminal output. The durable
+                // fetch command remains available for the controller copy.
+                metadata["public_url_unavailable"] = json!({
+                    "status_code": validation.status_code,
+                    "error": validation.error,
+                });
+            }
             Ok(JobArtifactMetadata {
                 id: artifact.id,
                 name: None,
@@ -179,11 +213,7 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
                     .and_then(|size| u64::try_from(size).ok()),
                 sha256: artifact.sha256,
                 content_base64: None,
-                metadata: Some(json!({
-                    "controller_run_id": controller_run_id,
-                    "controller_owned": true,
-                    "fetch_command": fetch_command,
-                })),
+                metadata: Some(metadata),
             })
         })
         .collect()
