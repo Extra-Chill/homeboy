@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.14] - 2026-09-06
+
+### Changed
+- return canonical reconcile action
+- cover explicit timeout cancellation
+- remove controller artifact URL probes
+
+### Fixed
+- bound global snapshot
+- discover extension JSON workloads
+- default job list to live jobs
+- keep fuzz detach policy controller-side
+- reap process groups on cancellation
+- include remote stdio in job logs
+- report capability admission failures
+- cancel unset agent-task waits
+- honor cancelled terminal status
+- block detached capability drift
+- project terminal timeout cancellation
+- fence detached staging readiness
+- stabilize readiness provenance evidence
+- preserve timeout detach default
+- detach accepted jobs after wait expiry
+- withhold unserved artifact URLs
+- avoid stale current version claims
+
 ## [0.367.13] - 2026-09-06
 
 ### Changed
