@@ -1496,7 +1496,6 @@ fn direct_readiness_fence_before_detached_staging(
         selection,
         plan,
         &readiness.status,
-        &readiness.homeboy_path,
         &runner_homeboy,
         &readiness.capability_admission,
         require_exact_runner_version(&readiness.runner.settings),
@@ -1515,7 +1514,6 @@ fn detached_direct_staging_fallback_or_refusal(
     selection: &LabRunnerSelection,
     plan: &HomeboyPlan,
     status: &RunnerStatusReport,
-    homeboy_path: &str,
     runner_homeboy: &serde_json::Value,
     capability_admission: &homeboy_lab_runner_contract::LabCapabilityAdmission,
     require_exact_runner_version: bool,
@@ -1537,7 +1535,11 @@ fn detached_direct_staging_fallback_or_refusal(
     }
     require_available_lab_runner(runner_id, status, concurrency_limit, hot_label)?;
     if capability_admission_has_blocking_drift(capability_admission, require_exact_runner_version) {
-        return Err(stale_runner_homeboy_error(runner_id, homeboy_path, status));
+        return Err(capability_admission_error(
+            runner_id,
+            capability_admission,
+            require_exact_runner_version,
+        ));
     }
     Ok(None)
 }
@@ -1981,6 +1983,13 @@ pub(crate) fn run_lab_offload_inner(
         lab_offload_runner_homeboy_progress(runner_id, &homeboy_path, &runner_homeboy)
     );
     if blocking_runner_homeboy_drift {
+        if let Some(admission) = direct_capability_admission.as_ref() {
+            return Err(capability_admission_error(
+                runner_id,
+                admission,
+                require_exact_runner_version,
+            ));
+        }
         return Err(stale_runner_homeboy_error(
             runner_id,
             &homeboy_path,
@@ -3844,7 +3853,6 @@ mod tests {
             &selection,
             &base_lab_plan(None),
             &status,
-            "/runner/homeboy",
             &runner_homeboy,
             &admission,
             false,
@@ -3936,14 +3944,22 @@ mod tests {
         let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
         let mut controller_staging_submissions = 0;
 
-        for admission in [
-            matching_capability_admission(
-                false,
-                homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+        for (admission, expected_cause_class, expected_message) in [
+            (
+                matching_capability_admission(
+                    false,
+                    homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+                ),
+                "capability_incompatible",
+                "Lab offload refused runner `homeboy-lab` because its capability admission is incompatible: missing capabilities. Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
             ),
-            matching_capability_admission(
-                true,
-                homeboy_lab_runner_contract::LabRuntimeAncestry::Unknown,
+            (
+                matching_capability_admission(
+                    true,
+                    homeboy_lab_runner_contract::LabRuntimeAncestry::Unknown,
+                ),
+                "strict_ancestry_unknown",
+                "Lab offload refused runner `homeboy-lab` because strict identity fencing requires exact-source ancestry, but admission reported Unknown. Reconnect the runner to collect exact source provenance, then retry.",
             ),
         ] {
             let error = detached_direct_staging_fallback_or_refusal(
@@ -3952,7 +3968,6 @@ mod tests {
                 &selection,
                 &base_lab_plan(None),
                 &status,
-                "/runner/homeboy",
                 &runner_homeboy,
                 &admission,
                 true,
@@ -3968,9 +3983,19 @@ mod tests {
             })
             .expect_err("capability or strict ancestry drift must block staging");
 
-            assert!(error
-                .message
-                .contains("Lab offload refused runner `homeboy-lab`"));
+            assert_eq!(error.code, ErrorCode::RunnerCapabilityMissing);
+            assert_eq!(error.message, expected_message);
+            assert_eq!(error.details["admission_cause_class"], expected_cause_class);
+            assert_eq!(
+                error.details["rejection_reason"],
+                serde_json::to_value(&admission.provenance.rejection_reason)
+                    .expect("rejection reason serializes")
+            );
+            assert_eq!(
+                error.details["ancestry"],
+                serde_json::to_value(admission.provenance.ancestry)
+                    .expect("ancestry serializes")
+            );
         }
         assert_eq!(controller_staging_submissions, 0);
     }
