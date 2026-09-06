@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.43.1] - 2026-09-06
+
+### Fixed
+- infer a bootstrap's environment from code, not comments
+
 ## [3.43.0] - 2026-09-06
 
 ### Added
