@@ -7011,28 +7011,6 @@ pub(crate) fn select_cook_candidate_in_store(
     select_cook_candidate_from_index(cook_id, index, Some(lifecycle_store))
 }
 
-pub fn select_cook_candidate_from_attempts(
-    cook_id: &str,
-    attempts: Vec<AgentTaskCookIndexAttempt>,
-) -> Result<AgentTaskCookCandidateSelection> {
-    let latest_run_id = attempts
-        .last()
-        .map(|attempt| attempt.run_id.clone())
-        .unwrap_or_default();
-    select_cook_candidate_from_index(
-        cook_id,
-        AgentTaskCookIndex {
-            schema: schemas::COOK_INDEX.to_string(),
-            cook_id: cook_id.to_string(),
-            latest_run_id,
-            latest_substantive_candidate: None,
-            cancellation_fence: None,
-            attempts,
-        },
-        None,
-    )
-}
-
 fn select_cook_candidate_from_index(
     cook_id: &str,
     index: AgentTaskCookIndex,

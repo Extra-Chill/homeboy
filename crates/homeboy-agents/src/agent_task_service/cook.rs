@@ -2621,20 +2621,6 @@ mod cell_error_envelope_tests {
     }
 }
 
-/// Resolves a generic dispatch command once, before a typed cook is scheduled.
-/// Callers compile workflow policy into the command and cook options; this
-/// routine owns the shared dispatch compilation boundary.
-pub fn compile_cook_attempt(
-    options: CookRequest,
-    dispatch: AgentTaskDispatchCommand,
-) -> Result<CookRequest> {
-    compile_cook_attempt_with_readiness_cache(
-        options,
-        dispatch,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )
-}
-
 /// Compile a Cook with a caller-owned runtime-readiness cache. Batch callers
 /// share this cache so identical provider/runtime/model verdicts probe once.
 pub fn compile_cook_attempt_with_readiness_cache(
@@ -4442,19 +4428,6 @@ pub fn terminal_review_form_continuation_is_eligible(
     Ok(retryable_review_form_terminal_failure(record, &aggregate))
 }
 
-pub fn terminal_review_form_continuation_is_eligible_readonly(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    plan: &AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<bool> {
-    let aggregate = lifecycle_store.read_aggregate_readonly(&record.run_id).ok();
-    terminal_review_form_continuation_is_eligible_for_observation_readonly(
-        plan,
-        record,
-        aggregate.as_ref(),
-    )
-}
-
 pub fn terminal_review_form_continuation_is_eligible_for_observation_readonly(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -4472,18 +4445,6 @@ pub fn terminal_review_form_continuation_is_eligible_for_observation_readonly(
         aggregate
             .is_some_and(|aggregate| retryable_review_form_terminal_failure(record, aggregate)),
     )
-}
-
-/// Validate the read-only admission boundary for a reconstructed continuation.
-/// This deliberately stops before recipe/lifecycle materialization, transport
-/// preparation, provider dispatch, and finalization.
-pub fn preflight_cook_continuation_admission(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &CookRequest,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<Vec<&'static str>> {
-    let aggregate = lifecycle_store.read_aggregate_readonly(&record.run_id).ok();
-    preflight_cook_continuation_admission_for_observation(options, record, aggregate.as_ref())
 }
 
 pub fn preflight_cook_continuation_admission_for_observation(
