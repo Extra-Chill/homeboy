@@ -2,6 +2,7 @@ use super::*;
 use base64::Engine;
 use homeboy_core::api_jobs::JobEventKind;
 use homeboy_core::observation::{NewRunRecord, ObservationStore};
+use homeboy_runner_contract::RunnerSessionRole;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -580,6 +581,134 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
         let job = fetch_daemon_job(&client, &daemon_url, job_id).expect("accepted daemon job");
         assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
     });
+}
+
+#[test]
+fn zero_wait_direct_daemon_explicitly_cancels_accepted_job_after_typed_handoff() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
+        let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let started = workspace.path().join("started");
+        let release = workspace.path().join("release");
+        let _release_on_drop = ReleaseBlockedWorkload(release.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let daemon_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        persist_direct_daemon_cancel_session(&daemon_url);
+
+        let (output, exit_code) = exec_via_daemon(
+            &ssh_runner(),
+            &daemon_url,
+            None,
+            workspace.path().display().to_string(),
+            None,
+            blocked_workload_command(&started, &release),
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            false,
+            None,
+        )
+        .expect("zero-wait direct daemon cancellation handoff");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.is_in_flight());
+        let job_id = output.job_id.as_deref().expect("accepted job id");
+        let run_id = output.mirror_run_id.as_deref().expect("durable run id");
+        let envelope: homeboy_core::lab_contract::LabRunnerHandoffEnvelope =
+            serde_json::from_str(&output.stdout).expect("typed running handoff");
+        assert_eq!(envelope.status, "running");
+        assert_eq!(envelope.identity.runner_job_id, job_id);
+        assert_eq!(envelope.mirror_run_id.as_deref(), Some(run_id));
+        assert!(
+            output.stderr.contains("remote cancellation was requested."),
+            "{}",
+            output.stderr
+        );
+
+        let client = Client::builder().no_proxy().build().expect("daemon client");
+        wait_for_cancelled_daemon_job(&client, &daemon_url, job_id);
+    });
+}
+
+fn persist_direct_daemon_cancel_session(daemon_url: &str) {
+    let local_port = daemon_url
+        .rsplit_once(':')
+        .expect("daemon URL port")
+        .1
+        .parse()
+        .expect("daemon port");
+    let runner_dir = homeboy_core::paths::homeboy()
+        .expect("homeboy directory")
+        .join("runners");
+    std::fs::create_dir_all(&runner_dir).expect("create runner directory");
+    std::fs::write(
+        runner_dir.join("lab.json"),
+        r#"{"id":"lab","kind":"local","workspace_root":"/srv/homeboy"}"#,
+    )
+    .expect("persist runner config");
+    let session = RunnerSession {
+        runner_id: "lab".to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("srv".to_string()),
+        controller_id: Some("handoff-cancel-test".to_string()),
+        broker_url: None,
+        remote_daemon_address: None,
+        local_port: Some(local_port),
+        local_url: Some(daemon_url.to_string()),
+        tunnel_pid: None,
+        tunnel_process_start_identity: None,
+        proxy_forward: None,
+        remote_daemon_pid: Some(std::process::id()),
+        remote_daemon_lease_id: None,
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: None,
+        connected_at: chrono::Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    };
+    let path = homeboy_core::paths::runner_controller_session_file("lab", "handoff-cancel-test")
+        .expect("session path");
+    std::fs::create_dir_all(path.parent().expect("session directory"))
+        .expect("create session directory");
+    std::fs::write(
+        path,
+        serde_json::to_vec(&session).expect("serialize session"),
+    )
+    .expect("persist session");
+}
+
+fn wait_for_cancelled_daemon_job(client: &Client, daemon_url: &str, job_id: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let job = fetch_daemon_job(client, daemon_url, job_id).expect("accepted daemon job");
+        if job.status.is_terminal() {
+            assert_eq!(job.status, JobStatus::Cancelled);
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for cancellation of accepted daemon job"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
