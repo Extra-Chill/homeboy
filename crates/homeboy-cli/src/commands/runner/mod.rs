@@ -39,6 +39,10 @@ pub(crate) fn is_compact_doctor_stdout(args: &RunnerArgs) -> bool {
     args.compact_doctor_stdout()
 }
 
+pub(crate) fn is_compact_job_list_stdout(args: &RunnerArgs) -> bool {
+    args.compact_job_list_stdout()
+}
+
 pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
     matches!(
         &args.command,
@@ -48,6 +52,37 @@ pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
 
 pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::CommandRun {
     match args.command {
+        cli::RunnerCommand::Job {
+            command:
+                cli::RunnerJobCommand::List {
+                    runner_id,
+                    active,
+                    queued,
+                    terminal,
+                    all,
+                    generation,
+                    correlation,
+                    ..
+                },
+        } => {
+            let args = RunnerArgs {
+                command: cli::RunnerCommand::Job {
+                    command: cli::RunnerJobCommand::List {
+                        runner_id,
+                        active,
+                        queued,
+                        terminal,
+                        all,
+                        generation,
+                        correlation,
+                        json: false,
+                    },
+                },
+            };
+            let (stdout_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json(dispatch::run(args));
+            jobs::compact_list_command_run(stdout_result, exit_code)
+        }
         cli::RunnerCommand::Exec {
             id,
             cwd,
