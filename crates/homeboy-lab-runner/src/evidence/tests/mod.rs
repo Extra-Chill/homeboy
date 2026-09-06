@@ -211,6 +211,7 @@ fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_b
                 .record_artifact_with_id(&run.id, "visual_compare", &path, id, json!({}))
                 .expect("controller artifact");
         }
+
         let metadata =
             controller_artifact_metadata(std::slice::from_ref(&run)).expect("terminal metadata");
         assert_eq!(
