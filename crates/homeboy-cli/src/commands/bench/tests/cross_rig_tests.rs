@@ -87,6 +87,25 @@ fn cross_rig_output_lifts_run_and_artifact_refs() {
                 )
             );
         }
+        for rig in payload["payload"]["rigs"]
+            .as_array()
+            .expect("comparison rigs")
+        {
+            let artifacts = rig["artifacts"].as_array().expect("rig artifacts");
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact["name"] == "visual_result"
+                        && artifact["type"] == "file"),
+                "expected persisted untyped file type: {rig}"
+            );
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact["name"] == "visual_url" && artifact["type"] == "url"),
+                "expected persisted URL type: {rig}"
+            );
+        }
 
         let artifact_actions = value["next_actions"]
             .as_array()
@@ -98,12 +117,27 @@ fn cross_rig_output_lifts_run_and_artifact_refs() {
             !artifact_actions.is_empty(),
             "expected artifact actions: {value}"
         );
-        for action in artifact_actions {
+        for action in &artifact_actions {
             let command = action["command"].as_str().expect("artifact command");
-            assert!(command.contains(" runs artifact preview "), "{command}");
             Cli::try_parse_from(shlex::split(command).expect("shell-safe command"))
                 .expect("advertised artifact command must parse");
         }
+        assert!(
+            artifact_actions.iter().any(|action| action["command"]
+                .as_str()
+                .is_some_and(|command| command.contains(" runs artifact preview "))),
+            "expected directory preview action: {value}"
+        );
+        assert!(
+            artifact_actions
+                .iter()
+                .filter(|action| action["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(" runs artifact get ")))
+                .count()
+                >= 4,
+            "expected file and URL get actions for both rigs: {value}"
+        );
 
         let summary = crate::commands::bench_summary::render_bench_summary(&payload)
             .expect("compact comparison summary");
@@ -115,12 +149,14 @@ fn cross_rig_output_lifts_run_and_artifact_refs() {
             .filter(|command| command.starts_with("runs artifact "));
         for command in artifact_commands {
             let command = format!("homeboy {command}");
-            assert!(command.contains(" runs artifact preview "), "{command}");
             Cli::try_parse_from(shlex::split(&command).expect("shell-safe command"))
                 .expect("advertised summary command must parse");
         }
         assert!(summary.contains("runs artifact preview"), "{summary}");
-        assert!(!summary.contains("runs artifact get"), "{summary}");
+        assert!(
+            summary.matches("runs artifact get").count() >= 4,
+            "{summary}"
+        );
     });
 }
 

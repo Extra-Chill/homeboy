@@ -352,6 +352,10 @@ pub fn apply_recorded_bench_artifact_links(
     record: &ArtifactRecord,
 ) -> Option<BenchDiagnostic> {
     artifact.observation_artifact_id = Some(record.id.clone());
+    // The observation record owns the durable storage type. Source artifacts
+    // may omit or use a domain-specific type, neither of which is a retrieval
+    // contract after promotion.
+    artifact.artifact_type = Some(record.artifact_type.clone());
     let public_url = artifact_links::public_artifact_url(record)?;
     if artifact_links::public_artifact_url_is_reachable_or_legacy(record) {
         artifact.public_url = Some(public_url.clone());

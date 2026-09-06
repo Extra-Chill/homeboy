@@ -484,11 +484,13 @@ fn comparison_artifact_lines(output: &Value) -> Vec<String> {
                 (run_id, string_value(artifact, &["observation_artifact_id"]))
             {
                 let command = match string_value(artifact, &["type"]) {
-                    Some("file") => Some(format!(
-                        "  {rig_id}/{name}: homeboy runs artifact get {run_id} {artifact_id} -o <path>"
-                    )),
                     Some("directory") => Some(format!(
                         "  {rig_id}/{name}: homeboy runs artifact preview {run_id} {artifact_id}"
+                    )),
+                    // Persisted artifact records default an omitted type to file;
+                    // URL records use the same retrieval command.
+                    None | Some("file" | "url") => Some(format!(
+                        "  {rig_id}/{name}: homeboy runs artifact get {run_id} {artifact_id} -o <path>"
                     )),
                     _ => None,
                 };

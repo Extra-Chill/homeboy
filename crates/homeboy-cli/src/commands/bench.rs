@@ -558,17 +558,19 @@ fn comparison_actionable_metadata<'a>(
                 semantic_key: Some(semantic_key.clone()),
             });
             let action = match artifact.artifact_type.as_deref() {
-                Some("file") => Some(CommandNextAction::new(
-                    format!("get artifact {semantic_key}"),
-                    format!(
-                        "homeboy runs artifact get {} {} -o <path>",
-                        persisted_run.run_id, artifact_id
-                    ),
-                )),
                 Some("directory") => Some(CommandNextAction::new(
                     format!("preview artifact {semantic_key}"),
                     format!(
                         "homeboy runs artifact preview {} {}",
+                        persisted_run.run_id, artifact_id
+                    ),
+                )),
+                // Persisted artifact records default an omitted type to file;
+                // URL records use the same retrieval command.
+                None | Some("file" | "url") => Some(CommandNextAction::new(
+                    format!("get artifact {semantic_key}"),
+                    format!(
+                        "homeboy runs artifact get {} {} -o <path>",
                         persisted_run.run_id, artifact_id
                     ),
                 )),
