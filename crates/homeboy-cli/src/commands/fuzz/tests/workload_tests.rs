@@ -152,6 +152,62 @@ fn fuzz_workloads_include_rig_declared_paths() {
 }
 
 #[test]
+fn node_package_fuzz_script_is_listed_and_selected_for_run() {
+    with_isolated_home(|home| {
+        let extension_dir = home.path().join(".config/homeboy/extensions/nodejs");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("nodejs.json"),
+            serde_json::json!({
+                "name": "Node.js",
+                "version": "0.0.0",
+                "fuzz": {
+                    "extension_script": "fuzz.sh",
+                    "workload_json_probes": [{
+                        "path": "package.json",
+                        "pointer": "/scripts/fuzz",
+                        "id": "package-script-fuzz",
+                        "label": "package.json scripts.fuzz"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        let component_dir = tempfile::tempdir().expect("component dir");
+        fs::write(
+            component_dir.path().join("package.json"),
+            serde_json::json!({ "scripts": { "fuzz": "node scripts/fuzz.mjs" } }).to_string(),
+        )
+        .expect("package manifest");
+        let args = FuzzListArgs {
+            comp: PositionalComponentArgs {
+                component: Some("node-package".to_string()),
+                path: Some(component_dir.path().to_string_lossy().to_string()),
+            },
+            rig: None,
+            remote_discovery: false,
+            extension_override: ExtensionOverrideArgs {
+                extensions: vec!["nodejs".to_string()],
+            },
+            setting_args: SettingArgs::default(),
+        };
+
+        let listed = run_list(args).expect("list package fuzz script");
+
+        assert_eq!(listed.count, 1);
+        assert_eq!(listed.workloads[0].id, "package-script-fuzz");
+        assert_eq!(
+            select_workload(&listed.workloads, None)
+                .expect("select sole package workload")
+                .expect("package workload")
+                .id,
+            "package-script-fuzz"
+        );
+    });
+}
+
+#[test]
 fn fuzz_workload_parses_artifact_postprocess_metadata() {
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
         "id": "package-fuzz",
