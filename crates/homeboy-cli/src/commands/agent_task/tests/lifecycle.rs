@@ -4341,7 +4341,7 @@ fn cancel_command_marks_queued_run_cancelled() {
 }
 
 #[test]
-fn reconcile_apply_uses_a_replayable_control_plane_action() {
+fn reconcile_apply_returns_the_replayable_control_plane_acknowledgement() {
     with_temp_home(|| {
         let run_id = "run-cli-reconcile-action";
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
@@ -4354,16 +4354,25 @@ fn reconcile_apply_uses_a_replayable_control_plane_action() {
             idempotency_key: Some("cli-reconcile-1".to_string()),
         };
         let (first, exit_code) = reconcile_run(apply()).expect("reconcile action");
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(first.clone()).expect("canonical action acknowledgement");
         assert_eq!(exit_code, 0);
-        assert_eq!(first["schema"], "homeboy/agent-task-reconcile/v1");
-        assert_eq!(first["authorization"], "explicit-apply");
-        assert_eq!(first["idempotency_key"], "cli-reconcile-1");
+        assert_eq!(
+            acknowledgement.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(
+            acknowledgement.action,
+            homeboy_control_plane_contract::ControlPlaneAction::Reconcile
+        );
+        assert_eq!(acknowledgement.idempotency_key, "cli-reconcile-1");
+        assert_eq!(
+            acknowledgement.result.schema,
+            "homeboy/agent-task-reconcile/v1"
+        );
 
         let replay = reconcile_run(apply()).expect("replay").0;
-        assert_eq!(
-            replay["action_acknowledgement"],
-            first["action_acknowledgement"]
-        );
+        assert_eq!(replay, first);
 
         let preview = reconcile_run(ReconcileArgs {
             run_id: run_id.to_string(),
@@ -4374,7 +4383,7 @@ fn reconcile_apply_uses_a_replayable_control_plane_action() {
         .expect("preview")
         .0;
         assert_eq!(preview["authorization"], "preview");
-        assert!(preview.get("action_acknowledgement").is_none());
+        assert_eq!(preview["schema"], "homeboy/agent-task-reconcile/v1");
     });
 }
 
