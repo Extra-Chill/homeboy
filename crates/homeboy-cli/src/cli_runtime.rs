@@ -582,7 +582,6 @@ fn register_startup_providers_after_reconcile(
     // worktree-safety logic can accept a dirty worktree that is a verified
     // agent-task gate-feedback candidate without depending on the agent-task
     // subsystem.
-    crate::agents::agent_task_candidate_baseline::register();
     // Register the agent-task activity provider so core's activity report
     // includes durable agent-task records and their health summary without
     // depending on the agent-task subsystem.
