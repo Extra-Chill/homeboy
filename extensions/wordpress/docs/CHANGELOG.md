@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.44.0] - 2026-09-06
+
+### Added
+- let a suite declare its own preload_files
+
 ## [3.43.2] - 2026-09-06
 
 ### Fixed
