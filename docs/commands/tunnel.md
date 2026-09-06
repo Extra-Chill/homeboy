@@ -77,7 +77,8 @@ homeboy tunnel service start homeboy-artifact-origin \
   --require-listener \
   --command 'exec homeboy tunnel artifact-origin serve --root "$HOME/.local/share/homeboy/artifacts" --bind 127.0.0.1:7351'
 
-homeboy tunnel service status homeboy-artifact-origin
+homeboy runner exec homeboy-lab -- \
+  homeboy tunnel service status homeboy-artifact-origin
 ```
 
 If the public host is attached through an outbound preview client, restore that
@@ -100,6 +101,7 @@ PUBLIC_BASE='https://<artifact-public-host>'
 EXPECTED_SIZE='<size_bytes from runs artifacts>'
 EXPECTED_SHA256='<sha256 from runs artifacts>'
 PUBLIC_URL="$PUBLIC_BASE/runs/$RUN_ID/artifacts/$ARTIFACT_ID"
+EXPECTED_FINAL_URL='<configured reviewer-facing URL after redirects>'
 BODY="$(mktemp "${TMPDIR:-/tmp}/homeboy-artifact.XXXXXX")"
 trap 'rm -f "$BODY"' 0 HUP INT TERM
 
@@ -111,6 +113,7 @@ METADATA="$(curl --connect-timeout 10 --max-time 30 --location --show-error --si
   "$PUBLIC_URL")"
 printf '%s\n' "$METADATA"
 test "$(printf '%s\n' "$METADATA" | awk -F= '$1 == "status" { print $2; exit }')" = 200
+test "$(printf '%s\n' "$METADATA" | awk -F= '$1 == "final_url" { sub(/^final_url=/, ""); print; exit }')" = "$EXPECTED_FINAL_URL"
 test "$(wc -c < "$BODY" | tr -d ' ')" = "$EXPECTED_SIZE"
 test "$(shasum -a 256 "$BODY" | cut -d ' ' -f 1)" = "$EXPECTED_SHA256"
 ```
