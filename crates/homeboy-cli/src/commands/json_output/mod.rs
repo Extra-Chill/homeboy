@@ -227,9 +227,7 @@ pub(crate) fn run_command_output(
             |payload, _| super::activity::render_activity_summary(payload),
         ),
         Commands::Bench(args) => {
-            let summarize = args.is_run_invocation()
-                && !args.wants_full_json()
-                && !homeboy::core::lab_routing::is_lab_offload_subprocess();
+            let summarize = args.is_run_invocation() && !args.wants_full_json();
             command_run_with_summary(
                 dispatch(Commands::Bench(args), spec, placement),
                 |payload, _| {
