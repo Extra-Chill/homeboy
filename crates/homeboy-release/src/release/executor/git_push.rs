@@ -258,19 +258,7 @@ mod tests {
     use homeboy_core::component::Component;
     use std::process::Command;
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 
     #[test]
     fn git_push_step_fails_when_git_push_fails() {

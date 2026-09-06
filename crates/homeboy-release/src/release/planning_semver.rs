@@ -453,20 +453,7 @@ mod tests {
     use homeboy_core::git;
     use homeboy_core::git::SemverBump;
 
-    fn run_git(dir: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: stdout={} stderr={}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as run_git;
 
     fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
         if let Some(parent) = dir.join(name).parent() {

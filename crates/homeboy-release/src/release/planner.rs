@@ -686,21 +686,8 @@ mod tests {
     }
 
     use std::path::Path;
-    use std::process::Command;
 
-    fn git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("git command runs");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 
     /// Build a local clone whose HEAD is at `v1.0.0` and an "origin" that is
     /// `extra_upstream_commits` ahead, then update tracking refs without
