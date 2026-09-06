@@ -2332,17 +2332,24 @@ pub(super) fn runner_job_result_fields(
     let capture = result
         .get("capture")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let exit_code = result
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or_else(|| {
-            if job_status == JobStatus::Succeeded {
-                0
-            } else {
-                1
-            }
-        });
+    // The terminal snapshot is authoritative when cancellation races a worker
+    // result. Keep that result intact for evidence and validation, but never
+    // report a cancelled job as a successful command.
+    let exit_code = if job_status == JobStatus::Cancelled {
+        1
+    } else {
+        result
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or_else(|| {
+                if job_status == JobStatus::Succeeded {
+                    0
+                } else {
+                    1
+                }
+            })
+    };
     RunnerJobResultFields {
         result,
         stdout,

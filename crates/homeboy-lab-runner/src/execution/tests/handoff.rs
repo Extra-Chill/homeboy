@@ -171,6 +171,60 @@ fn terminal_handoff_hints_reflect_cancelled_job_state() {
 }
 
 #[test]
+fn cancelled_terminal_snapshot_overrides_a_preexisting_success_result() {
+    let mut job = running_job();
+    job.status = JobStatus::Cancelled;
+    job.finished_at_ms = Some(job.updated_at_ms);
+    let result = json!({
+        "exit_code": 0,
+        "stdout": "completed before cancellation won",
+        "stderr": "",
+    });
+    let mut events = vec![JobEvent {
+        sequence: 1,
+        job_id: job.id,
+        kind: JobEventKind::Result,
+        timestamp_ms: job.updated_at_ms,
+        message: Some("worker result".to_string()),
+        data: Some(result.clone()),
+    }];
+
+    append_cancelled_result_if_absent(&job, &mut events);
+    let fields = runner_job_result_fields(&events, job.status, &Default::default(), &[]);
+    let runner_result = runner_result(
+        Some(&job),
+        fields.exit_code,
+        &fields.stdout,
+        &fields.stderr,
+        None,
+        None,
+    );
+    let execution_record = runner_execution_record_for_output(
+        &ssh_runner(),
+        "daemon",
+        fields.exit_code,
+        Some(job.id.to_string()),
+        None,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+    );
+
+    // This shared projection is used by both direct-daemon and reverse-broker
+    // terminal paths. The worker result remains evidence, while cancellation
+    // controls the reported command and lifecycle outcomes.
+    assert_eq!(events.len(), 1);
+    assert_eq!(fields.result, result);
+    assert_eq!(fields.exit_code, 1);
+    assert_eq!(runner_result.exit_code, 1);
+    assert_eq!(runner_result.status, JobStatus::Cancelled);
+    assert_eq!(execution_record.status, "failed");
+}
+
+#[test]
 fn lab_offload_handoff_persists_run_when_job_is_accepted() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();
