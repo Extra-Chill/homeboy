@@ -557,16 +557,28 @@ fn comparison_actionable_metadata<'a>(
                 ),
                 semantic_key: Some(semantic_key.clone()),
             });
-            actionable.next_actions.push(
-                CommandNextAction::new(
+            let action = match artifact.artifact_type.as_deref() {
+                Some("file") => Some(CommandNextAction::new(
                     format!("get artifact {semantic_key}"),
                     format!(
                         "homeboy runs artifact get {} {} -o <path>",
                         persisted_run.run_id, artifact_id
                     ),
-                )
-                .with_kind(CommandNextActionKind::Artifacts),
-            );
+                )),
+                Some("directory") => Some(CommandNextAction::new(
+                    format!("preview artifact {semantic_key}"),
+                    format!(
+                        "homeboy runs artifact preview {} {}",
+                        persisted_run.run_id, artifact_id
+                    ),
+                )),
+                _ => None,
+            };
+            if let Some(action) = action {
+                actionable
+                    .next_actions
+                    .push(action.with_kind(CommandNextActionKind::Artifacts));
+            }
         }
     }
 

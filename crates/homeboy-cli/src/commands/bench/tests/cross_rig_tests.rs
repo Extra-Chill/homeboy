@@ -1,4 +1,6 @@
 use super::*;
+use crate::cli_surface::Cli;
+use clap::Parser;
 
 #[test]
 fn cross_rig_run_passes_selector_to_each_rig() {
@@ -86,11 +88,39 @@ fn cross_rig_output_lifts_run_and_artifact_refs() {
             );
         }
 
+        let artifact_actions = value["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .filter(|action| action["kind"] == "artifacts")
+            .collect::<Vec<_>>();
+        assert!(
+            !artifact_actions.is_empty(),
+            "expected artifact actions: {value}"
+        );
+        for action in artifact_actions {
+            let command = action["command"].as_str().expect("artifact command");
+            assert!(command.contains(" runs artifact preview "), "{command}");
+            Cli::try_parse_from(shlex::split(command).expect("shell-safe command"))
+                .expect("advertised artifact command must parse");
+        }
+
         let summary = crate::commands::bench_summary::render_bench_summary(&payload)
             .expect("compact comparison summary");
         assert!(summary.contains("Comparison means:\n"), "{summary}");
         assert!(summary.contains("Runs:\n"), "{summary}");
-        assert!(summary.contains("homeboy runs artifact get "), "{summary}");
+        let artifact_commands = summary
+            .lines()
+            .filter_map(|line| line.split_once(": homeboy ").map(|(_, command)| command))
+            .filter(|command| command.starts_with("runs artifact "));
+        for command in artifact_commands {
+            let command = format!("homeboy {command}");
+            assert!(command.contains(" runs artifact preview "), "{command}");
+            Cli::try_parse_from(shlex::split(&command).expect("shell-safe command"))
+                .expect("advertised summary command must parse");
+        }
+        assert!(summary.contains("runs artifact preview"), "{summary}");
+        assert!(!summary.contains("runs artifact get"), "{summary}");
     });
 }
 

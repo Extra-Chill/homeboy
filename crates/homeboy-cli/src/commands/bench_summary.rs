@@ -483,10 +483,19 @@ fn comparison_artifact_lines(output: &Value) -> Vec<String> {
             if let (Some(run_id), Some(artifact_id)) =
                 (run_id, string_value(artifact, &["observation_artifact_id"]))
             {
-                lines.push(format!(
-                    "  {rig_id}/{name}: homeboy runs artifact get {run_id} {artifact_id} -o <path>"
-                ));
-                continue;
+                let command = match string_value(artifact, &["type"]) {
+                    Some("file") => Some(format!(
+                        "  {rig_id}/{name}: homeboy runs artifact get {run_id} {artifact_id} -o <path>"
+                    )),
+                    Some("directory") => Some(format!(
+                        "  {rig_id}/{name}: homeboy runs artifact preview {run_id} {artifact_id}"
+                    )),
+                    _ => None,
+                };
+                if let Some(command) = command {
+                    lines.push(command);
+                    continue;
+                }
             }
             if let Some(locator) = artifact_locator(artifact) {
                 lines.push(format!("  {rig_id}/{name}: {locator}"));
