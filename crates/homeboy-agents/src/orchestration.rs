@@ -395,12 +395,21 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                         .store
                                         .read_record(&resolved)
                                         .map_err(map_lifecycle_error)?;
+                                    let mut result =
+                                        serde_json::to_value(&report).unwrap_or_default();
+                                    result["handoff"] = promotion_handoff(&report);
+                                    if !parameters.dry_run {
+                                        result["recorded_on_run"] = serde_json::json!({
+                                            "run_id": current.run_id,
+                                            "metadata_key": "latest_promotion",
+                                        });
+                                    }
                                     (
                                         ControlPlaneActionOutcome::Succeeded,
                                         project_record(&current, None)?,
                                         ControlPlaneActionPayload {
                                             schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
-                                            data: serde_json::to_value(report).unwrap_or_default(),
+                                            data: result,
                                         },
                                         None,
                                     )
@@ -660,6 +669,41 @@ fn cancel_result_payload(result: ControlPlaneCancelResult) -> ControlPlaneAction
         schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
         data: serde_json::to_value(result).expect("control-plane cancellation result serializes"),
     }
+}
+
+fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionReport) -> Value {
+    let target_applied = report.status.patch_promoted();
+    let verified = matches!(
+        report.status,
+        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+    );
+    let next_action = if report.status.gate_failed() {
+        "patch promoted but deterministic gates failed; use gate feedback before finalizing"
+    } else if target_applied && verified {
+        "patch promoted and deterministic gates verified; finalize a PR"
+    } else if target_applied {
+        "patch promoted into the target worktree; verify, then finalize a PR"
+    } else {
+        "dry run only; rerun promote without `--dry-run` before finalizing"
+    };
+
+    serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-handoff/v1",
+        "states": {
+            "patch_artifact_produced": true,
+            "candidate_retained": true,
+            "target_applied": target_applied,
+            "patch_promoted": target_applied,
+            "verified": verified,
+            "finalized": false,
+            "pr_opened": false,
+        },
+        "boundary": report.status.handoff_boundary(),
+        "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
+            "homeboy agent-task finalize-pr --recover {run_id}"
+        )),
+        "next_actions": [next_action],
+    })
 }
 
 fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), ControlPlaneError> {
@@ -1575,8 +1619,8 @@ mod tests {
         ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState, EventCursor, EventId,
         RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
         CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
@@ -2166,6 +2210,74 @@ mod tests {
             let replay = execute().expect("failed replay");
 
             assert_eq!(first.outcome, ControlPlaneActionOutcome::Failed);
+            assert_eq!(replay, first);
+            assert_eq!(executions.get(), 1);
+        });
+    }
+
+    #[test]
+    fn promotion_action_owns_handoff_recording_and_idempotent_replay() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Promote,
+                idempotency_key: "promote-request-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({
+                        "source": "{}",
+                        "source_run_id": AGENT_TASK_RUN,
+                        "to_worktree": "homeboy@candidate",
+                        "dry_run": false,
+                    }),
+                },
+                confirmed: true,
+            };
+            let report: crate::agent_task_promotion::AgentTaskPromotionReport =
+                serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "applied",
+                "source": { "kind": "aggregate", "run_id": AGENT_TASK_RUN, "task_id": "task" },
+                "to_worktree": "homeboy@candidate",
+                "target": { "worktree": "homeboy@candidate" },
+                "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                "operator_notification": { "status": "completed", "message": "complete" },
+                }))
+                .expect("promotion report");
+            let executions = std::rc::Rc::new(std::cell::Cell::new(0));
+            let execute = || {
+                let executions = std::rc::Rc::clone(&executions);
+                let report = report.clone();
+                service.execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    || panic!("resume delegate must not run"),
+                    move |_| {
+                        executions.set(executions.get() + 1);
+                        Ok(report)
+                    },
+                )
+            };
+
+            let first = execute().expect("promote");
+            let replay = execute().expect("replay");
+
+            assert_eq!(first.result.schema, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA);
+            assert_eq!(
+                first.result.data["handoff"]["states"]["target_applied"],
+                true
+            );
+            assert_eq!(
+                first.result.data["recorded_on_run"]["metadata_key"],
+                "latest_promotion"
+            );
             assert_eq!(replay, first);
             assert_eq!(executions.get(), 1);
         });
