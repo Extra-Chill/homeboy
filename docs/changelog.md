@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.369.2] - 2026-09-07
+
+### Fixed
+- preserve detached admission diagnostics
+- resolve local tools without a login shell
+
 ## [0.369.1] - 2026-09-07
 
 ### Changed
