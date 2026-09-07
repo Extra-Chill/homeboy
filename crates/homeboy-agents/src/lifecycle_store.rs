@@ -846,6 +846,22 @@ impl AgentTaskLifecycleStore {
         Ok((records, page.truncated, page.next_cursor))
     }
 
+    pub(crate) fn read_mission(
+        &self,
+        mission_id: &str,
+    ) -> Result<Option<homeboy_core::observation::MissionRecord>> {
+        self.open_observation_readonly()?.get_mission(mission_id)
+    }
+
+    pub(crate) fn read_mission_page(
+        &self,
+        after: Option<&homeboy_core::observation::MissionCursor>,
+        limit: usize,
+    ) -> Result<homeboy_core::observation::MissionPage> {
+        self.open_observation_readonly()?
+            .list_missions_page(after, limit)
+    }
+
     /// Register a Cook attempt using this store's record, lock, index, and
     /// terminal-projection roots.
     pub fn record_cook_attempt(
@@ -1449,7 +1465,9 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         rig_id: None,
         metadata_json,
     };
-    if preserve_terminal {
+    if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
+        store.upsert_imported_run_with_mission(&projected, mission.as_str(), preserve_terminal)?;
+    } else if preserve_terminal {
         store.upsert_imported_run_preserving_terminal(&projected)?;
     } else {
         store.upsert_imported_run(&projected)?;

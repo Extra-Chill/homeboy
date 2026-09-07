@@ -96,6 +96,16 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["v1", "control-plane", "capabilities"]) => {
             Ok(HttpEndpoint::ControlPlaneCapabilities)
         }
+        (HttpMethod::Get, ["v1", "control-plane", "missions"]) => {
+            Ok(HttpEndpoint::ControlPlaneMissions {
+                request: control_plane_mission_list_request(path)?,
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "missions", id]) => {
+            Ok(HttpEndpoint::ControlPlaneMission {
+                id: (*id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "runs"]) => Ok(HttpEndpoint::ControlPlaneRuns {
             request: control_plane_run_list_request(path)?,
         }),
@@ -194,6 +204,8 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
+                "GET /v1/control-plane/missions".to_string(),
+                "GET /v1/control-plane/missions/:id".to_string(),
                 "GET /v1/control-plane/runs".to_string(),
                 "POST /v1/control-plane/runs".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
@@ -235,6 +247,12 @@ where
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneMissions { request } => {
+            return control_plane_missions_response(endpoint.clone(), request);
+        }
+        HttpEndpoint::ControlPlaneMission { id } => {
+            return control_plane_mission_response(endpoint.clone(), id);
         }
         HttpEndpoint::ControlPlaneRuns { request } => {
             return control_plane_runs_response(endpoint.clone(), request);
@@ -417,7 +435,9 @@ where
                 },
             )?,
         }),
-        HttpEndpoint::ControlPlaneRuns { .. }
+        HttpEndpoint::ControlPlaneMissions { .. }
+        | HttpEndpoint::ControlPlaneMission { .. }
+        | HttpEndpoint::ControlPlaneRuns { .. }
         | HttpEndpoint::ControlPlaneRunSubmit
         | HttpEndpoint::ControlPlaneRun { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
@@ -531,6 +551,46 @@ fn control_plane_runs_response(
         Ok(page) => control_plane_ok(endpoint, page),
         Err(error) => control_plane_err(endpoint, error),
     }
+}
+
+fn control_plane_missions_response(
+    endpoint: HttpEndpoint,
+    request: &homeboy_control_plane_contract::ControlPlaneMissionListRequest,
+) -> Result<HttpApiResponse> {
+    match crate::control_plane::missions(request) {
+        Ok(page) => control_plane_ok(endpoint, page),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_mission_response(
+    endpoint: HttpEndpoint,
+    mission_id: &str,
+) -> Result<HttpApiResponse> {
+    let result =
+        control_plane_mission_id(mission_id).and_then(|id| crate::control_plane::mission(&id));
+    match result {
+        Ok(mission) => control_plane_ok(endpoint, mission),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_mission_id(
+    mission_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::MissionId,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    if mission_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
+        return Err(
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                "mission id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"
+            )),
+        );
+    }
+    homeboy_control_plane_contract::MissionId::new(mission_id).map_err(|error| {
+        homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+    })
 }
 
 fn control_plane_submission_response(
@@ -709,6 +769,59 @@ fn control_plane_run_list_request(
             Error::validation_invalid_argument("cursor", error.to_string(), None, None)
         })?;
     let request = ControlPlaneRunListRequest { cursor, limit };
+    request.validate().map_err(|error| {
+        Error::validation_invalid_argument("limit", error.message, Some(limit.to_string()), None)
+    })?;
+    Ok(request)
+}
+
+fn control_plane_mission_list_request(
+    path: &str,
+) -> Result<homeboy_control_plane_contract::ControlPlaneMissionListRequest> {
+    use homeboy_control_plane_contract::{ControlPlaneMissionListRequest, MissionCursor};
+
+    let limits = raw_query_values(path, "limit");
+    if limits.len() > 1 || limits.first().is_some_and(String::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "limit",
+            "control-plane mission page limit must be provided exactly once and cannot be empty",
+            None,
+            None,
+        ));
+    }
+    let limit = limits
+        .into_iter()
+        .next()
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                Error::validation_invalid_argument(
+                    "limit",
+                    "control-plane mission page limit must be an integer",
+                    Some(value),
+                    None,
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(50);
+    let cursors = raw_query_values(path, "cursor");
+    if cursors.len() > 1 || cursors.first().is_some_and(String::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "cursor",
+            "control-plane mission cursor must be provided exactly once and cannot be empty",
+            None,
+            None,
+        ));
+    }
+    let cursor = cursors
+        .into_iter()
+        .next()
+        .map(MissionCursor::new)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument("cursor", error.to_string(), None, None)
+        })?;
+    let request = ControlPlaneMissionListRequest { cursor, limit };
     request.validate().map_err(|error| {
         Error::validation_invalid_argument("limit", error.message, Some(limit.to_string()), None)
     })?;

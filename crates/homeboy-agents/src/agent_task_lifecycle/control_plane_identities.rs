@@ -41,6 +41,13 @@ pub fn canonical_fanout_mission(metadata: &Value) -> Result<Option<MissionId>> {
     Ok(resolved.mission)
 }
 
+pub fn canonical_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>> {
+    if let Some(mission) = canonical_fanout_mission(&record.metadata)? {
+        return Ok(Some(mission));
+    }
+    Ok(canonical_control_plane_identities(record)?.map(|identities| identities.mission))
+}
+
 /// Resolve the durable run through the control-plane contract.
 ///
 /// A run id that does not encode an attempt is omitted rather than guessed.

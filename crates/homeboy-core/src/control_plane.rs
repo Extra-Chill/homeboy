@@ -6,10 +6,11 @@
 
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneCapabilities,
-    ControlPlaneError, ControlPlaneEventPage, ControlPlaneOperation, ControlPlaneRun,
-    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
-    ControlPlaneSubmissionRequest, EventCursor, RunId,
+    ControlPlaneError, ControlPlaneEventPage, ControlPlaneMission, ControlPlaneMissionListRequest,
+    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, EventCursor, MissionId,
+    RunId,
 };
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
@@ -22,6 +23,21 @@ pub trait ControlPlaneProvider: Send + Sync {
         Err(ControlPlaneError::not_found(format!(
             "control-plane run not found: {requested_id}"
         )))
+    }
+
+    fn mission(&self, requested_id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane mission not found: {requested_id}"
+        )))
+    }
+
+    fn missions(
+        &self,
+        _request: &ControlPlaneMissionListRequest,
+    ) -> Result<ControlPlaneMissionPage, ControlPlaneError> {
+        Err(ControlPlaneError::unavailable(
+            "control-plane mission discovery is unavailable",
+        ))
     }
 
     fn runs(
@@ -94,6 +110,17 @@ pub fn capabilities() -> ControlPlaneCapabilities {
 
 pub fn run(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
     with_provider(|provider| provider.run(requested_id))
+}
+
+pub fn mission(requested_id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
+    with_provider(|provider| provider.mission(requested_id))
+}
+
+pub fn missions(
+    request: &ControlPlaneMissionListRequest,
+) -> Result<ControlPlaneMissionPage, ControlPlaneError> {
+    request.validate()?;
+    with_provider(|provider| provider.missions(request))
 }
 
 pub fn runs(

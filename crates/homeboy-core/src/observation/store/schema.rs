@@ -293,6 +293,27 @@ const MIGRATIONS: &[Migration] = &[
             ON artifacts(run_id, json_extract(metadata_json, '$.scenario_id'), created_at ASC, id ASC);
         "#,
     },
+    Migration {
+        version: 18,
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS control_plane_missions (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS control_plane_mission_runs (
+            mission_id TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            PRIMARY KEY(mission_id, run_id),
+            FOREIGN KEY(mission_id) REFERENCES control_plane_missions(id),
+            FOREIGN KEY(run_id) REFERENCES runs(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_plane_missions_created
+            ON control_plane_missions(created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_control_plane_mission_runs_mission
+            ON control_plane_mission_runs(mission_id, run_id);
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

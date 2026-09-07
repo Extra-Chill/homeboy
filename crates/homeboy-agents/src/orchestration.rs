@@ -13,14 +13,17 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneBlocker,
     ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef,
-    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner,
-    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest,
-    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-    ControlPlaneRuntime, ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement,
-    ControlPlaneSubmissionRequest, ExecutionId, MissionId, ProviderSessionId, RunCursor, RunId,
+    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
+    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
+    ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
+    ExecutionId, MissionCursor, MissionId, ProviderSessionId, RunCursor, RunId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
     CONTROL_PLANE_RUN_PAGE_SCHEMA,
@@ -54,6 +57,7 @@ const ACTION_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
 const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
 const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RUN_CURSOR_SCHEMA: &str = "homeboy/control-plane-run-cursor/v1";
+const MISSION_CURSOR_SCHEMA: &str = "homeboy/control-plane-mission-cursor/v1";
 const RUN_CURSOR_BOUND: usize = 1024;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -82,6 +86,14 @@ struct RunCursorPayload {
     run_id: String,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MissionCursorPayload {
+    schema: String,
+    created_at: String,
+    mission_id: String,
+}
+
 /// Lookup used by [`OrchestrationService`]. Callers inject stores or test
 /// doubles; the service never opens an environment-rooted store itself.
 pub trait RunLookup {
@@ -94,6 +106,18 @@ pub trait RunListLookup {
         after: Option<&RunPagePosition>,
         limit: usize,
     ) -> Result<RunSnapshotPage, ControlPlaneError>;
+}
+
+pub trait MissionLookup {
+    fn get_mission(
+        &self,
+        id: &MissionId,
+    ) -> Result<Option<homeboy_core::observation::MissionRecord>, ControlPlaneError>;
+    fn list_missions(
+        &self,
+        after: Option<&homeboy_core::observation::MissionCursor>,
+        limit: usize,
+    ) -> Result<homeboy_core::observation::MissionPage, ControlPlaneError>;
 }
 
 pub trait EventLookup {
@@ -173,6 +197,27 @@ impl RunListLookup for LifecycleStoreLookup {
     }
 }
 
+impl MissionLookup for LifecycleStoreLookup {
+    fn get_mission(
+        &self,
+        id: &MissionId,
+    ) -> Result<Option<homeboy_core::observation::MissionRecord>, ControlPlaneError> {
+        self.store
+            .read_mission(id.as_str())
+            .map_err(map_lifecycle_error)
+    }
+
+    fn list_missions(
+        &self,
+        after: Option<&homeboy_core::observation::MissionCursor>,
+        limit: usize,
+    ) -> Result<homeboy_core::observation::MissionPage, ControlPlaneError> {
+        self.store
+            .read_mission_page(after, limit)
+            .map_err(map_lifecycle_error)
+    }
+}
+
 impl EventLookup for LifecycleStoreLookup {
     fn events(
         &self,
@@ -205,12 +250,18 @@ impl<L: RunLookup> OrchestrationService<L> {
     /// Operations available to a read-only injected lookup.
     pub fn read_capabilities() -> ControlPlaneCapabilities
     where
-        L: RunListLookup,
+        L: RunListLookup + MissionLookup,
     {
         ControlPlaneCapabilities::new(
-            vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
+            vec![
+                ControlPlaneResource::Mission,
+                ControlPlaneResource::Run,
+                ControlPlaneResource::Event,
+            ],
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::ListMissions,
+                ControlPlaneOperation::GetMission,
                 ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
@@ -226,6 +277,103 @@ impl<L: RunLookup> OrchestrationService<L> {
         })?;
         project_record(&snapshot.record, snapshot.plan.as_ref())
     }
+}
+
+impl<L: RunLookup + MissionLookup> OrchestrationService<L> {
+    pub fn mission(&self, id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
+        self.lookup
+            .get_mission(id)?
+            .map(project_mission)
+            .transpose()?
+            .ok_or_else(|| ControlPlaneError::not_found(format!("mission not found: {id}")))
+    }
+
+    pub fn missions(
+        &self,
+        request: &ControlPlaneMissionListRequest,
+    ) -> Result<ControlPlaneMissionPage, ControlPlaneError> {
+        request.validate()?;
+        let after = request
+            .cursor
+            .as_ref()
+            .map(decode_mission_cursor)
+            .transpose()?;
+        let page = self
+            .lookup
+            .list_missions(after.as_ref(), request.limit as usize)?;
+        let missions = page
+            .missions
+            .into_iter()
+            .map(project_mission)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_cursor = page
+            .next_cursor
+            .as_ref()
+            .map(encode_mission_cursor)
+            .transpose()?;
+        Ok(ControlPlaneMissionPage {
+            schema: CONTROL_PLANE_MISSION_PAGE_SCHEMA.to_string(),
+            missions,
+            has_more: next_cursor.is_some(),
+            next_cursor,
+        })
+    }
+}
+
+fn project_mission(
+    mission: homeboy_core::observation::MissionRecord,
+) -> Result<ControlPlaneMission, ControlPlaneError> {
+    Ok(ControlPlaneMission {
+        schema: CONTROL_PLANE_MISSION_SCHEMA.to_string(),
+        mission: MissionId::new(mission.id)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+        created_at: mission.created_at,
+        updated_at: mission.updated_at,
+        run_count: mission.run_count,
+    })
+}
+
+fn encode_mission_cursor(
+    position: &homeboy_core::observation::MissionCursor,
+) -> Result<MissionCursor, ControlPlaneError> {
+    let bytes = serde_json::to_vec(&MissionCursorPayload {
+        schema: MISSION_CURSOR_SCHEMA.to_string(),
+        created_at: position.created_at.clone(),
+        mission_id: position.id.clone(),
+    })
+    .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+    MissionCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
+}
+
+fn decode_mission_cursor(
+    cursor: &MissionCursor,
+) -> Result<homeboy_core::observation::MissionCursor, ControlPlaneError> {
+    if cursor.as_str().len() > RUN_CURSOR_BOUND {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane mission cursor exceeds the size bound",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.as_str())
+        .map_err(|_| {
+            ControlPlaneError::invalid_argument("control-plane mission cursor is invalid")
+        })?;
+    let payload: MissionCursorPayload = serde_json::from_slice(&bytes).map_err(|_| {
+        ControlPlaneError::invalid_argument("control-plane mission cursor is invalid")
+    })?;
+    if payload.schema != MISSION_CURSOR_SCHEMA
+        || payload.created_at.trim().is_empty()
+        || payload.mission_id.trim().is_empty()
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane mission cursor is invalid",
+        ));
+    }
+    Ok(homeboy_core::observation::MissionCursor {
+        created_at: payload.created_at,
+        id: payload.mission_id,
+    })
 }
 
 impl<L: RunLookup + RunListLookup> OrchestrationService<L> {
@@ -1838,7 +1986,7 @@ pub fn project_record(
         resource.attempt = Some(identities.attempt);
         resource.attempt_number = Some(identities.attempt_number);
     }
-    if let Some(mission) = fanout_mission(record, plan)? {
+    if let Some(mission) = fanout_mission(record)? {
         resource.mission = Some(mission);
     }
     resource.state = run_state(record);
@@ -1917,21 +2065,9 @@ fn identities_for_record(
         .map_err(|error| ControlPlaneError::invalid_argument(error.message))
 }
 
-fn fanout_mission(
-    record: &AgentTaskRunRecord,
-    plan: Option<&AgentTaskPlan>,
-) -> Result<Option<MissionId>, ControlPlaneError> {
-    let persisted = crate::agent_task_lifecycle::canonical_fanout_mission(&record.metadata)
-        .map_err(|error| ControlPlaneError::invalid_argument(error.message))?;
-    if persisted.is_some() {
-        return Ok(persisted);
-    }
-    plan.map(|plan| {
-        crate::agent_task_lifecycle::canonical_fanout_mission(&plan.metadata)
-            .map_err(|error| ControlPlaneError::invalid_argument(error.message))
-    })
-    .transpose()
-    .map(Option::flatten)
+fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, ControlPlaneError> {
+    crate::agent_task_lifecycle::canonical_fanout_mission(&record.metadata)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.message))
 }
 
 fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
@@ -2427,6 +2563,21 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
     }
 
+    fn mission(&self, requested_id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).mission(requested_id)
+    }
+
+    fn missions(
+        &self,
+        request: &ControlPlaneMissionListRequest,
+    ) -> Result<ControlPlaneMissionPage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).missions(request)
+    }
+
     fn runs(
         &self,
         request: &ControlPlaneRunListRequest,
@@ -2521,10 +2672,11 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_review_evidence, event_page, live_provider_liveness, observed_file_timestamp,
-        phase, project_record, review_failure_reasons, LifecycleStoreLookup, OrchestrationService,
-        RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
-        RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
+        bounded_review_evidence, decode_mission_cursor, encode_mission_cursor, event_page,
+        live_provider_liveness, observed_file_timestamp, phase, project_record,
+        review_failure_reasons, LifecycleStoreLookup, OrchestrationService, RegisteredProvider,
+        RunListLookup, RunLookup, RunPagePosition, RunSnapshot, RunSnapshotPage,
+        REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -2534,13 +2686,14 @@ mod tests {
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
         ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCancelDisposition,
         ControlPlaneCancelResult, ControlPlaneErrorClass, ControlPlaneEvent,
-        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunListRequest,
-        ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneSubmissionRequest,
-        EventCursor, EventId, RunCursor, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        ControlPlaneEventSource, ControlPlaneMissionListRequest, ControlPlaneOperation,
+        ControlPlaneRunListRequest, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+        ControlPlaneSubmissionRequest, EventCursor, EventId, MissionId, RunCursor, RunId,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -2856,6 +3009,8 @@ mod tests {
             capabilities.operations,
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::ListMissions,
+                ControlPlaneOperation::GetMission,
                 ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
@@ -2923,6 +3078,25 @@ mod tests {
                 limit: 10,
             })
             .expect_err("invalid cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+    }
+
+    #[test]
+    fn mission_cursor_round_trips_and_rejects_unknown_encodings() {
+        let position = homeboy_core::observation::MissionCursor {
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            id: "mission-1".to_string(),
+        };
+        let cursor = encode_mission_cursor(&position).expect("encode cursor");
+        assert_eq!(
+            decode_mission_cursor(&cursor).expect("decode cursor"),
+            position
+        );
+        let error = decode_mission_cursor(
+            &homeboy_control_plane_contract::MissionCursor::new("not-a-mission-cursor")
+                .expect("opaque cursor"),
+        )
+        .expect_err("invalid cursor");
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
     }
 
@@ -3008,6 +3182,18 @@ mod tests {
                     .map(|mission| mission.as_str()),
                 Some("prepared-fanout-mission")
             );
+            let mission = RegisteredProvider
+                .mission(&MissionId::new("prepared-fanout-mission").expect("mission"))
+                .expect("mission detail");
+            assert_eq!(mission.run_count, 1);
+            let missions = RegisteredProvider
+                .missions(&ControlPlaneMissionListRequest {
+                    limit: 1,
+                    ..Default::default()
+                })
+                .expect("mission page");
+            assert_eq!(missions.missions, vec![mission]);
+            assert!(!missions.has_more);
             assert_eq!(
                 store
                     .read_record(run_id)
@@ -3665,16 +3851,19 @@ mod tests {
                 "plane": "isolated_tasks"
             }
         });
-        let legacy = project_record(&record, Some(&legacy_plan)).expect("legacy projection");
+        let legacy = project_record(&record, Some(&legacy_plan)).expect("unpersisted projection");
         assert_eq!(
             legacy.mission.as_ref().map(|mission| mission.as_str()),
-            Some("fanout-portfolio-1")
+            Some(AGENT_TASK_COOK)
         );
 
         let mut durable_record = record;
         durable_record.metadata["fanout"] = legacy_plan.metadata["fanout"].clone();
         let durable = project_record(&durable_record, None).expect("durable projection");
-        assert_eq!(durable.mission, legacy.mission);
+        assert_eq!(
+            durable.mission.as_ref().map(|mission| mission.as_str()),
+            Some("fanout-portfolio-1")
+        );
         assert_eq!(durable.attempt_number, Some(1));
     }
 

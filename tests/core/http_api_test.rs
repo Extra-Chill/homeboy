@@ -11,13 +11,15 @@ use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
-    ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
+    ControlPlaneEventSource, ControlPlaneMission, ControlPlaneMissionListRequest,
+    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
     ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
     ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneSubmissionAcknowledgement,
-    ControlPlaneSubmissionRequest, EventCursor, EventId, MissionId, RunCursor, RunId, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
-    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    ControlPlaneSubmissionRequest, EventCursor, EventId, MissionCursor, MissionId, RunCursor,
+    RunId, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
     CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
 };
@@ -297,6 +299,16 @@ fn fixture_control_plane_run() -> ControlPlaneRun {
     resource
 }
 
+fn fixture_control_plane_mission() -> ControlPlaneMission {
+    ControlPlaneMission {
+        schema: CONTROL_PLANE_MISSION_SCHEMA.to_string(),
+        mission: MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        run_count: 1,
+    }
+}
+
 fn fixture_control_plane_events(cursor: Option<&EventCursor>) -> ControlPlaneEventPage {
     let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
     let after = cursor
@@ -348,9 +360,15 @@ struct FixtureControlPlaneProvider;
 impl ControlPlaneProvider for FixtureControlPlaneProvider {
     fn capabilities(&self) -> ControlPlaneCapabilities {
         ControlPlaneCapabilities::new(
-            vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
+            vec![
+                ControlPlaneResource::Mission,
+                ControlPlaneResource::Run,
+                ControlPlaneResource::Event,
+            ],
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::ListMissions,
+                ControlPlaneOperation::GetMission,
                 ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
@@ -358,6 +376,30 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneOperation::ExecuteRunAction,
             ],
         )
+    }
+
+    fn mission(&self, requested_id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_COOK {
+            return Err(ControlPlaneError::not_found("mission not found"));
+        }
+        Ok(fixture_control_plane_mission())
+    }
+
+    fn missions(
+        &self,
+        request: &ControlPlaneMissionListRequest,
+    ) -> Result<ControlPlaneMissionPage, ControlPlaneError> {
+        Ok(ControlPlaneMissionPage {
+            schema: CONTROL_PLANE_MISSION_PAGE_SCHEMA.to_string(),
+            missions: request
+                .cursor
+                .is_none()
+                .then(fixture_control_plane_mission)
+                .into_iter()
+                .collect(),
+            next_cursor: None,
+            has_more: false,
+        })
     }
 
     fn runs(
@@ -481,6 +523,25 @@ fn routes_versioned_control_plane_endpoints() {
     assert_eq!(
         http_api::route(
             HttpMethod::Get,
+            "/v1/control-plane/missions?limit=10&cursor=opaque-before",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneMissions {
+            request: ControlPlaneMissionListRequest {
+                cursor: Some(MissionCursor::new("opaque-before").expect("cursor")),
+                limit: 10,
+            }
+        }
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/v1/control-plane/missions/mission-abc",).expect("route"),
+        HttpEndpoint::ControlPlaneMission {
+            id: "mission-abc".to_string()
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
             "/v1/control-plane/runs?limit=10&cursor=opaque-before",
         )
         .expect("route"),
@@ -533,9 +594,10 @@ fn routes_versioned_control_plane_endpoints() {
         .expect_err("only the canonical actions route mutates runs");
     http_api::route(HttpMethod::Get, "/agent-task/runs/run-abc")
         .expect_err("the unversioned compatibility route is removed");
-    http_api::route(HttpMethod::Get, "/v1/control-plane/missions")
-        .expect_err("no extra resource family");
     for path in [
+        "/v1/control-plane/missions?limit=0",
+        "/v1/control-plane/missions?limit=101",
+        "/v1/control-plane/missions?cursor=",
         "/v1/control-plane/runs?limit=",
         "/v1/control-plane/runs?limit=1&limit=2",
         "/v1/control-plane/runs?cursor=",
@@ -615,12 +677,63 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
         capabilities.operations,
         vec![
             ControlPlaneOperation::GetCapabilities,
+            ControlPlaneOperation::ListMissions,
+            ControlPlaneOperation::GetMission,
             ControlPlaneOperation::SubmitRun,
             ControlPlaneOperation::ListRuns,
             ControlPlaneOperation::GetRun,
             ControlPlaneOperation::GetRunEvents,
             ControlPlaneOperation::ExecuteRunAction,
         ]
+    );
+}
+
+#[test]
+fn control_plane_http_lists_and_gets_canonical_missions() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: "/v1/control-plane/missions?limit=1".to_string(),
+        body: None,
+    })
+    .expect("mission page");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.missions.list");
+    let result: ControlPlaneResult<ControlPlaneMissionPage> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.resource.expect("page").missions,
+        vec![fixture_control_plane_mission()]
+    );
+
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/missions/{CONTROL_PLANE_FIXTURE_COOK}"),
+        body: None,
+    })
+    .expect("mission detail");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.missions.show");
+    let result: ControlPlaneResult<ControlPlaneMission> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(result.resource, Some(fixture_control_plane_mission()));
+}
+
+#[test]
+fn control_plane_mission_id_is_bounded_before_lookup() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/missions/{}", "m".repeat(257)),
+        body: None,
+    })
+    .expect("typed mission id error");
+    assert_eq!(response.status, 400);
+    let result: ControlPlaneResult<ControlPlaneMission> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.error.expect("error").class,
+        ControlPlaneErrorClass::InvalidArgument
     );
 }
 

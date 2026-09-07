@@ -21,6 +21,8 @@ pub struct ControlPlaneCapabilities {
 #[serde(rename_all = "snake_case")]
 pub enum ControlPlaneOperation {
     GetCapabilities,
+    ListMissions,
+    GetMission,
     SubmitRun,
     ListRuns,
     GetRun,
@@ -87,6 +89,8 @@ mod tests {
             !document.operations.iter().any(|operation| !matches!(
                 operation,
                 ControlPlaneOperation::GetCapabilities
+                    | ControlPlaneOperation::ListMissions
+                    | ControlPlaneOperation::GetMission
                     | ControlPlaneOperation::SubmitRun
                     | ControlPlaneOperation::ListRuns
                     | ControlPlaneOperation::GetRun

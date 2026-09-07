@@ -97,15 +97,17 @@ A useful headless UI can be built from this read/query surface:
   `GET /runs/:id/artifacts/:artifact_id/content`, and `GET /runs/:id/findings`
   for persisted evidence
 - `GET /audit/runs` and `GET /bench/runs` for analysis-specific run history
-- `GET /v1/control-plane/capabilities`, `GET /v1/control-plane/runs`,
+- `GET /v1/control-plane/capabilities`, `GET /v1/control-plane/missions`,
+  `GET /v1/control-plane/missions/:id`, `GET /v1/control-plane/runs`,
   `POST /v1/control-plane/runs`, and `GET /v1/control-plane/runs/:id` for the
-  typed orchestration service. HTTP submission requires broker `submit` scope,
+  typed orchestration service. Mission and run discovery accept bounded
+  `limit` values and opaque keyset cursors. The mission index is forward-only:
+  canonical mission ownership is indexed transactionally with each new run
+  projection after the index schema is installed. HTTP submission requires broker `submit` scope,
   binds the durable actor to that credential, and queues a controller plan
   already staged under its canonical run ID. Provider, model, runner, and plan
   payloads remain adapter-owned, and claimed execution stays off the serial
-  HTTP request loop. Run discovery accepts a
-  bounded `limit` and opaque `cursor`. Capabilities
-  advertise only the operations wired in this
+  HTTP request loop. Capabilities advertise only the operations wired in this
   build. Discovery, exact retrieval, and `homeboy agent-task status` are pure
   reads; live runner refresh and durable repair belong to the explicit
   reconciliation operation. The exact route accepts run ids; mission/Cook ids

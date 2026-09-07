@@ -1344,19 +1344,30 @@ impl ObservationStore {
     }
 
     pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {
-        self.upsert_imported_run_with_terminal_guard(run, false)
+        self.upsert_imported_run_with_terminal_guard(run, false, None)
     }
 
     /// Upsert an imported projection without allowing a stale in-flight writer
     /// to replace a settled observation.
     pub fn upsert_imported_run_preserving_terminal(&self, run: &RunRecord) -> Result<()> {
-        self.upsert_imported_run_with_terminal_guard(run, true)
+        self.upsert_imported_run_with_terminal_guard(run, true, None)
+    }
+
+    pub fn upsert_imported_run_with_mission(
+        &self,
+        run: &RunRecord,
+        mission_id: &str,
+        preserve_terminal: bool,
+    ) -> Result<()> {
+        validate_required("mission_id", mission_id)?;
+        self.upsert_imported_run_with_terminal_guard(run, preserve_terminal, Some(mission_id))
     }
 
     fn upsert_imported_run_with_terminal_guard(
         &self,
         run: &RunRecord,
         preserve_terminal: bool,
+        mission_id: Option<&str>,
     ) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let mut run = run.clone();
@@ -1377,7 +1388,8 @@ impl ObservationStore {
             ""
         };
         execute_with_retry("upsert imported run record", || {
-            self.connection.execute(
+            let transaction = self.connection.unchecked_transaction()?;
+            transaction.execute(
                 &format!(
                     r#"
                 INSERT INTO runs(
@@ -1423,9 +1435,107 @@ impl ObservationStore {
                     run.rig_id,
                     metadata_json,
                 ],
-            )
+            )?;
+            if let Some(mission_id) = mission_id {
+                let updated_at = run.finished_at.as_deref().unwrap_or(&run.started_at);
+                transaction.execute(
+                    r#"
+                    INSERT INTO control_plane_missions(id, created_at, updated_at)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(id) DO UPDATE SET
+                        updated_at = MAX(updated_at, excluded.updated_at)
+                    "#,
+                    params![mission_id, run.started_at, updated_at],
+                )?;
+                transaction.execute(
+                    r#"
+                    INSERT INTO control_plane_mission_runs(mission_id, run_id)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(mission_id, run_id) DO NOTHING
+                    "#,
+                    params![mission_id, run.id],
+                )?;
+            }
+            transaction.commit()
         })?;
         Ok(())
+    }
+
+    pub fn get_mission(&self, mission_id: &str) -> Result<Option<MissionRecord>> {
+        validate_required("mission_id", mission_id)?;
+        self.connection
+            .query_row(
+                r#"
+                SELECT m.id, m.created_at, m.updated_at, COUNT(mr.run_id)
+                FROM control_plane_missions m
+                LEFT JOIN control_plane_mission_runs mr ON mr.mission_id = m.id
+                WHERE m.id = ?1
+                GROUP BY m.id, m.created_at, m.updated_at
+                "#,
+                [mission_id],
+                |row| {
+                    Ok(MissionRecord {
+                        id: row.get(0)?,
+                        created_at: row.get(1)?,
+                        updated_at: row.get(2)?,
+                        run_count: row.get::<_, i64>(3)?.max(0) as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| self.read_error("read control-plane mission", error))
+    }
+
+    pub fn list_missions_page(
+        &self,
+        after: Option<&MissionCursor>,
+        limit: usize,
+    ) -> Result<MissionPage> {
+        let limit = limit.clamp(1, MAX_RUN_PAGE_LIMIT as usize);
+        let probe = i64::try_from(limit + 1).expect("bounded mission page");
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT m.id, m.created_at, m.updated_at, COUNT(mr.run_id)
+                FROM control_plane_missions m
+                LEFT JOIN control_plane_mission_runs mr ON mr.mission_id = m.id
+                WHERE (?1 IS NULL OR m.created_at < ?1 OR (m.created_at = ?1 AND m.id < ?2))
+                GROUP BY m.id, m.created_at, m.updated_at
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT ?3
+                "#,
+            )
+            .map_err(sqlite_error("prepare control-plane mission page"))?;
+        let started_at = after.map(|cursor| cursor.created_at.as_str());
+        let id = after.map(|cursor| cursor.id.as_str());
+        let rows = statement
+            .query_map(params![started_at, id, probe], |row| {
+                Ok(MissionRecord {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    run_count: row.get::<_, i64>(3)?.max(0) as u64,
+                })
+            })
+            .map_err(sqlite_error("list control-plane missions"))?;
+        let mut missions = collect_rows(rows, "collect control-plane missions")?;
+        let truncated = missions.len() > limit;
+        if truncated {
+            missions.truncate(limit);
+        }
+        let next_cursor = truncated.then(|| {
+            let last = missions.last().expect("nonempty truncated mission page");
+            MissionCursor {
+                created_at: last.created_at.clone(),
+                id: last.id.clone(),
+            }
+        });
+        Ok(MissionPage {
+            missions,
+            truncated,
+            next_cursor,
+        })
     }
 }
 
@@ -1433,6 +1543,77 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn mission_index_is_transactional_forward_only_and_keyset_paginated() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = |id: &str, started_at: &str| RunRecord {
+                id: id.to_string(),
+                kind: "agent-task".to_string(),
+                started_at: started_at.to_string(),
+                status: "queued".to_string(),
+                metadata_json: serde_json::json!({}),
+                ..Default::default()
+            };
+            store
+                .upsert_imported_run_with_mission(
+                    &run("run-old", "2026-01-01T00:00:00Z"),
+                    "mission-old",
+                    false,
+                )
+                .expect("old mission");
+            store
+                .upsert_imported_run_with_mission(
+                    &run("run-new", "2026-01-02T00:00:00Z"),
+                    "mission-new",
+                    false,
+                )
+                .expect("new mission");
+
+            let first = store.list_missions_page(None, 1).expect("first page");
+            assert_eq!(first.missions[0].id, "mission-new");
+            assert!(first.truncated);
+            store
+                .upsert_imported_run_with_mission(
+                    &run("run-late-old", "2025-12-01T00:00:00Z"),
+                    "mission-new",
+                    false,
+                )
+                .expect("late older run preserves the mission page key");
+            let second = store
+                .list_missions_page(first.next_cursor.as_ref(), 1)
+                .expect("second page");
+            assert_eq!(second.missions[0].id, "mission-old");
+            assert!(!second.truncated);
+            assert_eq!(
+                store
+                    .get_mission("mission-new")
+                    .expect("mission")
+                    .expect("indexed mission")
+                    .run_count,
+                2
+            );
+
+            let mut conflicting = run("run-new", "2026-01-02T00:00:00Z");
+            conflicting.status = "failed".to_string();
+            store
+                .upsert_imported_run_with_mission(&conflicting, "mission-other", false)
+                .expect_err("run cannot move missions");
+            assert_eq!(
+                store
+                    .get_run("run-new")
+                    .expect("run")
+                    .expect("persisted run")
+                    .status,
+                "queued"
+            );
+            assert!(store
+                .get_mission("mission-other")
+                .expect("mission lookup")
+                .is_none());
+        });
+    }
 
     #[test]
     fn lifecycle_runner_job_identity_can_be_claimed_as_a_recovery_source() {

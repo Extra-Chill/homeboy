@@ -5,11 +5,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunCursor, RunId};
+use crate::identity::{
+    AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId, RunCursor, RunId,
+};
 
 pub const CONTROL_PLANE_RESULT_SCHEMA: &str = "homeboy/control-plane-result/v1";
 pub const CONTROL_PLANE_RUN_SCHEMA: &str = "homeboy/control-plane-run/v1";
 pub const CONTROL_PLANE_RUN_PAGE_SCHEMA: &str = "homeboy/control-plane-run-page/v1";
+pub const CONTROL_PLANE_MISSION_SCHEMA: &str = "homeboy/control-plane-mission/v1";
+pub const CONTROL_PLANE_MISSION_PAGE_SCHEMA: &str = "homeboy/control-plane-mission-page/v1";
 pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
     "homeboy/control-plane-action-eligibility/v1";
 
@@ -227,6 +231,54 @@ pub struct ControlPlaneRunPage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneMission {
+    pub schema: String,
+    pub mission: MissionId,
+    pub created_at: String,
+    pub updated_at: String,
+    pub run_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneMissionListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<MissionCursor>,
+    pub limit: u32,
+}
+
+impl Default for ControlPlaneMissionListRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: 50,
+        }
+    }
+}
+
+impl ControlPlaneMissionListRequest {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if !(1..=100).contains(&self.limit) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane mission page limit must be between 1 and 100",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneMissionPage {
+    pub schema: String,
+    pub missions: Vec<ControlPlaneMission>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<MissionCursor>,
+    pub has_more: bool,
+}
+
 /// Bounded live provider evidence. This intentionally carries timestamps and a
 /// source name only; provider output and filesystem paths remain out of status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -391,12 +443,17 @@ mod tests {
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
         ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
         ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
-        ControlPlaneLocation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
-        ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
-        ControlPlaneRuntime, ControlPlaneStateSummary, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneLocation, ControlPlaneMission, ControlPlaneMissionListRequest,
+        ControlPlaneMissionPage, ControlPlaneOwner, ControlPlaneProviderSummary,
+        ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
+        ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+        CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA,
     };
-    use crate::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunCursor, RunId};
+    use crate::{
+        AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId, RunCursor, RunId,
+    };
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
@@ -548,6 +605,34 @@ mod tests {
         assert_eq!(page.runs[0].state, ControlPlaneRunState::Running);
         assert!(page.next_cursor.is_none());
         assert!(!page.has_more);
+    }
+
+    #[test]
+    fn mission_resource_and_page_round_trip() {
+        let mission = ControlPlaneMission {
+            schema: CONTROL_PLANE_MISSION_SCHEMA.to_string(),
+            mission: MissionId::new("mission-1").expect("mission"),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            run_count: 2,
+        };
+        let page = ControlPlaneMissionPage {
+            schema: CONTROL_PLANE_MISSION_PAGE_SCHEMA.to_string(),
+            missions: vec![mission],
+            next_cursor: Some(MissionCursor::new("opaque").expect("cursor")),
+            has_more: true,
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneMissionPage>(value).expect("deserialize"),
+            page
+        );
+        assert!(ControlPlaneMissionListRequest {
+            limit: 101,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

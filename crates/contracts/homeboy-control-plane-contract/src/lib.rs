@@ -37,18 +37,20 @@ pub use event::{
     CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
 };
 pub use identity::{
-    AttemptId, EventCursor, EventId, ExecutionId, IdentityError, MissionId, ProviderSessionId,
-    RunCursor, RunId, TaskId,
+    AttemptId, EventCursor, EventId, ExecutionId, IdentityError, MissionCursor, MissionId,
+    ProviderSessionId, RunCursor, RunId, TaskId,
 };
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{
     ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
     ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
-    ControlPlaneLocation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
+    ControlPlaneLocation, ControlPlaneMission, ControlPlaneMissionListRequest,
+    ControlPlaneMissionPage, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
     ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
     ControlPlaneRuntime, ControlPlaneStateSummary, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 pub use review::{
     ControlPlaneRunReview, ControlPlaneRunReviewRequest, CONTROL_PLANE_RUN_REVIEW_SCHEMA,
