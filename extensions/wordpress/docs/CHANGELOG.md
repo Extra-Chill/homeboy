@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.2] - 2026-09-07
+
+### Fixed
+- emit runtimes shape from env detector; fail on unresolved validation deps
+
 ## [3.45.1] - 2026-09-07
 
 ### Fixed
