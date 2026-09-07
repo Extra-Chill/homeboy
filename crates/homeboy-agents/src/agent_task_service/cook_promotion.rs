@@ -4253,7 +4253,10 @@ fn valid_manual_finalization_receipt(
         && report.publication_proof.status == "review_ready"
         && report.finalization_outcome.schema
             == crate::agent_task_finalization::AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA
-        && matches!(report.pr_action.as_str(), "created" | "updated")
+        && matches!(
+            report.pr_action.as_str(),
+            "created" | "updated" | "already_merged"
+        )
         && report.publication_proof.adapter_action.as_deref() == Some(report.pr_action.as_str())
         && report.publication_proof.adapter_ref == report.pr_url
         && report.pr_number.is_some()
