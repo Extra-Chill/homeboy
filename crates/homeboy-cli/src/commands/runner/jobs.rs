@@ -678,9 +678,11 @@ fn classify_follow_error(
     if message.contains("404") || message.contains("not found") {
         return homeboy::core::Error::validation_invalid_argument(
             "job_id",
-            format!("runner job `{job_id}` is absent after authoritative generation recovery; its retained log history was evicted or the job ID is invalid. Resume evidence is unavailable after cursor {cursor}"),
+            format!("runner job `{job_id}` evidence is unavailable after authoritative generation recovery: the exact job was not retained by its job-owning daemon generation. No terminal status is inferred and no unrelated runner run was selected. Resume evidence is unavailable after cursor {cursor}"),
             Some(job_id.to_string()),
-            None,
+            Some(vec![
+                "Inspect the controller record for the exact durable run before retrying: homeboy runs show <run-id>.".to_string(),
+            ]),
         );
     }
     follow_recovery_error(runner_id, job_id, cursor, poll_ms, error)
@@ -1200,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_job_after_recovery_is_classified_as_retention_or_eviction() {
+    fn missing_job_after_recovery_reports_explicit_evidence_unavailability() {
         let error = homeboy::core::Error::validation_invalid_argument(
             "job_id",
             "daemon request returned HTTP 404",
@@ -1209,7 +1211,14 @@ mod tests {
         );
         let classified = classify_follow_error("lab", "job-42", 9, 250, error);
 
-        assert!(classified.message.contains("evicted"));
+        assert!(classified.message.contains("evidence is unavailable"));
+        assert!(classified
+            .message
+            .contains("No terminal status is inferred"));
+        assert!(classified
+            .message
+            .contains("no unrelated runner run was selected"));
+        assert!(!classified.message.contains("evicted"));
         assert!(classified.message.contains("cursor 9"));
     }
 }

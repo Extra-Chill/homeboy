@@ -381,9 +381,9 @@ pub fn refresh_selected_mirrored_daemon_evidence(
                     serde_json::json!({
                         "runner_id": runner_id,
                         "job_id": job_id,
-                        "status": "not_found",
+                        "status": "evidence_unavailable",
                         "lifecycle_state": "stale",
-                        "stale_reason": "daemon_job_not_found",
+                        "stale_reason": "authoritative_generation_did_not_retain_job",
                         "retryable": false,
                         "diagnostic": {
                             "code": err.code.as_str(),
