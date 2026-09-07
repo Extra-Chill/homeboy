@@ -14726,6 +14726,7 @@ struct CaptureBackend {
     created: bool,
     updated: bool,
     existing_pr: Option<AgentTaskPrRef>,
+    merged_pr: Option<AgentTaskPrRef>,
     candidate_state: Option<crate::agent_task_finalization::AgentTaskPrCandidateState>,
     committed_sha: Option<String>,
     hydrate_run_id: Option<String>,
@@ -14945,6 +14946,14 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         _head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
         Ok(self.existing_pr.clone())
+    }
+    fn find_merged_pr(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Result<Option<AgentTaskPrRef>> {
+        Ok(self.merged_pr.clone())
     }
     fn verify_remote_candidate(
         &mut self,
@@ -17483,7 +17492,7 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
 }
 
 #[test]
-fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
+fn standalone_manual_preflight_recovers_merged_publication_without_republishing() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "manual-11974";
         let target = tempfile::tempdir().expect("fixture target");
@@ -17543,13 +17552,19 @@ fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
         );
         let mut publish_backend = CaptureBackend {
             candidate_state: Some(candidate),
+            merged_pr: Some(AgentTaskPrRef {
+                number: 11974,
+                url: "https://github.com/Extra-Chill/homeboy/pull/11974".to_string(),
+                is_draft: false,
+            }),
             ..Default::default()
         };
         let published =
             recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut publish_backend)
                 .expect("continuation resolves standalone validated intent");
         assert_eq!(published["status"], "review_ready");
-        assert!(publish_backend.created);
+        assert_eq!(published["pr_action"], "already_merged");
+        assert!(!publish_backend.created && !publish_backend.updated);
 
         let mut repeated_backend = CaptureBackend::default();
         assert_eq!(
