@@ -517,7 +517,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         // that happened to be holding the pen when the filesystem gave out. It
         // shares the operational exit code so a wrapper can distinguish it from
         // an internal error and route to cleanup (#11127).
-        ErrorCode::StorageExhausted => 20,
+        ErrorCode::ResourceCapacityReserve | ErrorCode::StorageExhausted => 20,
 
         // A contended runtime promotion (another owner holds the lease) is a
         // transient "busy" condition, not a hard failure — map it to the
@@ -3014,6 +3014,40 @@ mod tests {
             payload.expect_err("error payload").code,
             ErrorCode::ValidationMissingArgument
         );
+    }
+
+    #[test]
+    fn reserve_pressure_keeps_a_resource_exit_code_and_actionable_recovery() {
+        let error = Error::capacity_reserve(homeboy::core::error::CapacityReserveDetails {
+            filesystem: "/workspace".to_string(),
+            available_bytes: 90,
+            reserve_bytes: 100,
+            shortfall_bytes: 10,
+        })
+        .with_action(ExecutableAction::new(
+            "capacity.reserve.inspect_cleanup",
+            "inspect scoped rebuildable artifacts",
+            "homeboy",
+            ["cleanup", "artifacts", "--path", "/workspace"],
+            homeboy::core::error::ActionSafety::ReadOnly,
+        ));
+        let (payload, exit_code) = map_cmd_result_to_json::<serde_json::Value>(Err(error));
+        let error = payload.expect_err("reserve pressure error");
+        let response = CommandResultEnvelope::<()>::from_error(
+            &CommandIdentity::top_level("agent-task"),
+            &error,
+            exit_code,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(exit_code, 20);
+        assert_eq!(value["diagnostics"]["code"], "resource.capacity_reserve");
+        assert_eq!(value["diagnostics"]["details"]["shortfall_bytes"], 10);
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "homeboy cleanup artifacts --path /workspace"
+        );
+        assert_eq!(value["next_actions"][0]["action"]["safety"], "read_only");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::StorageExhaustedDetails;
+use crate::error::{ActionSafety, CapacityReserveDetails, ExecutableAction};
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
 use crate::{git, Error, Result};
@@ -238,7 +238,6 @@ pub fn admit_reconstructable_artifact_work_in_root(
             return Err(reconstructable_admission_error(
                 root,
                 budget.available_bytes,
-                budget.available_inodes,
                 reserve_bytes,
             ));
         }
@@ -320,18 +319,53 @@ fn below_reconstructable_reserve(root: &Path, reserve_bytes: u64) -> bool {
 fn reconstructable_admission_error(
     root: &Path,
     available_bytes: Option<u64>,
-    available_inodes: Option<u64>,
     reserve_bytes: u64,
 ) -> Error {
-    Error::storage_exhausted_detailed(StorageExhaustedDetails {
-        error: "managed worktree filesystem remains below the reconstructable-artifact reserve after bounded retention".to_string(),
-        context: Some("admission before managed work".to_string()),
-        path: Some(root.display().to_string()),
+    let available_bytes = available_bytes.expect("measured reserve breach has available bytes");
+    let path = root.display().to_string();
+    Error::capacity_reserve(CapacityReserveDetails {
+        filesystem: path.clone(),
         available_bytes,
-        available_inodes,
-        reserve_bytes: Some(reserve_bytes),
-        reserve_inodes: None,
+        reserve_bytes,
+        shortfall_bytes: reserve_bytes.saturating_sub(available_bytes),
     })
+    .with_action(ExecutableAction::new(
+        "capacity.reserve.inspect_cleanup",
+        "inspect scoped rebuildable artifacts",
+        "homeboy",
+        [
+            "cleanup",
+            "artifacts",
+            "--path",
+            path.as_str(),
+            "--sort",
+            "size",
+            "--limit",
+            "100",
+        ],
+        ActionSafety::ReadOnly,
+    ))
+    .with_action(
+        ExecutableAction::new(
+            "capacity.reserve.apply_cleanup",
+            "remove approved scoped rebuildable artifacts",
+            "homeboy",
+            [
+                "cleanup",
+                "artifacts",
+                "--path",
+                path.as_str(),
+                "--sort",
+                "size",
+                "--limit",
+                "100",
+                "--apply",
+            ],
+            ActionSafety::Mutating,
+        )
+        .requiring_confirmation("approve scoped rebuildable artifact removal"),
+    )
+    .with_hint("Inspect scoped rebuildable artifacts, then explicitly approve their removal if appropriate.")
 }
 
 fn run_automatic_artifact_retention_in(
@@ -3266,8 +3300,22 @@ mod tests {
             let error = admit_reconstructable_artifact_work(vec![repo.path().to_path_buf()])
                 .expect_err("a measured reserve breach must refuse new managed work");
 
-            assert!(error.is_storage_exhausted());
+            assert_eq!(error.code.as_str(), "resource.capacity_reserve");
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
+            assert_eq!(
+                error.details["shortfall_bytes"],
+                u64::MAX - error.details["available_bytes"].as_u64().unwrap()
+            );
+            assert_eq!(
+                error.details["filesystem"],
+                repo.path().display().to_string()
+            );
+            assert_eq!(error.details["_homeboy_actions"][0]["safety"], "read_only");
+            assert_eq!(error.details["_homeboy_actions"][1]["safety"], "mutating");
+            assert_eq!(
+                error.details["_homeboy_actions"][1]["required_confirmations"][0],
+                "approve scoped rebuildable artifact removal"
+            );
             assert!(repo.path().join("target/debug/app").exists());
         });
     }
@@ -3288,7 +3336,7 @@ mod tests {
             let error = admit_reconstructable_artifact_work(vec![build_root.path().to_path_buf()])
                 .expect_err("a measured reserve breach must still refuse non-repository work");
 
-            assert!(error.is_storage_exhausted());
+            assert_eq!(error.code.as_str(), "resource.capacity_reserve");
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
         });
     }
