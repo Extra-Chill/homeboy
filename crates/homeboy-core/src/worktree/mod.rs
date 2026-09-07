@@ -25,18 +25,18 @@ pub use types::{
     TerminalWorkspaceAuthorityObservation, TerminalWorkspaceAuthorityProof, WorkspaceRefRecord,
     WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeAdoptedInventoryPage,
     WorktreeBranchCleanupReport, WorktreeCleanupCandidate, WorktreeCleanupCounts,
-    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped, WorktreeCreateAction,
-    WorktreeCreateEvidence, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeCreateReconciliation, WorktreeHandoffFreshness, WorktreeHandoffFreshnessProof,
-    WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryApplyRefusal,
-    WorktreeInventoryAuthorization, WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence,
-    WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeInventoryRecord,
-    WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOutput, WorktreeLivenessAuthority,
-    WorktreeOwnershipProbe, WorktreeQueueCreateFailure, WorktreeQueueCreateOptions,
-    WorktreeQueueCreateOutput, WorktreeQueueCreateRequest, WorktreeQueueCreateRow,
-    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeReconciliationAction,
-    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupPageOptions,
+    WorktreeCleanupSkipped, WorktreeCreateAction, WorktreeCreateEvidence, WorktreeCreateOptions,
+    WorktreeCreateOutput, WorktreeCreateReconciliation, WorktreeHandoffFreshness,
+    WorktreeHandoffFreshnessProof, WorktreeImportOptions, WorktreeImportOutput,
+    WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization, WorktreeInventoryCrossTab,
+    WorktreeInventoryLocalEvidence, WorktreeInventoryOptions, WorktreeInventoryOutput,
+    WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOutput,
+    WorktreeLivenessAuthority, WorktreeOwnershipProbe, WorktreeQueueCreateFailure,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeQueueCreateRequest,
+    WorktreeQueueCreateRow, WorktreeQueueCreateStatus, WorktreeQueueLockHolder,
+    WorktreeReconciliationAction, WorktreeReconciliationAuthority, WorktreeReconciliationResult,
+    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
     TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
@@ -555,6 +555,57 @@ pub(super) fn with_task_worktree_registry_write_lock<T>(
     operation()
 }
 
+pub(super) fn with_task_worktree_registry_write_lock_until<T>(
+    deadline: std::time::Instant,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::internal_io(
+                "task-worktree registry lease deadline exhausted",
+                Some("lock task worktree registry".into()),
+            ));
+        }
+        if let Ok(gate) = TASK_WORKTREE_REGISTRY_GATE
+            .get_or_init(|| RwLock::new(()))
+            .try_write()
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::internal_io(
+                    "task-worktree registry lease deadline exhausted",
+                    Some("lock task worktree registry".into()),
+                ));
+            }
+            let lock = open_task_worktree_registry_lock()?;
+            while lock.try_lock_exclusive().is_err() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::internal_io(
+                        "task-worktree registry lease deadline exhausted",
+                        Some("lock task worktree registry".into()),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::internal_io(
+                    "task-worktree registry lease deadline exhausted",
+                    Some("lock task worktree registry".into()),
+                ));
+            }
+            let result = operation();
+            drop(gate);
+            return result;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::internal_io(
+                "task-worktree registry lease deadline exhausted",
+                Some("lock task worktree registry".into()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
     let store = metadata_dir()?;
     let parent = store.parent().ok_or_else(|| {
@@ -635,7 +686,20 @@ pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {
 
 pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput> {
     let store = metadata_dir()?;
-    cleanup_with_store(options, &store)
+    cleanup_with_store_page(
+        WorktreeCleanupPageOptions {
+            cleanup: options,
+            limit: usize::MAX,
+            cursor: None,
+            deadline: None,
+        },
+        &store,
+    )
+}
+
+pub fn cleanup_page(options: WorktreeCleanupPageOptions) -> Result<WorktreeCleanupOutput> {
+    let store = metadata_dir()?;
+    cleanup_with_store_page(options, &store)
 }
 
 /// Register an active task-worktree record against the current test home.
