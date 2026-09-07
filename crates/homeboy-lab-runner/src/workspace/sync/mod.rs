@@ -1632,6 +1632,32 @@ pub fn prune_workspaces(
     options: RunnerWorkspacePruneOptions,
 ) -> Result<(RunnerWorkspacePruneOutput, i32)> {
     let runner = load(runner_id)?;
+    prune_workspaces_for_runner(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        &runner,
+        options,
+    )
+}
+
+/// [`prune_workspaces`] against an explicitly injected root.
+///
+/// Resolving the runner ambiently while pruning an injected root would reap one
+/// installation's workspaces on another's behalf (#14362).
+#[allow(dead_code)]
+pub fn prune_workspaces_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerWorkspacePruneOptions,
+) -> Result<(RunnerWorkspacePruneOutput, i32)> {
+    let runner = load_in_roots(roots, runner_id)?;
+    prune_workspaces_for_runner(roots, &runner, options)
+}
+
+fn prune_workspaces_for_runner(
+    roots: &homeboy_core::paths::PathRoots,
+    runner: &crate::Runner,
+    options: RunnerWorkspacePruneOptions,
+) -> Result<(RunnerWorkspacePruneOutput, i32)> {
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace_root",
@@ -1663,8 +1689,8 @@ pub fn prune_workspaces(
     let mut scan_complete = true;
     let receipt_path = if options.converge {
         Some(prune_convergence_receipt_path_in_roots(
-            homeboy_core::paths::PathRoots::from_environment()?.data(),
-            runner_id,
+            roots.data(),
+            &runner.id,
             workspace_root,
         ))
     } else {
