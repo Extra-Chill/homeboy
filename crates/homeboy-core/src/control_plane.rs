@@ -8,7 +8,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneEventPage, ControlPlaneOperation, ControlPlaneRun,
     ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, EventCursor, RunId,
+    ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneSubmissionRequest, EventCursor, RunId,
 };
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
@@ -29,6 +30,15 @@ pub trait ControlPlaneProvider: Send + Sync {
     ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
         Err(ControlPlaneError::unavailable(
             "control-plane run discovery is unavailable",
+        ))
+    }
+
+    fn submit(
+        &self,
+        _request: &ControlPlaneSubmissionRequest,
+    ) -> Result<ControlPlaneSubmissionAcknowledgement, ControlPlaneError> {
+        Err(ControlPlaneError::unavailable(
+            "control-plane run submission is unavailable",
         ))
     }
 
@@ -91,6 +101,13 @@ pub fn runs(
 ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
     request.validate()?;
     with_provider(|provider| provider.runs(request))
+}
+
+pub fn submit(
+    request: &ControlPlaneSubmissionRequest,
+) -> Result<ControlPlaneSubmissionAcknowledgement, ControlPlaneError> {
+    request.validate()?;
+    with_provider(|provider| provider.submit(request))
 }
 
 pub fn events(

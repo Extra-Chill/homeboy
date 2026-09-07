@@ -99,6 +99,9 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["v1", "control-plane", "runs"]) => Ok(HttpEndpoint::ControlPlaneRuns {
             request: control_plane_run_list_request(path)?,
         }),
+        (HttpMethod::Post, ["v1", "control-plane", "runs"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunSubmit)
+        }
         (HttpMethod::Get, ["v1", "control-plane", "runs", id]) => {
             Ok(HttpEndpoint::ControlPlaneRun {
                 id: (*id).to_string(),
@@ -192,6 +195,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
                 "GET /v1/control-plane/runs".to_string(),
+                "POST /v1/control-plane/runs".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
                 "GET /v1/control-plane/runs/:id/review".to_string(),
                 "GET /v1/control-plane/runs/:id/events".to_string(),
@@ -234,6 +238,9 @@ where
         }
         HttpEndpoint::ControlPlaneRuns { request } => {
             return control_plane_runs_response(endpoint.clone(), request);
+        }
+        HttpEndpoint::ControlPlaneRunSubmit => {
+            return control_plane_submission_response(endpoint.clone(), request.body.as_ref());
         }
         HttpEndpoint::ControlPlaneRunReview { id, request } => {
             return control_plane_review_response(endpoint.clone(), id, request);
@@ -411,6 +418,7 @@ where
             )?,
         }),
         HttpEndpoint::ControlPlaneRuns { .. }
+        | HttpEndpoint::ControlPlaneRunSubmit
         | HttpEndpoint::ControlPlaneRun { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
@@ -521,6 +529,44 @@ fn control_plane_runs_response(
 ) -> Result<HttpApiResponse> {
     match crate::control_plane::runs(request) {
         Ok(page) => control_plane_ok(endpoint, page),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_submission_response(
+    endpoint: HttpEndpoint,
+    body: Option<&Value>,
+) -> Result<HttpApiResponse> {
+    let result = body
+        .cloned()
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "control-plane submission request body is required",
+            )
+        })
+        .and_then(|body| {
+            serde_json::from_value::<homeboy_control_plane_contract::ControlPlaneSubmissionRequest>(
+                body,
+            )
+            .map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                    "invalid control-plane submission request: {error}"
+                ))
+            })
+        })
+        .and_then(|request| {
+            if !request.queue_only {
+                return Err(
+                    homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                        "HTTP control-plane submission requires queue_only=true",
+                    ),
+                );
+            }
+            Ok(request)
+        })
+        .and_then(|request| crate::control_plane::submit(&request));
+    match result {
+        Ok(acknowledgement) => control_plane_ok(endpoint, acknowledgement),
         Err(error) => control_plane_err(endpoint, error),
     }
 }

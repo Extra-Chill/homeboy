@@ -2227,8 +2227,44 @@ where
         ("POST", path) if path.starts_with("/runner/jobs/") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
+        ("POST", "/v1/control-plane/runs") => {
+            match authorize_control_plane_submission(body, &broker_auth) {
+                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
+}
+
+fn authorize_control_plane_submission(
+    body: Option<serde_json::Value>,
+    broker_auth: &remote_runner::BrokerAuthContext,
+) -> Result<Option<serde_json::Value>> {
+    let Some(grant) = broker_auth.authorize(crate::broker_auth::BrokerScope::Submit, None)? else {
+        return Ok(body);
+    };
+    if grant.credential_id == "loopback-open" {
+        return Err(Error::broker_auth_denied(
+            "control-plane submission requires a paired credential with submit scope",
+            None,
+            vec!["Pair a controller credential before submitting durable work.".to_string()],
+        ));
+    }
+    let mut body = body.unwrap_or_else(|| json!({}));
+    let object = body.as_object_mut().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "body",
+            "control-plane submission request body must be a JSON object",
+            None,
+            None,
+        )
+    })?;
+    object.insert(
+        "actor".to_string(),
+        serde_json::Value::String(format!("broker:{}", grant.credential_id)),
+    );
+    Ok(Some(body))
 }
 
 /// Read-only proof that a loopback endpoint is this daemon, bound to a fresh
@@ -4371,6 +4407,47 @@ mod tests {
         self, DaemonExecOutput, PreparedDaemonExec, PreparedDaemonExecRequest, RunnerExecDriver,
         RunnerExecPrepareRequest,
     };
+
+    #[test]
+    fn network_control_plane_submission_binds_actor_to_submit_credential() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut store = crate::broker_auth::BrokerAuthStore::default();
+            let minted = store
+                .pair(
+                    "controller-credential",
+                    "controller-a",
+                    std::collections::BTreeSet::from([crate::broker_auth::BrokerScope::Submit]),
+                )
+                .expect("pair");
+            store.save().expect("auth store");
+            let authenticated = remote_runner::BrokerAuthContext {
+                token: Some(minted.token),
+                loopback_bind: true,
+                trusted_local: false,
+            };
+            let authorized = authorize_control_plane_submission(
+                Some(json!({ "actor": "spoofed" })),
+                &authenticated,
+            )
+            .expect("authorized")
+            .expect("body");
+            assert_eq!(authorized["actor"], "broker:controller-credential");
+
+            let unauthenticated = remote_runner::BrokerAuthContext {
+                token: None,
+                loopback_bind: true,
+                trusted_local: false,
+            };
+            authorize_control_plane_submission(Some(json!({})), &unauthenticated)
+                .expect_err("missing bearer token");
+
+            let mut smoke_store = crate::broker_auth::BrokerAuthStore::default();
+            smoke_store.allow_unauthenticated_loopback = true;
+            smoke_store.save().expect("smoke auth store");
+            authorize_control_plane_submission(Some(json!({})), &unauthenticated)
+                .expect_err("loopback smoke grant cannot submit durable work");
+        });
+    }
 
     /// Round-trip the envelope through the exact functions that build it on the
     /// wire, then read it with the client's reader.

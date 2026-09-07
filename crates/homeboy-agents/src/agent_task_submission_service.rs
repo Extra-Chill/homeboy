@@ -532,41 +532,9 @@ where
 }
 
 fn validate_submission_request(request: &ControlPlaneSubmissionRequest) -> Result<()> {
-    if request.schema != CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA {
-        return Err(Error::validation_invalid_argument(
-            "schema",
-            format!(
-                "control-plane submission request schema must be {CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA}"
-            ),
-            None,
-            None,
-        ));
-    }
-    if request.idempotency_key.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "idempotency_key",
-            "control-plane submission request requires an idempotency key",
-            None,
-            None,
-        ));
-    }
-    if request.actor.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "actor",
-            "control-plane submission request requires an actor",
-            None,
-            None,
-        ));
-    }
-    if request.idempotency_key != request.run.as_str() {
-        return Err(Error::validation_invalid_argument(
-            "idempotency_key",
-            "control-plane submission idempotency key must equal the canonical run id",
-            Some(request.idempotency_key.clone()),
-            None,
-        ));
-    }
-    Ok(())
+    request
+        .validate()
+        .map_err(|error| Error::validation_invalid_argument("request", error.message, None, None))
 }
 
 fn load_existing_record(

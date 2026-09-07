@@ -13,11 +13,13 @@ use homeboy_control_plane_contract::{
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
     ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
     ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, EventCursor, EventId, MissionId, RunCursor,
-    RunId, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneSubmissionRequest, EventCursor, EventId, MissionId, RunCursor, RunId, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
 };
 use homeboy_resource_topology_contract::{
     ResourceTopologyResourceKind, ResourceTopologyResourceRef,
@@ -349,6 +351,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
             vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
@@ -371,6 +374,24 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
             runs,
             next_cursor: None,
             has_more: false,
+        })
+    }
+
+    fn submit(
+        &self,
+        request: &ControlPlaneSubmissionRequest,
+    ) -> Result<ControlPlaneSubmissionAcknowledgement, ControlPlaneError> {
+        Ok(ControlPlaneSubmissionAcknowledgement {
+            schema: CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
+            acknowledgement: format!("{}:submission:{}", request.run, request.idempotency_key),
+            run: request.run.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            actor: request.actor.clone(),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+            outcome: ControlPlaneActionOutcome::Succeeded,
+            queued: request.queue_only,
+            resource: fixture_control_plane_run(),
+            message: None,
         })
     }
 
@@ -452,6 +473,10 @@ fn routes_versioned_control_plane_endpoints() {
     assert_eq!(
         http_api::route(HttpMethod::Get, "/v1/control-plane/capabilities").expect("route"),
         HttpEndpoint::ControlPlaneCapabilities
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Post, "/v1/control-plane/runs").expect("route"),
+        HttpEndpoint::ControlPlaneRunSubmit
     );
     assert_eq!(
         http_api::route(
@@ -590,6 +615,7 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
         capabilities.operations,
         vec![
             ControlPlaneOperation::GetCapabilities,
+            ControlPlaneOperation::SubmitRun,
             ControlPlaneOperation::ListRuns,
             ControlPlaneOperation::GetRun,
             ControlPlaneOperation::GetRunEvents,
@@ -614,6 +640,50 @@ fn control_plane_http_lists_canonical_runs() {
     let page = result.resource.expect("page");
     assert_eq!(page.schema, CONTROL_PLANE_RUN_PAGE_SCHEMA);
     assert_eq!(page.runs, vec![fixture_control_plane_run()]);
+}
+
+#[test]
+fn control_plane_http_submits_a_prepared_run_through_the_provider() {
+    register_fixture_control_plane_provider();
+    let request = ControlPlaneSubmissionRequest {
+        schema: CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA.to_string(),
+        idempotency_key: CONTROL_PLANE_FIXTURE_RUN.to_string(),
+        actor: "http-test".to_string(),
+        run: RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run"),
+        queue_only: true,
+    };
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Post,
+        path: "/v1/control-plane/runs".to_string(),
+        body: Some(serde_json::to_value(&request).expect("request")),
+    })
+    .expect("submission acknowledgement");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.submit");
+    let result: ControlPlaneResult<ControlPlaneSubmissionAcknowledgement> =
+        serde_json::from_value(response.body).expect("result");
+    let acknowledgement = result.resource.expect("acknowledgement");
+    assert_eq!(acknowledgement.run, request.run);
+    assert_eq!(acknowledgement.idempotency_key, request.idempotency_key);
+    assert!(acknowledgement.queued);
+
+    let missing = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Post,
+        path: "/v1/control-plane/runs".to_string(),
+        body: None,
+    })
+    .expect("typed rejection");
+    assert_eq!(missing.status, 400);
+
+    let mut synchronous = request;
+    synchronous.queue_only = false;
+    let rejected = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Post,
+        path: "/v1/control-plane/runs".to_string(),
+        body: Some(serde_json::to_value(synchronous).expect("request")),
+    })
+    .expect("typed rejection");
+    assert_eq!(rejected.status, 400);
 }
 
 #[test]

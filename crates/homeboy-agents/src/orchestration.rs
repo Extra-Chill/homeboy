@@ -16,8 +16,9 @@ use homeboy_control_plane_contract::{
     ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner,
     ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest,
     ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-    ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunCursor,
-    RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    ControlPlaneRuntime, ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneSubmissionRequest, ExecutionId, ProviderSessionId, RunCursor, RunId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
@@ -210,6 +211,7 @@ impl<L: RunLookup> OrchestrationService<L> {
             vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
@@ -2414,6 +2416,51 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).runs(request)
     }
 
+    fn submit(
+        &self,
+        request: &ControlPlaneSubmissionRequest,
+    ) -> Result<ControlPlaneSubmissionAcknowledgement, ControlPlaneError> {
+        if request.run.as_str().len() > 256
+            || homeboy_core::paths::sanitize_path_segment(request.run.as_str())
+                != request.run.as_str()
+        {
+            return Err(ControlPlaneError::invalid_argument(
+                "staged control-plane submission requires a canonical path-segment run id of at most 256 bytes",
+            ));
+        }
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let plan_path = store.controller_plan_path(request.run.as_str());
+        match plan_path.try_exists() {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ControlPlaneError::not_found(format!(
+                    "prepared controller plan not found for run: {}",
+                    request.run
+                )))
+            }
+            Err(error) => return Err(ControlPlaneError::unavailable(error.to_string())),
+        }
+        let plan = store
+            .read_controller_plan(request.run.as_str())
+            .map_err(map_lifecycle_error)?;
+        let prepared = crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
+            .with_lifecycle_store(store);
+        let outcome = if request.queue_only {
+            crate::agent_task_submission_service::queue_prepared_plan(request, prepared)
+        } else {
+            crate::agent_task_submission_service::submit_prepared_plan(
+                request,
+                prepared,
+                std::sync::Arc::new(
+                    crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+                ),
+            )
+        }
+        .map_err(map_lifecycle_error)?;
+        Ok(outcome.acknowledgement)
+    }
+
     fn review(
         &self,
         requested_id: &RunId,
@@ -2456,8 +2503,8 @@ mod tests {
     use super::{
         bounded_review_evidence, event_page, live_provider_liveness, observed_file_timestamp,
         phase, project_record, review_failure_reasons, LifecycleStoreLookup, OrchestrationService,
-        RunListLookup, RunLookup, RunPagePosition, RunSnapshot, RunSnapshotPage,
-        REVIEW_EVIDENCE_BOUND,
+        RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
+        RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -2468,12 +2515,14 @@ mod tests {
         ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCancelDisposition,
         ControlPlaneCancelResult, ControlPlaneErrorClass, ControlPlaneEvent,
         ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunListRequest,
-        ControlPlaneRunReviewRequest, ControlPlaneRunState, EventCursor, EventId, RunCursor, RunId,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneSubmissionRequest,
+        EventCursor, EventId, RunCursor, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
+    use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::json;
@@ -2787,6 +2836,7 @@ mod tests {
             capabilities.operations,
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
@@ -2896,6 +2946,47 @@ mod tests {
             assert_eq!(second.runs[0].run.as_str(), "run-oldest");
             assert!(!second.has_more);
             assert!(second.next_cursor.is_none());
+        });
+    }
+
+    #[test]
+    fn registered_provider_submits_a_prepared_controller_plan_once() {
+        with_isolated_home(|_| {
+            let run_id = "prepared-control-plane-run";
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store
+                .write_controller_plan(run_id, &AgentTaskPlan::new("prepared-plan", Vec::new()))
+                .expect("prepared plan");
+            let request = ControlPlaneSubmissionRequest {
+                schema: CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA.to_string(),
+                idempotency_key: run_id.to_string(),
+                actor: "control-plane-test".to_string(),
+                run: RunId::new(run_id).expect("run"),
+                queue_only: true,
+            };
+
+            let first = RegisteredProvider.submit(&request).expect("submit");
+            let replay = RegisteredProvider.submit(&request).expect("replay");
+            assert_eq!(first.acknowledgement, replay.acknowledgement);
+            assert_eq!(first.run.as_str(), run_id);
+            assert!(first.queued);
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(replay.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert!(store.record_exists(run_id).expect("record exists"));
+
+            for invalid_run in ["prepared/control-plane-run", &"x".repeat(257)] {
+                let invalid = ControlPlaneSubmissionRequest {
+                    schema: CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA.to_string(),
+                    idempotency_key: invalid_run.to_string(),
+                    actor: "control-plane-test".to_string(),
+                    run: RunId::new(invalid_run).expect("opaque run"),
+                    queue_only: true,
+                };
+                let error = RegisteredProvider
+                    .submit(&invalid)
+                    .expect_err("unsafe staged-plan identity");
+                assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+            }
         });
     }
 
