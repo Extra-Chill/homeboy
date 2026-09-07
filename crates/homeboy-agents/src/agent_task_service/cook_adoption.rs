@@ -313,18 +313,21 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             "recipe_finalization",
         ),
     };
-    let source_worktree = options
-        .workspace
-        .source_worktree_path
-        .clone()
+    let source_worktree = match options.workspace.source_worktree_path.clone() {
+        Some(path) => path,
+        None => homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
+            &options.workspace.to_worktree,
+        )?
+        .map(|worktree| PathBuf::from(worktree.path))
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "candidate_ref",
-                "candidate adoption requires the recorded source worktree",
+                "candidate adoption requires a recorded source worktree or registered destination",
                 None,
                 None,
             )
-        })?;
+        })?,
+    };
     let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
         .unwrap_or_else(|| source_worktree.clone());
     // Resolve the caller input to the commit object before durable ownership is
