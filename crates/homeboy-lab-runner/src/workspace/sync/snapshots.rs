@@ -72,6 +72,17 @@ pub fn workspace_snapshots(
     filters: RunnerWorkspaceSnapshotFilters,
 ) -> Result<(RunnerWorkspaceSnapshotsOutput, i32)> {
     let runner = load(runner_id)?;
+    workspace_snapshots_for_runner(&runner, filters)
+}
+
+/// [`workspace_snapshots`] for a runner the caller has already resolved.
+///
+/// Callers inside a rooted sync already hold the runner; re-resolving it by id
+/// would reach the ambient config root and defeat the injected one (#14362).
+pub(crate) fn workspace_snapshots_for_runner(
+    runner: &crate::Runner,
+    filters: RunnerWorkspaceSnapshotFilters,
+) -> Result<(RunnerWorkspaceSnapshotsOutput, i32)> {
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace_root",
@@ -101,7 +112,7 @@ pub fn workspace_snapshots(
         RunnerWorkspaceSnapshotsOutput {
             variant: "workspace_snapshots",
             command: "runner.workspace.snapshots",
-            runner_id: runner.id,
+            runner_id: runner.id.clone(),
             workspace_root: workspace_root.to_string(),
             lab_workspaces_root,
             filters: RunnerWorkspaceSnapshotAppliedFilters {

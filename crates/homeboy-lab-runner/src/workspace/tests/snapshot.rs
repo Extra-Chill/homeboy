@@ -56,6 +56,29 @@ fn assert_parses_under_posix_shells(command: &str, label: &str) {
     );
 }
 
+/// Seed a local runner definition into an explicitly injected config root.
+///
+/// `crate::create` writes through `PathRoots::from_environment`, which forces
+/// callers onto `with_isolated_home` and therefore onto the process-global env
+/// lock. Seeding the injected root keeps these tests parallel (#14362).
+fn rooted_local_runner(roots: &homeboy_core::paths::PathRoots, id: &str, workspace_root: &Path) {
+    use homeboy_core::config::ConfigEntity;
+    fs::create_dir_all(<crate::Runner as ConfigEntity>::config_dir_in_root(
+        roots.config(),
+    ))
+    .expect("runner config dir");
+    let runner: crate::Runner = serde_json::from_str(&format!(
+        r#"{{"id":"{id}","kind":"local","workspace_root":"{}"}}"#,
+        workspace_root.display()
+    ))
+    .expect("runner spec");
+    fs::write(
+        <crate::Runner as ConfigEntity>::config_path_in_root(roots.config(), id),
+        serde_json::to_string_pretty(&runner).expect("serialize runner"),
+    )
+    .expect("write runner config");
+}
+
 #[test]
 fn snapshot_git_readback_failure_fails_materialization_contract() {
     let runner: crate::Runner = serde_json::from_value(serde_json::json!({
@@ -152,7 +175,9 @@ static SOURCE_SYNC_EXCLUDES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
 fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source workspace");
         let runner_root = tempfile::tempdir().expect("runner root");
         fs::write(source.path().join("file.txt"), "committed source\n").expect("source file");
@@ -182,16 +207,10 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
             .expect("commit source");
         let source_revision =
             git_output(source.path(), &["rev-parse", "HEAD"]).expect("source SHA");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-snapshot-harvest","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-snapshot-harvest", runner_root.path());
 
-        let (synced, _) = sync_workspace(
+        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-snapshot-harvest",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -302,12 +321,14 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
             error.contains("content hash") || error.contains("cleanliness does not match"),
             "unexpected source change must remain bound to provenance: {error}"
         );
-    });
+    }
 }
 
 #[test]
 fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source workspace");
         let runner_root = tempfile::tempdir().expect("runner root");
         git(source.path(), &["init", "--quiet", "-b", "main"]);
@@ -327,16 +348,10 @@ fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
             git_output(source.path(), &["rev-parse", "HEAD"]).expect("pinned base revision");
         git(source.path(), &["checkout", "--quiet", &destination]);
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-pinned-cook-base","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-pinned-cook-base", runner_root.path());
 
-        let (synced, _) = sync_workspace(
+        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-pinned-cook-base",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -368,12 +383,14 @@ fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
             .expect("runner pinned base"),
             pinned_base
         );
-    });
+    }
 }
 
 #[test]
 fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source repository");
         let worktrees = tempfile::tempdir().expect("linked worktree root");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -408,16 +425,10 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
             "provider-managed linked task worktree uses a gitdir pointer file"
         );
         let source_revision = git_output(&linked, &["rev-parse", "HEAD"]).expect("linked HEAD");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-linked-snapshot-git","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-linked-snapshot-git", runner_root.path());
 
-        let (synced, exit_code) = sync_workspace(
+        let (synced, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-linked-snapshot-git",
             RunnerWorkspaceSyncOptions {
                 path: linked.display().to_string(),
@@ -453,7 +464,7 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
         );
         super::super::util::verify_valid_git_representation(remote)
             .expect("verified valid .git representation before handoff");
-    });
+    }
 }
 
 #[test]
@@ -807,7 +818,9 @@ fn runner_snapshot_excludes_extend_default_snapshot_policy() {
 
 #[test]
 fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(source.path().join(".homeboy")).expect("metadata directory");
@@ -816,16 +829,10 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
             "user-owned collision\n",
         )
         .expect("metadata collision");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-collision","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-collision", runner_root.path());
 
-        let error = sync_workspace(
+        let error = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-collision",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -849,7 +856,7 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
             0,
             "collision must fail before creating a materialized workspace"
         );
-    });
+    }
 }
 
 #[test]
@@ -973,7 +980,9 @@ fn workspace_content_manifest_and_hash_share_one_traversal_instant() {
 
 #[test]
 fn test_sync_workspace() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(source.path().join("src")).expect("src dir");
@@ -1002,16 +1011,10 @@ fn test_sync_workspace() {
         )
         .expect("tsbuildinfo file");
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local", runner_root.path());
 
-        let (output, exit_code) = sync_workspace(
+        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1060,12 +1063,14 @@ fn test_sync_workspace() {
         assert!(Path::new(&output.remote_path)
             .join("packages/cli/tsconfig.tsbuildinfo")
             .exists());
-    });
+    }
 }
 
 #[test]
 fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         git(source.path(), &["init"]);
@@ -1082,16 +1087,10 @@ fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
         fs::write(source.path().join("node_modules/pkg/index.js"), "module").expect("module file");
         fs::write(source.path().join("build.tsbuildinfo"), "state").expect("state file");
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-gitignore","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-gitignore", runner_root.path());
 
-        let (output, exit_code) = sync_workspace(
+        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-gitignore",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1120,7 +1119,7 @@ fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
         assert!(!Path::new(&output.remote_path)
             .join("build.tsbuildinfo")
             .exists());
-    });
+    }
 }
 
 #[test]
@@ -1134,7 +1133,9 @@ fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
         "HOMEBOY_SOURCE_SYNC_EXCLUDES",
         "./docs/superpowers/plans/**",
     );
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("clean DMC-managed worktree");
         let runner_root = tempfile::tempdir().expect("runner root");
         fs::create_dir_all(source.path().join("docs")).expect("docs directory");
@@ -1146,14 +1147,7 @@ fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
         git(source.path(), &["add", "."]);
         git(source.path(), &["commit", "-m", "clean source"]);
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-late-dmc-context","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-late-dmc-context", runner_root.path());
 
         let injected_context = source
             .path()
@@ -1173,7 +1167,8 @@ fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
             },
         );
 
-        let (output, exit_code) = sync_workspace(
+        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-late-dmc-context",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1200,7 +1195,7 @@ fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
                 .exists(),
             "the injected context must be absent from the staged and materialized manifests"
         );
-    });
+    }
     match previous {
         Some(value) => std::env::set_var("HOMEBOY_SOURCE_SYNC_EXCLUDES", value),
         None => std::env::remove_var("HOMEBOY_SOURCE_SYNC_EXCLUDES"),
@@ -1209,19 +1204,14 @@ fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
 
 #[test]
 fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n").expect("manifest");
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local", runner_root.path());
 
         let options = RunnerWorkspaceSyncOptions {
             path: source.path().display().to_string(),
@@ -1233,40 +1223,40 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
             allow_dirty_lab_workspace: false,
             run_isolation_token: None,
         };
-        let (first, _) = sync_workspace("lab-local", options.clone()).expect("first sync");
+        let (first, _) =
+            crate::workspace::sync::sync_workspace_in_roots(&roots, "lab-local", options.clone())
+                .expect("first sync");
         let remote_path = Path::new(&first.remote_path);
         assert!(remote_path.join("Cargo.toml").exists());
 
         fs::write(remote_path.join("sentinel.txt"), "kept\n").expect("sentinel");
 
-        let (second, _) = sync_workspace("lab-local", options).expect("second sync");
+        let (second, _) =
+            crate::workspace::sync::sync_workspace_in_roots(&roots, "lab-local", options)
+                .expect("second sync");
         let second_remote_path = Path::new(&second.remote_path);
 
         assert_ne!(second.remote_path, first.remote_path);
         assert!(second_remote_path.join("Cargo.toml").exists());
         assert!(!second_remote_path.join("sentinel.txt").exists());
         assert!(remote_path.join("sentinel.txt").exists());
-    });
+    }
 }
 
 #[test]
 fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_paths() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(source.path().join("src")).expect("src dir");
         fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-contract","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-contract", runner_root.path());
 
-        let (output, _) = sync_workspace(
+        let (output, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-contract",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1327,7 +1317,7 @@ fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_
             contract.output_paths.artifact_dir,
             RunnerWorkspaceOutputPaths::artifact_dir_for_workspace(&output.remote_path)
         );
-    });
+    }
 }
 
 #[test]
@@ -1456,7 +1446,9 @@ fn workspace_list_omits_partial_git_checkouts_without_a_valid_head() {
 
 #[test]
 fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overlay() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source = super::dirty_git_repo();
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let head = git_output(source.path(), &["rev-parse", "HEAD"]).expect("source head");
@@ -1471,16 +1463,10 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
             ],
         );
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-snapshot-git","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-snapshot-git", runner_root.path());
 
-        let (output, exit_code) = sync_workspace(
+        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-snapshot-git",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1551,7 +1537,7 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
             "Git cleanup must restore the captured baseline"
         );
         assert!(!remote.join("untracked.txt").exists());
-    });
+    }
 }
 
 #[test]
@@ -2150,7 +2136,9 @@ fn snapshot_staging_preserves_an_admitted_root_when_every_child_is_excluded() {
 
 #[test]
 fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let workspace_root = tempfile::tempdir().expect("workspace root");
         let source = workspace_root.path().join("homeboy@task");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -2185,14 +2173,7 @@ fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
             .expect("generated output");
         fs::write(source.join("target/debug/homeboy"), "binary\n").expect("target output");
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-stable-clean-worktree","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-stable-clean-worktree", runner_root.path());
         let options = RunnerWorkspaceSyncOptions {
             path: source.display().to_string(),
             mode: RunnerWorkspaceSyncMode::Snapshot,
@@ -2205,15 +2186,19 @@ fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
         };
 
         for attempt in 0..3 {
-            let (synced, exit_code) = sync_workspace("lab-stable-clean-worktree", options.clone())
-                .expect("clean worktree snapshot must remain stable");
+            let (synced, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
+                &roots,
+                "lab-stable-clean-worktree",
+                options.clone(),
+            )
+            .expect("clean worktree snapshot must remain stable");
             assert_eq!(exit_code, 0, "attempt {attempt}");
             let staged = Path::new(&synced.remote_path);
             assert!(staged.join("tracked.txt").is_file());
             assert!(!staged.join("generated/runtime/output.js").exists());
             assert!(!staged.join("target/debug/homeboy").exists());
         }
-    });
+    }
 }
 
 #[cfg(unix)]
@@ -2252,7 +2237,9 @@ fn content_hash_binds_tracked_unresolved_symlinks_deterministically() {
 fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
     use std::os::unix::fs::symlink;
 
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("source");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -2278,15 +2265,9 @@ fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
             ],
         );
 
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-internal-links","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (output, _) = sync_workspace(
+        rooted_local_runner(&roots, "lab-internal-links", runner_root.path());
+        let (output, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-internal-links",
             RunnerWorkspaceSyncOptions {
                 path: source.display().to_string(),
@@ -2323,7 +2304,7 @@ fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
                 .is_empty(),
             "tracked internal links must not change the exact Git checkout"
         );
-    });
+    }
 }
 
 #[test]
