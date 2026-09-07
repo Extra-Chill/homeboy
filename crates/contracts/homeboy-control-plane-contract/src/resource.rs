@@ -196,6 +196,8 @@ impl ControlPlaneRun {
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneRunListRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission: Option<MissionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<RunCursor>,
     pub limit: u32,
 }
@@ -203,6 +205,7 @@ pub struct ControlPlaneRunListRequest {
 impl Default for ControlPlaneRunListRequest {
     fn default() -> Self {
         Self {
+            mission: None,
             cursor: None,
             limit: 50,
         }
@@ -581,6 +584,15 @@ mod tests {
         assert_eq!(value["next_cursor"], AGENT_TASK_RUN);
         let decoded: ControlPlaneRunPage = serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, page);
+
+        let request = ControlPlaneRunListRequest {
+            mission: Some(MissionId::new(AGENT_TASK_COOK).expect("mission")),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize request")["mission"],
+            AGENT_TASK_COOK
+        );
 
         assert!(ControlPlaneRunListRequest {
             limit: 0,

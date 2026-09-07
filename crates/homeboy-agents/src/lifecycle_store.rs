@@ -846,6 +846,25 @@ impl AgentTaskLifecycleStore {
         Ok((records, page.truncated, page.next_cursor))
     }
 
+    pub(crate) fn read_mission_record_page(
+        &self,
+        mission_id: &str,
+        after: Option<ObservationRunCursor>,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
+        let page = self.open_observation_readonly()?.list_mission_runs_page(
+            mission_id,
+            after.as_ref(),
+            limit,
+        )?;
+        let records = page
+            .runs
+            .iter()
+            .map(record_from_run)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((records, page.truncated, page.next_cursor))
+    }
+
     pub(crate) fn read_mission(
         &self,
         mission_id: &str,

@@ -727,6 +727,24 @@ fn control_plane_run_list_request(
 ) -> Result<homeboy_control_plane_contract::ControlPlaneRunListRequest> {
     use homeboy_control_plane_contract::{ControlPlaneRunListRequest, RunCursor};
 
+    let missions = raw_query_values(path, "mission");
+    if missions.len() > 1 || missions.first().is_some_and(String::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "mission",
+            "control-plane mission filter must be provided exactly once and cannot be empty",
+            None,
+            None,
+        ));
+    }
+    let mission = missions
+        .into_iter()
+        .next()
+        .map(|value| {
+            control_plane_mission_id(&value).map_err(|error| {
+                Error::validation_invalid_argument("mission", error.message, Some(value), None)
+            })
+        })
+        .transpose()?;
     let limits = raw_query_values(path, "limit");
     if limits.len() > 1 || limits.first().is_some_and(String::is_empty) {
         return Err(Error::validation_invalid_argument(
@@ -768,7 +786,11 @@ fn control_plane_run_list_request(
         .map_err(|error| {
             Error::validation_invalid_argument("cursor", error.to_string(), None, None)
         })?;
-    let request = ControlPlaneRunListRequest { cursor, limit };
+    let request = ControlPlaneRunListRequest {
+        mission,
+        cursor,
+        limit,
+    };
     request.validate().map_err(|error| {
         Error::validation_invalid_argument("limit", error.message, Some(limit.to_string()), None)
     })?;

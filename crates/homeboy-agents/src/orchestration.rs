@@ -84,6 +84,7 @@ struct RunCursorPayload {
     schema: String,
     started_at: String,
     run_id: String,
+    mission_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,6 +104,7 @@ pub trait RunLookup {
 pub trait RunListLookup {
     fn list(
         &self,
+        mission: Option<&MissionId>,
         after: Option<&RunPagePosition>,
         limit: usize,
     ) -> Result<RunSnapshotPage, ControlPlaneError>;
@@ -169,6 +171,7 @@ impl RunLookup for LifecycleStoreLookup {
 impl RunListLookup for LifecycleStoreLookup {
     fn list(
         &self,
+        mission: Option<&MissionId>,
         after: Option<&RunPagePosition>,
         limit: usize,
     ) -> Result<RunSnapshotPage, ControlPlaneError> {
@@ -176,10 +179,13 @@ impl RunListLookup for LifecycleStoreLookup {
             started_at: position.started_at.clone(),
             id: position.run_id.clone(),
         });
-        let (records, _truncated, next_cursor) = self
-            .store
-            .read_record_page(after, limit)
-            .map_err(map_lifecycle_error)?;
+        let (records, _truncated, next_cursor) = if let Some(mission) = mission {
+            self.store
+                .read_mission_record_page(mission.as_str(), after, limit)
+        } else {
+            self.store.read_record_page(after, limit)
+        }
+        .map_err(map_lifecycle_error)?;
         let snapshots = records
             .into_iter()
             .map(|record| {
@@ -384,8 +390,18 @@ impl<L: RunLookup + RunListLookup> OrchestrationService<L> {
         request: &ControlPlaneRunListRequest,
     ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
         request.validate()?;
-        let after = request.cursor.as_ref().map(decode_run_cursor).transpose()?;
-        let page = self.lookup.list(after.as_ref(), request.limit as usize)?;
+        let decoded = request.cursor.as_ref().map(decode_run_cursor).transpose()?;
+        if let Some((_, cursor_mission)) = &decoded {
+            if cursor_mission.as_ref() != request.mission.as_ref() {
+                return Err(ControlPlaneError::invalid_argument(
+                    "control-plane run cursor does not match the mission filter",
+                ));
+            }
+        }
+        let after = decoded.as_ref().map(|(position, _)| position);
+        let page = self
+            .lookup
+            .list(request.mission.as_ref(), after, request.limit as usize)?;
         let runs = page
             .snapshots
             .into_iter()
@@ -395,7 +411,7 @@ impl<L: RunLookup + RunListLookup> OrchestrationService<L> {
         let next_cursor = page
             .next_position
             .as_ref()
-            .map(encode_run_cursor)
+            .map(|position| encode_run_cursor(position, request.mission.as_ref()))
             .transpose()?;
         Ok(ControlPlaneRunPage {
             schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
@@ -406,18 +422,24 @@ impl<L: RunLookup + RunListLookup> OrchestrationService<L> {
     }
 }
 
-fn encode_run_cursor(position: &RunPagePosition) -> Result<RunCursor, ControlPlaneError> {
+fn encode_run_cursor(
+    position: &RunPagePosition,
+    mission: Option<&MissionId>,
+) -> Result<RunCursor, ControlPlaneError> {
     let bytes = serde_json::to_vec(&RunCursorPayload {
         schema: RUN_CURSOR_SCHEMA.to_string(),
         started_at: position.started_at.clone(),
         run_id: position.run_id.clone(),
+        mission_id: mission.map(|mission| mission.as_str().to_string()),
     })
     .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
     RunCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
 }
 
-fn decode_run_cursor(cursor: &RunCursor) -> Result<RunPagePosition, ControlPlaneError> {
+fn decode_run_cursor(
+    cursor: &RunCursor,
+) -> Result<(RunPagePosition, Option<MissionId>), ControlPlaneError> {
     if cursor.as_str().len() > RUN_CURSOR_BOUND {
         return Err(ControlPlaneError::invalid_argument(
             "control-plane run cursor exceeds the size bound",
@@ -436,10 +458,18 @@ fn decode_run_cursor(cursor: &RunCursor) -> Result<RunPagePosition, ControlPlane
             "control-plane run cursor is invalid",
         ));
     }
-    Ok(RunPagePosition {
-        started_at: payload.started_at,
-        run_id: payload.run_id,
-    })
+    let mission = payload
+        .mission_id
+        .map(MissionId::new)
+        .transpose()
+        .map_err(|_| ControlPlaneError::invalid_argument("control-plane run cursor is invalid"))?;
+    Ok((
+        RunPagePosition {
+            started_at: payload.started_at,
+            run_id: payload.run_id,
+        },
+        mission,
+    ))
 }
 
 fn review_promotion_candidates(
@@ -2723,10 +2753,25 @@ mod tests {
     impl RunListLookup for MapLookup {
         fn list(
             &self,
+            mission: Option<&MissionId>,
             after: Option<&RunPagePosition>,
             limit: usize,
         ) -> Result<RunSnapshotPage, homeboy_control_plane_contract::ControlPlaneError> {
             let mut snapshots = self.snapshots.values().cloned().collect::<Vec<_>>();
+            if let Some(mission) = mission {
+                snapshots = snapshots
+                    .into_iter()
+                    .map(|snapshot| {
+                        let projected = project_record(&snapshot.record, snapshot.plan.as_ref())?;
+                        Ok((snapshot, projected.mission))
+                    })
+                    .collect::<Result<Vec<_>, homeboy_control_plane_contract::ControlPlaneError>>()?
+                    .into_iter()
+                    .filter_map(|(snapshot, projected_mission)| {
+                        (projected_mission.as_ref() == Some(mission)).then_some(snapshot)
+                    })
+                    .collect();
+            }
             snapshots.sort_by(|left, right| {
                 right
                     .record
@@ -3052,6 +3097,7 @@ mod tests {
         let service = OrchestrationService::new(MapLookup { snapshots });
         let second = service
             .runs(&ControlPlaneRunListRequest {
+                mission: None,
                 cursor: first.next_cursor,
                 limit: 1,
             })
@@ -3061,6 +3107,7 @@ mod tests {
 
         let third = service
             .runs(&ControlPlaneRunListRequest {
+                mission: None,
                 cursor: second.next_cursor,
                 limit: 1,
             })
@@ -3074,6 +3121,7 @@ mod tests {
     fn run_discovery_rejects_unknown_cursor_encodings() {
         let error = service()
             .runs(&ControlPlaneRunListRequest {
+                mission: None,
                 cursor: Some(RunCursor::new("not-a-run-cursor").expect("opaque cursor")),
                 limit: 10,
             })
@@ -3111,6 +3159,15 @@ mod tests {
             ] {
                 let mut record = record(run_id);
                 record.submitted_at = submitted_at.to_string();
+                record.metadata = json!({
+                    "fanout": {
+                        "id": if run_id == "run-oldest" {
+                            "mission-b"
+                        } else {
+                            "mission-a"
+                        }
+                    }
+                });
                 store.write_record(&record).expect("record");
             }
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
@@ -3133,6 +3190,7 @@ mod tests {
 
             let second = service
                 .runs(&ControlPlaneRunListRequest {
+                    mission: None,
                     cursor: first.next_cursor,
                     limit: 2,
                 })
@@ -3140,6 +3198,34 @@ mod tests {
             assert_eq!(second.runs[0].run.as_str(), "run-oldest");
             assert!(!second.has_more);
             assert!(second.next_cursor.is_none());
+
+            let mission_a = MissionId::new("mission-a").expect("mission");
+            let filtered_first = service
+                .runs(&ControlPlaneRunListRequest {
+                    mission: Some(mission_a.clone()),
+                    limit: 1,
+                    ..Default::default()
+                })
+                .expect("first filtered page");
+            assert_eq!(filtered_first.runs[0].run.as_str(), "run-newest");
+            assert!(filtered_first.has_more);
+            let filtered_second = service
+                .runs(&ControlPlaneRunListRequest {
+                    mission: Some(mission_a),
+                    cursor: filtered_first.next_cursor.clone(),
+                    limit: 1,
+                })
+                .expect("second filtered page");
+            assert_eq!(filtered_second.runs[0].run.as_str(), "run-middle");
+            assert!(!filtered_second.has_more);
+            let mismatch = service
+                .runs(&ControlPlaneRunListRequest {
+                    mission: Some(MissionId::new("mission-b").expect("mission")),
+                    cursor: filtered_first.next_cursor,
+                    limit: 1,
+                })
+                .expect_err("cursor is bound to its mission filter");
+            assert_eq!(mismatch.class, ControlPlaneErrorClass::InvalidArgument);
         });
     }
 

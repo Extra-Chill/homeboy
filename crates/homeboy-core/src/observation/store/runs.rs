@@ -985,6 +985,43 @@ impl ObservationStore {
         Ok(run_page_from_probe(runs, limit, offset))
     }
 
+    pub fn list_mission_runs_page(
+        &self,
+        mission_id: &str,
+        after: Option<&RunCursor>,
+        limit: usize,
+    ) -> Result<RunPage> {
+        validate_required("mission_id", mission_id)?;
+        let limit = limit.clamp(1, MAX_RUN_PAGE_LIMIT as usize);
+        let probe = i64::try_from(limit + 1).expect("bounded mission run page");
+        let started_at = after.map(|cursor| cursor.started_at.as_str());
+        let id = after.map(|cursor| cursor.id.as_str());
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at, r.status,
+                       r.command, r.cwd, r.homeboy_version, r.git_sha, r.rig_id, r.metadata_json
+                FROM control_plane_mission_runs mr
+                INNER JOIN runs r ON r.id = mr.run_id
+                WHERE mr.mission_id = ?1
+                  AND r.kind = 'agent-task'
+                  AND (?2 IS NULL OR r.started_at < ?2 OR (r.started_at = ?2 AND r.id < ?3))
+                ORDER BY r.started_at DESC, r.id DESC
+                LIMIT ?4
+                "#,
+            )
+            .map_err(sqlite_error("prepare control-plane mission run page"))?;
+        let rows = statement
+            .query_map(
+                params![mission_id, started_at, id, probe],
+                row_to_run_record,
+            )
+            .map_err(sqlite_error("list control-plane mission runs"))?;
+        let runs = collect_rows(rows, "collect control-plane mission runs")?;
+        Ok(run_page_from_probe(runs, limit as i64, 0))
+    }
+
     /// Walk every run matching `filter`, paginating internally so the answer is
     /// complete rather than silently cut at the page ceiling.
     ///
@@ -1594,6 +1631,16 @@ mod tests {
                     .run_count,
                 2
             );
+            let mission_runs = store
+                .list_mission_runs_page("mission-new", None, 1)
+                .expect("first mission run page");
+            assert_eq!(mission_runs.runs[0].id, "run-new");
+            assert!(mission_runs.truncated);
+            let remaining = store
+                .list_mission_runs_page("mission-new", mission_runs.next_cursor.as_ref(), 1)
+                .expect("second mission run page");
+            assert_eq!(remaining.runs[0].id, "run-late-old");
+            assert!(!remaining.truncated);
 
             let mut conflicting = run("run-new", "2026-01-02T00:00:00Z");
             conflicting.status = "failed".to_string();

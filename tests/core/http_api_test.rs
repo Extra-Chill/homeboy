@@ -406,7 +406,11 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
         &self,
         request: &ControlPlaneRunListRequest,
     ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
-        let runs = if request.cursor.is_some() {
+        let mission_matches = request
+            .mission
+            .as_ref()
+            .is_none_or(|mission| mission.as_str() == CONTROL_PLANE_FIXTURE_COOK);
+        let runs = if request.cursor.is_some() || !mission_matches {
             Vec::new()
         } else {
             vec![fixture_control_plane_run()]
@@ -542,11 +546,12 @@ fn routes_versioned_control_plane_endpoints() {
     assert_eq!(
         http_api::route(
             HttpMethod::Get,
-            "/v1/control-plane/runs?limit=10&cursor=opaque-before",
+            "/v1/control-plane/runs?mission=mission-abc&limit=10&cursor=opaque-before",
         )
         .expect("route"),
         HttpEndpoint::ControlPlaneRuns {
             request: ControlPlaneRunListRequest {
+                mission: Some(MissionId::new("mission-abc").expect("mission")),
                 cursor: Some(RunCursor::new("opaque-before").expect("cursor")),
                 limit: 10,
             }
@@ -602,6 +607,8 @@ fn routes_versioned_control_plane_endpoints() {
         "/v1/control-plane/runs?limit=1&limit=2",
         "/v1/control-plane/runs?cursor=",
         "/v1/control-plane/runs?cursor=one&cursor=two",
+        "/v1/control-plane/runs?mission=one&mission=two",
+        "/v1/control-plane/runs?mission=",
     ] {
         http_api::route(HttpMethod::Get, path).expect_err("ambiguous or empty page parameter");
     }
@@ -753,6 +760,19 @@ fn control_plane_http_lists_canonical_runs() {
     let page = result.resource.expect("page");
     assert_eq!(page.schema, CONTROL_PLANE_RUN_PAGE_SCHEMA);
     assert_eq!(page.runs, vec![fixture_control_plane_run()]);
+
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs?mission={CONTROL_PLANE_FIXTURE_COOK}&limit=1"),
+        body: None,
+    })
+    .expect("mission run page");
+    let result: ControlPlaneResult<ControlPlaneRunPage> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.resource.expect("page").runs,
+        vec![fixture_control_plane_run()]
+    );
 }
 
 #[test]
