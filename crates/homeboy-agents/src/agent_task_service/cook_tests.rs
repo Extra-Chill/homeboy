@@ -17383,6 +17383,13 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         .expect("preflight direct manual publication");
         super::super::cook_promotion::persist_manual_finalization_retry_intent(run_id, &intent)
             .expect("persist direct retry intent");
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(run_id)
+                .expect("read retry intent")
+                .metadata["manual_finalization_retry_candidate"]["changed_files"],
+            serde_json::json!(intent.changed_files),
+            "retry recovery retains the preflight candidate scope even after commit"
+        );
         let hook = target.path().join(".git/hooks/pre-commit");
         std::fs::write(
             &hook,
@@ -17410,6 +17417,12 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         let record =
             agent_task_lifecycle::reconcile_status(run_id).expect("failed Cook manual record");
         assert_eq!(record.state, AgentTaskRunState::Failed);
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            // Simulate the clean-checkout fingerprint written before #14395.
+            record.metadata["manual_finalization_retry_candidate"]["changed_files"] =
+                serde_json::json!([]);
+        })
+        .expect("persist legacy empty retry scope");
         // The rejecting hook staged the original bytes. A real content change
         // must still invalidate the retry's semantic tree/path binding.
         std::fs::write(target.path().join("src/lib.rs"), "drifted\n")
