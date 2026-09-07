@@ -5885,6 +5885,80 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
 }
 
 #[test]
+fn reserve_pressure_cook_context_forwards_only_the_scoped_inventory_action() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new_without_recovery(
+            "cook-reserve-pressure",
+            2,
+            1,
+            false,
+            None,
+        );
+        let error =
+            homeboy_core::Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+                filesystem: "/worktrees/new-task".to_string(),
+                available_bytes: 90,
+                reserve_bytes: 100,
+                shortfall_bytes: 10,
+            })
+            .with_action(homeboy_core::error::ExecutableAction::new(
+                "capacity.reserve.inspect_repository_artifacts",
+                "inspect reclaimable artifacts across repository worktrees",
+                "homeboy",
+                [
+                    "cleanup",
+                    "artifacts",
+                    "--path",
+                    "/worktrees/repository",
+                    "--all-worktrees",
+                    "--merged-only",
+                ],
+                homeboy_core::error::ActionSafety::ReadOnly,
+            ))
+            .with_action(
+                homeboy_core::error::ExecutableAction::new(
+                    "capacity.reserve.apply_repository_artifacts",
+                    "remove approved artifacts from merged repository worktrees",
+                    "homeboy",
+                    ["cleanup", "artifacts", "--apply"],
+                    homeboy_core::error::ActionSafety::Mutating,
+                )
+                .requiring_confirmation("approve removal"),
+            );
+        super::super::materialize_initial_cook_attempt(&fixture.options)
+            .expect("materialize Cook attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &fixture.run_id,
+            &fixture.options.identity.initial_plan,
+            "worktree_capacity_admission",
+            &error,
+        )
+        .expect("persist capacity failure");
+
+        let report = cook_report(CookReportInput {
+            cook_id: fixture.cook_id.clone(),
+            status: "pre_execution_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some(error.message.clone()),
+            exit_code: 1,
+            invocation_latest_run_id: Some(&fixture.run_id),
+        })
+        .value;
+        let context = report.failure_context.expect("capacity recovery context");
+
+        assert_eq!(context.reason_code, "resource.capacity_reserve");
+        assert_eq!(context.next_actions.len(), 1);
+        assert_eq!(
+            context.next_actions[0].command,
+            "homeboy cleanup artifacts --path /worktrees/repository --all-worktrees --merged-only"
+        );
+        assert!(report.stop_reason.unwrap().contains("/worktrees/new-task"));
+    });
+}
+
+#[test]
 fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary repository");

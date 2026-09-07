@@ -5812,6 +5812,13 @@ pub fn cook_failure_context(
     let pre_execution_diagnostic = record.as_ref().and_then(|record| {
         let failure = record.metadata.get("pre_execution_failure")?;
         let details = failure.get("details")?;
+        if failure.get("error_code").and_then(Value::as_str) == Some("resource.capacity_reserve") {
+            return Some(serde_json::json!({
+                "code": "resource.capacity_reserve",
+                "message": failure.get("message"),
+                "details": details,
+            }));
+        }
         details
             .get("worktree_provider_failure")
             .cloned()
@@ -5926,26 +5933,33 @@ pub fn cook_failure_context(
             None,
         )
     };
-    let recovery_actions = dirty_candidate_adoption_recovery_actions(
-        &recipe,
-        record.as_ref(),
-        cook_id,
-        &chronological_latest_run_id,
-    )
-    .unwrap_or_else(|| {
-        cook_recovery_actions(
-            status,
-            &chronological_latest_run_id,
-            recovery_legal,
-            blocking_claim.is_some(),
-            record
-                .as_ref()
-                .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
-            exact_checkpoint_candidate_mismatch(&diagnostic),
-            ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
-            record.as_ref().and_then(lab_handoff_runtime_recovery),
-        )
-    });
+    let recovery_actions = capacity_reserve_recovery_actions(record.as_ref())
+        .or_else(|| {
+            dirty_candidate_adoption_recovery_actions(
+                &recipe,
+                record.as_ref(),
+                cook_id,
+                &chronological_latest_run_id,
+            )
+        })
+        .unwrap_or_else(|| {
+            cook_recovery_actions(
+                status,
+                &chronological_latest_run_id,
+                recovery_legal,
+                blocking_claim.is_some(),
+                record
+                    .as_ref()
+                    .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
+                exact_checkpoint_candidate_mismatch(&diagnostic),
+                ambiguous_promotion_artifact_ids(
+                    record_run_id,
+                    promotion_diagnostic.as_ref(),
+                    &recipe,
+                ),
+                record.as_ref().and_then(lab_handoff_runtime_recovery),
+            )
+        });
     let promotion_provenance = promotion.cloned();
     Some(super::AgentTaskCookFailureContext {
         cook_id: cook_id.to_string(),
@@ -5971,6 +5985,55 @@ pub fn cook_failure_context(
         recovery_reason: recovery_actions.reason,
         next_actions: recovery_actions.next_actions,
         legal_actions: recovery_actions.legal_actions,
+    })
+}
+
+/// A persisted failure is normally not trusted to manufacture shell commands.
+/// Reserve admission actions are core-owned, explicitly read-only, and retain
+/// their structured identifier, so the terminal Cook notification can safely
+/// forward only the inventory action. The confirmation-gated apply action stays
+/// in durable diagnostic evidence.
+fn capacity_reserve_recovery_actions(
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+) -> Option<CookRecoveryActions> {
+    let failure = record?.metadata.get("pre_execution_failure")?;
+    if failure.get("error_code").and_then(Value::as_str) != Some("resource.capacity_reserve") {
+        return None;
+    }
+    let actions = failure
+        .pointer("/details/_homeboy_actions")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|action| {
+            action
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("capacity.reserve."))
+                && action.get("program").and_then(Value::as_str) == Some("homeboy")
+                && action.get("safety").and_then(Value::as_str) == Some("read_only")
+        })
+        .filter_map(|action| {
+            let label = action.get("label")?.as_str()?;
+            let args = action
+                .get("args")?
+                .as_array()?
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            Some(super::AgentTaskCookRecoveryAction {
+                action: label.to_string(),
+                command: format!("homeboy {}", quote_args(&args)),
+            })
+        })
+        .take(1)
+        .collect::<Vec<_>>();
+    (!actions.is_empty()).then(|| CookRecoveryActions {
+        reason: "Filesystem reserve pressure blocked admission. Inspect the protected scoped inventory before approving any removal.".to_string(),
+        legal_actions: actions.clone(),
+        next_actions: actions,
     })
 }
 
