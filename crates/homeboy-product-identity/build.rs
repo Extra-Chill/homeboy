@@ -90,7 +90,7 @@ fn emit_git_identity(root: &Path) {
             provenance.dirty
         );
     } else {
-        if let Some(commit) = git_output(root, &["rev-parse", "--short=12", "HEAD"]) {
+        if let Some(commit) = git_output(root, &["rev-parse", "HEAD"]) {
             println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
         }
         if let Some(status) = git_output(root, &["status", "--porcelain"]) {
@@ -150,7 +150,7 @@ fn synthetic_snapshot_provenance(root: &Path) -> Option<SyntheticSnapshotProvena
         _ => return None,
     };
     Some(SyntheticSnapshotProvenance {
-        commit: source_head[..12].to_string(),
+        commit: source_head.to_string(),
         dirty,
     })
 }

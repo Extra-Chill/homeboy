@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.369.5] - 2026-09-07
+
+### Fixed
+- defer provider credentials to runner
+
+## [0.369.4] - 2026-09-07
+
+### Changed
+- Make reserve-pressure Cook failures actionable
+
+### Fixed
+- recover merged finalizations
+- retain manual retry scope
+- recover interrupted replacement gates
+- retain full source commit
+- make the exported TMPDIR socket-safe after canonicalization
+
 ## [0.369.3] - 2026-09-07
 
 ### Fixed

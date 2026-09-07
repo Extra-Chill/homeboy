@@ -831,6 +831,9 @@ pub struct VerifyReplacementArgs {
     /// Explicit operator authorization for the replacement proof recorded by this command.
     #[arg(long, value_name = "TEXT")]
     pub authorize_external_proof: String,
+    /// Explicit operator authorization to rerun gates after an interrupted replacement execution. Homeboy still refuses while the original operation lease is live.
+    #[arg(long, value_name = "TEXT")]
+    pub authorize_interrupted_rerun: Option<String>,
     /// Verification gate configuration for the replacement candidate.
     #[command(flatten)]
     pub gates: VerifyGateArgs,

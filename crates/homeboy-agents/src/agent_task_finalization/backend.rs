@@ -472,6 +472,29 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         }))
     }
 
+    fn find_merged_pr(
+        &mut self,
+        path: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<Option<AgentTaskPrRef>> {
+        let output = pr_find(
+            None,
+            PrFindOptions {
+                base: Some(base.to_string()),
+                head: Some(head.to_string()),
+                state: PrState::Merged,
+                limit: 10,
+                path: Some(path.to_string()),
+            },
+        )?;
+        Ok(output.items.into_iter().next().map(|item| AgentTaskPrRef {
+            number: item.number,
+            url: item.url,
+            is_draft: item.is_draft,
+        }))
+    }
+
     fn verify_remote_candidate(
         &mut self,
         path: &str,
