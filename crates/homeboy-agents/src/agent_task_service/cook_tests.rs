@@ -158,6 +158,51 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
     });
 }
 
+#[test]
+fn deferred_materialization_keeps_explicit_parent_identity_with_nested_registration() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let repository = tempfile::tempdir().expect("materialized repository");
+        homeboy_core::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+        let nested_path = repository.path().join("packages/php-transformer");
+        std::fs::create_dir_all(&nested_path).expect("nested component");
+        let registrations = home.path().join(".config/homeboy/components");
+        std::fs::create_dir_all(&registrations).expect("component registrations");
+        for (id, local_path) in [
+            ("blocks-engine", repository.path()),
+            ("php-transformer", nested_path.as_path()),
+        ] {
+            std::fs::write(
+                registrations.join(format!("{id}.json")),
+                serde_json::json!({
+                    "local_path": local_path,
+                    "remote_url": "https://github.com/example/blocks-engine.git"
+                })
+                .to_string(),
+            )
+            .expect("register component");
+        }
+
+        let mut plan = AgentTaskPlan::new("parent-component", Vec::new());
+        plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "blocks-engine",
+            "component_id": "blocks-engine",
+            "component_cwd": "."
+        });
+
+        // This is the boundary immediately before Cook admits the materialized
+        // workspace to a provider. It must use the controller-selected parent,
+        // not re-resolve the checkout path and find both registrations (#14383).
+        bind_materialized_cook_component_workspace(&mut plan, repository.path())
+            .expect("bind explicit parent component workspace");
+
+        assert_eq!(
+            plan.metadata["cook_repository_identity"]["component_id"],
+            "blocks-engine"
+        );
+        assert!(plan.metadata.get("gate_workspace").is_none());
+    });
+}
+
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn with_strict_config_lock(test: impl FnOnce()) {
