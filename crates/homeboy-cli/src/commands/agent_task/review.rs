@@ -1101,6 +1101,7 @@ pub(crate) fn verify_replacement(mut args: VerifyReplacementArgs) -> CmdResult<V
         &args.cook_or_attempt_id,
         args.gates.into(),
         args.authorize_external_proof,
+        args.authorize_interrupted_rerun,
     )?;
     let run_id = report.source.run_id.clone().ok_or_else(|| {
         homeboy::core::Error::internal_unexpected(

@@ -4768,6 +4768,8 @@ fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
         "cargo test exact::replacement",
         "--authorize-external-proof",
         "Chris approved corrected gate evidence",
+        "--authorize-interrupted-rerun",
+        "Chris approved rerunning after the interrupted executor",
     ])
     .expect("replacement verification command parses");
     let Commands::AgentTask(args) = cli.command else {
@@ -4781,6 +4783,10 @@ fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
     assert_eq!(
         args.authorize_external_proof,
         "Chris approved corrected gate evidence"
+    );
+    assert_eq!(
+        args.authorize_interrupted_rerun.as_deref(),
+        Some("Chris approved rerunning after the interrupted executor")
     );
 }
 
