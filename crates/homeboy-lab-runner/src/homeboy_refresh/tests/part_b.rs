@@ -823,7 +823,8 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
             dry_run: false,
         };
 
-        let (selected, exit_code) = refresh_homeboy_binary(options.clone()).expect("selection");
+        let (selected, exit_code) =
+            refresh_homeboy_binary_in_roots(&ambient_roots(), options.clone()).expect("selection");
         assert_eq!(exit_code, 0);
         assert_eq!(selected.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(selected.selected_binary_path, binary.display().to_string());
@@ -852,7 +853,8 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
         assert_eq!(refreshed, "present");
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
 
-        let (repeated, exit_code) = refresh_homeboy_binary(options).expect("repeat selection");
+        let (repeated, exit_code) =
+            refresh_homeboy_binary_in_roots(&ambient_roots(), options).expect("repeat selection");
         assert_eq!(exit_code, 0);
         assert_eq!(repeated.updated_fields, ["env", "homeboy_path"]);
         assert!(!repeated.daemon_refreshed);
@@ -1252,7 +1254,8 @@ fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnec
         };
 
         let (rejected, exit_code) =
-            refresh_homeboy_binary(options.clone()).expect("rejection output");
+            refresh_homeboy_binary_in_roots(&ambient_roots(), options.clone())
+                .expect("rejection output");
         assert_eq!(exit_code, 1);
         assert!(rejected
             .failure
@@ -1462,11 +1465,8 @@ fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
 
 #[test]
 fn ssh_bootstrap_transport_failure_leaves_config_unchanged() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        crate::create_in_roots(
-            &roots,
+    test_support::with_isolated_home(|_| {
+        crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
         )
@@ -1478,23 +1478,20 @@ fn ssh_bootstrap_transport_failure_leaves_config_unchanged() {
         );
         assert!(result.is_err());
         assert_eq!(
-            crate::load_in_roots(&roots, "lab-local")
+            crate::load("lab-local")
                 .expect("reload")
                 .settings
                 .homeboy_path
                 .as_deref(),
             Some("/old")
         );
-    }
+    });
 }
 
 #[test]
 fn ssh_bootstrap_identity_mismatch_leaves_config_unchanged() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        crate::create_in_roots(
-            &roots,
+    test_support::with_isolated_home(|_| {
+        crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
         )
@@ -1508,14 +1505,14 @@ fn ssh_bootstrap_identity_mismatch_leaves_config_unchanged() {
         );
         assert!(result.is_err());
         assert_eq!(
-            crate::load_in_roots(&roots, "lab-local")
+            crate::load("lab-local")
                 .expect("reload")
                 .settings
                 .homeboy_path
                 .as_deref(),
             Some("/old")
         );
-    }
+    });
 }
 
 #[test]
@@ -1563,7 +1560,8 @@ fn materialized_refresh_requires_an_immutable_binary_hash_and_path() {
 #[test]
 fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
     test_support::with_isolated_home(|_| {
-        crate::create(r#"{"id":"lab-local","kind":"local","homeboy_path":"/old","env":{"OLD":"1"},"resources":{"dev_sync":{"old":true}}}"#, false).expect("runner");
+        crate::create(
+                        r#"{"id":"lab-local","kind":"local","homeboy_path":"/old","env":{"OLD":"1"},"resources":{"dev_sync":{"old":true}}}"#, false).expect("runner");
         let plan = ssh_bootstrap_plan();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();

@@ -160,7 +160,12 @@ pub(super) fn hostname_fallback() -> String {
 }
 
 pub(super) fn session_path(runner_id: &str) -> Result<PathBuf> {
-    paths::runner_controller_session_file(runner_id, &controller_id())
+    Ok(session_path_in_root(&paths::homeboy()?, runner_id))
+}
+
+/// [`session_path`] below an already-resolved config root.
+pub(super) fn session_path_in_root(config_root: &std::path::Path, runner_id: &str) -> PathBuf {
+    paths::runner_controller_session_file_in_root(config_root, runner_id, &controller_id())
 }
 
 pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
@@ -255,14 +260,23 @@ pub(super) fn read_session_for_status_until(
     runner_id: &str,
     deadline: Instant,
 ) -> Result<Option<RunnerSession>> {
+    read_session_for_status_until_in_root(&paths::homeboy()?, runner_id, deadline)
+}
+
+/// [`read_session_for_status_until`] below an already-resolved config root.
+pub(super) fn read_session_for_status_until_in_root(
+    config_root: &std::path::Path,
+    runner_id: &str,
+    deadline: Instant,
+) -> Result<Option<RunnerSession>> {
     let controller_id = controller_id();
-    let session = read_session_for_controller(runner_id, &controller_id)?;
+    let session = read_session_for_controller_in_root(config_root, runner_id, &controller_id)?;
     if session.as_ref().is_some_and(|session| {
         status_session_state_until(Some(session), deadline) == RunnerSessionState::Connected
     }) {
         return Ok(session);
     }
-    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
     match status_peer_session_in_until(&directory, &controller_id, deadline)? {
         StatusPeerSession::One(peer) => Ok(Some(*peer)),
         StatusPeerSession::None => Ok(session),
@@ -736,10 +750,20 @@ pub(super) fn read_session_for_controller(
     runner_id: &str,
     controller_id: &str,
 ) -> Result<Option<RunnerSession>> {
-    read_session_at(&paths::runner_controller_session_file(
+    read_session_for_controller_in_root(&paths::homeboy()?, runner_id, controller_id)
+}
+
+/// [`read_session_for_controller`] below an already-resolved config root.
+pub(super) fn read_session_for_controller_in_root(
+    config_root: &std::path::Path,
+    runner_id: &str,
+    controller_id: &str,
+) -> Result<Option<RunnerSession>> {
+    read_session_at(&paths::runner_controller_session_file_in_root(
+        config_root,
         runner_id,
         controller_id,
-    )?)
+    ))
 }
 
 pub(super) fn read_ownership(runner_id: &str) -> Result<Option<RunnerSession>> {

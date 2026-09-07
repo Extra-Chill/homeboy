@@ -35,7 +35,7 @@ use super::session::{
     RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
     RunnerTunnelMode, RunnerTunnelProcessStartIdentity, REVERSE_UNVERIFIED_REASON,
 };
-use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
+use super::{load, load_in_roots, remote_runner_homeboy_path, Runner, RunnerKind};
 
 const ADMISSION_WAKE_IDLE: u8 = 0;
 const ADMISSION_WAKE_RUNNING: u8 = 1;
@@ -1990,6 +1990,20 @@ pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerS
     status_with_admission_projection_until(runner_id, deadline).map(|(status, _, _)| status)
 }
 
+/// [`status`] against an explicitly injected root.
+#[allow(dead_code)]
+pub fn status_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+) -> Result<RunnerStatusReport> {
+    status_with_admission_projection_until_in_roots(
+        roots,
+        runner_id,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
+    .map(|(status, _, _)| status)
+}
+
 /// Capture status and the generation ledger together so callers that need an
 /// admission answer cannot observe a second, racing persisted generation state.
 pub(crate) fn status_with_admission_projection(
@@ -2016,13 +2030,34 @@ pub(crate) fn status_with_admission_projection_until(
     Vec<super::RunnerDaemonGenerationStatus>,
     Vec<super::RunnerGenerationJobOwners>,
 )> {
-    let runner = load(runner_id)?;
-    let session_path = session_path(runner_id)?;
+    status_with_admission_projection_until_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        deadline,
+    )
+}
+
+/// [`status_with_admission_projection_until`] against an injected root.
+///
+/// Runner resolution and the controller session record both follow `roots`, so
+/// a status observation on an injected root cannot read the ambient
+/// installation's registry or sessions (#14362).
+pub(crate) fn status_with_admission_projection_until_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    deadline: Instant,
+) -> Result<(
+    RunnerStatusReport,
+    Vec<super::RunnerDaemonGenerationStatus>,
+    Vec<super::RunnerGenerationJobOwners>,
+)> {
+    let runner = load_in_roots(roots, runner_id)?;
+    let session_path = session_path_in_root(roots.config(), runner_id);
     // Status is an observation path. In particular, a stale direct-SSH record
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let session = read_session_for_status_until(runner_id, deadline)?;
+    let session = read_session_for_status_until_in_root(roots.config(), runner_id, deadline)?;
     let state = status_session_state_until(session.as_ref(), deadline);
     let connected = state == RunnerSessionState::Connected;
     let (stale_daemon, configured_job_binary_build_identity) =
@@ -2152,12 +2187,32 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     reconcile_status_with_outcome(runner_id).map(|outcome| outcome.status)
 }
 
+/// [`reconcile_status`] against an explicitly injected root.
+#[allow(dead_code)]
+pub fn reconcile_status_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+) -> Result<RunnerStatusReport> {
+    reconcile_status_with_outcome_in_roots(roots, runner_id).map(|outcome| outcome.status)
+}
+
 /// Reconcile a runner and retain the exact generations this operation retired.
 /// The report is a fresh postcondition observation; retirement IDs come only
 /// from the generation reconciler's locked removal path.
 pub fn reconcile_status_with_outcome(runner_id: &str) -> Result<RunnerReconcileStatusOutcome> {
-    let runner = load(runner_id)?;
-    let mut report = status(runner_id)?;
+    reconcile_status_with_outcome_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+    )
+}
+
+/// [`reconcile_status_with_outcome`] against an explicitly injected root.
+pub fn reconcile_status_with_outcome_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+) -> Result<RunnerReconcileStatusOutcome> {
+    let runner = load_in_roots(roots, runner_id)?;
+    let mut report = status_in_roots(roots, runner_id)?;
     if report.connected {
         reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
     }
@@ -2182,7 +2237,7 @@ pub fn reconcile_status_with_outcome(runner_id: &str) -> Result<RunnerReconcileS
         }
     }
     Ok(RunnerReconcileStatusOutcome {
-        status: status(runner_id)?,
+        status: status_in_roots(roots, runner_id)?,
         retired_generation_ids: generation_reconcile.retired_generation_ids,
     })
 }

@@ -16,9 +16,9 @@ use homeboy_core::output::MergeOutput;
 
 use super::connection::{
     active_jobs_before_daemon_replacement, configured_runner_homeboy_build_identity,
-    disconnect_with_session, reconcile_status, rotate_daemon_generation,
+    disconnect_with_session, rotate_daemon_generation,
 };
-use super::execution::exec_with_status_snapshot;
+use super::execution::{exec_with_status_snapshot, exec_with_status_snapshot_in_roots};
 use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
 use super::{
     connect_with_orphan_adoption, copy_snapshot_to_directory, exec, load, load_in_roots,
@@ -510,7 +510,7 @@ pub fn refresh_homeboy_binary_in_roots(
     // Reconciliation settles retained generation counts from the daemon's typed
     // job view. Consume that postcondition rather than immediately replacing it
     // with a new observation that can include this recovery operation's records.
-    let admission = reconciled_refresh_admission(&plan.runner_id)?;
+    let admission = reconciled_refresh_admission_in_roots(roots, &plan.runner_id)?;
     let connection_status = admission.status.clone();
     if plan.mode == "materialize" {
         let authorities =
@@ -534,7 +534,8 @@ pub fn refresh_homeboy_binary_in_roots(
     let diagnostic_ssh_bootstrap = execution_route.uses_diagnostic_ssh();
     let exec_options =
         refresh_execution_options(&plan, required_commands, diagnostic_ssh_bootstrap);
-    let (exec_output, exit_code) = exec_with_status_snapshot(
+    let (exec_output, exit_code) = exec_with_status_snapshot_in_roots(
+        roots,
         &plan.runner_id,
         exec_options,
         Some(connection_status.clone()),
@@ -638,7 +639,7 @@ pub fn refresh_homeboy_binary_in_roots(
     // connect while materialization runs, so reconnect decisions cannot use the
     // pre-materialization status snapshot.
     promotion_lease.assert_generation()?;
-    let post_lease_status = super::status(&plan.runner_id)?;
+    let post_lease_status = super::connection::status_in_roots(roots, &plan.runner_id)?;
     let promotion_authorities =
         refresh_promotion_authorities_in_roots(roots, &plan.runner_id, &post_lease_status)?;
     // Selection belongs to the controller-owned runner registry. It must be
@@ -1123,7 +1124,7 @@ pub fn refresh_homeboy_binary_in_roots(
                 // This arm returns `daemon_refreshed: false` directly, so it
                 // does not reassign the local first.
                 let transport_exit_code = reconnect_transport_exit_code(
-                    super::status(&plan.runner_id)
+                    super::connection::status_in_roots(roots, &plan.runner_id)
                         .map(|status| status.is_connected())
                         .unwrap_or(false),
                 );
@@ -1790,9 +1791,20 @@ fn refresh_execution_route(
 /// later pre-rotation job probe remains the fail-closed check for work that
 /// appears while materialization is in progress.
 fn reconciled_refresh_admission(runner_id: &str) -> Result<super::RunnerAdmissionSnapshot> {
+    reconciled_refresh_admission_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+    )
+}
+
+/// [`reconciled_refresh_admission`] against an explicitly injected root.
+fn reconciled_refresh_admission_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+) -> Result<super::RunnerAdmissionSnapshot> {
     reconciled_refresh_admission_with(
         runner_id,
-        reconcile_status,
+        |runner_id| super::connection::reconcile_status_in_roots(roots, runner_id),
         super::runner_admission_snapshot_for_status,
     )
 }
