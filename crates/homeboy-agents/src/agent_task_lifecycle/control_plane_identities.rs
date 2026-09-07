@@ -4,6 +4,7 @@ use homeboy_control_plane_contract::{
     resolve, AttemptId, IdentityKind, MissionId, ResolveError, RunId,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::AgentTaskRunRecord;
 use homeboy_core::{Error, Result};
@@ -15,6 +16,29 @@ pub struct CanonicalControlPlaneIdentities {
     pub run: RunId,
     pub attempt: AttemptId,
     pub attempt_number: u32,
+}
+
+pub fn canonical_fanout_mission(metadata: &Value) -> Result<Option<MissionId>> {
+    let Some(fanout_id) = metadata.pointer("/fanout/id").and_then(Value::as_str) else {
+        if metadata.get("fanout").is_some() {
+            return Err(Error::validation_invalid_argument(
+                "fanout",
+                "fanout metadata requires a nonempty string id",
+                None,
+                None,
+            ));
+        }
+        return Ok(None);
+    };
+    let resolved = resolve(IdentityKind::FanoutPortfolioId, fanout_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "fanout.id",
+            error.to_string(),
+            Some(fanout_id.to_string()),
+            None,
+        )
+    })?;
+    Ok(resolved.mission)
 }
 
 /// Resolve the durable run through the control-plane contract.

@@ -2651,6 +2651,10 @@ where
     if let Some(invalidation) = plan.metadata.get("execution_placement_invalidated") {
         metadata["execution_placement_invalidated"] = invalidation.clone();
     }
+    if let Some(fanout) = plan.metadata.get("fanout") {
+        canonical_fanout_mission(&plan.metadata)?;
+        metadata["fanout"] = fanout.clone();
+    }
     // Surface controller-owned worktree convergence in the run record as well
     // as the immutable plan, so status and resumed execution retain the same
     // reviewer-facing evidence.
@@ -2716,6 +2720,24 @@ where
     let mut pre_execution_recovery = false;
     let mut pre_execution_runtime_recovery = false;
     if let Ok(existing) = lifecycle_store.read_record(&run_id) {
+        let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
+        let submitted_fanout = canonical_fanout_mission(&record.metadata)?;
+        if existing_fanout.is_some()
+            && submitted_fanout.is_some()
+            && existing_fanout != submitted_fanout
+        {
+            return Err(Error::validation_invalid_argument(
+                "fanout.id",
+                "an existing run cannot be rebound to a different fanout mission",
+                Some(run_id.clone()),
+                None,
+            ));
+        }
+        if submitted_fanout.is_none() {
+            if let Some(fanout) = existing.metadata.get("fanout") {
+                record.metadata["fanout"] = fanout.clone();
+            }
+        }
         pre_execution_recovery =
             crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                 &existing,

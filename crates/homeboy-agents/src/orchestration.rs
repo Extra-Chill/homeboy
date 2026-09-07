@@ -17,7 +17,7 @@ use homeboy_control_plane_contract::{
     ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest,
     ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
     ControlPlaneRuntime, ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement,
-    ControlPlaneSubmissionRequest, ExecutionId, ProviderSessionId, RunCursor, RunId,
+    ControlPlaneSubmissionRequest, ExecutionId, MissionId, ProviderSessionId, RunCursor, RunId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
@@ -1838,6 +1838,9 @@ pub fn project_record(
         resource.attempt = Some(identities.attempt);
         resource.attempt_number = Some(identities.attempt_number);
     }
+    if let Some(mission) = fanout_mission(record, plan)? {
+        resource.mission = Some(mission);
+    }
     resource.state = run_state(record);
     resource.location = location(record);
     resource.execution = execution(record)?;
@@ -1912,6 +1915,23 @@ fn identities_for_record(
 ) -> Result<Option<CanonicalControlPlaneIdentities>, ControlPlaneError> {
     canonical_control_plane_identities(record)
         .map_err(|error| ControlPlaneError::invalid_argument(error.message))
+}
+
+fn fanout_mission(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+) -> Result<Option<MissionId>, ControlPlaneError> {
+    let persisted = crate::agent_task_lifecycle::canonical_fanout_mission(&record.metadata)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.message))?;
+    if persisted.is_some() {
+        return Ok(persisted);
+    }
+    plan.map(|plan| {
+        crate::agent_task_lifecycle::canonical_fanout_mission(&plan.metadata)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.message))
+    })
+    .transpose()
+    .map(Option::flatten)
 }
 
 fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
@@ -2525,7 +2545,7 @@ mod tests {
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
@@ -2954,8 +2974,15 @@ mod tests {
         with_isolated_home(|_| {
             let run_id = "prepared-control-plane-run";
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let mut plan = AgentTaskPlan::new("prepared-plan", Vec::new());
+            plan.metadata = json!({
+                "fanout": {
+                    "id": "prepared-fanout-mission",
+                    "plane": "isolated_tasks"
+                }
+            });
             store
-                .write_controller_plan(run_id, &AgentTaskPlan::new("prepared-plan", Vec::new()))
+                .write_controller_plan(run_id, &plan)
                 .expect("prepared plan");
             let request = ControlPlaneSubmissionRequest {
                 schema: CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA.to_string(),
@@ -2973,6 +3000,23 @@ mod tests {
             assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
             assert_eq!(replay.outcome, ControlPlaneActionOutcome::Succeeded);
             assert!(store.record_exists(run_id).expect("record exists"));
+            assert_eq!(
+                first
+                    .resource
+                    .mission
+                    .as_ref()
+                    .map(|mission| mission.as_str()),
+                Some("prepared-fanout-mission")
+            );
+            assert_eq!(
+                store
+                    .read_record(run_id)
+                    .expect("record")
+                    .metadata
+                    .pointer("/fanout/id")
+                    .and_then(Value::as_str),
+                Some("prepared-fanout-mission")
+            );
 
             for invalid_run in ["prepared/control-plane-run", &"x".repeat(257)] {
                 let invalid = ControlPlaneSubmissionRequest {
@@ -2987,6 +3031,24 @@ mod tests {
                     .expect_err("unsafe staged-plan identity");
                 assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
             }
+
+            let malformed_run = "malformed-fanout-run";
+            let mut malformed_plan = AgentTaskPlan::new("malformed-fanout-plan", Vec::new());
+            malformed_plan.metadata = json!({ "fanout": { "id": AGENT_TASK_RUN } });
+            store
+                .write_controller_plan(malformed_run, &malformed_plan)
+                .expect("staged malformed plan");
+            let malformed_request = ControlPlaneSubmissionRequest {
+                schema: CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA.to_string(),
+                idempotency_key: malformed_run.to_string(),
+                actor: "control-plane-test".to_string(),
+                run: RunId::new(malformed_run).expect("run"),
+                queue_only: true,
+            };
+            RegisteredProvider
+                .submit(&malformed_request)
+                .expect_err("run-shaped fanout cannot be persisted as a mission");
+            assert!(!store.record_exists(malformed_run).expect("record absent"));
         });
     }
 
@@ -3591,6 +3653,29 @@ mod tests {
         let decoded: homeboy_control_plane_contract::ControlPlaneRun =
             serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, resource);
+    }
+
+    #[test]
+    fn fanout_identity_owns_the_canonical_child_run_mission() {
+        let record = record(AGENT_TASK_RUN);
+        let mut legacy_plan = AgentTaskPlan::new("fanout-plan", Vec::new());
+        legacy_plan.metadata = json!({
+            "fanout": {
+                "id": "fanout-portfolio-1",
+                "plane": "isolated_tasks"
+            }
+        });
+        let legacy = project_record(&record, Some(&legacy_plan)).expect("legacy projection");
+        assert_eq!(
+            legacy.mission.as_ref().map(|mission| mission.as_str()),
+            Some("fanout-portfolio-1")
+        );
+
+        let mut durable_record = record;
+        durable_record.metadata["fanout"] = legacy_plan.metadata["fanout"].clone();
+        let durable = project_record(&durable_record, None).expect("durable projection");
+        assert_eq!(durable.mission, legacy.mission);
+        assert_eq!(durable.attempt_number, Some(1));
     }
 
     #[test]
