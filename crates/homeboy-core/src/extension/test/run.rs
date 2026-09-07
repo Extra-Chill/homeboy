@@ -3424,19 +3424,7 @@ mod tests {
     }
     use homeboy_core::test_support::{exec_capable_tempdir, with_isolated_home};
 
-    fn run_git(dir: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use crate::test_support::git_command_output as run_git;
 
     fn clean_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("temp dir");

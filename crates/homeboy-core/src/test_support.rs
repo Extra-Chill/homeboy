@@ -1693,6 +1693,27 @@ fn git_repo_fixture(name: &str, committed: bool) -> (TempDir, PathBuf) {
 /// Use this when the test configures its own `user.name` / `user.email` and may
 /// assert on the resulting authorship. [`run_git_fixture_command`] pins a fixed
 /// fixture identity, which would override that configuration.
+/// Run a git command in `repo`, assert it succeeded, and return its trimmed
+/// stdout, without injecting any author or committer identity.
+///
+/// The output counterpart of [`run_git_command`]. Use [`git_fixture_output`]
+/// instead when the test wants the pinned fixture identity.
+pub fn git_command_output(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("run git command");
+    assert!(
+        output.status.success(),
+        "git command {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 pub fn run_git_command(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

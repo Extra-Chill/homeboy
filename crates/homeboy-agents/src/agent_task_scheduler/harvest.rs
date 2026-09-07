@@ -758,15 +758,7 @@ mod committed_harvest_tests {
         std::env::remove_var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
     }
 
-    fn git(cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("git command runs");
-        assert!(output.status.success(), "git {args:?} failed");
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_core::test_support::git_command_output as git;
 
     fn gate_feedback_request(
         workspace: &Path,
