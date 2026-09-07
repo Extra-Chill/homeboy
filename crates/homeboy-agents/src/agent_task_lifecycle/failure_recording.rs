@@ -873,6 +873,9 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
     if error.details["pre_execution_phase"] == "gate_toolchain_preflight" {
         return AgentTaskFailureClassification::CapabilityMissing;
     }
+    if error.code == homeboy_core::ErrorCode::ResourceCapacityReserve {
+        return AgentTaskFailureClassification::Capacity;
+    }
     if error.retryable == Some(true) {
         AgentTaskFailureClassification::Transient
     } else {

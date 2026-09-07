@@ -341,12 +341,16 @@ pub(super) fn hydrate_agent_task_secret_env(
 
 fn hydrate_agent_task_secret_env_with_providers(
     args: &[String],
-    env: &mut HashMap<String, String>,
+    _env: &mut HashMap<String, String>,
     providers: &[AgentTaskExecutorProvider],
 ) -> Result<serde_json::Value> {
-    let mut names = declared_agent_task_controller_secret_env_with_providers(args, providers)?;
+    let names = declared_agent_task_controller_secret_env_with_providers(args, providers)?;
     let mut runner_deferred_names =
         declared_agent_task_run_plan_secret_env_with_providers(args, providers);
+    // Provider credentials belong to the execution runner. Carry their names in
+    // the existing secret plan so the runner resolves its own references after
+    // durable replay; never materialize values into a broker submission.
+    runner_deferred_names.extend(names.iter().cloned());
     runner_deferred_names.sort();
     runner_deferred_names.dedup();
     if names.is_empty() && runner_deferred_names.is_empty() {
@@ -363,33 +367,6 @@ fn hydrate_agent_task_secret_env_with_providers(
         })
         .transpose()?
         .unwrap_or_default();
-    let controller_source_run_plan_names = runner_deferred_names
-        .iter()
-        .filter(|name| fallback_sources.contains_key(name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !controller_source_run_plan_names.is_empty() {
-        names.extend(controller_source_run_plan_names.iter().cloned());
-        names.sort();
-        names.dedup();
-        runner_deferred_names.retain(|name| !controller_source_run_plan_names.contains(name));
-    }
-    if !names.is_empty() {
-        let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(&names, &fallback_sources).map_err(|error| {
-            Error::validation_invalid_argument(
-                "secret-env",
-                error.message,
-                None,
-                Some(vec![
-                    "Configure provider secrets with Homeboy's global agent-task secret config, for example `homeboy agent-task auth map-env` or `homeboy agent-task auth set-keychain`.".to_string(),
-                ]),
-            )
-        })?;
-        for (name, value) in resolved {
-            env.insert(name, value);
-        }
-    }
-
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
         "secret_env": agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources),

@@ -898,6 +898,46 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
         });
     };
 
+    if record.metadata["cook_id"].is_string() && record.metadata["retry_of"].is_string() {
+        let store = super::CookRecipeStore::from_current_data_root()?;
+        let cook_id = record.metadata["cook_id"]
+            .as_str()
+            .expect("checked Cook id metadata");
+        let recipe = store.load_recipe(cook_id)?;
+        let attempt = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == record.run_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_recipe.attempts",
+                    "queued Cook retry is absent from its durable recipe",
+                    Some(record.run_id.clone()),
+                    None,
+                )
+            })?;
+        let attempt_dispatcher = dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+        let mut options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
+        options.identity.initial_run_id = attempt.run_id.clone();
+        options.identity.initial_plan = attempt.plan.clone();
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let cook = super::CookService::run(
+            options,
+            super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
+            super::CookMode::RecoverPreExecution,
+        )?;
+        let aggregate = agent_task_lifecycle::read_aggregate(&record.run_id).ok();
+        return Ok(AgentTaskRunNextResult {
+            value: aggregate.map(|aggregate| {
+                crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate)
+            }),
+            exit_code: cook.exit_code,
+            skipped,
+            queue_admission,
+        });
+    }
+
     let result = run_claimed(record.run_id, executor)?;
     Ok(AgentTaskRunNextResult {
         value: Some(crate::agent_task_artifacts::reviewer_facing_aggregate(

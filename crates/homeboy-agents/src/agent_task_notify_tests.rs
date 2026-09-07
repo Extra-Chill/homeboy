@@ -145,6 +145,36 @@ fn failed_cook_forwards_its_own_legal_recovery_commands() {
 }
 
 #[test]
+fn reserve_pressure_notification_names_the_filesystem_and_scoped_inventory() {
+    let mut failed = report("pre_execution_failure", None);
+    failed.terminal_failure_classification = Some("capacity".to_string());
+    failed.stop_reason = Some(
+        "Filesystem reserve shortfall at /worktrees/new-task: 90 bytes available, 100 bytes reserved, 10 bytes short".to_string(),
+    );
+    let mut context = failure_context();
+    context.phase = "worktree_capacity_admission".to_string();
+    context.reason_code = "resource.capacity_reserve".to_string();
+    context.legal_actions = vec![AgentTaskCookRecoveryAction {
+        action: "inspect reclaimable artifacts across repository worktrees".to_string(),
+        command:
+            "homeboy cleanup artifacts --path /worktrees/repository --all-worktrees --merged-only"
+                .to_string(),
+    }];
+    failed.failure_context = Some(context);
+
+    let payload = terminal_payload(&failed, None, 1);
+    let body = payload.render_body();
+
+    assert!(body.contains("Filesystem reserve shortfall at /worktrees/new-task"));
+    assert!(body.contains("Failure classification: capacity"));
+    assert!(body.contains("Reason code: resource.capacity_reserve"));
+    assert!(payload.actions.iter().any(|action| {
+        action.command
+            == "homeboy cleanup artifacts --path /worktrees/repository --all-worktrees --merged-only"
+    }));
+}
+
+#[test]
 fn failed_cook_forwards_a_recovery_action_once_when_report_sections_overlap() {
     let mut failed = report("pre_execution_failure", None);
     let recovery = AgentTaskCookRecoveryAction {

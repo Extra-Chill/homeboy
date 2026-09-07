@@ -5885,6 +5885,80 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
 }
 
 #[test]
+fn reserve_pressure_cook_context_forwards_only_the_scoped_inventory_action() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new_without_recovery(
+            "cook-reserve-pressure",
+            2,
+            1,
+            false,
+            None,
+        );
+        let error =
+            homeboy_core::Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+                filesystem: "/worktrees/new-task".to_string(),
+                available_bytes: 90,
+                reserve_bytes: 100,
+                shortfall_bytes: 10,
+            })
+            .with_action(homeboy_core::error::ExecutableAction::new(
+                "capacity.reserve.inspect_repository_artifacts",
+                "inspect reclaimable artifacts across repository worktrees",
+                "homeboy",
+                [
+                    "cleanup",
+                    "artifacts",
+                    "--path",
+                    "/worktrees/repository",
+                    "--all-worktrees",
+                    "--merged-only",
+                ],
+                homeboy_core::error::ActionSafety::ReadOnly,
+            ))
+            .with_action(
+                homeboy_core::error::ExecutableAction::new(
+                    "capacity.reserve.apply_repository_artifacts",
+                    "remove approved artifacts from merged repository worktrees",
+                    "homeboy",
+                    ["cleanup", "artifacts", "--apply"],
+                    homeboy_core::error::ActionSafety::Mutating,
+                )
+                .requiring_confirmation("approve removal"),
+            );
+        super::super::materialize_initial_cook_attempt(&fixture.options)
+            .expect("materialize Cook attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &fixture.run_id,
+            &fixture.options.identity.initial_plan,
+            "worktree_capacity_admission",
+            &error,
+        )
+        .expect("persist capacity failure");
+
+        let report = cook_report(CookReportInput {
+            cook_id: fixture.cook_id.clone(),
+            status: "pre_execution_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some(error.message.clone()),
+            exit_code: 1,
+            invocation_latest_run_id: Some(&fixture.run_id),
+        })
+        .value;
+        let context = report.failure_context.expect("capacity recovery context");
+
+        assert_eq!(context.reason_code, "resource.capacity_reserve");
+        assert_eq!(context.next_actions.len(), 1);
+        assert_eq!(
+            context.next_actions[0].command,
+            "homeboy cleanup artifacts --path /worktrees/repository --all-worktrees --merged-only"
+        );
+        assert!(report.stop_reason.unwrap().contains("/worktrees/new-task"));
+    });
+}
+
+#[test]
 fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary repository");
@@ -14652,6 +14726,7 @@ struct CaptureBackend {
     created: bool,
     updated: bool,
     existing_pr: Option<AgentTaskPrRef>,
+    merged_pr: Option<AgentTaskPrRef>,
     candidate_state: Option<crate::agent_task_finalization::AgentTaskPrCandidateState>,
     committed_sha: Option<String>,
     hydrate_run_id: Option<String>,
@@ -14871,6 +14946,14 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         _head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
         Ok(self.existing_pr.clone())
+    }
+    fn find_merged_pr(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Result<Option<AgentTaskPrRef>> {
+        Ok(self.merged_pr.clone())
     }
     fn verify_remote_candidate(
         &mut self,
@@ -15562,6 +15645,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect_err("artifact preflight fails before shell execution");
         assert!(!replacement_gate_execution_started(
@@ -15570,6 +15654,28 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         )
         .expect("read replacement gate fence"));
         std::fs::rename(&unavailable_patch, &patch_path).expect("restore promotion artifact");
+        mark_replacement_gate_execution_started(&test_lifecycle_store(), "run-verify-replacement")
+            .expect("persist interrupted replacement execution");
+        agent_task_lifecycle::rewrite_record_for_test("run-verify-replacement", |record| {
+            record.metadata["replacement_gate_execution_fences"]["verify-replacement"]
+                ["owner_pid"] = serde_json::json!(u32::MAX);
+        })
+        .expect("simulate terminated interrupted executor");
+        let interrupted = verify_replacement_gates(
+            "cook-verify-replacement",
+            VerifyGateOptions {
+                verify: vec![reviewer_gate.clone()],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+            None,
+        )
+        .expect_err("interrupted gates require explicit rerun authority");
+        assert_eq!(
+            interrupted.details["recovery"]["kind"],
+            "external_candidate_bound_proof_required"
+        );
+        assert!(!gate_log.exists());
         let replacement = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
@@ -15580,6 +15686,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            Some("Chris approved rerunning after the interrupted executor".to_string()),
         )
         .expect("replacement gates complete");
 
@@ -15629,6 +15736,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect_err("completed inherited failure needs renewed authorization");
         assert_eq!(error.details["field"], "accept_inherited_failures");
@@ -15640,6 +15748,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect("completed replacement proof replays without rerunning gates");
         assert_eq!(replay.status, replacement.status);
@@ -15674,6 +15783,11 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
                 ["accept_inherited_failures"],
             true
+        );
+        assert_eq!(
+            record.metadata["latest_promotion"]["provenance"]
+                ["replacement_gate_execution_recovery"]["operator_authorization"],
+            "Chris approved rerunning after the interrupted executor"
         );
     });
 }
@@ -15715,6 +15829,7 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect_err("interrupted execution must fail closed");
 
@@ -15722,6 +15837,20 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
         assert_eq!(
             error.details["recovery"]["kind"],
             "external_candidate_bound_proof_required"
+        );
+        let live_error = verify_replacement_gates(
+            cook_id,
+            VerifyGateOptions {
+                verify: vec![format!("printf ran > {}", gate_log.display())],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+            Some("Chris approved rerunning after the interrupted executor".to_string()),
+        )
+        .expect_err("a live interrupted owner must veto an authorized rerun");
+        assert_eq!(
+            live_error.details["recovery"]["kind"],
+            "replacement_gate_execution_live"
         );
         assert!(!gate_log.exists());
         assert!(
@@ -17263,6 +17392,13 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         .expect("preflight direct manual publication");
         super::super::cook_promotion::persist_manual_finalization_retry_intent(run_id, &intent)
             .expect("persist direct retry intent");
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(run_id)
+                .expect("read retry intent")
+                .metadata["manual_finalization_retry_candidate"]["changed_files"],
+            serde_json::json!(intent.changed_files),
+            "retry recovery retains the preflight candidate scope even after commit"
+        );
         let hook = target.path().join(".git/hooks/pre-commit");
         std::fs::write(
             &hook,
@@ -17290,6 +17426,12 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         let record =
             agent_task_lifecycle::reconcile_status(run_id).expect("failed Cook manual record");
         assert_eq!(record.state, AgentTaskRunState::Failed);
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            // Simulate the clean-checkout fingerprint written before #14395.
+            record.metadata["manual_finalization_retry_candidate"]["changed_files"] =
+                serde_json::json!([]);
+        })
+        .expect("persist legacy empty retry scope");
         // The rejecting hook staged the original bytes. A real content change
         // must still invalidate the retry's semantic tree/path binding.
         std::fs::write(target.path().join("src/lib.rs"), "drifted\n")
@@ -17350,7 +17492,7 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
 }
 
 #[test]
-fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
+fn standalone_manual_preflight_recovers_merged_publication_without_republishing() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "manual-11974";
         let target = tempfile::tempdir().expect("fixture target");
@@ -17410,13 +17552,19 @@ fn standalone_manual_preflight_continuation_recovers_and_is_idempotent() {
         );
         let mut publish_backend = CaptureBackend {
             candidate_state: Some(candidate),
+            merged_pr: Some(AgentTaskPrRef {
+                number: 11974,
+                url: "https://github.com/Extra-Chill/homeboy/pull/11974".to_string(),
+                is_draft: false,
+            }),
             ..Default::default()
         };
         let published =
             recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut publish_backend)
                 .expect("continuation resolves standalone validated intent");
         assert_eq!(published["status"], "review_ready");
-        assert!(publish_backend.created);
+        assert_eq!(published["pr_action"], "already_merged");
+        assert!(!publish_backend.created && !publish_backend.updated);
 
         let mut repeated_backend = CaptureBackend::default();
         assert_eq!(

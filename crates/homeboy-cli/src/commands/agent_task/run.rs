@@ -2340,6 +2340,25 @@ where
         }
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
+    if record.state.is_terminal()
+        && agent_task_service_direct::retryable_pre_execution_failure(&record)
+    {
+        if !args.rearm {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "rearm",
+                "a retryable pre-execution Cook failure requires --rearm to reserve a durable successor attempt",
+                Some(run_id),
+                None,
+            ));
+        }
+        // A failed readiness or transport check did not reach provider work.
+        // Reserve its replacement through the retry owner rather than rerunning
+        // the terminal record. The normal queue owner then dispatches the
+        // successor, preserving append-only Cook lineage and budget.
+        let retry = agent_task_service::retry(&record.run_id, None, false, false)?;
+        let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
+        return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
+    }
     if execute_queued_attempt && record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
         return dispatch_queued_cook_retry(
             &recipe,

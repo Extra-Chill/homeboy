@@ -2268,6 +2268,9 @@ fn classification_next_actions(
             actions.extend(provider_readiness_actions(runner_id));
             actions
         }
+        // Capacity admission records its scoped cleanup plan in the failure
+        // evidence. Do not offer a retry until an operator has inspected it.
+        AgentTaskFailureClassification::Capacity => vec![failure_evidence],
         // The request the provider received was malformed. Replaying the
         // boundary shows the exact rejected input; a retry would resend it.
         AgentTaskFailureClassification::InvalidInput => {
