@@ -2485,7 +2485,7 @@ fn logs_return_canonical_events_while_diagnostics_stay_on_diagnose_and_review() 
         assert_eq!(diagnose_value["root_cause"]["class"], "provider_discovery");
         assert_eq!(diagnose_value["root_cause"]["task_id"], "task-a");
         assert_eq!(
-            review_value["diagnostic_summary"]["message"],
+            review_value["evidence"]["diagnostic_summary"]["message"],
             diagnose_value["root_cause"]["message"]
         );
         assert_eq!(

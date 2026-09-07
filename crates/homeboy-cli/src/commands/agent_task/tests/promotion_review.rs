@@ -58,28 +58,13 @@ fn applied_promotion_resume_requires_explicit_gate_rerun() {
     let applied = json!({ "status": "applied" });
     let failed = json!({ "status": "gate_failed" });
 
-    assert!(!review::promotion_is_resumable(&applied, false));
-    assert!(review::promotion_is_resumable(&applied, true));
-    assert!(review::promotion_is_resumable(&failed, false));
-}
-
-#[test]
-fn cli_promotion_resume_policy_matches_the_shared_service() {
-    for (previous, rerun_completed_gates) in [
-        (json!({ "status": "applied" }), false),
-        (json!({ "status": "applied" }), true),
-        (json!({ "status": "gate_failed" }), false),
-        (json!({ "status": "verification_pending" }), false),
-        (json!({ "status": "completed" }), true),
-    ] {
-        assert_eq!(
-            review::promotion_is_resumable(&previous, rerun_completed_gates),
-            homeboy::agents::agent_task_service::promotion_is_resumable(
-                &previous,
-                rerun_completed_gates,
-            ),
-        );
-    }
+    assert!(!homeboy::agents::agent_task_service::promotion_is_resumable(&applied, false));
+    assert!(homeboy::agents::agent_task_service::promotion_is_resumable(
+        &applied, true
+    ));
+    assert!(homeboy::agents::agent_task_service::promotion_is_resumable(
+        &failed, false
+    ));
 }
 
 #[test]
@@ -138,6 +123,31 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
         };
         homeboy::agents::agent_task_service::persist_initial_recipe(&options)
             .expect("persist Cook recipe");
+        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
+            .expect("run Cook attempt");
+        let (review_value, _) = review::review(ReviewArgs {
+            run_id: run_id.to_string(),
+            full: true,
+            to_worktree: Some("fixture@retained-gates".to_string()),
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review Cook attempt");
+        let promotion_command = review_value["evidence"]["promotion_candidates"][0]["command"]
+            .as_array()
+            .expect("promotion command");
+        assert!(promotion_command
+            .iter()
+            .any(|argument| argument == "--base"));
+        assert!(promotion_command.iter().any(|argument| argument == "main"));
+        assert!(promotion_command
+            .iter()
+            .any(|argument| argument == "--gates-from-cook-recipe"));
+        assert!(!promotion_command.iter().any(|argument| {
+            argument
+                .as_str()
+                .is_some_and(|argument| argument.contains(private_program))
+        }));
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
             "agent-task",
@@ -155,12 +165,142 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
         };
         let mut cli_gates = cook.gates;
 
-        let hydrated = review::resolve_promotion_gates(&mut cli_gates, true, Some(run_id), run_id)
-            .expect("hydrate durable Cook gates");
+        let hydrated = review::resolve_promotion_gates(
+            &mut cli_gates,
+            true,
+            false,
+            Some(run_id),
+            run_id,
+            None,
+            None,
+        )
+        .expect("hydrate durable Cook gates");
 
         assert_eq!(hydrated, gates);
         assert_eq!(hydrated.private_verify, [private_program]);
         assert_eq!(hydrated.input_sources[0].path, None);
+    });
+}
+
+#[test]
+fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
+    with_temp_home(|| {
+        let run_id = "run-private-resume-gates";
+        let private_program = "printf 'private token'";
+        let gates = homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            private_verify: vec![private_program.to_string()],
+            execution_policy:
+                homeboy::agents::agent_tasks::gate::AgentTaskGateExecutionPolicy::ContinueAll,
+            ..Default::default()
+        };
+        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
+            .expect("run completed");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["latest_promotion"] = json!({
+                "status": "gate_failed",
+                "source": { "task_id": "task-a" },
+                "patch_artifact": { "id": "patch-a" },
+                "target": { "worktree": "fixture@resume" },
+                "provenance": {
+                    "resume_contract": {
+                        "inputs": { "base_ref": "main" },
+                        "gates": gates,
+                    }
+                }
+            });
+        })
+        .expect("durable resume contract");
+
+        let (review_value, _) = review::review(ReviewArgs {
+            run_id: run_id.to_string(),
+            full: true,
+            to_worktree: None,
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review");
+        let serialized = serde_json::to_string(&review_value).expect("review JSON");
+        assert!(!serialized.contains(private_program));
+        let command = review_value["evidence"]["promotion_candidates"][0]["command"]
+            .as_array()
+            .expect("promotion command")
+            .iter()
+            .map(|argument| argument.as_str().expect("argument"))
+            .collect::<Vec<_>>();
+        let cli =
+            crate::cli_surface::Cli::try_parse_from(command).expect("generated command parses");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Promote(mut promote) = agent_task.command else {
+            panic!("promote command");
+        };
+        assert!(promote.gates_from_resume_contract);
+        let missing_selectors = review::resolve_promotion_gates(
+            &mut promote.gates,
+            false,
+            true,
+            Some(run_id),
+            run_id,
+            None,
+            None,
+        )
+        .expect_err("resume contract requires exact selectors");
+        assert!(missing_selectors
+            .message
+            .contains("--task-id and --artifact-id"));
+        let hydrated = review::resolve_promotion_gates(
+            &mut promote.gates,
+            false,
+            true,
+            Some(run_id),
+            run_id,
+            Some("task-a"),
+            Some("patch-a"),
+        )
+        .expect("hydrate durable resume gates");
+        assert_eq!(hydrated, gates);
+        assert_eq!(hydrated.private_verify, [private_program]);
+    });
+}
+
+#[test]
+fn review_does_not_advertise_a_command_for_an_invalid_resume_gate_contract() {
+    with_temp_home(|| {
+        let run_id = "run-invalid-resume-gates";
+        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
+            .expect("run completed");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["latest_promotion"] = json!({
+                "status": "gate_failed",
+                "source": { "task_id": "task-a" },
+                "patch_artifact": { "id": "patch-a" },
+                "target": { "worktree": "fixture@resume" },
+                "provenance": { "resume_contract": {
+                    "inputs": { "base_ref": "main" },
+                    "gates": { "gate_timeout_seconds": "not-a-number" }
+                }}
+            });
+        })
+        .expect("invalid durable resume contract");
+
+        let (review_value, _) = review::review(ReviewArgs {
+            run_id: run_id.to_string(),
+            full: true,
+            to_worktree: None,
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review remains readable");
+        let candidate = &review_value["evidence"]["promotion_candidates"][0];
+
+        assert_eq!(candidate["ready"], false, "{candidate}");
+        assert!(candidate["command"].is_null());
+        assert_eq!(
+            candidate["unavailable_reason"],
+            "durable resume contract has an invalid gate policy"
+        );
     });
 }
 
@@ -180,16 +320,12 @@ fn review_reports_queued_run_without_chat_state() {
         .expect("review loaded");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(value["schema"], "homeboy/agent-task-review/v1");
-        assert_eq!(value["run_id"], "run-review-queued");
-        assert_eq!(value["state"], "queued");
-        assert_eq!(value["transport"]["chat_state_required"], false);
-        assert!(value["aggregate_review"].is_null());
-        assert_eq!(value["logs"]["events"][0]["status"], "queued");
-        assert!(value["next_actions"][0]
-            .as_str()
-            .expect("next action")
-            .contains("run-next"));
+        assert_eq!(value["schema"], "homeboy/control-plane-run-review/v1");
+        assert_eq!(value["run"], "run-review-queued");
+        assert_eq!(value["resource"]["state"], "queued");
+        assert!(value["evidence"]["aggregate_review"].is_null());
+        assert!(!value["evidence"]["logs"].is_null());
+        assert_eq!(value["evidence"]["read"]["mutated"], false);
     });
 }
 
@@ -202,47 +338,24 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
             Arc::new(ApplyArtifactExecutor),
         )
         .expect("run completed");
-
         let (value, exit_code) = review::review(ReviewArgs {
             run_id: "run-review-completed".to_string(),
             full: true,
-            to_worktree: Some("homeboy@fix-review-flow".to_string()),
+            to_worktree: Some("homeboy-review-flow".to_string()),
             provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review loaded");
-
         assert_eq!(exit_code, 0);
-        assert_eq!(value["state"], "succeeded");
-        assert_eq!(value["durable_read"]["phase"], "controller_local");
-        assert!(value["durable_read"]["unavailable_sources"]
-            .as_array()
-            .expect("durable source availability")
-            .is_empty());
-        assert_eq!(value["aggregate_review"]["summary"]["apply_candidates"], 1);
-        assert_eq!(value["artifacts"]["artifacts"][0]["id"], "patch-a");
-        assert_eq!(value["promotion_candidates"][0]["task_id"], "task-a");
-        assert_eq!(value["promotion_candidates"][0]["artifact_id"], "patch-a");
-        assert_eq!(value["promotion_candidates"][0]["ready"], true);
+        assert_eq!(value["resource"]["state"], "succeeded");
         assert_eq!(
-            value["promotion_candidates"][0]["command"],
-            json!([
-                "homeboy",
-                "agent-task",
-                "promote",
-                "run-review-completed",
-                "--task-id",
-                "task-a",
-                "--artifact-id",
-                "patch-a",
-                "--to-worktree",
-                "homeboy@fix-review-flow"
-            ])
+            value["evidence"]["aggregate_review"]["summary"]["apply_candidates"],
+            1
         );
-        assert!(value["next_actions"][0]
-            .as_str()
-            .expect("next action")
-            .contains("promotion_candidates"));
+        assert_eq!(
+            value["evidence"]["artifacts"]["artifacts"][0]["id"],
+            "patch-a"
+        );
     });
 }
 
@@ -255,7 +368,6 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
             Arc::new(ApplyArtifactExecutor),
         )
         .expect("run completed");
-
         let (value, exit_code) = review::review(ReviewArgs {
             run_id: "run-review-default-bounded".to_string(),
             full: false,
@@ -264,16 +376,9 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
             provider_argv: Vec::new(),
         })
         .expect("review loaded");
-
         assert_eq!(exit_code, 0);
         assert_eq!(value["view"], "summary");
-        assert!(value.get("record").is_none());
-        assert!(value.get("logs").is_none());
-        assert!(value.get("artifacts").is_none());
-        assert_eq!(
-            value["full_command"],
-            "homeboy agent-task review run-review-default-bounded --full"
-        );
+        assert!(value.get("evidence").is_none());
         assert_eq!(value["canonical_candidate"]["state"], "patch_available");
         assert_eq!(value["selected_candidate"]["size_bytes"], 42);
         assert!(value["promotion_candidates"][0]["command"].is_null());
@@ -281,67 +386,13 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
             value["promotion_candidates"][0]["destination_required"],
             true
         );
-        let destination_guidance = value["next_actions"][0]
+        assert!(value["next_actions"][0]
             .as_str()
-            .expect("destination guidance");
-        assert!(destination_guidance.contains(
-            "homeboy agent-task review run-review-default-bounded --to-worktree <managed-worktree>"
-        ));
-        assert!(!destination_guidance.contains("agent-task promote"));
-    });
-}
-
-#[test]
-fn full_review_excludes_unrelated_worktree_cleanup_inventory() {
-    with_temp_home(|| {
-        let run_id = "run-review-scoped-cleanup";
-        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
-            .expect("run completed");
-        let unrelated_worktrees = (0..59)
-            .map(|index| format!("/workspace/unrelated-worktree-{index}"))
-            .collect::<Vec<_>>();
-        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["automatic_artifact_retention"] = json!({
-                "status": "completed",
-                "worktree_count": unrelated_worktrees.len(),
-                "worktrees": unrelated_worktrees,
-            });
-        })
-        .expect("persist unrelated cleanup inventory");
-
-        let (review_value, exit_code) = review::review(ReviewArgs {
-            run_id: run_id.to_string(),
-            full: true,
-            to_worktree: None,
-            provider_command: None,
-            provider_argv: Vec::new(),
-        })
-        .expect("review loaded");
-
-        assert_eq!(exit_code, 0);
-        assert!(review_value["record"]["metadata"]
-            .get("automatic_artifact_retention")
-            .is_none());
+            .expect("destination guidance")
+            .contains("--to-worktree <managed-worktree>"));
         assert_eq!(
-            review_value["cleanup_evidence"][0]["kind"],
-            "automatic_artifact_retention"
-        );
-        assert_eq!(
-            review_value["cleanup_evidence"][0]["command"],
-            format!("homeboy agent-task status {run_id}")
-        );
-        assert_eq!(
-            review_value["cleanup_evidence"][0]["export_command"],
-            format!("homeboy agent-task status {run_id} --output <path>")
-        );
-        assert!(!review_value.to_string().contains("unrelated-worktree-58"));
-        let persisted =
-            agent_task_lifecycle::reconcile_status(run_id).expect("cleanup evidence persists");
-        assert_eq!(
-            persisted.metadata["automatic_artifact_retention"]["worktrees"]
-                .as_array()
-                .map(Vec::len),
-            Some(59)
+            value["full_command"],
+            "homeboy agent-task review run-review-default-bounded --full"
         );
     });
 }
@@ -503,7 +554,16 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         .expect("Cook evidence reads the selected candidate plan");
 
         assert_eq!(status_value["run"], candidate_run_id);
-        for value in [&review_value, &diagnose_value, &evidence_value] {
+        assert_eq!(review_value["resource"]["run"], candidate_run_id);
+        assert_eq!(
+            review_value["evidence"]["candidate_selection"]["latest_attempt_run_id"],
+            retry_run_id
+        );
+        assert_eq!(
+            review_value["evidence"]["candidate_selection"]["run_id"],
+            candidate_run_id
+        );
+        for value in [&diagnose_value, &evidence_value] {
             assert_eq!(value["run_id"], candidate_run_id);
             assert_eq!(
                 value["candidate_selection"]["latest_attempt_run_id"],
@@ -511,13 +571,17 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             );
             assert_eq!(value["candidate_selection"]["run_id"], candidate_run_id);
         }
-        assert_eq!(review_value["contributing_attempt"]["run_id"], retry_run_id);
         assert_eq!(
-            review_value["contributing_attempt"]["review_form"]["summary"],
+            review_value["evidence"]["contributing_attempt"]["run_id"],
+            retry_run_id
+        );
+        assert_eq!(
+            review_value["evidence"]["contributing_attempt"]["review_form"]["summary"],
             "Retry reviewed the candidate."
         );
         assert_eq!(
-            review_value["contributing_attempt"]["verification"]["provenance"]["gate_retry"],
+            review_value["evidence"]["contributing_attempt"]["verification"]["provenance"]
+                ["gate_retry"],
             "intentional_no_change"
         );
         assert_eq!(

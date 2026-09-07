@@ -165,7 +165,6 @@ fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Cancel => "cancel",
         ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
-        ControlPlaneAction::Review => "review",
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::Retry => "retry",
     }

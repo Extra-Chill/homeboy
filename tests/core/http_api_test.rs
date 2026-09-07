@@ -12,10 +12,11 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
     ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
-    ControlPlaneRun, ControlPlaneRunState, EventCursor, EventId, MissionId, RunId, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
-    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneRun, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+    EventCursor, EventId, MissionId, RunId, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 use homeboy_resource_topology_contract::{
     ResourceTopologyResourceKind, ResourceTopologyResourceRef,
@@ -382,6 +383,22 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
         Ok(fixture_control_plane_events(cursor))
     }
 
+    fn review(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneRunReviewRequest,
+    ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("fixture run not found"));
+        }
+        Ok(ControlPlaneRunReview {
+            schema: CONTROL_PLANE_RUN_REVIEW_SCHEMA.to_string(),
+            run: requested_id.clone(),
+            resource: fixture_control_plane_run(),
+            evidence: serde_json::json!({ "request": request }),
+        })
+    }
+
     fn execute_action(
         &self,
         requested_id: &RunId,
@@ -426,6 +443,21 @@ fn routes_versioned_control_plane_endpoints() {
     assert_eq!(
         http_api::route(
             HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/review?to_worktree=homeboy%40candidate&provider_argv=homeboy&provider_argv=--config%3Dpath+with+spaces",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRunReview {
+            id: "run-abc".to_string(),
+            request: ControlPlaneRunReviewRequest {
+                to_worktree: Some("homeboy@candidate".to_string()),
+                provider_command: None,
+                provider_argv: vec!["homeboy".to_string(), "--config=path with spaces".to_string()],
+            },
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
             "/v1/control-plane/runs/run-abc/events?cursor=event-page-2",
         )
         .expect("route"),
@@ -446,6 +478,56 @@ fn routes_versioned_control_plane_endpoints() {
         .expect_err("the unversioned compatibility route is removed");
     http_api::route(HttpMethod::Get, "/v1/control-plane/missions")
         .expect_err("no extra resource family");
+}
+
+#[test]
+fn control_plane_http_review_uses_the_typed_provider_contract() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!(
+            "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/review?to_worktree=homeboy%40candidate&provider_argv=homeboy&provider_argv=--config%3Dpath+with+spaces"
+        ),
+        body: None,
+    })
+    .expect("review");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.review");
+    let result: ControlPlaneResult<ControlPlaneRunReview> =
+        serde_json::from_value(response.body).expect("result");
+    let review = result.resource.expect("review resource");
+    assert_eq!(review.schema, CONTROL_PLANE_RUN_REVIEW_SCHEMA);
+    assert_eq!(review.run.as_str(), CONTROL_PLANE_FIXTURE_RUN);
+    assert_eq!(
+        review.evidence["request"]["to_worktree"],
+        "homeboy@candidate"
+    );
+    assert_eq!(
+        review.evidence["request"]["provider_argv"],
+        serde_json::json!(["homeboy", "--config=path with spaces"])
+    );
+}
+
+#[test]
+fn control_plane_http_review_rejects_conflicting_provider_inputs() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!(
+            "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/review?provider_command=homeboy&provider_argv=homeboy"
+        ),
+        body: None,
+    })
+    .expect("typed review error");
+
+    assert_eq!(response.status, 400);
+    let result: ControlPlaneResult<ControlPlaneRunReview> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(!result.ok);
+    assert_eq!(
+        result.error.expect("error").class,
+        homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
+    );
 }
 
 #[test]

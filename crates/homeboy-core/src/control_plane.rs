@@ -6,8 +6,8 @@
 
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneCapabilities,
-    ControlPlaneError, ControlPlaneEventPage, ControlPlaneOperation, ControlPlaneRun, EventCursor,
-    RunId,
+    ControlPlaneError, ControlPlaneEventPage, ControlPlaneOperation, ControlPlaneRun,
+    ControlPlaneRunReview, ControlPlaneRunReviewRequest, EventCursor, RunId,
 };
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
@@ -27,6 +27,16 @@ pub trait ControlPlaneProvider: Send + Sync {
         requested_id: &RunId,
         _cursor: Option<&EventCursor>,
     ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane run not found: {requested_id}"
+        )))
+    }
+
+    fn review(
+        &self,
+        requested_id: &RunId,
+        _request: &ControlPlaneRunReviewRequest,
+    ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
         Err(ControlPlaneError::not_found(format!(
             "control-plane run not found: {requested_id}"
         )))
@@ -71,6 +81,14 @@ pub fn events(
     cursor: Option<&EventCursor>,
 ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
     with_provider(|provider| provider.events(requested_id, cursor))
+}
+
+pub fn review(
+    requested_id: &RunId,
+    request: &ControlPlaneRunReviewRequest,
+) -> Result<ControlPlaneRunReview, ControlPlaneError> {
+    request.validate()?;
+    with_provider(|provider| provider.review(requested_id, request))
 }
 
 pub fn execute_action(

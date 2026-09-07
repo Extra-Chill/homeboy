@@ -78,6 +78,10 @@ pub enum HttpEndpoint {
     ControlPlaneRun {
         id: String,
     },
+    ControlPlaneRunReview {
+        id: String,
+        request: homeboy_control_plane_contract::ControlPlaneRunReviewRequest,
+    },
     ControlPlaneRunEvents {
         id: String,
         cursor: Option<homeboy_control_plane_contract::EventCursor>,
@@ -171,6 +175,7 @@ impl HttpEndpoint {
             Self::ActivityItem { .. } => "activity.show",
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
             Self::ControlPlaneRun { .. } => "control_plane.runs.show",
+            Self::ControlPlaneRunReview { .. } => "control_plane.runs.review",
             Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",
             Self::ControlPlaneRunActions { .. } => "control_plane.runs.actions",
             Self::Jobs => "jobs.list",
