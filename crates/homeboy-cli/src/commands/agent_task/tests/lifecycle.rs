@@ -1088,6 +1088,134 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
 }
 
 #[test]
+fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
+    with_temp_home(|| {
+        let cook_id = "cook-readiness-rearm";
+        let source_run_id = "cook-readiness-rearm-attempt-1";
+        let source_plan = AgentTaskPlan::new(
+            "cook-readiness-rearm-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture" },
+                "instructions": "retry readiness"
+            }))
+            .expect("provider task")],
+        );
+        let options = homeboy::agents::agent_task_service::CookRequest {
+            identity: homeboy::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: source_run_id.to_string(),
+                initial_plan: source_plan.clone(),
+            },
+            workspace: homeboy::agents::agent_task_service::CookWorkspace {
+                to_worktree: "fixture@readiness-rearm".to_string(),
+                source_worktree_path: None,
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            gates: Default::default(),
+            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
+            finalization: homeboy::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "Readiness rearm".to_string(),
+                commit_message: "Readiness rearm".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&source_plan, Some(source_run_id))
+            .expect("persist source attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            source_run_id,
+        )
+        .expect("bind source attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            source_run_id,
+            &source_plan,
+            "provider_readiness",
+            &Error::internal_unexpected("injected readiness timeout").with_retryable(true),
+        )
+        .expect("persist retryable readiness failure");
+        assert_eq!(
+            agent_task_lifecycle::exact_record(source_run_id)
+                .expect("source record")
+                .metadata["provider_executions_consumed"],
+            0
+        );
+        let refusal = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: source_run_id.to_string(),
+                preflight: false,
+                rearm: false,
+                artifact_id: None,
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+                full: true,
+            },
+            Arc::new(CapturingExecutor::default()),
+            |_| Ok(None),
+        )
+        .expect_err("non-rearm continuation cannot reuse a terminal attempt");
+        assert!(refusal.message.contains("requires --rearm"));
+
+        let (continued, continued_exit_code) = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: source_run_id.to_string(),
+                preflight: false,
+                rearm: true,
+                artifact_id: None,
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+                full: true,
+            },
+            Arc::new(CapturingExecutor::default()),
+            |_| Ok(None),
+        )
+        .expect("rearm reserves and dispatches a successor");
+
+        assert_eq!(continued_exit_code, 0, "{continued:#}");
+        let index =
+            agent_task_lifecycle::cook_index(cook_id).expect("Cook index includes successor");
+        let successor_run_id = index.latest_run_id;
+        assert_ne!(successor_run_id, source_run_id, "{continued:#}");
+        assert_eq!(continued["latest_run_id"], successor_run_id);
+        let successor = agent_task_lifecycle::exact_record(&successor_run_id)
+            .expect("successor record is durable");
+        assert_eq!(successor.metadata["retry_of"], source_run_id);
+        assert_eq!(successor.metadata["provider_executions_consumed"], 0);
+    });
+}
+
+#[test]
 fn cli_cook_converges_recipe_lifecycle_and_index_after_transient_first_write_failure() {
     with_temp_home(|| {
         let (_root, source) = recoverable_runner_worktree();
