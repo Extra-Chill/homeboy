@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.4] - 2026-09-07
+
+### Fixed
+- dump native MariaDB host diagnostics when readiness is not ready
+
 ## [3.45.3] - 2026-09-07
 
 ### Fixed
