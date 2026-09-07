@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.5] - 2026-09-07
+
+### Fixed
+- treat a behind-upstream WP Codebox checkout as advisory when the pinned commit matches
+
 ## [3.45.4] - 2026-09-07
 
 ### Fixed
