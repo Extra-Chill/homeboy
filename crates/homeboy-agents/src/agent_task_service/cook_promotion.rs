@@ -3202,7 +3202,8 @@ pub fn persist_manual_finalization_retry_intent(
     )?;
     agent_task_lifecycle::record_manual_finalization_retry(run_id)?;
     let candidate = crate::agent_task_promotion::candidate_fingerprint(&report.path)?;
-    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { mut fingerprint } =
+        candidate
     else {
         return Err(Error::validation_invalid_argument(
             "path",
@@ -3211,6 +3212,9 @@ pub fn persist_manual_finalization_retry_intent(
             None,
         ));
     };
+    // A committed checkout is clean, but its preflight dossier has already
+    // authenticated the candidate's changed-file scope for receipt recovery.
+    fingerprint.changed_files = report.changed_files.clone();
     agent_task_lifecycle::record_manual_finalization_retry_candidate(
         run_id,
         serde_json::to_value(fingerprint).expect("candidate fingerprint serializes"),
@@ -4333,7 +4337,13 @@ fn receipt_matches_manual_preflight(
             )
             .is_ok_and(|candidate| {
                 candidate.tree == binding.candidate_tree
-                    && candidate.changed_files == binding.changed_files
+                    && (candidate.changed_files == binding.changed_files
+                        // Older retryable manual finalizations fingerprinted a
+                        // clean committed checkout, which has no working-tree
+                        // changes. Their validated intent remains the durable
+                        // source of the preflight candidate scope.
+                        || (candidate.changed_files.is_empty()
+                            && intent.changed_files == binding.changed_files))
             })
         } else {
             intent_git_identity.commit_sha.is_some()
@@ -4385,7 +4395,13 @@ fn require_manual_retry_candidate(
     };
     // Hooks may stage the exact candidate before rejecting it. Bind semantic
     // content and paths, not the transient staged/unstaged representation.
-    if actual.tree != expected.tree || actual.changed_files != expected.changed_files {
+    let legacy_scope_matches = expected.changed_files.is_empty()
+        && manual_finalization_intent_for_run(record, &record.run_id)
+            .map(|intent| intent.changed_files == actual.changed_files)
+            .unwrap_or(false);
+    if actual.tree != expected.tree
+        || (actual.changed_files != expected.changed_files && !legacy_scope_matches)
+    {
         return Err(Error::validation_invalid_argument(
             "manual_finalization_retry_candidate",
             "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
