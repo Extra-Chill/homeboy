@@ -62,7 +62,7 @@ function inspect() {
     behind: source.details?.git?.behind,
   };
 
-  if (source.status !== 'ok') {
+  if (source.status !== 'ok' && !isBehindUpstreamAdvisory(source, provenance)) {
     return rejected(source.status === 'warning' ? 'provenance_unavailable' : 'provenance_invalid', observed, source.message);
   }
   if (!provenance) {
@@ -102,6 +102,28 @@ function inspect() {
     return rejected('source_authority_unprovable', observed, 'an external source candidate requires an exact expected commit');
   }
   return accepted(observed);
+}
+
+/**
+ * A doctor warning that only says the checkout is behind its upstream is a
+ * freshness advisory, not a provenance defect. The build still carries exact,
+ * immutable provenance for the commit it was built from; whether that commit
+ * is the one the caller asked for is decided by the source-commit comparison
+ * below. Every other warning (missing evidence, unverifiable source) stays a
+ * rejection. Managed source mode only: the pin is the authority there, and
+ * an exact expected commit is required so a stale pin cannot be laundered
+ * through this path.
+ */
+function isBehindUpstreamAdvisory(source, provenance) {
+  if (source.status !== 'warning') return false;
+  if (options.mode !== 'source' || options.candidate !== 'managed' || !expected.commit) return false;
+  if (!provenance?.git?.commit || provenance.git.commit !== expected.commit) return false;
+  const behind = Number(source.details?.git?.behind);
+  if (!Number.isInteger(behind) || behind <= 0) return false;
+  const ahead = Number(source.details?.git?.ahead ?? 0);
+  if (ahead !== 0) return false;
+  const evidence = source.details?.git?.evidence;
+  return evidence !== undefined && evidence !== 'unavailable';
 }
 
 function accepted(observed) {

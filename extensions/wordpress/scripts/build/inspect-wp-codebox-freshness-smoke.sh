@@ -24,7 +24,9 @@ doctor_json() {
     local ref="${4:-main}"
     local commit="${5:-fresh-commit}"
     local evidence="${6:-local-tracking-ref}"
-    jq -cn --arg status "${source_status}" --arg version "${version}" --arg dist "${dist}" --arg ref "${ref}" --arg commit "${commit}" --arg evidence "${evidence}" '{schema:"wp-codebox/doctor/v1",status:(if $status == "error" then "error" elif $status == "warning" then "warning" else "ok" end),checks:[{id:"wp-codebox.source",status:$status,message:"fixture provenance",details:{provenance:{schema:"wp-codebox/cli-build-provenance/v1",package:{name:"@automattic/wp-codebox-cli",version:$version},dist:{sha256:$dist},git:{ref:$ref,commit:$commit}},git:{evidence:$evidence,remoteFetch:"not-attempted"}}}]}'
+    local behind="${7:-0}"
+    local ahead="${8:-0}"
+    jq -cn --arg status "${source_status}" --arg version "${version}" --arg dist "${dist}" --arg ref "${ref}" --arg commit "${commit}" --arg evidence "${evidence}" --argjson behind "${behind}" --argjson ahead "${ahead}" '{schema:"wp-codebox/doctor/v1",status:(if $status == "error" then "error" elif $status == "warning" then "warning" else "ok" end),checks:[{id:"wp-codebox.source",status:$status,message:"fixture provenance",details:{provenance:{schema:"wp-codebox/cli-build-provenance/v1",package:{name:"@automattic/wp-codebox-cli",version:$version},dist:{sha256:$dist},git:{ref:$ref,commit:$commit}},git:{evidence:$evidence,remoteFetch:"not-attempted",behind:$behind,ahead:$ahead}}}]}'
 }
 
 expect_accept() {
@@ -84,5 +86,19 @@ expect_accept override-exact --candidate override --mode source --expected-ref m
 # current; doctor explicitly reports that no fetch was attempted.
 DOCTOR_OUTPUT="$(doctor_json ok 0.23.3 fresh-dist main fresh-commit unavailable)"
 expect_accept offline-current-managed --candidate managed --mode source --expected-ref main
+
+# A pinned managed checkout that is merely behind its upstream still carries
+# exact provenance for the pinned commit. That is a freshness advisory, not a
+# provenance defect (#2806). Accept only when the commit matches the pin.
+DOCTOR_OUTPUT="$(doctor_json warning 0.23.3 fresh-dist main fresh-commit local-tracking-ref 2)"
+expect_accept behind-upstream-pinned --candidate managed --mode source --expected-ref main --expected-commit fresh-commit
+expect_reject behind-upstream-wrong-commit provenance_unavailable --candidate managed --mode source --expected-ref main --expected-commit other-commit
+DOCTOR_OUTPUT="$(doctor_json warning 0.23.3 fresh-dist main fresh-commit local-tracking-ref 2)"
+expect_reject behind-upstream-no-pin provenance_unavailable --candidate managed --mode source --expected-ref main
+expect_reject behind-upstream-override provenance_unavailable --candidate override --mode source --expected-ref main --expected-commit fresh-commit
+DOCTOR_OUTPUT="$(doctor_json warning 0.23.3 fresh-dist main fresh-commit unavailable 2)"
+expect_reject behind-upstream-no-evidence provenance_unavailable --candidate managed --mode source --expected-ref main --expected-commit fresh-commit
+DOCTOR_OUTPUT="$(doctor_json warning 0.23.3 fresh-dist main fresh-commit local-tracking-ref 2 1)"
+expect_reject behind-and-ahead provenance_unavailable --candidate managed --mode source --expected-ref main --expected-commit fresh-commit
 
 echo "WP Codebox freshness inspector smoke passed"
