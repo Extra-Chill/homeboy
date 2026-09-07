@@ -13,8 +13,9 @@ use homeboy_control_plane_contract::{
     ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef,
     ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner,
-    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunState,
-    ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunId,
+    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
+    ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
@@ -152,14 +153,277 @@ impl<L: RunLookup> OrchestrationService<L> {
     }
 }
 
+fn review_promotion_candidates(
+    run_id: &str,
+    request: &ControlPlaneRunReviewRequest,
+    aggregate: &crate::agent_tasks::AgentTaskAggregate,
+    review: &crate::agent_tasks::AgentTaskAggregateReport,
+    record: &AgentTaskRunRecord,
+    cook_contract: Option<&(String, Value)>,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Vec<Value> {
+    review
+        .apply_candidates
+        .iter()
+        .chain(review.review_candidates.iter().filter(|candidate| {
+            aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == candidate.task_id)
+                .is_some_and(|outcome| {
+                    outcome.status
+                        == crate::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
+                })
+        }))
+        .flat_map(|candidate| {
+            let artifact_ids = aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == candidate.task_id)
+                .filter(|outcome| {
+                    outcome.status
+                        == crate::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
+                })
+                .and_then(|outcome| {
+                    crate::agent_task_promotion::canonical_recoverable_patch_artifacts_in_observation_store(
+                        outcome,
+                        &crate::agent_task_promotion::AgentTaskPromotionOptions {
+                            source: "{}".to_string(),
+                            source_run_id: Some(run_id.to_string()),
+                            source_path: None,
+                            source_worktree_path: None,
+                            base_ref: None,
+                            task_base_sha: None,
+                            candidate_ref: None,
+                            to_worktree: "<managed-worktree>".to_string(),
+                            task_id: Some(candidate.task_id.clone()),
+                            artifact_id: None,
+                            dry_run: true,
+                            gates: Default::default(),
+                            provider_command: None,
+                            provider_invocation: None,
+                        },
+                        observation_store,
+                    )
+                    .ok()
+                    .map(|canonical| {
+                        canonical
+                            .artifacts
+                            .into_iter()
+                            .map(|artifact| artifact.id)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_else(|| candidate.artifact_ids.clone());
+            let selection_required = artifact_ids.len() > 1;
+            artifact_ids.into_iter().map(move |artifact_id| {
+                let mut command = vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "promote".to_string(),
+                    run_id.to_string(),
+                    "--task-id".to_string(),
+                    candidate.task_id.clone(),
+                    "--artifact-id".to_string(),
+                    artifact_id.clone(),
+                ];
+                let continuation = record.metadata.get("latest_promotion").filter(|promotion| {
+                    crate::agent_task_service::promotion_is_resumable(promotion, false)
+                        && promotion.pointer("/source/task_id").and_then(Value::as_str)
+                            == Some(candidate.task_id.as_str())
+                        && promotion
+                            .pointer("/patch_artifact/id")
+                            .and_then(Value::as_str)
+                            == Some(artifact_id.as_str())
+                });
+                let destination = continuation
+                    .and_then(|promotion| promotion.pointer("/target/worktree"))
+                    .and_then(Value::as_str)
+                    .or(request.to_worktree.as_deref());
+                let command = destination.map(|destination| {
+                    command.extend(["--to-worktree".to_string(), destination.to_string()]);
+                    if let Some(contract) = continuation
+                        .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
+                    {
+                        append_resume_base(&mut command, contract);
+                        if cook_contract.is_none() {
+                            append_resume_gates(
+                                &mut command,
+                                contract.get("gates").unwrap_or(&Value::Null),
+                            );
+                        }
+                    } else if let Some((base, _)) = cook_contract {
+                        command.extend(["--base".to_string(), base.clone()]);
+                    }
+                    if cook_contract.is_some() {
+                        command.push("--gates-from-cook-recipe".to_string());
+                    }
+                    if let Some(provider_command) = &request.provider_command {
+                        command
+                            .extend(["--provider-command".to_string(), provider_command.clone()]);
+                    }
+                    command.extend(
+                        request
+                            .provider_argv
+                            .iter()
+                            .map(|argument| format!("--provider-argv={argument}")),
+                    );
+                    command
+                });
+                serde_json::json!({
+                    "task_id": candidate.task_id,
+                    "artifact_id": artifact_id,
+                    "reason": candidate.reason,
+                    "command": command,
+                    "ready": destination.is_some(),
+                    "destination_required": destination.is_none(),
+                    "selection_required": selection_required,
+                })
+            })
+        })
+        .collect()
+}
+
+fn append_resume_base(command: &mut Vec<String>, contract: &Value) {
+    if let Some(base) = contract.pointer("/inputs/base_ref").and_then(Value::as_str) {
+        command.extend(["--base".to_string(), base.to_string()]);
+    }
+}
+
+fn append_resume_gates(command: &mut Vec<String>, gates: &Value) {
+    for (key, flag) in [
+        ("verify", "--verify"),
+        ("private_verify", "--private-verify"),
+    ] {
+        for value in gates
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            command.extend([flag.to_string(), value.to_string()]);
+        }
+    }
+    for (key, flag) in [
+        ("private_gate_reveal", "--private-gate-reveal"),
+        ("gate_timeout_seconds", "--gate-timeout-seconds"),
+        (
+            "gate_heartbeat_interval_seconds",
+            "--gate-heartbeat-interval-seconds",
+        ),
+        (
+            "gate_no_progress_timeout_seconds",
+            "--gate-no-progress-timeout-seconds",
+        ),
+    ] {
+        if let Some(value) = gates.get(key).and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_u64().map(|value| value.to_string()))
+        }) {
+            command.extend([flag.to_string(), value.replace('_', "-")]);
+        }
+    }
+    if gates.get("rerun_completed_gates").and_then(Value::as_bool) == Some(true) {
+        command.push("--rerun-completed-gates".to_string());
+    }
+}
+
+fn review_retry_context(run_id: &str) -> Value {
+    serde_json::json!({
+        "run_id": run_id,
+        "retry_action": ControlPlaneAction::Retry,
+        "resume_action": ControlPlaneAction::Resume,
+    })
+}
+
 impl OrchestrationService<LifecycleStoreLookup> {
     /// Operations wired by the durable lifecycle-backed provider.
     pub fn capabilities() -> ControlPlaneCapabilities {
         let mut capabilities = Self::read_capabilities();
+        capabilities.resources.push(ControlPlaneResource::Review);
+        capabilities
+            .operations
+            .push(ControlPlaneOperation::GetRunReview);
         capabilities
             .operations
             .push(ControlPlaneOperation::ExecuteRunAction);
         capabilities
+    }
+
+    /// Read review evidence exclusively from this service's injected store.
+    pub fn review(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneRunReviewRequest,
+    ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
+        let snapshot = self.lookup.get(requested_id)?.ok_or_else(|| {
+            ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
+        })?;
+        let durable_read = crate::agent_task_lifecycle::durable_local_read_in_store(
+            &self.lookup.store,
+            requested_id.as_str(),
+        )
+        .map_err(map_lifecycle_error)?;
+        let resource = project_record(&durable_read.record, snapshot.plan.as_ref())?;
+        let aggregate = durable_read.aggregate;
+        let aggregate_review = aggregate.as_ref().map(|aggregate| {
+            crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
+        });
+        let cook_contract = review_cook_contract(&self.lookup.store, requested_id.as_str())?;
+        let observation_store =
+            homeboy_core::observation::ObservationStore::open_initialized_for_lifecycle_in_roots(
+                self.lookup.store.roots(),
+            )
+            .map_err(map_lifecycle_error)?;
+        let promotion_candidates = aggregate
+            .as_ref()
+            .zip(aggregate_review.as_ref())
+            .map(|(aggregate, review)| {
+                review_promotion_candidates(
+                    requested_id.as_str(),
+                    request,
+                    aggregate,
+                    review,
+                    &durable_read.record,
+                    cook_contract.as_ref(),
+                    &observation_store,
+                )
+            })
+            .unwrap_or_default();
+        let failure_reasons = aggregate
+            .as_ref()
+            .map(review_failure_reasons)
+            .filter(|reasons| !reasons.is_empty());
+        let canonical_candidate =
+            review_canonical_candidate(&durable_read.record, aggregate_review.as_ref(), &resource);
+        let (record, cleanup_evidence) = review_record_projection(&durable_read.record);
+        let evidence = serde_json::json!({
+            "record": record,
+            "logs": crate::agent_task_lifecycle::logs_in_store(&self.lookup.store, requested_id.as_str()).map_err(map_lifecycle_error)?,
+            "artifacts": crate::agent_task_lifecycle::artifacts_in_store(&self.lookup.store, requested_id.as_str()).map_err(map_lifecycle_error)?,
+            "aggregate": aggregate,
+            "aggregate_review": aggregate_review,
+            "promotion_candidates": promotion_candidates,
+            "diagnostic_summary": failure_reasons.as_ref().and_then(|reasons| reasons.first()).cloned(),
+            "failure_reasons": failure_reasons,
+            "execution_states": review_execution_states(aggregate.as_ref(), &durable_read.record, &resource),
+            "canonical_candidate": canonical_candidate,
+            "next_actions": review_next_actions(&durable_read.record, aggregate_review.as_ref(), request.to_worktree.is_some()),
+            "cleanup_evidence": cleanup_evidence,
+            "transport": { "authoritative": "homeboy-agent-task-lifecycle", "chat_state_required": false },
+            "action_eligibility": resource.action_eligibility,
+            "retry_context": review_retry_context(requested_id.as_str()),
+            "read": { "phase": "controller_local", "mutated": false, "unavailable_sources": durable_read.unavailable_sources },
+        });
+        Ok(ControlPlaneRunReview {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_RUN_REVIEW_SCHEMA.to_string(),
+            run: requested_id.clone(),
+            resource,
+            evidence,
+        })
     }
 
     /// Execute the canonical run mutation against the same durable lifecycle
@@ -538,12 +802,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 ),
                             }
                         }
-                        _ => {
-                            return Err(ControlPlaneError::invalid_argument(format!(
-                                "{} is not wired through the canonical action executor",
-                                action_name(request.action)
-                            )))
-                        }
                     }
                 };
                 let result = ControlPlaneActionAcknowledgement {
@@ -574,6 +832,405 @@ impl OrchestrationService<LifecycleStoreLookup> {
             }
         }
     }
+}
+
+fn review_cook_contract(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<(String, Value)>, ControlPlaneError> {
+    let recipe_store = crate::agent_task_service::CookRecipeStore::new(store.roots().clone());
+    let Some(recipe) = recipe_store
+        .load_recipe_for_attempt(run_id)
+        .map_err(map_lifecycle_error)?
+    else {
+        return Ok(None);
+    };
+    let base = recipe
+        .finalization
+        .get("base")
+        .and_then(Value::as_str)
+        .filter(|base| !base.trim().is_empty())
+        .ok_or_else(|| {
+            ControlPlaneError::invalid_argument(
+                "durable Cook recipe is missing its declared promotion base",
+            )
+        })?
+        .to_string();
+    Ok(Some((base, recipe.gate_policy)))
+}
+
+fn review_failure_reasons(aggregate: &crate::agent_tasks::AgentTaskAggregate) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    for outcome in aggregate.outcomes.iter().filter(|outcome| {
+        matches!(
+            outcome.status,
+            crate::agent_tasks::AgentTaskOutcomeStatus::Failed
+                | crate::agent_tasks::AgentTaskOutcomeStatus::ProviderError
+                | crate::agent_tasks::AgentTaskOutcomeStatus::Timeout
+                | crate::agent_tasks::AgentTaskOutcomeStatus::UnableToRemediate
+                | crate::agent_tasks::AgentTaskOutcomeStatus::Cancelled
+        )
+    }) {
+        for diagnostic in &outcome.diagnostics {
+            diagnostics.push(serde_json::json!({
+                "task_id": outcome.task_id,
+                "class": diagnostic.class,
+                "message": diagnostic.message,
+                "source": "diagnostics",
+            }));
+        }
+        collect_nested_diagnostics(&outcome.outputs, &outcome.task_id, &mut diagnostics);
+        collect_nested_diagnostics(&outcome.metadata, &outcome.task_id, &mut diagnostics);
+    }
+    diagnostics.sort_by_key(|diagnostic| {
+        let class = diagnostic["class"].as_str().unwrap_or_default();
+        let priority = if class.contains("validation") || class.contains("fatal") {
+            0
+        } else if class.contains("registration") || class.contains("missing") {
+            1
+        } else {
+            2
+        };
+        (
+            priority,
+            class.to_string(),
+            diagnostic["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    });
+    let mut seen = std::collections::BTreeSet::new();
+    diagnostics
+        .into_iter()
+        .filter(|diagnostic| {
+            seen.insert((
+                diagnostic["class"].as_str().unwrap_or_default().to_string(),
+                diagnostic["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            ))
+        })
+        .take(8)
+        .collect()
+}
+
+fn collect_nested_diagnostics(value: &Value, task_id: &str, diagnostics: &mut Vec<Value>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(items) = object.get("diagnostics").and_then(Value::as_array) {
+                for item in items {
+                    if let (Some(class), Some(message)) = (
+                        item.get("class").and_then(Value::as_str),
+                        item.get("message").and_then(Value::as_str),
+                    ) {
+                        diagnostics.push(serde_json::json!({
+                            "task_id": task_id,
+                            "class": class,
+                            "message": message,
+                            "source": "nested_diagnostics",
+                        }));
+                    }
+                }
+            }
+            for nested in object.values() {
+                collect_nested_diagnostics(nested, task_id, diagnostics);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                collect_nested_diagnostics(nested, task_id, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn review_execution_states(
+    aggregate: Option<&crate::agent_tasks::AgentTaskAggregate>,
+    record: &AgentTaskRunRecord,
+    resource: &ControlPlaneRun,
+) -> Value {
+    let review = aggregate.map(|aggregate| {
+        crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
+    });
+    let canonical_candidate = review_canonical_candidate(record, review.as_ref(), resource);
+    let candidate_state = canonical_candidate["state"]
+        .as_str()
+        .unwrap_or("not_available");
+    let candidate_tasks = review
+        .as_ref()
+        .map(|review| {
+            review
+                .tasks
+                .iter()
+                .map(|task| {
+                    let reason_code = if task.status
+                        == crate::agent_tasks::AgentTaskOutcomeStatus::NoOp
+                    {
+                        "no_changes_produced"
+                    } else {
+                        match task.decision {
+                            crate::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
+                                "no_changes_produced"
+                            }
+                            crate::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate => {
+                                candidate_state
+                            }
+                            crate::agent_tasks::AgentTaskReconciliationDecision::RetryCandidate => {
+                                "provider_retry_required"
+                            }
+                            crate::agent_tasks::AgentTaskReconciliationDecision::IssueReportCandidate => {
+                                "issue_report_required"
+                            }
+                            crate::agent_tasks::AgentTaskReconciliationDecision::ReviewCandidate => {
+                                "review_required"
+                            }
+                        }
+                    };
+                    serde_json::json!({ "task_id": task.task_id, "state": task.decision, "reason_code": reason_code })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let promotion = record.metadata.get("latest_promotion");
+    let promotion_state = promotion
+        .and_then(|promotion| promotion.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("not_attempted");
+    let target_applied = promotion.is_some_and(review_promotion_target_applied);
+    let accepted_inherited_failure = promotion
+        .and_then(|promotion| promotion.get("deterministic_gates"))
+        .and_then(Value::as_array)
+        .is_some_and(|gates| {
+            gates.iter().any(|gate| {
+                gate.get("status").and_then(Value::as_str) == Some("accepted_inherited_failure")
+            })
+        });
+    let finalization_state = record
+        .metadata
+        .pointer("/cook_finalization/status")
+        .and_then(Value::as_str)
+        .map(|status| match status {
+            "review_ready" | "draft_published" => "completed",
+            "failed" | "finalization_failed" => "finalization_failed",
+            "pending" | "finalization_pending" => "finalization_pending",
+            other => other,
+        })
+        .unwrap_or("not_attempted");
+    serde_json::json!({
+        "schema": "homeboy/agent-task-execution-states/v1",
+        "provider": aggregate.map(|aggregate| aggregate.outcomes.iter().map(|outcome| {
+            let failed = matches!(outcome.status, crate::agent_tasks::AgentTaskOutcomeStatus::Failed | crate::agent_tasks::AgentTaskOutcomeStatus::ProviderError | crate::agent_tasks::AgentTaskOutcomeStatus::Timeout | crate::agent_tasks::AgentTaskOutcomeStatus::UnableToRemediate | crate::agent_tasks::AgentTaskOutcomeStatus::Cancelled);
+            serde_json::json!({ "task_id": outcome.task_id, "state": if failed { "failed" } else { "succeeded" }, "outcome_status": outcome.status, "failure_classification": outcome.failure_classification })
+        }).collect::<Vec<_>>()).unwrap_or_default(),
+        "candidate": { "state": candidate_state, "tasks": candidate_tasks },
+        "gate": { "state": if accepted_inherited_failure { "accepted_inherited_failure" } else if !target_applied { "not_run" } else if matches!(promotion_state, "gate_failed" | "no_changes_gate_failed") { "failed" } else if promotion_state == "verification_pending" { "pending" } else if matches!(promotion_state, "applied" | "verified_no_changes") { "passed" } else { "not_run" } },
+        "promotion": { "state": promotion_state, "patch_promoted": target_applied, "verified": target_applied && promotion_state == "applied", "verification_phase": if promotion_state == "verification_pending" && target_applied { "post_apply" } else if promotion_state == "verification_pending" { "pre_apply" } else { "not_pending" }, "target": { "state": if target_applied { "applied" } else if promotion.is_some() { "not_applied" } else { "not_declared" }, "worktree": promotion.and_then(|promotion| promotion.pointer("/target/worktree").or_else(|| promotion.get("to_worktree"))), "candidate_fingerprint_matches": target_applied && promotion.is_some_and(|promotion| promotion.pointer("/provenance/candidate").is_some_and(|candidate| !candidate.is_null())) } },
+        "finalization": { "state": finalization_state, "finalized": finalization_state == "completed" },
+        "publication": resource.publication,
+    })
+}
+
+fn review_canonical_candidate(
+    record: &AgentTaskRunRecord,
+    review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
+    resource: &ControlPlaneRun,
+) -> Value {
+    let promotion = record.metadata.get("latest_promotion");
+    let promotion_status = promotion
+        .and_then(|promotion| promotion.get("status"))
+        .and_then(Value::as_str);
+    let target_applied = promotion.is_some_and(review_promotion_target_applied);
+    let finalized = record
+        .metadata
+        .get("cook_finalization")
+        .is_some_and(|finalization| {
+            matches!(
+                finalization.get("status").and_then(Value::as_str),
+                Some("review_ready" | "draft_published")
+            ) && finalization
+                .get("pr_url")
+                .or_else(|| finalization.get("pull_request_url"))
+                .and_then(Value::as_str)
+                .is_some_and(|url| !url.trim().is_empty())
+        });
+    let retained = promotion.is_some_and(|promotion| {
+        promotion_status.is_some_and(|status| {
+            matches!(status, "applied" | "gate_failed" | "verification_pending")
+        }) && promotion
+            .get("patch_artifact")
+            .or_else(|| promotion.get("patch"))
+            .and_then(|artifact| artifact.get("id").or_else(|| artifact.get("artifact_id")))
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+    });
+    let state = if finalized {
+        "finalized"
+    } else if retained {
+        "apply_ready"
+    } else if review.is_some_and(|review| review.summary.apply_candidates > 0) {
+        "patch_available"
+    } else if review.is_some_and(|review| {
+        !review.tasks.is_empty()
+            && review
+                .tasks
+                .iter()
+                .all(|task| task.status == crate::agent_tasks::AgentTaskOutcomeStatus::NoOp)
+    }) {
+        "no_changes_produced"
+    } else {
+        resource
+            .candidate
+            .as_ref()
+            .map(|candidate| candidate.state.as_str())
+            .unwrap_or("not_available")
+    };
+    serde_json::json!({
+        "schema": "homeboy/agent-task-candidate/v1",
+        "state": state,
+        "id": resource.candidate.as_ref().and_then(|candidate| candidate.id.as_deref()),
+        "target_applied": target_applied,
+        "verified": target_applied && promotion_status == Some("applied"),
+        "finalized": finalized,
+        "fingerprint": promotion.and_then(|promotion| promotion.pointer("/provenance/candidate")),
+    })
+}
+
+fn review_promotion_target_applied(promotion: &Value) -> bool {
+    matches!(
+        promotion.get("status").and_then(Value::as_str),
+        Some("verification_pending" | "applied" | "gate_failed")
+    ) && promotion
+        .pointer("/provenance/post_apply")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && promotion
+            .pointer("/patch_artifact/id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+        && promotion
+            .pointer("/target/worktree")
+            .or_else(|| promotion.get("to_worktree"))
+            .and_then(Value::as_str)
+            .is_some_and(|target| !target.trim().is_empty())
+        && promotion
+            .pointer("/provenance/candidate")
+            .is_some_and(|candidate| !candidate.is_null())
+}
+
+fn review_next_actions(
+    record: &AgentTaskRunRecord,
+    review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
+    has_target: bool,
+) -> Vec<String> {
+    if record.state == AgentTaskRunState::Queued {
+        return vec!["run this queued durable task with `homeboy agent-task run <run-id>` or let a daemon claim it with `homeboy agent-task run-next`".to_string()];
+    }
+    if record.state == AgentTaskRunState::Running {
+        return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`".to_string()];
+    }
+    let Some(review) = review else {
+        return vec!["terminal run has no aggregate artifact; inspect lifecycle status for finalization errors".to_string()];
+    };
+    let mut actions = Vec::new();
+    if review.summary.apply_candidates > 0 {
+        actions.push(if has_target {
+            "review `promotion_candidates` and run the generated promotion command".to_string()
+        } else {
+            format!(
+                "rerun review with `homeboy agent-task review {} --to-worktree <managed-worktree>`",
+                record.run_id
+            )
+        });
+    }
+    if review.summary.retry_candidates > 0 {
+        actions.push(format!("retry provider-error or timeout candidates after fixing executor/preflight issues with `homeboy agent-task retry {} --run`", record.run_id));
+        actions.push(format!("rerun the persisted plan through Lab with `homeboy --runner <runner-id> agent-task run-plan --plan @{} --record-run-id <new-run-id>`", record.plan_path));
+    }
+    if review.summary.issue_report_candidates > 0 {
+        actions.push(
+            "open or update the tracker with `issue_report_candidates` diagnostics and evidence"
+                .to_string(),
+        );
+    }
+    if review.summary.review_candidates > 0 {
+        actions.push(
+            "inspect `review_candidates` before deciding whether to retry, report, or ignore"
+                .to_string(),
+        );
+    }
+    if actions.is_empty() {
+        actions.push("no promotion, retry, or issue-report candidates were produced; inspect task summaries for no-op completion".to_string());
+    }
+    actions
+}
+
+fn review_record_projection(record: &AgentTaskRunRecord) -> (Value, Vec<Value>) {
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return (value, Vec::new());
+    };
+    let evidence = [
+        "automatic_artifact_retention",
+        "automatic_artifact_retention_inaccessible_roots",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        let details = metadata.remove(key)?;
+        let count = details
+            .get("worktree_count")
+            .and_then(Value::as_u64)
+            .or_else(|| details.as_array().map(|items| items.len() as u64))
+            .or_else(|| details.get("worktrees").and_then(Value::as_array).map(|items| items.len() as u64))
+            .unwrap_or(0);
+        Some(serde_json::json!({
+            "kind": key,
+            "count": count,
+            "details_omitted": true,
+            "ref": format!("homeboy://agent-task/run/{}/status#metadata.{key}", record.run_id),
+            "command": format!("homeboy agent-task status {}", record.run_id),
+            "export_command": format!("homeboy agent-task status {} --output <path>", record.run_id),
+        }))
+    })
+    .collect();
+    (value, evidence)
+}
+
+fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionReport) -> Value {
+    let target_applied = report.status.patch_promoted();
+    let verified = matches!(
+        report.status,
+        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+    );
+    let next_action = if report.status.gate_failed() {
+        "patch promoted but deterministic gates failed; use gate feedback before finalizing"
+    } else if target_applied && verified {
+        "patch promoted and deterministic gates verified; finalize a PR"
+    } else if target_applied {
+        "patch promoted into the target worktree; verify, then finalize a PR"
+    } else {
+        "dry run only; rerun promote without `--dry-run` before finalizing"
+    };
+
+    serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-handoff/v1",
+        "states": {
+            "patch_artifact_produced": true,
+            "candidate_retained": true,
+            "target_applied": target_applied,
+            "patch_promoted": target_applied,
+            "verified": verified,
+            "finalized": false,
+            "pr_opened": false,
+        },
+        "boundary": report.status.handoff_boundary(),
+        "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
+            "homeboy agent-task finalize-pr --recover {run_id}"
+        )),
+        "next_actions": [next_action],
+    })
 }
 
 impl OrchestrationService<LifecycleStoreLookup> {
@@ -728,12 +1385,6 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
         ControlPlaneAction::Reconcile => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
         ControlPlaneAction::Resume => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
         ControlPlaneAction::Retry => CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
-        _ => {
-            return Err(ControlPlaneError::invalid_argument(format!(
-                "{} is not wired through the canonical action executor",
-                action_name(request.action)
-            )))
-        }
     };
     if request.parameters.schema != expected_parameters_schema {
         return Err(ControlPlaneError::invalid_argument(format!(
@@ -788,7 +1439,6 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Cancel => "cancel",
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::Retry => "retry",
-        ControlPlaneAction::Review => "review",
         ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
     }
@@ -832,6 +1482,36 @@ pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<Contro
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .run(&requested_id)
+        .map_err(|error| match error.class {
+            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+                homeboy_core::Error::validation_invalid_argument(
+                    "run_id",
+                    error.message,
+                    Some(run_id.to_string()),
+                    None,
+                )
+            }
+            ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
+        })
+}
+
+pub fn review_from_current_environment(
+    run_id: &str,
+    request: &ControlPlaneRunReviewRequest,
+) -> homeboy_core::Result<ControlPlaneRunReview> {
+    let requested_id = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    OrchestrationService::new(LifecycleStoreLookup::new(store))
+        .review(&requested_id, request)
         .map_err(|error| match error.class {
             ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
                 homeboy_core::Error::validation_invalid_argument(
@@ -1575,6 +2255,16 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
     }
 
+    fn review(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneRunReviewRequest,
+    ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).review(requested_id, request)
+    }
+
     fn events(
         &self,
         requested_id: &RunId,
@@ -1616,11 +2306,12 @@ mod tests {
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
         ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCancelDisposition,
         ControlPlaneCancelResult, ControlPlaneErrorClass, ControlPlaneEvent,
-        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState, EventCursor, EventId,
-        RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunReviewRequest,
+        ControlPlaneRunState, EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
@@ -1899,10 +2590,73 @@ mod tests {
                 ControlPlaneOperation::GetCapabilities,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
+                ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
             ]
         );
         assert!(!capabilities.operations.is_empty());
+    }
+
+    #[test]
+    fn review_preserves_authoritative_aggregate_absence() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+
+            let review = service
+                .review(
+                    &RunId::new(AGENT_TASK_RUN).expect("run"),
+                    &ControlPlaneRunReviewRequest::default(),
+                )
+                .expect("review");
+
+            assert!(review.evidence["aggregate"].is_null());
+            assert_eq!(
+                review.evidence["read"]["unavailable_sources"][0]["source"],
+                "aggregate"
+            );
+            assert_eq!(
+                review.evidence["read"]["unavailable_sources"][0]["reason_code"],
+                "durable_read.authoritative_aggregate_absent"
+            );
+        });
+    }
+
+    #[test]
+    fn review_redacts_automatic_retention_inventory() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let mut run = record(AGENT_TASK_RUN);
+            run.metadata["automatic_artifact_retention"] = json!({
+                "worktree_count": 2,
+                "worktrees": ["/private/unrelated-one", "/private/unrelated-two"],
+            });
+            run.metadata["automatic_artifact_retention_inaccessible_roots"] = json!({
+                "worktrees": ["/private/inaccessible"],
+            });
+            store.write_record(&run).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+
+            let review = service
+                .review(
+                    &RunId::new(AGENT_TASK_RUN).expect("run"),
+                    &ControlPlaneRunReviewRequest::default(),
+                )
+                .expect("review");
+
+            assert!(review.evidence["record"]["metadata"]
+                .get("automatic_artifact_retention")
+                .is_none());
+            assert!(review.evidence["record"]["metadata"]
+                .get("automatic_artifact_retention_inaccessible_roots")
+                .is_none());
+            assert_eq!(review.evidence["cleanup_evidence"][0]["count"], 2);
+            assert_eq!(review.evidence["cleanup_evidence"][1]["count"], 1);
+            let serialized = serde_json::to_string(&review).expect("review JSON");
+            assert!(!serialized.contains("/private/unrelated-one"));
+            assert!(!serialized.contains("/private/inaccessible"));
+        });
     }
 
     #[test]
@@ -2348,10 +3102,6 @@ mod tests {
                 .expect("action eligibility")
                 .schema,
             CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA
-        );
-        assert_eq!(
-            eligibility(&resource, ControlPlaneAction::Review),
-            ControlPlaneActionAvailability::Available
         );
         assert_eq!(
             resource.execution.as_ref().map(|id| id.as_str()),

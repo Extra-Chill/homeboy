@@ -15,10 +15,7 @@ use homeboy::agents::agent_tasks::finalization::{
 };
 use homeboy::agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::agents::agent_tasks::promotion::{
-    canonical_recoverable_patch_artifacts, AgentTaskPromotionOptions, AgentTaskPromotionReport,
-    AgentTaskPromotionStatus,
-};
+use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::provider::{
     evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
     provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider,
@@ -34,16 +31,13 @@ use homeboy::agents::agent_tasks::review_dossier::{
     AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
-use homeboy::agents::agent_tasks::{
-    AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest,
-};
+use homeboy::agents::agent_tasks::AgentTaskRequest;
 use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 use homeboy::core::Error;
 
 use super::super::CmdResult;
-use super::candidate::{canonical_candidate_projection, classify_candidates};
 use super::{
     AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
     RecordReplacementGateProofArgs, ReviewArgs, VerifyGateArgs, VerifyReplacementArgs,
@@ -204,159 +198,42 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
 
 pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let target = super::status::resolve_cook_reader_target(&args.run_id, false)?;
-    let run_id = &target.run_id;
-    // Review is an aggregate reader. Its durable controller projection remains
-    // useful even when an unrelated runner is unavailable.
-    let durable_read = agent_task_lifecycle::durable_local_read(run_id)?;
-    let record = durable_read.record;
-    // A review that names a target worktree is preparing a promotion handoff.
-    // Materialize recovered runner artifacts before rendering its command.
-    if args.to_worktree.is_some() {
-        agent_task_lifecycle::materialize_recovered_patch_artifact(&record.run_id, None, None)?;
-    }
-    let log = agent_task_lifecycle::logs(run_id)?;
-    let artifacts = agent_task_lifecycle::artifacts(run_id)?;
-    let aggregate = durable_read.aggregate.as_ref();
-    let aggregate_review =
-        aggregate.map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
-    let diagnostic_summary = aggregate.and_then(super::diagnostic_summary_from_aggregate);
-    let failure_reasons = aggregate
-        .map(super::status::failure_reasons_from_aggregate)
-        .filter(|reasons| !reasons.is_empty());
-    let execution_states = aggregate.map(|aggregate| {
-        super::status::execution_states_from_aggregate(
-            aggregate,
-            &serde_json::to_value(&record).unwrap_or(Value::Null),
-        )
-    });
-    let cook_contract = agent_task_service::load_recipe_for_attempt(&record.run_id)?
-        .map(|recipe| {
-            let base = recipe
-                .finalization
-                .get("base")
-                .and_then(Value::as_str)
-                .filter(|base| !base.trim().is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    homeboy::core::Error::validation_invalid_argument(
-                        "cook_recipe.finalization.base",
-                        "durable Cook recipe is missing its declared promotion base",
-                        Some(recipe.cook_id.clone()),
-                        None,
-                    )
-                })?;
-            let gates = serde_json::from_value(recipe.gate_policy.clone()).map_err(|error| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "cook_recipe.gate_policy",
-                    format!("durable Cook recipe has an invalid gate policy: {error}"),
-                    Some(recipe.cook_id),
-                    None,
-                )
-            })?;
-            Ok::<_, homeboy::core::Error>((base, gates))
-        })
-        .transpose()?;
-    let promotion_candidates = aggregate_review
-        .as_ref()
-        .map(|review| {
-            aggregate
-                .map(|aggregate| {
-                    promotion_candidates(
-                        PromotionCandidateContext {
-                            source: &record.run_id,
-                            source_run_id: Some(&record.run_id),
-                            aggregate_path: record.aggregate_path.as_deref(),
-                            to_worktree: args.to_worktree.as_deref(),
-                            cook_base: cook_contract.as_ref().map(|(base, _)| base.as_str()),
-                            cook_gates: cook_contract.as_ref().map(|(_, gates)| gates),
-                            provider_command: args.provider_command.as_deref(),
-                            provider_argv: &args.provider_argv,
-                            latest_promotion: record.metadata.get("latest_promotion"),
-                        },
-                        aggregate,
-                        review,
-                    )
-                })
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
-    let next_actions = review_next_actions(
-        &record.run_id,
-        &record.state,
-        &record.plan_path,
-        aggregate_review.as_ref(),
-        args.to_worktree.as_deref(),
-    );
-    let (review_record, cleanup_evidence) = review_record_projection(&record);
-
-    let mut value = serde_json::json!({
-            "schema": "homeboy/agent-task-review/v1",
-            "run_id": record.run_id,
-            "state": record.state,
-            "plan_id": record.plan_id,
-            "plan_path": record.plan_path,
-            "aggregate_path": record.aggregate_path,
-            "record": review_record,
-            "logs": log,
-            "artifacts": artifacts,
-            "aggregate": aggregate,
-            "aggregate_review": aggregate_review,
-            "diagnostic_summary": diagnostic_summary,
-            "failure_reasons": failure_reasons,
-            "execution_states": execution_states,
-            "promotion_candidates": promotion_candidates,
-            "next_actions": next_actions,
-            "cleanup_evidence": cleanup_evidence,
-            "transport": {
-                "authoritative": "homeboy-agent-task-lifecycle",
-                "chat_state_required": false
-            },
-            "durable_read": {
-                "phase": "controller_local",
-                "unavailable_sources": durable_read.unavailable_sources,
-            }
-    });
-    value["canonical_candidate"] = canonical_candidate_projection(classify_candidates(&value));
+    let review = homeboy::agents::orchestration::review_from_current_environment(
+        &target.run_id,
+        &homeboy_control_plane_contract::ControlPlaneRunReviewRequest {
+            to_worktree: args.to_worktree,
+            provider_command: args.provider_command,
+            provider_argv: args.provider_argv,
+        },
+    )?;
+    let mut value = serde_json::to_value(review).unwrap_or(Value::Null);
     if let Some(selection) = target.selection {
+        let selected_run_id = value.pointer("/resource/run").and_then(Value::as_str);
         let latest_attempt_run_id = selection["latest_attempt_run_id"].as_str();
-        if latest_attempt_run_id.is_some_and(|latest| latest != record.run_id) {
-            if let Ok(latest) =
-                agent_task_lifecycle::reconcile_status(latest_attempt_run_id.unwrap())
-            {
-                let review_form = super::status::completed_run_aggregate(&latest.run_id)
-                    .transpose()?
-                    .and_then(|aggregate| {
-                        aggregate
-                            .selected_outcome()
-                            .or_else(|| {
-                                (aggregate.outcomes.len() == 1)
-                                    .then(|| aggregate.outcomes.first())
-                                    .flatten()
-                            })
-                            .and_then(|outcome| outcome.outputs.get("review_form"))
-                            .cloned()
-                    });
-                value["contributing_attempt"] = serde_json::json!({
-                    "run_id": latest.run_id,
-                    "review_form": review_form,
-                    "verification": latest.metadata.get("latest_promotion"),
-                });
-            }
+        if latest_attempt_run_id.is_some_and(|latest| Some(latest) != selected_run_id) {
+            let latest = agent_task_lifecycle::durable_local_read(
+                latest_attempt_run_id.expect("latest attempt was checked"),
+            )?;
+            let review_form = latest.aggregate.as_ref().and_then(|aggregate| {
+                aggregate
+                    .selected_outcome()
+                    .or_else(|| {
+                        (aggregate.outcomes.len() == 1)
+                            .then(|| aggregate.outcomes.first())
+                            .flatten()
+                    })
+                    .and_then(|outcome| outcome.outputs.get("review_form"))
+                    .cloned()
+            });
+            value["evidence"]["contributing_attempt"] = serde_json::json!({
+                "run_id": latest.record.run_id,
+                "review_form": review_form,
+                "verification": latest.record.metadata.get("latest_promotion"),
+            });
         }
-        value["candidate_selection"] = selection;
+        value["evidence"]["candidate_selection"] = selection;
     }
     Ok((compact_review(value, args.full), 0))
-}
-
-/// Cleanup retention is persisted with a run because it happened while that
-/// run completed, but its inventory can cover sibling worktrees. Keep that
-/// operational evidence addressable without making it review evidence.
-fn review_record_projection(
-    record: &homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord,
-) -> (Value, Vec<Value>) {
-    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
-    let cleanup_evidence = super::status::cleanup_evidence_projection(&mut value, &record.run_id);
-    (value, cleanup_evidence)
 }
 
 /// Default review output is an actionable handoff, not a second copy of every
@@ -365,12 +242,8 @@ fn compact_review(value: Value, full: bool) -> Value {
     if full {
         return value;
     }
-    let run_id = value
-        .get("run_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let canonical_candidate = canonical_candidate_projection(classify_candidates(&value));
-    let promotion = value.pointer("/record/metadata/latest_promotion");
+    let run_id = value.get("run").and_then(Value::as_str).unwrap_or_default();
+    let promotion = value.pointer("/evidence/record/metadata/latest_promotion");
     let selected_candidate = promotion
         .map(compact_selected_candidate)
         .or_else(|| compact_apply_candidate(&value))
@@ -388,25 +261,45 @@ fn compact_review(value: Value, full: bool) -> Value {
     serde_json::json!({
         "schema": value.get("schema"),
         "view": "summary",
-        "run_id": value.get("run_id"),
-        "state": value.get("state"),
-        "plan_id": value.get("plan_id"),
-        "plan_path": value.get("plan_path"),
-        "aggregate_path": value.get("aggregate_path"),
-        "aggregate_review": { "summary": value.pointer("/aggregate_review/summary") },
-        "diagnostic_summary": value.get("diagnostic_summary"),
-        "failure_reasons": value.get("failure_reasons"),
-        "execution_states": value.get("execution_states"),
-        "canonical_candidate": canonical_candidate,
+        "run": value.get("run"),
+        "resource": value.get("resource"),
+        "aggregate_review": { "summary": value.pointer("/evidence/aggregate_review/summary") },
+        "diagnostic_summary": value.pointer("/evidence/diagnostic_summary"),
+        "failure_reasons": value.pointer("/evidence/failure_reasons"),
+        "execution_states": value.pointer("/evidence/execution_states"),
+        "canonical_candidate": value.pointer("/evidence/canonical_candidate"),
         "selected_candidate": selected_candidate,
         "gates": gates,
-        "promotion_candidates": value.get("promotion_candidates"),
-        "next_actions": value.get("next_actions"),
-        "candidate_selection": value.get("candidate_selection"),
-        "contributing_attempt": value.get("contributing_attempt"),
-        "durable_read": value.get("durable_read"),
+        "promotion_candidates": value.pointer("/evidence/promotion_candidates"),
+        "next_actions": value.pointer("/evidence/next_actions"),
+        "action_eligibility": value.pointer("/evidence/action_eligibility"),
+        "candidate_selection": value.pointer("/evidence/candidate_selection"),
+        "contributing_attempt": value.pointer("/evidence/contributing_attempt"),
+        "transport": value.pointer("/evidence/transport"),
+        "read": value.pointer("/evidence/read"),
         "full_command": format!("homeboy agent-task review {run_id} --full"),
     })
+}
+
+fn compact_apply_candidate(value: &Value) -> Option<Value> {
+    let candidate = value.pointer("/evidence/promotion_candidates/0")?;
+    let task_id = candidate.get("task_id").and_then(Value::as_str)?;
+    let artifact_id = candidate.get("artifact_id").and_then(Value::as_str)?;
+    let artifact = value
+        .pointer("/evidence/aggregate_review/artifact_inventory")?
+        .as_array()?
+        .iter()
+        .find(|artifact| {
+            artifact.get("task_id").and_then(Value::as_str) == Some(task_id)
+                && artifact.get("artifact_id").and_then(Value::as_str) == Some(artifact_id)
+        })?;
+    Some(serde_json::json!({
+        "status": "available",
+        "task_id": candidate.get("task_id"),
+        "artifact": compact_fields(artifact, &["artifact_id", "kind", "path", "sha256", "metadata"]),
+        "size_bytes": artifact.get("size_bytes"),
+        "changed_files": artifact.pointer("/metadata/changed_files"),
+    }))
 }
 
 fn compact_selected_candidate(promotion: &Value) -> Value {
@@ -427,27 +320,6 @@ fn compact_selected_candidate(promotion: &Value) -> Value {
         "size_bytes": size_bytes,
         "changed_files": promotion.get("changed_files"),
     })
-}
-
-fn compact_apply_candidate(value: &Value) -> Option<Value> {
-    let candidate = value.pointer("/promotion_candidates/0")?;
-    let task_id = candidate.get("task_id").and_then(Value::as_str)?;
-    let artifact_id = candidate.get("artifact_id").and_then(Value::as_str)?;
-    let artifact = value
-        .pointer("/aggregate_review/artifact_inventory")?
-        .as_array()?
-        .iter()
-        .find(|artifact| {
-            artifact.get("task_id").and_then(Value::as_str) == Some(task_id)
-                && artifact.get("artifact_id").and_then(Value::as_str) == Some(artifact_id)
-        })?;
-    Some(serde_json::json!({
-        "status": "available",
-        "task_id": candidate.get("task_id"),
-        "artifact": compact_fields(artifact, &["artifact_id", "kind", "path", "sha256", "metadata"]),
-        "size_bytes": artifact.get("size_bytes"),
-        "changed_files": artifact.pointer("/metadata/changed_files"),
-    }))
 }
 
 fn compact_fields(value: &Value, fields: &[&str]) -> Value {
@@ -868,10 +740,6 @@ fn promotion_progress_line(message: &str) {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "{message}");
     let _ = stderr.flush();
-}
-
-pub(crate) fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
-    agent_task_service::promotion_is_resumable(previous, rerun_completed_gates)
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
@@ -3058,278 +2926,6 @@ pub(crate) fn default_protected_branches() -> Vec<String> {
     ]
 }
 
-#[derive(Clone, Copy)]
-struct PromotionCandidateContext<'a> {
-    source: &'a str,
-    source_run_id: Option<&'a str>,
-    aggregate_path: Option<&'a str>,
-    to_worktree: Option<&'a str>,
-    cook_base: Option<&'a str>,
-    cook_gates: Option<&'a VerifyGateOptions>,
-    provider_command: Option<&'a str>,
-    provider_argv: &'a [String],
-    latest_promotion: Option<&'a Value>,
-}
-
-fn promotion_candidates(
-    context: PromotionCandidateContext<'_>,
-    aggregate: &AgentTaskAggregate,
-    review: &AgentTaskAggregateReport,
-) -> Vec<Value> {
-    review
-        .apply_candidates
-        .iter()
-        .chain(review.review_candidates.iter().filter(|candidate| {
-            aggregate
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.task_id == candidate.task_id)
-                .is_some_and(|outcome| {
-                    outcome.status
-                        == homeboy::agents::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
-                })
-        }))
-        .flat_map(|candidate| {
-            let artifact_ids = aggregate
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.task_id == candidate.task_id)
-                .filter(|outcome| {
-                    outcome.status
-                        == homeboy::agents::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
-                })
-                .map(|outcome| {
-                    canonical_recoverable_patch_artifacts(
-                        outcome,
-                        &AgentTaskPromotionOptions {
-                            source: "{}".to_string(),
-                            source_run_id: context.source_run_id.map(str::to_string),
-                            source_path: context.aggregate_path.map(std::path::PathBuf::from),
-                            source_worktree_path: None,
-                            base_ref: None,
-                            task_base_sha: None,
-                            candidate_ref: None,
-                            to_worktree: context.to_worktree.unwrap_or("<managed-worktree>").to_string(),
-                            task_id: Some(candidate.task_id.clone()),
-                            artifact_id: None,
-                            dry_run: true,
-                            gates: Default::default(),
-                            provider_command: None,
-                            provider_invocation: None,
-                        },
-                    )
-                    .map(|canonical| canonical.artifacts.into_iter().map(|artifact| artifact.id).collect())
-                    .unwrap_or_default()
-                })
-                .unwrap_or_else(|| candidate.artifact_ids.clone());
-            let selection_required = artifact_ids.len() > 1;
-            artifact_ids.into_iter().map(move |artifact_id| {
-                let command = vec![
-                    "homeboy".to_string(),
-                    "agent-task".to_string(),
-                    "promote".to_string(),
-                    context.source.to_string(),
-                    "--task-id".to_string(),
-                    candidate.task_id.clone(),
-                    "--artifact-id".to_string(),
-                    artifact_id.clone(),
-                ];
-                let continuation = context.latest_promotion.filter(|promotion| {
-                    promotion_is_resumable(promotion, false)
-                        && promotion.pointer("/source/task_id").and_then(Value::as_str)
-                            == Some(candidate.task_id.as_str())
-                        && promotion.pointer("/patch_artifact/id").and_then(Value::as_str)
-                            == Some(artifact_id.as_str())
-                });
-                let destination = continuation
-                    .and_then(|promotion| promotion.pointer("/target/worktree"))
-                    .and_then(Value::as_str)
-                    .or(context.to_worktree);
-                let command = destination.map(|destination| {
-                    let mut command = command;
-                    command.push("--to-worktree".to_string());
-                    command.push(destination.to_string());
-                    if let Some(contract) = continuation
-                        .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
-                    {
-                        if context.cook_gates.is_some() {
-                            append_resume_base(&mut command, contract);
-                        } else {
-                            append_resume_contract(&mut command, contract);
-                        }
-                    } else if let Some(base) = context.cook_base {
-                        command.extend(["--base".to_string(), base.to_string()]);
-                    }
-                    if context.cook_gates.is_some() {
-                        command.push("--gates-from-cook-recipe".to_string());
-                    }
-                    if let Some(provider_command) = context.provider_command {
-                        command.push("--provider-command".to_string());
-                        command.push(provider_command.to_string());
-                    }
-                    command.extend(
-                        context.provider_argv
-                            .iter()
-                            .map(|argument| format!("--provider-argv={argument}")),
-                    );
-                    command
-                });
-
-                serde_json::json!({
-                    "task_id": candidate.task_id,
-                    "artifact_id": artifact_id,
-                    "reason": candidate.reason,
-                    "command": command,
-                    "ready": destination.is_some(),
-                    "destination_required": destination.is_none(),
-                    "selection_required": selection_required,
-                })
-            })
-        })
-        .collect()
-}
-
-/// Render the durable gate contract rather than relying on evolving CLI defaults.
-fn append_resume_contract(command: &mut Vec<String>, contract: &Value) {
-    append_resume_base(command, contract);
-    let Some(gates) = contract.get("gates") else {
-        return;
-    };
-    append_resume_gates(command, gates);
-}
-
-fn append_resume_base(command: &mut Vec<String>, contract: &Value) {
-    if let Some(base) = contract.pointer("/inputs/base_ref").and_then(Value::as_str) {
-        command.extend(["--base".to_string(), base.to_string()]);
-    }
-}
-
-fn append_resume_gates(command: &mut Vec<String>, gates: &Value) {
-    for (key, flag) in [
-        ("verify", "--verify"),
-        ("private_verify", "--private-verify"),
-    ] {
-        if let Some(values) = gates.get(key).and_then(Value::as_array) {
-            for value in values.iter().filter_map(Value::as_str) {
-                command.extend([flag.to_string(), value.to_string()]);
-            }
-        }
-    }
-    for (key, flag) in [
-        ("private_gate_reveal", "--private-gate-reveal"),
-        ("gate_timeout_seconds", "--gate-timeout-seconds"),
-        (
-            "gate_heartbeat_interval_seconds",
-            "--gate-heartbeat-interval-seconds",
-        ),
-        (
-            "gate_no_progress_timeout_seconds",
-            "--gate-no-progress-timeout-seconds",
-        ),
-    ] {
-        if let Some(value) = gates.get(key) {
-            let value = value
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| value.as_u64().map(|value| value.to_string()));
-            if let Some(value) = value {
-                command.extend([flag.to_string(), value.replace('_', "-")]);
-            }
-        }
-    }
-    if gates.get("rerun_completed_gates").and_then(Value::as_bool) == Some(true) {
-        command.push("--rerun-completed-gates".to_string());
-    }
-    if let Some(environment) = gates.get("gate_environment") {
-        if let Some(mode) = environment.get("mode").and_then(Value::as_str) {
-            command.extend([
-                "--gate-environment-mode".to_string(),
-                mode.replace('_', "-"),
-            ]);
-        }
-        if let Some(variables) = environment.get("variables").and_then(Value::as_object) {
-            for (name, value) in variables {
-                if let Some(value) = value.as_str() {
-                    command.extend(["--gate-env".to_string(), format!("{name}={value}")]);
-                }
-            }
-        }
-        for (key, flag) in [
-            ("isolate_home", "--isolate-gate-home"),
-            ("isolate_xdg", "--isolate-gate-xdg"),
-        ] {
-            if let Some(value) = environment.get(key).and_then(Value::as_bool) {
-                command.push(format!("{flag}={value}"));
-            }
-        }
-        if let Some(inputs) = environment
-            .get("extension_inputs")
-            .and_then(Value::as_array)
-        {
-            for input in inputs {
-                if let Ok(input) = serde_json::to_string(input) {
-                    command.extend(["--gate-extension-input".to_string(), input]);
-                }
-            }
-        }
-    }
-}
-
-fn review_next_actions(
-    run_id: &str,
-    state: &agent_task_lifecycle::AgentTaskRunState,
-    plan_path: &str,
-    aggregate_review: Option<&AgentTaskAggregateReport>,
-    to_worktree: Option<&str>,
-) -> Vec<String> {
-    if matches!(state, agent_task_lifecycle::AgentTaskRunState::Queued) {
-        return vec!["run this queued durable task with `homeboy agent-task run <run-id>` or let a daemon claim it with `homeboy agent-task run-next`".to_string()];
-    }
-
-    if matches!(state, agent_task_lifecycle::AgentTaskRunState::Running) {
-        return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`; stale running records are annotated in status metadata".to_string()];
-    }
-
-    let Some(review) = aggregate_review else {
-        return vec!["terminal run has no aggregate artifact; inspect lifecycle status for finalization errors".to_string()];
-    };
-
-    let mut actions = Vec::new();
-    if review.summary.apply_candidates > 0 {
-        if to_worktree.is_some() {
-            actions.push("review `promotion_candidates` and run the generated `homeboy agent-task promote` command for the selected patch artifact".to_string());
-        } else {
-            actions.push(format!(
-                "rerun review with `homeboy agent-task review {run_id} --to-worktree <managed-worktree>` to generate executable promotion commands for apply candidates"
-            ));
-        }
-    }
-    if review.summary.retry_candidates > 0 {
-        actions.push(format!(
-            "retry provider-error or timeout candidates after fixing executor/preflight issues with `homeboy agent-task retry {run_id} --run`"
-        ));
-        actions.push(format!(
-            "rerun the persisted plan through Lab with `homeboy --runner <runner-id> agent-task run-plan --plan @{plan_path} --record-run-id <new-run-id>`"
-        ));
-    }
-    if review.summary.issue_report_candidates > 0 {
-        actions.push(
-            "open or update the tracker with `issue_report_candidates` diagnostics and evidence"
-                .to_string(),
-        );
-    }
-    if review.summary.review_candidates > 0 {
-        actions.push(
-            "inspect `review_candidates` before deciding whether to retry, report, or ignore"
-                .to_string(),
-        );
-    }
-    if actions.is_empty() {
-        actions.push("no promotion, retry, or issue-report candidates were produced; inspect task summaries for no-op completion".to_string());
-    }
-    actions
-}
-
 fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> Value {
     // Typed reports are only constructed after the target mutation. The status
     // remains a compatibility field; expose verification independently.
@@ -3482,11 +3078,6 @@ mod tests {
         AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
     };
-    use homeboy::agents::agent_tasks::{
-        AgentTaskAggregateSummary, AgentTaskArtifact, AgentTaskDecisionRef, AgentTaskOutcome,
-        AgentTaskOutcomeStatus, AgentTaskReconciliationDecision, AGENT_TASK_ARTIFACT_SCHEMA,
-    };
-    use sha2::{Digest, Sha256};
     use std::process::Command;
 
     #[test]
@@ -3610,74 +3201,40 @@ mod tests {
     }
 
     #[test]
-    fn compact_apply_candidate_uses_the_selected_task_and_artifact_id() {
-        let value = serde_json::json!({
-            "promotion_candidates": [{
-                "task_id": "selected-task",
-                "artifact_id": "shared-patch"
-            }],
-            "aggregate_review": {
-                "artifact_inventory": [
-                    {
-                        "task_id": "other-task",
-                        "artifact_id": "shared-patch",
-                        "kind": "patch",
-                        "path": "/tmp/other.patch",
-                        "size_bytes": 1,
-                        "metadata": { "changed_files": ["other.rs"] }
-                    },
-                    {
-                        "task_id": "selected-task",
-                        "artifact_id": "shared-patch",
-                        "kind": "patch",
-                        "path": "/tmp/selected.patch",
-                        "size_bytes": 17394,
-                        "metadata": { "changed_files": ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] }
-                    }
-                ]
-            }
-        });
-
-        let selected = compact_apply_candidate(&value).expect("selected candidate");
-
-        assert_eq!(selected["artifact"]["path"], "/tmp/selected.patch");
-        assert_eq!(selected["size_bytes"], 17394);
-        assert_eq!(selected["changed_files"].as_array().map(Vec::len), Some(6));
-    }
-
-    #[test]
     fn compact_review_preserves_one_target_applied_candidate_fingerprint() {
         let patch = tempfile::NamedTempFile::new().expect("patch");
         std::fs::write(patch.path(), "x".repeat(7_635)).expect("write patch");
         let value = compact_review(
             serde_json::json!({
-                "schema": "homeboy/agent-task-review/v1",
-                "run_id": "agent-task-11805",
-                "state": "succeeded",
-                "record": {
-                    "metadata": {
-                        "latest_promotion": {
-                            "status": "applied",
-                            "source": { "task_id": "task-1" },
-                            "patch_artifact": {
-                                "id": "candidate",
-                                "kind": "patch",
-                                "path": patch.path(),
-                            },
-                            "changed_files": ["a.rs", "b.rs", "c.rs"],
-                            "provenance": { "post_apply": true, "candidate": { "head": "candidate-head" } },
-                            "deterministic_gates": [{
-                                "name": "cargo test",
-                                "status": "succeeded",
-                                "exit_code": 0,
-                                "command": ["cargo", "test"],
-                                "stdout": "large duplicate evidence"
-                            }]
+                "schema": "homeboy/control-plane-run-review/v1",
+                "run": "agent-task-11805",
+                "resource": { "run": "agent-task-11805", "state": "succeeded" },
+                "evidence": {
+                    "record": {
+                        "metadata": {
+                            "latest_promotion": {
+                                "status": "applied",
+                                "source": { "task_id": "task-1" },
+                                "patch_artifact": {
+                                    "id": "candidate",
+                                    "kind": "patch",
+                                    "path": patch.path(),
+                                },
+                                "changed_files": ["a.rs", "b.rs", "c.rs"],
+                                "provenance": { "post_apply": true, "candidate": { "head": "candidate-head" } },
+                                "deterministic_gates": [{
+                                    "name": "cargo test",
+                                    "status": "succeeded",
+                                    "exit_code": 0,
+                                    "command": ["cargo", "test"],
+                                    "stdout": "large duplicate evidence"
+                                }]
+                            }
                         }
-                    }
-                },
-                "logs": { "events": ["large lifecycle payload"] },
-                "artifacts": { "artifacts": ["large lifecycle payload"] }
+                    },
+                    "logs": { "events": ["large lifecycle payload"] },
+                    "artifacts": { "artifacts": ["large lifecycle payload"] }
+                }
             }),
             false,
         );
@@ -4930,383 +4487,6 @@ mod tests {
         });
     }
 
-    fn recoverable_review_aggregate(
-        temp: &tempfile::TempDir,
-        producer_attempts: &[u64],
-    ) -> AgentTaskAggregate {
-        let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
-        let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
-        let artifacts = producer_attempts
-            .iter()
-            .enumerate()
-            .map(|(index, attempt)| {
-                let path = temp.path().join(format!("candidate-{index}.patch"));
-                std::fs::write(&path, patch).expect("write patch");
-                AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: format!("candidate-{index}"),
-                    kind: if index == 0 { "patch" } else { "git-diff" }.to_string(),
-                    path: Some(path.display().to_string()),
-                    size_bytes: Some(patch.len() as u64),
-                    sha256: Some(sha256.clone()),
-                    metadata: serde_json::json!({
-                        "role": "patch",
-                        "run_id": "review-run",
-                        "task_id": "task-1",
-                        "producer_attempt": attempt,
-                        "base_ref": "base",
-                        "provider_backend": "provider",
-                        "repository_identity": "repo",
-                        "workspace_identity": "workspace",
-                    }),
-                    ..Default::default()
-                }
-            })
-            .collect();
-        let mut aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "plan_id": "test",
-            "status": "candidate_recoverable",
-            "totals": { "skipped": 0 },
-        }))
-        .expect("aggregate");
-        aggregate.outcomes = vec![AgentTaskOutcome {
-            task_id: "task-1".to_string(),
-            status: AgentTaskOutcomeStatus::CandidateRecoverable,
-            artifacts,
-            ..Default::default()
-        }];
-        aggregate
-    }
-
-    #[test]
-    fn promotion_candidates_preserve_provider_argv() {
-        let review = AgentTaskAggregateReport {
-            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
-            summary: AgentTaskAggregateSummary::default(),
-            tasks: Vec::new(),
-            artifact_inventory: Vec::new(),
-            apply_candidates: vec![AgentTaskDecisionRef {
-                task_id: "task-1".to_string(),
-                decision: AgentTaskReconciliationDecision::ApplyCandidate,
-                reason: "patch available".to_string(),
-                artifact_ids: vec!["patch-1".to_string()],
-            }],
-            issue_report_candidates: Vec::new(),
-            retry_plan: Vec::new(),
-            review_candidates: Vec::new(),
-            matrix: Vec::new(),
-        };
-        let aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "plan_id": "test",
-            "status": "succeeded",
-            "totals": { "skipped": 0 },
-        }))
-        .expect("aggregate");
-
-        let provider_argv = [
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "promotion-provider".to_string(),
-            "--workspace=/tmp/target".to_string(),
-        ];
-        let candidates = promotion_candidates(
-            PromotionCandidateContext {
-                source: "aggregate.json",
-                source_run_id: None,
-                aggregate_path: None,
-                to_worktree: Some("fixture@target"),
-                cook_base: None,
-                cook_gates: None,
-                provider_command: None,
-                provider_argv: &provider_argv,
-                latest_promotion: None,
-            },
-            &aggregate,
-            &review,
-        );
-
-        assert_eq!(
-            candidates[0]["command"],
-            serde_json::json!([
-                "homeboy",
-                "agent-task",
-                "promote",
-                "aggregate.json",
-                "--task-id",
-                "task-1",
-                "--artifact-id",
-                "patch-1",
-                "--to-worktree",
-                "fixture@target",
-                "--provider-argv=homeboy",
-                "--provider-argv=agent-task",
-                "--provider-argv=promotion-provider",
-                "--provider-argv=--workspace=/tmp/target",
-            ])
-        );
-    }
-
-    #[test]
-    fn promotion_candidates_preserve_the_declared_cook_base() {
-        let review = AgentTaskAggregateReport {
-            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
-            summary: AgentTaskAggregateSummary::default(),
-            tasks: Vec::new(),
-            artifact_inventory: Vec::new(),
-            apply_candidates: vec![AgentTaskDecisionRef {
-                task_id: "task-1".to_string(),
-                decision: AgentTaskReconciliationDecision::ApplyCandidate,
-                reason: "patch available".to_string(),
-                artifact_ids: vec!["patch-1".to_string()],
-            }],
-            issue_report_candidates: Vec::new(),
-            retry_plan: Vec::new(),
-            review_candidates: Vec::new(),
-            matrix: Vec::new(),
-        };
-        let aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "plan_id": "test",
-            "status": "succeeded",
-            "totals": { "skipped": 0 },
-        }))
-        .expect("aggregate");
-
-        let candidates = promotion_candidates(
-            PromotionCandidateContext {
-                source: "cook-attempt-9400",
-                source_run_id: Some("cook-attempt-9400"),
-                aggregate_path: None,
-                to_worktree: Some("fixture@target"),
-                cook_base: Some("trunk"),
-                cook_gates: None,
-                provider_command: None,
-                provider_argv: &[],
-                latest_promotion: None,
-            },
-            &aggregate,
-            &review,
-        );
-
-        assert_eq!(
-            candidates[0]["command"],
-            serde_json::json!([
-                "homeboy",
-                "agent-task",
-                "promote",
-                "cook-attempt-9400",
-                "--task-id",
-                "task-1",
-                "--artifact-id",
-                "patch-1",
-                "--to-worktree",
-                "fixture@target",
-                "--base",
-                "trunk",
-            ])
-        );
-    }
-
-    #[test]
-    fn promotion_candidates_retain_snapshotted_cook_gates_and_private_provenance() {
-        let review = AgentTaskAggregateReport {
-            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
-            summary: AgentTaskAggregateSummary::default(),
-            tasks: Vec::new(),
-            artifact_inventory: Vec::new(),
-            apply_candidates: vec![AgentTaskDecisionRef {
-                task_id: "task-1".to_string(),
-                decision: AgentTaskReconciliationDecision::ApplyCandidate,
-                reason: "patch available".to_string(),
-                artifact_ids: vec!["patch-1".to_string()],
-            }],
-            issue_report_candidates: Vec::new(),
-            retry_plan: Vec::new(),
-            review_candidates: Vec::new(),
-            matrix: Vec::new(),
-        };
-        let aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "plan_id": "test",
-            "status": "succeeded",
-            "totals": { "skipped": 0 },
-        }))
-        .expect("aggregate");
-        let gates: VerifyGateOptions = serde_json::from_value(serde_json::json!({
-            "verify": ["cargo test", "printf 'file-backed public gate'"],
-            "private_verify": ["private-check", "printf 'file-backed private gate'"],
-            "input_sources": [
-                {"visibility": "visible", "source_kind": "inline", "sha256": "sha256:inline-public", "size_bytes": 10, "redaction_policy": "full_evidence"},
-                {"visibility": "visible", "source_kind": "file", "path": "/fixture/public-gate.sh", "sha256": "sha256:file-public", "size_bytes": 24, "redaction_policy": "full_evidence"},
-                {"visibility": "private", "source_kind": "inline", "sha256": "sha256:inline-private", "size_bytes": 13, "redaction_policy": "summary_only"},
-                {"visibility": "private", "source_kind": "file", "sha256": "sha256:file-private", "size_bytes": 25, "redaction_policy": "summary_only"}
-            ],
-            "private_gate_reveal": "summary_only",
-            "execution_policy": "continue_all",
-            "gate_timeout_seconds": 42,
-            "gate_heartbeat_interval_seconds": 7,
-            "gate_no_progress_timeout_seconds": 11,
-            "rerun_completed_gates": true,
-            "accept_inherited_failures": true,
-            "gate_environment": {"mode": "replace", "variables": {"MODE": "test"}, "preserve": {}, "isolate_home": true, "isolate_xdg": true, "shared_cargo_target": false, "extension_inputs": []},
-            "gate_toolchains": [],
-            "gate_package_artifacts": [],
-            "gate_diagnostic_sidecars": [],
-            "hydrate_dependencies": true,
-        }))
-        .expect("gate fixture");
-
-        let candidates = promotion_candidates(
-            PromotionCandidateContext {
-                source: "cook-attempt-9400",
-                source_run_id: Some("cook-attempt-9400"),
-                aggregate_path: None,
-                to_worktree: Some("fixture@target"),
-                cook_base: Some("trunk"),
-                cook_gates: Some(&gates),
-                provider_command: None,
-                provider_argv: &[],
-                latest_promotion: None,
-            },
-            &aggregate,
-            &review,
-        );
-
-        let command = candidates[0]["command"]
-            .as_array()
-            .expect("promotion command")
-            .iter()
-            .map(|value| value.as_str().expect("command argument").to_string())
-            .collect::<Vec<_>>();
-        assert!(command.contains(&"--gates-from-cook-recipe".to_string()));
-        for private_value in [
-            "private-check",
-            "printf 'file-backed private gate'",
-            "private-gate.sh",
-            "sha256:file-private",
-        ] {
-            assert!(!command
-                .iter()
-                .any(|argument| argument.contains(private_value)));
-        }
-        assert!(!command.iter().any(|argument| argument == "--verify"));
-        assert!(!command
-            .iter()
-            .any(|argument| argument == "--private-verify"));
-        assert!(crate::cli_surface::Cli::try_parse_from(&command).is_ok());
-    }
-
-    #[test]
-    fn resume_contract_emits_exact_base_and_gate_arguments() {
-        let mut command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        append_resume_contract(
-            &mut command,
-            &serde_json::json!({
-                "inputs": { "base_ref": "release" },
-                "gates": {
-                    "verify": ["cargo test --lib"],
-                    "private_verify": ["./private-check"],
-                    "private_gate_reveal": "full_evidence",
-                    "gate_timeout_seconds": 42,
-                    "gate_heartbeat_interval_seconds": 7,
-                    "rerun_completed_gates": false,
-                    "gate_environment": {
-                        "mode": "replace",
-                        "variables": { "MODE": "test" },
-                        "isolate_home": true,
-                        "isolate_xdg": false,
-                        "extension_inputs": [{
-                            "id": "wordpress",
-                            "source": "/opt/extensions/wordpress",
-                            "identity": "sha256:content"
-                        }]
-                    }
-                }
-            }),
-        );
-
-        assert_eq!(
-            command,
-            vec![
-                "homeboy",
-                "agent-task",
-                "--base",
-                "release",
-                "--verify",
-                "cargo test --lib",
-                "--private-verify",
-                "./private-check",
-                "--private-gate-reveal",
-                "full-evidence",
-                "--gate-timeout-seconds",
-                "42",
-                "--gate-heartbeat-interval-seconds",
-                "7",
-                "--gate-environment-mode",
-                "replace",
-                "--gate-env",
-                "MODE=test",
-                "--isolate-gate-home=true",
-                "--isolate-gate-xdg=false",
-                "--gate-extension-input",
-                "{\"id\":\"wordpress\",\"identity\":\"sha256:content\",\"source\":\"/opt/extensions/wordpress\"}",
-            ]
-        );
-    }
-
-    #[test]
-    fn promotion_candidates_canonicalize_aliases_and_preserve_attempt_choices() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let equivalent_aggregate = recoverable_review_aggregate(&temp, &[1, 1]);
-        let equivalent_review =
-            AgentTaskAggregateReport::from(equivalent_aggregate.outcomes.clone());
-        assert_eq!(equivalent_review.apply_candidates.len(), 0);
-        assert_eq!(equivalent_review.review_candidates.len(), 1);
-        let equivalent = promotion_candidates(
-            PromotionCandidateContext {
-                source: "review-run",
-                source_run_id: None,
-                aggregate_path: None,
-                to_worktree: Some("fixture@target"),
-                cook_base: None,
-                cook_gates: None,
-                provider_command: None,
-                provider_argv: &[],
-                latest_promotion: None,
-            },
-            &equivalent_aggregate,
-            &equivalent_review,
-        );
-        assert_eq!(equivalent.len(), 1);
-        assert_eq!(equivalent[0]["artifact_id"], "candidate-0");
-        assert_eq!(equivalent[0]["selection_required"], false);
-        assert_eq!(equivalent[0]["command"][9], "fixture@target");
-
-        let distinct_aggregate = recoverable_review_aggregate(&temp, &[1, 2]);
-        let distinct_review = AgentTaskAggregateReport::from(distinct_aggregate.outcomes.clone());
-        let distinct = promotion_candidates(
-            PromotionCandidateContext {
-                source: "review-run",
-                source_run_id: None,
-                aggregate_path: None,
-                to_worktree: Some("fixture@target"),
-                cook_base: None,
-                cook_gates: None,
-                provider_command: None,
-                provider_argv: &[],
-                latest_promotion: None,
-            },
-            &distinct_aggregate,
-            &distinct_review,
-        );
-        assert_eq!(distinct.len(), 2);
-        assert!(distinct
-            .iter()
-            .all(|candidate| candidate["selection_required"] == true));
-    }
-
     #[test]
     fn typed_test_steps_and_overrides_have_explicit_grammar() {
         let step = parse_test_step("cargo test dossier=>all tests pass").expect("typed step");
@@ -5326,39 +4506,6 @@ mod tests {
         assert!(parse_override("summary=@operator").is_err());
         assert!(parse_override("summary=Reviewed summary@").is_err());
         assert!(parse_public_contract("cli.finalize-pr=>").is_err());
-    }
-
-    #[test]
-    fn review_next_actions_include_retry_and_lab_run_plan_commands() {
-        let review = AgentTaskAggregateReport {
-            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
-            summary: AgentTaskAggregateSummary {
-                retry_candidates: 1,
-                ..AgentTaskAggregateSummary::default()
-            },
-            tasks: Vec::new(),
-            artifact_inventory: Vec::new(),
-            apply_candidates: Vec::new(),
-            issue_report_candidates: Vec::new(),
-            retry_plan: Vec::new(),
-            review_candidates: Vec::new(),
-            matrix: Vec::new(),
-        };
-
-        let actions = review_next_actions(
-            "agent-task-run-1",
-            &agent_task_lifecycle::AgentTaskRunState::Failed,
-            "/tmp/agent-task-run-1/plan.json",
-            Some(&review),
-            None,
-        );
-
-        assert!(actions
-            .iter()
-            .any(|action| action.contains("homeboy agent-task retry agent-task-run-1 --run")));
-        assert!(actions.iter().any(|action| action.contains(
-            "homeboy --runner <runner-id> agent-task run-plan --plan @/tmp/agent-task-run-1/plan.json --record-run-id <new-run-id>"
-        )));
     }
 
     #[test]

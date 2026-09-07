@@ -66,14 +66,6 @@ pub fn lifecycle_action_eligibility(
                 "agent_task_run",
             ),
             action(
-                ControlPlaneAction::Review,
-                available("review is a non-mutating read available for every durable run"),
-                ControlPlaneActionConfirmation::None,
-                Vec::new(),
-                true,
-                "agent_task_review",
-            ),
-            action(
                 ControlPlaneAction::Promote,
                 promotion,
                 ControlPlaneActionConfirmation::Required,
@@ -232,11 +224,7 @@ mod tests {
         ] {
             let report = lifecycle_action_eligibility(&record(state, false), None);
             assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
-            assert_eq!(report.actions.len(), 6);
-            assert_eq!(
-                decision(&report, ControlPlaneAction::Review),
-                ControlPlaneActionAvailability::Available
-            );
+            assert_eq!(report.actions.len(), 5);
             if state.is_terminal() {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Cancel),

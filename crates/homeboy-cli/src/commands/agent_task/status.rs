@@ -29,7 +29,9 @@ use super::args::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
     ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
-use super::candidate::{canonical_candidate_projection, classify_candidates, CandidateState};
+use super::candidate::{canonical_candidate_projection, classify_candidates};
+#[cfg(test)]
+use super::candidate::CandidateState;
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
@@ -348,7 +350,6 @@ fn control_plane_run_requires_action(
                 action.action,
                 ControlPlaneAction::Resume
                     | ControlPlaneAction::Retry
-                    | ControlPlaneAction::Review
                     | ControlPlaneAction::Promote
             ) && action.availability == ControlPlaneActionAvailability::Available
         })
@@ -399,39 +400,6 @@ fn compact_cook_candidate_projection(run_id: &str) -> Value {
             "reason": bounded_value(&Value::String(error.message)),
         }),
     }
-}
-
-/// Automatic retention runs while a task completes but can inventory every
-/// workspace sharing its roots. Keep that global operational evidence durable
-/// and addressable without allowing it to obscure this run's diagnosis.
-pub(crate) fn cleanup_evidence_projection(value: &mut Value, run_id: &str) -> Vec<Value> {
-    let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) else {
-        return Vec::new();
-    };
-    let run_ref = homeboy::core::execution_contract::encode_uri_component(run_id);
-    [
-        "automatic_artifact_retention",
-        "automatic_artifact_retention_inaccessible_roots",
-    ]
-    .into_iter()
-    .filter_map(|key| {
-        let details = metadata.remove(key)?;
-        let count = details
-            .get("worktree_count")
-            .and_then(Value::as_u64)
-            .or_else(|| details.as_array().map(|items| items.len() as u64))
-            .or_else(|| details.get("worktrees").and_then(Value::as_array).map(|items| items.len() as u64))
-            .unwrap_or(0);
-        Some(json!({
-            "kind": key,
-            "count": count,
-            "details_omitted": true,
-            "ref": format!("homeboy://agent-task/run/{run_ref}/status#metadata.{key}"),
-            "command": format!("homeboy agent-task status {}", quote_arg(run_id)),
-            "export_command": format!("homeboy agent-task status {} --output <path>", quote_arg(run_id)),
-        }))
-    })
-    .collect()
 }
 
 struct StatusPoller {
@@ -800,6 +768,7 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
 }
 
 /// Attach the canonical run resource assembled from the durable snapshot.
+#[cfg(test)]
 fn promotion_state(record: &Value) -> String {
     let raw = record
         .pointer("/metadata/latest_promotion/status")
@@ -808,6 +777,7 @@ fn promotion_state(record: &Value) -> String {
     raw.to_string()
 }
 
+#[cfg(test)]
 fn promotion_gate_state(record: &Value, promotion: &str, target_applied: bool) -> &'static str {
     if !target_applied {
         return "not_run";
@@ -831,6 +801,7 @@ fn promotion_gate_state(record: &Value, promotion: &str, target_applied: bool) -
     }
 }
 
+#[cfg(test)]
 fn finalization_state(record: &Value) -> String {
     record
         .pointer("/metadata/cook_finalization/status")
@@ -3903,16 +3874,10 @@ pub(crate) fn completed_run_aggregate(
     }
 }
 
-pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) -> Option<Value> {
-    ranked_diagnostics(aggregate_failure_diagnostics(aggregate))
-        .into_iter()
-        .map(collected_diagnostic_value)
-        .next()
-}
-
 /// Project terminal execution facts into stable machine-readable states. These
 /// fields deliberately derive from typed outcome and lifecycle values, never
 /// provider summary prose or diagnostic messages.
+#[cfg(test)]
 pub(crate) fn execution_states_from_aggregate(
     aggregate: &AgentTaskAggregate,
     record: &Value,
@@ -4028,6 +3993,7 @@ pub(crate) fn execution_states_from_aggregate(
     })
 }
 
+#[cfg(test)]
 fn promotion_target_projection(promotion: Option<&Value>, applied: bool) -> Value {
     let Some(promotion) = promotion else {
         return json!({ "state": "not_declared", "candidate_fingerprint_matches": Value::Null });
@@ -5070,6 +5036,7 @@ fn candidate_result_payload(record: &Value, aggregate: Option<&AgentTaskAggregat
     payload
 }
 
+#[cfg(test)]
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
     collected_diagnostic_value_with_details(item, false)
 }

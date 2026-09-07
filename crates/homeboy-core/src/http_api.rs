@@ -101,6 +101,16 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 id: (*id).to_string(),
             })
         }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "review"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReview {
+                id: (*id).to_string(),
+                request: homeboy_control_plane_contract::ControlPlaneRunReviewRequest {
+                    to_worktree: query_value(path, "to_worktree"),
+                    provider_command: query_value(path, "provider_command"),
+                    provider_argv: query_values(path, "provider_argv"),
+                },
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "runs", id, "events"]) => {
             let cursor = query_value(path, "cursor")
                 .map(homeboy_control_plane_contract::EventCursor::new)
@@ -179,6 +189,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
+                "GET /v1/control-plane/runs/:id/review".to_string(),
                 "GET /v1/control-plane/runs/:id/events".to_string(),
                 "POST /v1/control-plane/runs/:id/actions".to_string(),
                 "GET /jobs".to_string(),
@@ -216,6 +227,9 @@ where
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRunReview { id, request } => {
+            return control_plane_review_response(endpoint.clone(), id, request);
         }
         HttpEndpoint::ControlPlaneRunEvents { id, cursor } => {
             return control_plane_events_response(endpoint.clone(), id, cursor.as_ref());
@@ -390,6 +404,7 @@ where
             )?,
         }),
         HttpEndpoint::ControlPlaneRun { .. }
+        | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
         | HttpEndpoint::ControlPlaneCapabilities => {
@@ -495,6 +510,19 @@ fn control_plane_capabilities_response() -> Result<HttpApiResponse> {
 fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<HttpApiResponse> {
     match control_plane_run(run_id) {
         Ok(resource) => control_plane_ok(endpoint, resource),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_review_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    request: &homeboy_control_plane_contract::ControlPlaneRunReviewRequest,
+) -> Result<HttpApiResponse> {
+    let result = control_plane_run_id(run_id)
+        .and_then(|run_id| crate::control_plane::review(&run_id, request));
+    match result {
+        Ok(review) => control_plane_ok(endpoint, review),
         Err(error) => control_plane_err(endpoint, error),
     }
 }
@@ -1528,6 +1556,20 @@ fn query_value(path: &str, key: &str) -> Option<String> {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         (name == key && !value.is_empty()).then(|| value.to_string())
     })
+}
+
+fn query_values(path: &str, key: &str) -> Vec<String> {
+    path.split_once('?')
+        .map(|(_, query)| {
+            query
+                .split('&')
+                .filter_map(|pair| {
+                    let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+                    (name == key && !value.is_empty()).then(|| value.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn topology_root(kind: &str, id: &str) -> Result<ResourceTopologyResourceRef> {

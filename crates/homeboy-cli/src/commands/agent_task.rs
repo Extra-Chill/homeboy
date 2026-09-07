@@ -48,7 +48,6 @@ pub use args::{
     RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs, VerifyGateArgs,
     VerifyReplacementArgs,
 };
-pub(crate) use status::diagnostic_summary_from_aggregate;
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
     + Send

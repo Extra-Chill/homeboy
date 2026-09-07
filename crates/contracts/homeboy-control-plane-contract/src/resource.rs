@@ -244,14 +244,13 @@ pub enum ControlPlaneAction {
     Cancel,
     Resume,
     Retry,
-    Review,
     Promote,
     Reconcile,
 }
 
 impl ControlPlaneAction {
     pub const fn is_mutating(self) -> bool {
-        !matches!(self, Self::Review)
+        true
     }
 }
 
@@ -414,14 +413,14 @@ mod tests {
             schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
             run: run.clone(),
             actions: vec![ControlPlaneActionEligibility {
-                action: ControlPlaneAction::Review,
+                action: ControlPlaneAction::Cancel,
                 availability: ControlPlaneActionAvailability::Available,
-                reason: "review is a non-mutating read available for every durable run".to_string(),
+                reason: "cancellation is available".to_string(),
                 confirmation: ControlPlaneActionConfirmation::None,
                 required_inputs: Vec::new(),
                 idempotent: true,
                 requires_revalidation: true,
-                result_resource_type: "review".to_string(),
+                result_resource_type: "run".to_string(),
             }],
         });
         resource.created_at = "2026-01-01T00:00:00Z".to_string();

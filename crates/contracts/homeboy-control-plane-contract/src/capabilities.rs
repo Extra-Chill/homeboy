@@ -22,6 +22,7 @@ pub struct ControlPlaneCapabilities {
 pub enum ControlPlaneOperation {
     GetCapabilities,
     GetRun,
+    GetRunReview,
     GetRunEvents,
     ExecuteRunAction,
 }
@@ -32,6 +33,7 @@ pub enum ControlPlaneOperation {
 pub enum ControlPlaneResource {
     Mission,
     Run,
+    Review,
     Task,
     Attempt,
     Execution,
@@ -82,6 +84,7 @@ mod tests {
                 operation,
                 ControlPlaneOperation::GetCapabilities
                     | ControlPlaneOperation::GetRun
+                    | ControlPlaneOperation::GetRunReview
                     | ControlPlaneOperation::GetRunEvents
                     | ControlPlaneOperation::ExecuteRunAction
             )),
