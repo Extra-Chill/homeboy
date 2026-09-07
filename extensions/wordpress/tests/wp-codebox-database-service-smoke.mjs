@@ -160,6 +160,16 @@ try {
     wp_codebox_database_service: { provider: 'native', engine: 'mariadb' },
   }, /native MariaDB service is not ready on this host \(unavailable: trusted-containment-tools-unavailable\)/, { OMIT_NATIVE_DATABASE_CAPABILITY: '1' });
   assert.deepEqual(await observations(missingNativeCapability.observed), [], 'unready host capability fails before recipe build');
+  for (const expected of [
+    'native-mariadb-diagnostic: runtimeServices=',
+    'native-mariadb-diagnostic: TMPDIR=',
+    'native-mariadb-diagnostic: os.tmpdir()=',
+    'native-mariadb-diagnostic: projected mariadb socket path length=',
+    'native-mariadb-diagnostic: /dev/fuse ',
+    'native-mariadb-diagnostic: uid=',
+  ]) {
+    assert.match(missingNativeCapability.result.stderr, new RegExp(`^${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'm'), `unready host preflight is self-diagnosing (${expected})`);
+  }
 
   const missingPackageCapability = expectPreflightFailure({
     database_type: 'mysql',

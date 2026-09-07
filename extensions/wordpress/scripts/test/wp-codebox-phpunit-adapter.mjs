@@ -2,7 +2,7 @@
 /**
  * External dependencies
  */
-import { createWriteStream } from 'node:fs';
+import { accessSync, constants, createWriteStream, realpathSync, statSync, statfsSync } from 'node:fs';
 import { access, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -790,6 +790,64 @@ function resolveDatabaseService(configuration, environment) {
     },
   };
 }
+// The probe collapses every internal failure to a single status/reason pair
+// (the underlying error is deliberately swallowed upstream), so an unready host
+// is otherwise undiagnosable from CI logs alone. Dump the environment facts the
+// known failure modes depend on: temp-root identity and device (mount/realpath
+// mismatches), hard rlimits (prlimit cannot raise a lowered hard limit), FUSE
+// device access, process identity, and the projected probe socket path (AF_UNIX
+// binds fail past 108 bytes, and the probe nests
+// wp-codebox-mariadb-XXXXXX/storage/runtime/server.sock under realpath(TMPDIR)).
+// Every line is labeled for grep; nothing here reads secret material.
+function nativeMariaDbDiagnostics(descriptor) {
+  const label = 'native-mariadb-diagnostic:';
+  const lines = [];
+  const safe = (value) => JSON.stringify(value ?? null);
+  try {
+    lines.push(`${label} runtimeServices=${safe(descriptor?.runtimeServices)}`);
+    lines.push(`${label} TMPDIR=${safe(process.env.TMPDIR)} HOMEBOY_RUNTIME_TMPDIR=${safe(process.env.HOMEBOY_RUNTIME_TMPDIR)}`);
+    const effectiveTmp = tmpdir();
+    let resolvedTmp = effectiveTmp;
+    try {
+      resolvedTmp = realpathSync(effectiveTmp);
+    } catch {}
+    lines.push(`${label} os.tmpdir()=${effectiveTmp} realpath=${resolvedTmp}`);
+    try {
+      const stats = statfsSync(resolvedTmp);
+      lines.push(`${label} tmpdir statfs type=0x${stats.type.toString(16)} bsize=${stats.bsize} blocks=${stats.blocks} bavail=${stats.bavail}`);
+    } catch {}
+    const probeRoot = path.join(resolvedTmp, 'wp-codebox-mariadb-XXXXXX');
+    const socketPath = path.join(probeRoot, 'storage', 'runtime', 'server.sock');
+    const overflow = socketPath.length > 107 ? ' EXCEEDS the AF_UNIX 108-byte path limit' : ' (within the AF_UNIX 108-byte path limit)';
+    lines.push(`${label} projected probe root=${probeRoot}`);
+    lines.push(`${label} projected mariadb socket path length=${socketPath.length} path=${socketPath}${overflow}`);
+    try {
+      const limits = spawnSync('prlimit', ['--pid', String(process.pid)], { encoding: 'utf8', timeout: 5000 });
+      if (!limits.error && typeof limits.stdout === 'string') {
+        for (const line of limits.stdout.split('\n')) {
+          if (line.trim() !== '') {
+            lines.push(`${label} prlimit ${line.trim()}`);
+          }
+        }
+      }
+    } catch {}
+    let fuse = 'absent';
+    try {
+      accessSync('/dev/fuse', constants.R_OK | constants.W_OK);
+      fuse = 'present rw';
+    } catch {
+      try {
+        statSync('/dev/fuse');
+        fuse = 'present not-rw';
+      } catch {}
+    }
+    lines.push(`${label} /dev/fuse ${fuse}`);
+    lines.push(`${label} uid=${process.getuid?.()} euid=${process.geteuid?.()} gid=${process.getgid?.()} egid=${process.getegid?.()}`);
+  } catch {
+    lines.push(`${label} diagnostic collection failed`);
+  }
+  return lines.join('\n');
+}
 function requireDatabaseServiceCapability(service) {
   if (!service?.requiredCapability) {
     return;
@@ -818,6 +876,7 @@ function requireDatabaseServiceCapability(service) {
     throw new Error('WP Codebox runtime does not advertise the required native MariaDB service capability');
   }
   if (!Array.isArray(descriptor.capabilities) || !descriptor.capabilities.includes(service.requiredCapability)) {
+    process.stderr.write(`${nativeMariaDbDiagnostics(descriptor)}\n`);
     const readiness = descriptor?.runtimeServices?.nativeMariaDb;
     const detail = readiness?.reason ? ` (${readiness.status}: ${readiness.reason})` : '';
     throw new Error(`WP Codebox native MariaDB service is not ready on this host${detail}`);
