@@ -2491,7 +2491,11 @@ fn materialize_script(
         quote_path(binary_path),
         allow_downgrade,
     );
-    let authority_commits = quote_path(&authority_commits.join(" "));
+    let authority_commits = authority_commits
+        .iter()
+        .map(|authority| quote_path(authority))
+        .collect::<Vec<_>>()
+        .join(" ");
     let downgrade_guard = format!(
         "preflight=$(mktemp -d)\ntrap 'rm -rf \"$preflight\"' EXIT HUP INT TERM\ngit -C \"$preflight\" init --bare --quiet\nif ! git -C \"$preflight\" fetch --quiet \"$source\" \"$ref\"; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$preflight\" rev-parse --verify --quiet FETCH_HEAD^{{commit}})\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref did not resolve to a commit: $ref\" >&2\n  exit 1\nfi\nfor authority in {authority_commits}; do\n  if [ -z \"$authority\" ] || [ \"$authority\" = \"$target\" ]; then\n    continue\n  fi\n  if ! git -C \"$preflight\" fetch --quiet \"$source\" \"$authority\"; then\n    if [ \"$allow_downgrade\" != true ]; then\n      echo \"Cannot prove requested Homeboy ref is not a downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n      exit 1\n    fi\n    continue\n  fi\n  if git -C \"$preflight\" merge-base --is-ancestor \"$target\" \"$authority\"; then\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$authority\" >&2\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n    if [ \"$allow_downgrade\" != true ]; then\n      echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n      exit 1\n    fi\n  fi\ndone\nrm -rf \"$preflight\"\ntrap - EXIT HUP INT TERM\n"
     );

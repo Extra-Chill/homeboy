@@ -625,6 +625,20 @@ fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
 }
 
 #[test]
+fn materialize_plan_checks_each_refresh_authority_individually() {
+    let script = materialize_script(
+        "https://example.test/homeboy.git",
+        "v0.295.0",
+        "/runner/ws/homeboy-clean",
+        "/runner/ws/homeboy-clean/target/release/homeboy",
+        false,
+        &["controller-authority", "daemon-authority"],
+    );
+
+    assert!(script.contains("for authority in 'controller-authority' 'daemon-authority'; do"));
+}
+
+#[test]
 fn materialize_plan_allows_an_explicit_git_ancestry_downgrade() {
     let script = materialize_script(
         "https://example.test/homeboy.git",
