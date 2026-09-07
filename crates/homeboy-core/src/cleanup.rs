@@ -2563,7 +2563,6 @@ mod tests {
     }
 
     use super::*;
-    use std::process::Command;
     use tempfile::TempDir;
 
     #[cfg(not(unix))]
@@ -4507,19 +4506,7 @@ mod tests {
         }
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     #[test]
     fn non_git_worktree_scan_errors_without_aborting_batch() {

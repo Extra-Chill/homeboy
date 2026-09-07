@@ -1099,20 +1099,7 @@ mod tests {
         git(path, &["init", "--bare", "-b", "main"]);
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .unwrap_or_else(|err| panic!("git {:?} failed to start: {}", args, err));
-        assert!(
-            output.status.success(),
-            "git {:?} failed\nstdout: {}\nstderr: {}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     fn git_stdout(path: &std::path::Path, args: &[&str]) -> Option<String> {
         let output = Command::new("git")

@@ -113,7 +113,6 @@ pub struct UpdateAvailable {
 mod tests {
     use super::*;
     use crate::test_support;
-    use std::process::Command;
     use std::time::Instant;
 
     #[test]
@@ -157,19 +156,7 @@ mod tests {
         assert!(timeouts[1].1 < timeouts[0].1);
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git fixture command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 }
 
 pub fn read_source_revision(extension_id: &str) -> Option<String> {
@@ -335,7 +322,6 @@ fn source_metadata_file(extension_dir: &std::path::Path, kind: &str) -> String {
 #[cfg(test)]
 mod cleanliness_tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn modified_and_untracked_status_lines_yield_paths() {
@@ -382,19 +368,7 @@ mod cleanliness_tests {
         );
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     fn commit_all(path: &Path) {
         git(path, &["init", "-b", "main"]);

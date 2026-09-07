@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use crate::extension::invoke::RunnerOutput;
@@ -800,19 +799,7 @@ fn init_git_repo(path: &std::path::Path) {
     );
 }
 
-fn git(path: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use crate::test_support::run_git_command as git;
 
 fn component_with_extension(id: &str, path: &std::path::Path) -> Component {
     let mut extensions = HashMap::new();

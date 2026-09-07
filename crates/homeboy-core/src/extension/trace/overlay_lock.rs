@@ -647,19 +647,7 @@ mod tests {
         );
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     fn write_test_overlay_lock(component_dir: &Path, pid: u32) -> PathBuf {
         let component_path = normalize_component_path(component_dir);

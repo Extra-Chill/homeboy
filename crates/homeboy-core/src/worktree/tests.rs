@@ -58,20 +58,7 @@ fn registry_read_lease_blocks_active_worktree_publication() {
     });
 }
 
-fn run_git(dir: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: stdout={} stderr={}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use crate::test_support::run_git_command as run_git;
 
 fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
     TaskWorktreeRecord {

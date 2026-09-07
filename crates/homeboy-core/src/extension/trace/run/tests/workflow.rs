@@ -506,20 +506,7 @@ fn init_git_repo(path: &std::path::Path) {
     git(path, &["commit", "-m", "initial"]);
 }
 
-fn git(path: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .unwrap_or_else(|err| panic!("git {:?} failed to start: {}", args, err));
-    assert!(
-        output.status.success(),
-        "git {:?} failed\nstdout: {}\nstderr: {}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use crate::test_support::run_git_command as git;
 
 fn test_run_args(path: &std::path::Path) -> TraceRunWorkflowArgs {
     TraceRunWorkflowArgs {
