@@ -1048,18 +1048,7 @@ mod tests {
 
     #[test]
     fn exact_ref_preparation_builds_detached_bytes_and_cleans_owned_resources() {
-        fn git(path: &Path, args: &[&str]) -> String {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(path)
-                .output()
-                .expect("run git");
-            assert!(output.status.success(), "git {:?}: {:?}", args, output);
-            String::from_utf8(output.stdout)
-                .expect("git output")
-                .trim()
-                .to_string()
-        }
+        use homeboy_core::test_support::git_command_output as git;
 
         let repo = tempfile::tempdir().expect("repo");
         git(repo.path(), &["init", "-q"]);
@@ -1134,18 +1123,7 @@ mod tests {
     #[test]
     fn exact_ref_default_extension_build_replaces_stale_artifact_and_records_source_commit() {
         homeboy_core::test_support::with_isolated_home(|home| {
-            fn git(path: &Path, args: &[&str]) -> String {
-                let output = std::process::Command::new("git")
-                    .args(args)
-                    .current_dir(path)
-                    .output()
-                    .expect("run git");
-                assert!(output.status.success(), "git {:?}: {:?}", args, output);
-                String::from_utf8(output.stdout)
-                    .expect("git output")
-                    .trim()
-                    .to_string()
-            }
+            use homeboy_core::test_support::git_command_output as git;
 
             let extension_dir = home
                 .path()

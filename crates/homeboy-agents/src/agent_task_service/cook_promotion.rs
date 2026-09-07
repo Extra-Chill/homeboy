@@ -2671,20 +2671,7 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
 mod moving_base_tests {
     use super::*;
 
-    fn git(path: &std::path::Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_core::test_support::git_command_output as git;
 
     #[test]
     fn moving_base_overlap_is_rejected_before_destination_mutation() {

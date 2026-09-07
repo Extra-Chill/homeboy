@@ -634,20 +634,7 @@ mod tests {
         super::recovery_path_in_roots(test_roots().data(), component_id)
     }
 
-    fn run_git(path: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?}: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_core::test_support::git_command_output as run_git;
 
     fn write_release_artifact(path: &Path) {
         let file = std::fs::File::create(path).expect("create release artifact");
