@@ -806,16 +806,21 @@ function requireDatabaseServiceCapability(service) {
   } catch {
     descriptor = null;
   }
+  // Two distinct signals: the contract manifest's runtimeServices.packageCapabilities
+  // lists what this WP Codebox package can provide at all, while the top-level
+  // descriptor.capabilities only includes the native service once the host's
+  // containment tools are verified ready (descriptor.runtimeServices.nativeMariaDb).
   const runtimeServices = descriptor?.contractManifest?.capabilities?.runtimeServices;
-  if (
-    descriptor?.schema !== 'wp-codebox/runtime-descriptor/v1'
-    || !Array.isArray(descriptor.capabilities)
-    || !descriptor.capabilities.includes(service.requiredCapability)
-    || runtimeServices?.schema !== RUNTIME_SERVICE_CAPABILITIES_SCHEMA
-    || !Array.isArray(runtimeServices.capabilities)
-    || !runtimeServices.capabilities.includes(service.requiredCapability)
-  ) {
+  const packageSupportsService = runtimeServices?.schema === RUNTIME_SERVICE_CAPABILITIES_SCHEMA
+    && Array.isArray(runtimeServices.packageCapabilities)
+    && runtimeServices.packageCapabilities.includes(service.requiredCapability);
+  if (descriptor?.schema !== 'wp-codebox/runtime-descriptor/v1' || !packageSupportsService) {
     throw new Error('WP Codebox runtime does not advertise the required native MariaDB service capability');
+  }
+  if (!Array.isArray(descriptor.capabilities) || !descriptor.capabilities.includes(service.requiredCapability)) {
+    const readiness = descriptor?.runtimeServices?.nativeMariaDb;
+    const detail = readiness?.reason ? ` (${readiness.status}: ${readiness.reason})` : '';
+    throw new Error(`WP Codebox native MariaDB service is not ready on this host${detail}`);
   }
 }
 function isObject(value) {
