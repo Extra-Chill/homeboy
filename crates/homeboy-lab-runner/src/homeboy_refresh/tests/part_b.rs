@@ -274,7 +274,7 @@ fn extension_only_dev_sync_plan_does_not_refresh_homeboy_binary() {
             reconnect: false,
             dry_run: true,
         };
-        let plan = plan_runner_dev_sync(&options).expect("plan dev-sync");
+        let plan = plan_runner_dev_sync_in_roots(&roots, &options).expect("plan dev-sync");
 
         assert!(!should_sync_homeboy_binary(&options));
         assert_eq!(plan.local_binary, None);
