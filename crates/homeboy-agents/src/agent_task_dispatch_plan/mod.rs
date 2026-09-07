@@ -762,7 +762,6 @@ mod tests {
     use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
     use homeboy_core::test_support::with_isolated_home;
     use std::collections::HashMap;
-    use std::process::Command;
     use std::sync::Arc;
 
     #[test]
@@ -1994,14 +1993,7 @@ mod tests {
         run_git(path, &["commit", "-m", "init"]);
     }
 
-    fn run_git(path: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git command runs");
-        assert!(status.success(), "git {:?} failed", args);
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     #[test]
     fn resolves_workspace_path_without_specialized_coupling() {
@@ -2246,17 +2238,5 @@ mod tests {
         }
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as git;
 }

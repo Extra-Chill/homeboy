@@ -1682,14 +1682,7 @@ mod declared_base_tests {
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git runs")
-            .success());
-    }
+    use homeboy_core::test_support::run_git_command as git;
 
     fn git_output(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
