@@ -1198,41 +1198,6 @@ fn review_record_projection(record: &AgentTaskRunRecord) -> (Value, Vec<Value>) 
     (value, evidence)
 }
 
-fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionReport) -> Value {
-    let target_applied = report.status.patch_promoted();
-    let verified = matches!(
-        report.status,
-        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-    );
-    let next_action = if report.status.gate_failed() {
-        "patch promoted but deterministic gates failed; use gate feedback before finalizing"
-    } else if target_applied && verified {
-        "patch promoted and deterministic gates verified; finalize a PR"
-    } else if target_applied {
-        "patch promoted into the target worktree; verify, then finalize a PR"
-    } else {
-        "dry run only; rerun promote without `--dry-run` before finalizing"
-    };
-
-    serde_json::json!({
-        "schema": "homeboy/agent-task-promotion-handoff/v1",
-        "states": {
-            "patch_artifact_produced": true,
-            "candidate_retained": true,
-            "target_applied": target_applied,
-            "patch_promoted": target_applied,
-            "verified": verified,
-            "finalized": false,
-            "pr_opened": false,
-        },
-        "boundary": report.status.handoff_boundary(),
-        "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
-            "homeboy agent-task finalize-pr --recover {run_id}"
-        )),
-        "next_actions": [next_action],
-    })
-}
-
 impl OrchestrationService<LifecycleStoreLookup> {
     /// Reconcile an accepted cancellation through the canonical lifecycle owner.
     /// Runner probes stay disabled: cancellation convergence is controller-owned
