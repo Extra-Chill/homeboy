@@ -19,7 +19,10 @@ use homeboy_core::extension::catalog::{
 use homeboy_core::extension::readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
-use homeboy_core::extension::{invoke::run_setup, resolve::is_extension_compatible};
+use homeboy_core::extension::{
+    invoke::{execute_api, execute_response_result, execute_run_request, run_setup},
+    resolve::is_extension_compatible,
+};
 use homeboy_extension_contract as extension_contract;
 use homeboy_extension_contract::action_types::ActionType;
 use homeboy_extension_contract::api::v1::{
@@ -1384,16 +1387,16 @@ fn run_extension(
     };
 
     let filter = ExtensionStepFilter { step, skip };
-
-    let result = homeboy_core::extension::invoke::run_extension(
+    let result = execute_response_result(execute_api(&execute_run_request(
         extension_id,
         project.as_deref(),
         component.as_deref(),
         inputs,
         args,
         mode,
-        filter,
-    )?;
+        &filter,
+        format!("cli:{}", uuid::Uuid::new_v4()),
+    )))?;
 
     Ok((
         ExtensionOutput::Run {
@@ -2333,6 +2336,58 @@ mod tests {
     fn extension_inventory_defaults_to_cached_readiness() {
         assert_eq!(readiness_mode(false), ExtensionReadinessMode::Cached);
         assert_eq!(readiness_mode(true), ExtensionReadinessMode::Probe);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_run_projects_captured_output_and_exit_code() {
+        with_isolated_home(|home| {
+            let extension_id = "fixture-run";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{"name":"fixture-run","version":"1.0.0","executable":{"runtime":{"run_command":"sh {{extension_path}}/run.sh"}}}"#,
+            )
+            .expect("manifest");
+            let script = extension_dir.join("run.sh");
+            fs::write(&script, "#!/bin/sh\nprintf captured-output\nexit 7\n").expect("script");
+            let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).expect("chmod");
+
+            let (output, exit_code) = run_extension(
+                extension_id,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                false,
+                true,
+                None,
+                None,
+            )
+            .expect("extension run");
+            assert_eq!(exit_code, 7);
+            let ExtensionOutput::Run {
+                extension_id: returned_id,
+                project_id,
+                output,
+            } = output
+            else {
+                panic!("expected extension run output");
+            };
+            assert_eq!(returned_id, extension_id);
+            assert_eq!(project_id, None);
+            assert_eq!(
+                output.map(|captured| captured.stdout),
+                Some("captured-output".to_string())
+            );
+        });
     }
 
     #[test]
