@@ -9,6 +9,20 @@ pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck
             format!("{} is available", spec.command),
             None,
         )
+    } else if probe.probe_failed {
+        // The lookup never reached a verdict, so neither "found" nor "missing"
+        // is a truthful message. Report the probe failure and hand the operator
+        // the reason instead of a remediation for a tool that may be installed.
+        error(
+            spec.check_id,
+            format!(
+                "{} could not be probed: {}",
+                spec.command,
+                probe_reason(probe)
+            ),
+            Some(PROBE_FAILURE_REMEDIATION.to_string()),
+            probe_details(probe),
+        )
     } else if spec.required {
         error(
             spec.check_id,
@@ -25,6 +39,24 @@ pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck
     }
 }
 
+pub(crate) const PROBE_FAILURE_REMEDIATION: &str =
+    "The tool lookup itself failed, so the tool may well be installed. Fix the reported environment or shell error, then re-run doctor.";
+
+fn probe_reason(probe: &ToolProbe) -> &str {
+    probe
+        .error
+        .as_deref()
+        .unwrap_or("the tool lookup failed without a reason")
+}
+
+fn probe_details(probe: &ToolProbe) -> BTreeMap<String, String> {
+    let mut details = BTreeMap::new();
+    if let Some(error) = &probe.error {
+        details.insert("probe_error".to_string(), error.clone());
+    }
+    details
+}
+
 pub(crate) fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerCheck {
     let mut details = BTreeMap::new();
     details.insert("command".to_string(), command.to_string());
@@ -36,6 +68,17 @@ pub(crate) fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerChe
         ok_with_details(
             format!("tool.required.{command}"),
             format!("Required runner tool {command} is available"),
+            details,
+        )
+    } else if probe.probe_failed {
+        details.extend(probe_details(probe));
+        error(
+            format!("tool.required.{command}"),
+            format!(
+                "Required runner tool {command} could not be probed: {}",
+                probe_reason(probe)
+            ),
+            Some(PROBE_FAILURE_REMEDIATION.to_string()),
             details,
         )
     } else {
