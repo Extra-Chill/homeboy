@@ -1369,9 +1369,7 @@ fn run_main_test_workflow_inner(
                 // suite proves it still works. Say that instead.
                 let harness_only = impacted
                     .iter()
-                    .all(|file| {
-                        crate::extension::test::drift::is_test_harness_config_path(file)
-                    });
+                    .all(|file| crate::extension::test::drift::is_test_harness_config_path(file));
 
                 let message = if harness_only {
                     format!(
