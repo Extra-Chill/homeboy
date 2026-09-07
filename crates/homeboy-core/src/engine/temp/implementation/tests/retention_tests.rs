@@ -17,6 +17,8 @@ fn active_invocation_lease_survives_transient_pin_loss() {
     #[cfg(not(unix))]
     let path = exported_path.clone();
     fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("simulate pin loss");
+    // The directory is named for the invocation short id now, so this filter
+    // is resolved through the prefix recorded in `owner.json` (#14384).
     let mut options = bounded_options(false, Some("homeboy-invocation-tmp"));
     options.older_than_days = 0;
 
@@ -788,5 +790,206 @@ fn external_hardlink_is_not_reported_as_reclaimable_allocation() {
     assert_eq!(output.removed_count, 1);
     assert!(external.exists());
     assert!(output.verified_reclaimed_bytes <= output.removed_allocated_bytes);
+    env::remove_var(runtime_tmpdir_env());
+}
+
+/// Restore an invocation-runtime-root override on drop.
+struct InvocationRootGuard(Option<String>);
+
+impl InvocationRootGuard {
+    fn set(path: &Path) -> Self {
+        let prior = env::var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
+        env::set_var(
+            crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+            path,
+        );
+        Self(prior)
+    }
+}
+
+impl Drop for InvocationRootGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(prior) => env::set_var(
+                crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                prior,
+            ),
+            None => env::remove_var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
+        }
+    }
+}
+
+/// The reported bug, end to end.
+///
+/// #14384: `TMPDIR` was a short symlink onto a
+/// `homeboy-invocation-tmp-<uuid>-<nanos>` directory, ~74 bytes of name before
+/// any root. Every workload that canonicalizes its temp root before creating
+/// sockets — WP Codebox's native MariaDB provider does it as part of a
+/// symlink-free containment proof — got a path that could not hold a socket.
+/// Binding through `realpath` is the assertion the old contract could not pass.
+#[cfg(unix)]
+#[test]
+fn exported_tmpdir_holds_a_socket_after_canonicalization() {
+    use std::os::unix::net::UnixListener;
+
+    let _guard = home_env_guard();
+    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+    let _root_guard = InvocationRootGuard::set(runtime_root.path());
+    let data_root = tempfile::tempdir().expect("data volume runtime temp root");
+    env::set_var(runtime_tmpdir_env(), data_root.path());
+
+    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+    let invocation = super::super::super::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &super::super::super::invocation::InvocationRequirements::default(),
+    )
+    .expect("invocation");
+
+    let exported = invocation.context().tmp_dir;
+    let canonical = exported
+        .canonicalize()
+        .expect("canonicalize exported TMPDIR");
+    let socket = canonical.join("server.sock");
+    assert!(
+        socket.as_os_str().len() < 108,
+        "socket path under the resolved TMPDIR must fit sun_path: {} bytes ({})",
+        socket.as_os_str().len(),
+        socket.display()
+    );
+    let listener = UnixListener::bind(&socket).expect("bind a socket under the resolved TMPDIR");
+
+    // The durable owner still lives on the data volume (#11125) — the fix buys
+    // socket safety by shortening the name, not by moving the bytes.
+    assert!(
+        canonical.starts_with(data_root.path().canonicalize().expect("data root")),
+        "durable temp must stay on the data volume: {}",
+        canonical.display()
+    );
+    // The uuid and the creation time left the directory name; they are still
+    // recorded where cleanup actually reads them.
+    let owner = read_run_owner(&canonical).expect("owner record");
+    assert!(!owner.owner_id.is_empty());
+    assert!(!owner.created_at.is_empty());
+    assert_eq!(owner.producer.as_deref(), Some("invocation"));
+    assert_eq!(owner.placement, None, "default placement is the data root");
+
+    drop(listener);
+    drop(invocation);
+    run_dir.cleanup();
+    env::remove_var(runtime_tmpdir_env());
+}
+
+/// A data root too long for even a 10-byte name degrades placement instead of
+/// handing out a `TMPDIR` no socket can live under.
+#[cfg(unix)]
+#[test]
+fn a_data_root_over_budget_falls_back_to_the_short_runtime_root() {
+    use std::os::unix::net::UnixListener;
+
+    let _guard = home_env_guard();
+    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+    let _root_guard = InvocationRootGuard::set(runtime_root.path());
+    let data_root = tempfile::tempdir().expect("data volume root");
+    // Deep enough that no invocation name fits the sockaddr_un budget beneath
+    // it — the long-$HOME host the fallback exists for.
+    let long_data_root = data_root.path().join("d".repeat(80));
+    fs::create_dir_all(&long_data_root).expect("long data root");
+    env::set_var(runtime_tmpdir_env(), &long_data_root);
+
+    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+    let invocation = super::super::super::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &super::super::super::invocation::InvocationRequirements::default(),
+    )
+    .expect("invocation");
+
+    let exported = invocation.context().tmp_dir;
+    let canonical = exported
+        .canonicalize()
+        .expect("canonicalize exported TMPDIR");
+    assert!(
+        canonical.starts_with(runtime_root.path().canonicalize().expect("runtime root")),
+        "over-budget data root must degrade to the short runtime root: {}",
+        canonical.display()
+    );
+    // No alias: the owner is already short, so nothing is indirected.
+    assert!(
+        !fs::symlink_metadata(&exported)
+            .expect("exported metadata")
+            .file_type()
+            .is_symlink(),
+        "a fallback-placed owner is exported directly"
+    );
+    let listener = UnixListener::bind(canonical.join("server.sock"))
+        .expect("bind a socket under the fallback TMPDIR");
+
+    let owner = read_run_owner(&canonical).expect("owner record");
+    assert_eq!(
+        owner.placement.as_deref(),
+        Some("invocation-runtime-root"),
+        "the degradation must be recorded so cleanup and operators can see it"
+    );
+
+    drop(listener);
+    drop(invocation);
+    run_dir.cleanup();
+    env::remove_var(runtime_tmpdir_env());
+}
+
+/// Cleanup has to find fallback-placed bytes, and must not mistake a live
+/// invocation's state directories — siblings in the same root, with no owner
+/// record — for strays.
+#[cfg(unix)]
+#[test]
+fn cleanup_reclaims_fallback_owners_and_spares_live_invocation_dirs() {
+    let _guard = home_env_guard();
+    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+    let _root_guard = InvocationRootGuard::set(runtime_root.path());
+    let data_root = tempfile::tempdir().expect("data volume root");
+    let long_data_root = data_root.path().join("d".repeat(80));
+    fs::create_dir_all(&long_data_root).expect("long data root");
+    env::set_var(runtime_tmpdir_env(), &long_data_root);
+
+    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+    let invocation = super::super::super::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &super::super::super::invocation::InvocationRequirements::default(),
+    )
+    .expect("invocation");
+    let context = invocation.context();
+    let fallback_owner = context.tmp_dir.clone();
+    let state_dir = context.state_dir.clone();
+    let artifact_dir = context.artifact_dir.clone();
+    fs::write(fallback_owner.join("payload.bin"), vec![b'x'; 4096]).expect("payload");
+
+    let mut options = bounded_options(true, None);
+    options.older_than_days = 0;
+
+    // While the invocation is live nothing under the shared root is reclaimed.
+    let live = cleanup_runtime_tmp_bounded(options).expect("live sweep");
+    assert_eq!(live.removed_count, 0);
+    assert!(fallback_owner.exists());
+    assert!(state_dir.exists());
+    assert!(artifact_dir.exists());
+    assert!(
+        !live
+            .rows
+            .iter()
+            .any(|row| row.path == state_dir.display().to_string()
+                || row.path == artifact_dir.display().to_string()),
+        "live invocation directories must not be inspected as runtime-temp strays"
+    );
+
+    drop(invocation);
+    assert!(!state_dir.exists(), "invocation teardown removes STATE_DIR");
+
+    let reclaimed = cleanup_runtime_tmp_bounded(options).expect("terminal sweep");
+    assert_eq!(
+        reclaimed.removed_count, 1,
+        "the fallback-placed owner is reclaimed once its invocation ends"
+    );
+    assert!(!fallback_owner.exists());
+
+    run_dir.cleanup();
     env::remove_var(runtime_tmpdir_env());
 }
