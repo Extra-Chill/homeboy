@@ -532,7 +532,7 @@ mod tests {
         assert!(zip.by_name("demo-plugin/node_modules/junk.js").is_err());
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     #[test]
     fn cleanup_deploy_build_artifact_preserves_non_empty_build_dir() {

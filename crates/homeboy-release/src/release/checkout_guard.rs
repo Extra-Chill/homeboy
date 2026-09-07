@@ -223,7 +223,7 @@ mod tests {
     use super::ReleaseCheckoutGuard;
     use homeboy_core::component::Component;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn run_git_allow_failure(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         std::process::Command::new("git")

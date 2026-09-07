@@ -484,7 +484,7 @@ fn local_file_dependency_error(offenders: &[LocalFileDependency]) -> Error {
 mod tests {
     use super::*;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn init_repo(dir: &Path) {
         run_git(dir, &["init", "--quiet"]);

@@ -855,7 +855,7 @@ mod tests {
         );
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 }
 
 pub(crate) fn materialize_snapshot(

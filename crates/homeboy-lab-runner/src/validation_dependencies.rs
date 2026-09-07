@@ -355,7 +355,7 @@ mod tests {
         parent_remote_path, sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     };
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     fn init_checkout_with_upstream(path: &Path) -> tempfile::TempDir {
         let remote = tempfile::tempdir().expect("remote");

@@ -2020,7 +2020,7 @@ mod tests {
         });
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     /// Commit an extension checkout and return its HEAD SHA, which is what both
     /// sides report as `source_revision`.

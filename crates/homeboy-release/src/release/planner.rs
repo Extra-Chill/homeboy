@@ -687,7 +687,7 @@ mod tests {
 
     use std::path::Path;
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     /// Build a local clone whose HEAD is at `v1.0.0` and an "origin" that is
     /// `extra_upstream_commits` ahead, then update tracking refs without

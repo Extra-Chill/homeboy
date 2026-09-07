@@ -453,7 +453,7 @@ mod tests {
     use homeboy_core::git;
     use homeboy_core::git::SemverBump;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
         if let Some(parent) = dir.join(name).parent() {
