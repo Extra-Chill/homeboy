@@ -698,6 +698,7 @@ impl AgentTaskCookAttemptDispatcher for CountingCookDispatcher {
 #[derive(Clone, Default)]
 struct CountingCookExecutor {
     executions: Arc<AtomicUsize>,
+    patch_path: Option<String>,
 }
 
 impl AgentTaskExecutorAdapter for CountingCookExecutor {
@@ -711,6 +712,18 @@ impl AgentTaskExecutorAdapter for CountingCookExecutor {
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("unexpected execution".to_string()),
+            artifacts: self
+                .patch_path
+                .as_ref()
+                .map(|path| {
+                    vec![AgentTaskArtifact {
+                        id: "candidate".to_string(),
+                        kind: "patch".to_string(),
+                        path: Some(path.clone()),
+                        ..Default::default()
+                    }]
+                })
+                .unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -1025,16 +1038,23 @@ fn recoverable_runner_cook_args(source: &std::path::Path) -> AgentTaskCookArgs {
 
 fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
     let root = tempfile::tempdir().expect("fixture root");
+    let remote = root.path().join("origin.git");
     let primary = root.path().join("primary");
     let source = root.path().join("worktree");
     std::fs::create_dir(&primary).expect("create primary checkout");
+    let initialized = Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&remote)
+        .status()
+        .expect("create fixture remote");
+    assert!(initialized.success());
     init_runtime_component_checkout(&primary);
     let remote = Command::new("git")
         .args([
             "remote",
             "add",
             "origin",
-            "https://github.com/example/fixture.git",
+            remote.to_str().expect("fixture remote path"),
         ])
         .current_dir(&primary)
         .status()
@@ -1049,6 +1069,12 @@ fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
         },
     )
     .expect("register fixture primary");
+    let pushed = Command::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&primary)
+        .status()
+        .expect("push fixture main");
+    assert!(pushed.success());
     let worktree = Command::new("git")
         .args(["worktree", "add", "-b", "fixture-recovery"])
         .arg(&source)
@@ -1084,6 +1110,175 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
         .expect("cook status resolves through its public alias");
         assert_eq!(status_exit, 0);
         assert_eq!(status_value["state"], "failed");
+    });
+}
+
+#[test]
+fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
+    with_temp_home(|| {
+        let cook_id = "cook-readiness-rearm";
+        let source_run_id = "cook-readiness-rearm-attempt-1";
+        let (root, source) = recoverable_runner_worktree();
+        let patch = root.path().join("candidate.patch");
+        std::fs::write(
+            &patch,
+            "diff --git a/plugin.php b/plugin.php\nindex 5ed90c8..70525e4 100644\n--- a/plugin.php\n+++ b/plugin.php\n@@ -1 +1,2 @@\n <?php\n+// recovered readiness retry\n",
+        )
+        .expect("write candidate patch");
+        let mut source_plan = AgentTaskPlan::new(
+            "cook-readiness-rearm-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture", "model": "fixture-model" },
+                "instructions": "retry readiness"
+            }))
+            .expect("provider task")],
+        );
+        source_plan.tasks[0].workspace.root = Some(source.display().to_string());
+        source_plan.tasks[0].metadata = json!({
+            "worktree_provision": { "kind": "explicit_cwd" }
+        });
+        let options = homeboy::agents::agent_task_service::CookRequest {
+            identity: homeboy::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: source_run_id.to_string(),
+                initial_plan: source_plan.clone(),
+            },
+            workspace: homeboy::agents::agent_task_service::CookWorkspace {
+                to_worktree: source.display().to_string(),
+                source_worktree_path: Some(source),
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                ..Default::default()
+            },
+            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
+            finalization: homeboy::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "Readiness rearm".to_string(),
+                commit_message: "Readiness rearm".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&source_plan, Some(source_run_id))
+            .expect("persist source attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            source_run_id,
+        )
+        .expect("bind source attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            source_run_id,
+            &source_plan,
+            "provider_readiness",
+            &Error::internal_unexpected("injected readiness timeout").with_retryable(true),
+        )
+        .expect("persist retryable readiness failure");
+        assert_eq!(
+            agent_task_lifecycle::exact_record(source_run_id)
+                .expect("source record")
+                .metadata["provider_executions_consumed"],
+            0
+        );
+        let refusal = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: source_run_id.to_string(),
+                preflight: false,
+                rearm: false,
+                artifact_id: None,
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+                full: true,
+            },
+            Arc::new(CapturingExecutor::default()),
+            |_| Ok(None),
+        )
+        .expect_err("non-rearm continuation cannot reuse a terminal attempt");
+        assert!(refusal.message.contains("requires --rearm"));
+
+        let (continued, continued_exit_code) = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: source_run_id.to_string(),
+                preflight: false,
+                rearm: true,
+                artifact_id: None,
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+                full: true,
+            },
+            Arc::new(CapturingExecutor::default()),
+            |_| Ok(None),
+        )
+        .expect("rearm reserves and dispatches a successor");
+
+        assert_eq!(continued_exit_code, 0, "{continued:#}");
+        let index =
+            agent_task_lifecycle::cook_index(cook_id).expect("Cook index includes successor");
+        let successor_run_id = index.latest_run_id;
+        assert_ne!(successor_run_id, source_run_id, "{continued:#}");
+        assert_eq!(continued["latest_run_id"], successor_run_id);
+        let successor = agent_task_lifecycle::exact_record(&successor_run_id)
+            .expect("successor record is durable");
+        assert_eq!(successor.state, AgentTaskRunState::Queued, "{successor:#?}");
+        assert_eq!(successor.metadata["retry_of"], source_run_id);
+        assert_eq!(successor.metadata["provider_executions_consumed"], 0);
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let queued = homeboy::agents::agent_task_service::run_next_with_cook_dispatcher(
+            Arc::new(CountingCookExecutor {
+                executions: Arc::clone(&executions),
+                patch_path: Some(patch.display().to_string()),
+            }),
+            |_| Ok(None),
+            Some(&std::collections::HashSet::from([successor_run_id.clone()])),
+        )
+        .expect("queue owner executes the Cook successor through its lifecycle");
+
+        let completed = agent_task_lifecycle::exact_record(&successor_run_id)
+            .expect("successor completion is durable");
+        assert_eq!(queued.exit_code, 0, "{queued:#?}\n{completed:#?}");
+        assert_eq!(executions.load(Ordering::SeqCst), 1, "{queued:#?}");
+        assert_eq!(completed.metadata["provider_executions_consumed"], 1);
+        assert!(
+            completed.metadata["latest_promotion"]["deterministic_gates"].is_array(),
+            "Cook promotion and gates must run instead of the generic plan runner: {completed:#?}"
+        );
+        assert_eq!(
+            completed.metadata["cook_progress"]["terminal_status"],
+            "green_no_finalize",
+            "the Cook-owned no-finalize finalization decision must close the lifecycle: {completed:#?}"
+        );
     });
 }
 
