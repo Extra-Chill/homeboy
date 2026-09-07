@@ -2020,19 +2020,7 @@ mod tests {
         });
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 
     /// Commit an extension checkout and return its HEAD SHA, which is what both
     /// sides report as `source_revision`.

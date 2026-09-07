@@ -813,7 +813,6 @@ pub(super) fn is_excluded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn snapshot_identity_ignores_declared_context_excludes() {
@@ -856,14 +855,7 @@ mod tests {
         );
     }
 
-    fn git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("run git");
-        assert!(output.status.success(), "git {args:?} failed");
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 }
 
 pub(crate) fn materialize_snapshot(

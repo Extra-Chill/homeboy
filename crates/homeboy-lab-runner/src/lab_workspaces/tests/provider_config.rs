@@ -20,19 +20,7 @@ use crate::{
 };
 use homeboy_core::worktree;
 
-fn git(path: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_core::test_support::run_git_fixture_command as git;
 
 fn init_task_worktree(source: &Path, worktree: &Path, branch: &str) {
     std::fs::create_dir_all(source).expect("source dir");

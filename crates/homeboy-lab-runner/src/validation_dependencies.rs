@@ -355,19 +355,7 @@ mod tests {
         parent_remote_path, sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     };
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 
     fn init_checkout_with_upstream(path: &Path) -> tempfile::TempDir {
         let remote = tempfile::tempdir().expect("remote");
