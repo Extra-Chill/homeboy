@@ -12551,7 +12551,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         let run_id = "cook-adopt-review-form-attempt-1";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.identity.initial_run_id = run_id.to_string();
-        options.workspace.source_worktree_path = Some(target.clone());
+        options.workspace.source_worktree_path = None;
         options.workspace.task_base_sha = Some(base.clone());
         options.provider_transport.provider_command = Some(provider.display().to_string());
         options.provider_transport.attempt_dispatcher = None;
