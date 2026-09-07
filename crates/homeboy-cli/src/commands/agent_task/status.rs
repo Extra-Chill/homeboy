@@ -29,9 +29,9 @@ use super::args::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
     ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
-use super::candidate::{canonical_candidate_projection, classify_candidates};
 #[cfg(test)]
 use super::candidate::CandidateState;
+use super::candidate::{canonical_candidate_projection, classify_candidates};
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
