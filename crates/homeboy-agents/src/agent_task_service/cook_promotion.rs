@@ -1239,11 +1239,14 @@ pub fn record_replacement_gate_proof(
             None,
         ));
     }
-    if original.status != AgentTaskPromotionStatus::GateFailed || !original.status.patch_promoted()
+    if !matches!(
+        original.status,
+        AgentTaskPromotionStatus::GateFailed | AgentTaskPromotionStatus::VerificationPending
+    ) || !original.status.patch_promoted()
     {
         return Err(Error::validation_invalid_argument(
             "latest_promotion.status",
-            "replacement gate proof is only valid for an already-applied candidate whose original gates failed",
+            "replacement gate proof is only valid for an already-applied candidate whose verification failed or did not complete",
             Some(run_id.to_string()),
             None,
         ));
@@ -1323,6 +1326,10 @@ pub fn record_replacement_gate_proof(
                 Some("serialize original promotion history".to_string()),
             )
         })?);
+    let reason = match original.status {
+        AgentTaskPromotionStatus::VerificationPending => "interrupted_original_verification",
+        _ => "infrastructure_invalid_original_gates",
+    };
     replacement.provenance["replacement_gate_proof"] = serde_json::json!({
         "schema": "homeboy/agent-task-replacement-gate-proof/v1",
         "original_history": {
@@ -1333,7 +1340,7 @@ pub fn record_replacement_gate_proof(
             "deterministic_gate_count": original.deterministic_gates.len(),
             "sha256": original_digest,
         },
-        "reason": "infrastructure_invalid_original_gates",
+        "reason": reason,
         "operator_authorization": external_authorization,
         "externally_produced": true,
         "accept_inherited_failures": accept_inherited_failures,
@@ -1644,11 +1651,14 @@ fn verify_replacement_gates_owned(
     if replacement_gate_execution_started(lifecycle_store, run_id)? {
         return Err(interrupted_replacement_gate_execution_error(run_id));
     }
-    if original.status != AgentTaskPromotionStatus::GateFailed || !original.status.patch_promoted()
+    if !matches!(
+        original.status,
+        AgentTaskPromotionStatus::GateFailed | AgentTaskPromotionStatus::VerificationPending
+    ) || !original.status.patch_promoted()
     {
         return Err(Error::validation_invalid_argument(
             "latest_promotion.status",
-            "replacement gates require an already-applied candidate whose original gates failed",
+            "replacement gates require an already-applied candidate whose verification failed or did not complete",
             Some(run_id.to_string()),
             None,
         ));
