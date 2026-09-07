@@ -22,15 +22,24 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write('0.21.0'); process.exit(0); }
 if (args[0] === 'runtime' && args[1] === 'descriptor') {
-  const capabilities = process.env.OMIT_NATIVE_DATABASE_CAPABILITY === '1' ? [] : ['runtime-service:mysql:native:mariadb'];
+  // Mirrors the real descriptor shape: the manifest lists package support under
+  // packageCapabilities unconditionally; the top-level capabilities list only
+  // carries the native service once the host containment tools are ready.
+  const nativeReady = process.env.OMIT_NATIVE_DATABASE_CAPABILITY !== '1';
+  const capabilities = nativeReady ? ['runtime-service:mysql:native:mariadb'] : [];
   process.stdout.write(JSON.stringify({
     schema: 'wp-codebox/runtime-descriptor/v1',
     readiness: { status: 'available', browserRuntime: { status: 'ready' } },
     capabilities,
+    runtimeServices: {
+      nativeMariaDb: nativeReady
+        ? { capability: 'runtime-service:mysql:native:mariadb', status: 'ready' }
+        : { capability: 'runtime-service:mysql:native:mariadb', status: 'unavailable', reason: 'trusted-containment-tools-unavailable' },
+    },
     contractManifest: {
       schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } },
       capabilities: {
-        runtimeServices: { schema: 'wp-codebox/runtime-service-capabilities/v1', capabilities },
+        runtimeServices: { schema: 'wp-codebox/runtime-service-capabilities/v1', packageCapabilities: process.env.OMIT_NATIVE_PACKAGE_CAPABILITY === '1' ? [] : ['runtime-service:mysql:native:mariadb'] },
       },
     },
   }));
@@ -149,8 +158,14 @@ try {
   const missingNativeCapability = expectPreflightFailure({
     database_type: 'mysql',
     wp_codebox_database_service: { provider: 'native', engine: 'mariadb' },
-  }, /does not advertise the required native MariaDB service capability/, { OMIT_NATIVE_DATABASE_CAPABILITY: '1' });
-  assert.deepEqual(await observations(missingNativeCapability.observed), [], 'missing upstream capability fails before recipe build');
+  }, /native MariaDB service is not ready on this host \(unavailable: trusted-containment-tools-unavailable\)/, { OMIT_NATIVE_DATABASE_CAPABILITY: '1' });
+  assert.deepEqual(await observations(missingNativeCapability.observed), [], 'unready host capability fails before recipe build');
+
+  const missingPackageCapability = expectPreflightFailure({
+    database_type: 'mysql',
+    wp_codebox_database_service: { provider: 'native', engine: 'mariadb' },
+  }, /does not advertise the required native MariaDB service capability/, { OMIT_NATIVE_PACKAGE_CAPABILITY: '1' });
+  assert.deepEqual(await observations(missingPackageCapability.observed), [], 'missing package capability fails before recipe build');
 
   for (const engine of [undefined, 'mysql', 'unsupported', 42]) {
     const rejectedEngine = expectPreflightFailure({

@@ -24,7 +24,7 @@ const capability = 'runtime-service:mysql:native:mariadb';
 assert.equal(descriptor?.schema, 'wp-codebox/runtime-descriptor/v1', 'candidate CLI must expose the public runtime descriptor');
 assert.equal(descriptor?.capabilities?.includes(capability), true, 'candidate CLI must advertise native MariaDB support');
 assert.equal(descriptor?.contractManifest?.capabilities?.runtimeServices?.schema, 'wp-codebox/runtime-service-capabilities/v1');
-assert.equal(descriptor?.contractManifest?.capabilities?.runtimeServices?.capabilities?.includes(capability), true);
+assert.equal(descriptor?.contractManifest?.capabilities?.runtimeServices?.packageCapabilities?.includes(capability), true);
 
 const extension = path.resolve(import.meta.dirname, '..');
 const runner = path.join(extension, 'scripts/test/test-runner-wp-codebox.sh');
