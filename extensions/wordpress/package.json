@@ -180,6 +180,7 @@
     "test:wp-codebox-prepared-dependency-cache": "bash tests/prepared-bench-dependency-cache-smoke.sh",
     "test:dependency-plugin-preflight": "bash tests/dependency-plugin-preflight-smoke.sh",
     "test:validation-dependency-resolution-regressions": "bash tests/validation-dependency-resolution-regressions-smoke.sh",
+    "test:validation-dependency-unresolved-fatal": "bash tests/validation-dependency-unresolved-fatal-smoke.sh",
     "test:phpstan-dependency-signature-shadowing": "bash tests/phpstan-dependency-signature-shadowing-smoke.sh",
     "test:phpstan-dependency-class-registration": "bash tests/phpstan-dependency-class-registration-smoke.sh",
     "test:build-before-production-prune": "bash scripts/build/build-before-production-prune-smoke.sh",

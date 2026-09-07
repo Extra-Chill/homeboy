@@ -1005,8 +1005,15 @@ _homeboy_prepare_cloned_dependency() {
     # such as `composer/installers` exist to relocate packages inside a real
     # WordPress tree, which this copy is not, and running them would make
     # preparation depend on the host's ambient `allow-plugins` policy.
-    if ! ( cd "$clone_path" && composer install --no-dev --no-interaction --no-plugins --quiet ); then
-        echo "Warning: Could not install Composer dependencies for validation dependency '${clone_path}'." >&2
+    # Composer's failure report ("Your requirements could not be resolved…
+    # Problem 1 … requires php >=8.4 …") is the only thing that explains why
+    # a dependency did not install. Keep the happy path quiet but surface the
+    # full error on failure instead of a one-line warning that hides the cause.
+    local composer_output
+    if ! composer_output=$( cd "$clone_path" && composer install --no-dev --no-interaction --no-plugins --no-progress 2>&1 ); then
+        echo "Error: Could not install Composer dependencies for validation dependency '${clone_path}'." >&2
+        echo "Error: Composer output (PHP $(php -r 'echo PHP_VERSION;' 2>/dev/null || echo unknown) at $(command -v php 2>/dev/null || echo php)):" >&2
+        printf '%s\n' "$composer_output" | grep -v -F 'Deprecation Notice' | sed 's/^/    /' >&2
         return 1
     fi
 }
@@ -1219,7 +1226,13 @@ _homeboy_walk_validation_dependency() {
     resolved=$(_homeboy_resolve_validation_dependency_entry_path "$dependency" || true)
 
     if [ -z "$resolved" ]; then
-        echo "Warning: Could not resolve WordPress validation dependency '$dependency_token'" >&2
+        # A declared dependency that cannot be resolved means the run will
+        # execute without a plugin the component requires. Every test that
+        # touches that plugin then fails for a reason unrelated to the code
+        # under test, and the failure count is meaningless. Record it so the
+        # resolver can fail the phase instead of silently narrowing the graph.
+        echo "Error: Could not resolve WordPress validation dependency '$dependency_token'" >&2
+        unresolved_dependencies+=("$dependency_token")
         return 0
     fi
 
@@ -1321,11 +1334,18 @@ homeboy_resolve_validation_dependency_paths() {
     local -A seen_paths=()
     local -A seen_dependencies=()
     local -A seen_slugs=()
+    local -a unresolved_dependencies=()
     local dependency
 
     while IFS= read -r dependency; do
         _homeboy_walk_validation_dependency "$dependency"
     done <<< "$all_deps"
+
+    if [ "${#unresolved_dependencies[@]}" -gt 0 ]; then
+        echo "Error: ${#unresolved_dependencies[@]} declared WordPress validation dependency(ies) could not be resolved: ${unresolved_dependencies[*]}" >&2
+        echo "Error: Refusing to continue with a partial dependency graph; results would not reflect the component under test." >&2
+        return 1
+    fi
 }
 
 homeboy_merge_validation_dependency_paths() {
@@ -2048,7 +2068,12 @@ homeboy_export_validation_dependency_paths() {
     local existing_paths
     existing_paths=$(homeboy_translate_validation_dependency_paths "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}")
     local resolved_paths
-    resolved_paths=$(HOMEBOY_SUPPRESS_DEPENDENCY_RESOLUTION_LOG=1 homeboy_resolve_validation_dependency_paths "$plugin_path" || true)
+    if ! resolved_paths=$(HOMEBOY_SUPPRESS_DEPENDENCY_RESOLUTION_LOG=1 homeboy_resolve_validation_dependency_paths "$plugin_path"); then
+        # The resolver already printed which dependency failed and why.
+        # Propagate so the calling runner fails the phase with that reason
+        # rather than running a test suite against a partial plugin graph.
+        return 1
+    fi
     resolved_paths=$(homeboy_translate_validation_dependency_paths "$resolved_paths")
 
     local merged_paths
