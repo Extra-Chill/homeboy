@@ -695,19 +695,28 @@ pub(super) fn status_session_state_until(
 /// tunnel for an in-process handoff. Borrowing never writes a controller
 /// record, so only the original controller may later tear down that tunnel.
 pub(super) fn read_session_or_live_peer(runner_id: &str) -> Result<Option<RunnerSession>> {
-    read_session_or_live_peer_for_controller(runner_id, &controller_id())
+    read_session_or_live_peer_in_root(&paths::homeboy()?, runner_id)
+}
+
+/// [`read_session_or_live_peer`] below an already-resolved config root.
+pub(super) fn read_session_or_live_peer_in_root(
+    config_root: &std::path::Path,
+    runner_id: &str,
+) -> Result<Option<RunnerSession>> {
+    read_session_or_live_peer_for_controller(config_root, runner_id, &controller_id())
 }
 
 fn read_session_or_live_peer_for_controller(
+    config_root: &std::path::Path,
     runner_id: &str,
     controller_id: &str,
 ) -> Result<Option<RunnerSession>> {
-    let session = read_session_for_controller(runner_id, controller_id)?;
+    let session = read_session_for_controller_in_root(config_root, runner_id, controller_id)?;
     if session.as_ref().is_some_and(session_is_live) {
         return Ok(session);
     }
 
-    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
     resolve_session_or_live_peer_in(&directory, controller_id, session, session_is_live)
 }
 

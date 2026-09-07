@@ -420,7 +420,21 @@ fn selection_blocker_after_busy(
 /// and generation. A child process must present the capability explicitly
 /// attached by [`RuntimePromotionLease::authorize_subprocess`].
 pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimePromotionLease> {
+    acquire_in_root(&paths::runtime_promotion_dir()?, operation, target)
+}
+
+/// [`acquire`] below an already-resolved runtime promotion root.
+///
+/// The lease store is machine-global by default. An explicitly rooted acquire
+/// keeps an isolated caller from observing or contending the host's live
+/// promotion lease (#14362).
+pub fn acquire_in_root(
+    root: &Path,
+    operation: &str,
+    target: impl Into<String>,
+) -> Result<RuntimePromotionLease> {
     acquire_with_pin_policy(
+        root,
         operation,
         target.into(),
         String::new(),
@@ -455,6 +469,7 @@ pub fn acquire_waiting_for_compatible_with_status(
     progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimePromotionLease> {
     acquire_waiting_for_compatible_key_and_status(
+        &paths::runtime_promotion_dir()?,
         operation,
         target,
         "",
@@ -475,6 +490,7 @@ pub fn acquire_waiting_for_target_with_status(
     progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimePromotionLease> {
     acquire_waiting_for_compatible_key_and_status(
+        &paths::runtime_promotion_dir()?,
         operation,
         target,
         "",
@@ -493,7 +509,27 @@ pub fn acquire_waiting_for_compatible_key(
     timeout: Duration,
     progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimePromotionLease> {
+    acquire_waiting_for_compatible_key_in_root(
+        &paths::runtime_promotion_dir()?,
+        operation,
+        target,
+        compatibility_key,
+        timeout,
+        progress,
+    )
+}
+
+/// [`acquire_waiting_for_compatible_key`] below an already-resolved root.
+pub fn acquire_waiting_for_compatible_key_in_root(
+    root: &Path,
+    operation: &str,
+    target: impl Into<String>,
+    compatibility_key: impl Into<String>,
+    timeout: Duration,
+    progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimePromotionLease> {
     acquire_waiting_for_compatible_key_and_status(
+        root,
         operation,
         target,
         compatibility_key,
@@ -511,6 +547,7 @@ enum CompatibleOwnerPolicy {
 }
 
 fn acquire_waiting_for_compatible_key_and_status(
+    root: &Path,
     operation: &str,
     target: impl Into<String>,
     compatibility_key: impl Into<String>,
@@ -536,6 +573,7 @@ fn acquire_waiting_for_compatible_key_and_status(
             last_progress: &mut last_progress,
         };
         match acquire_with_pin_policy(
+            root,
             operation,
             target.clone(),
             compatibility_key.clone(),
@@ -581,7 +619,17 @@ pub fn acquire_for_generation_rotation(
     operation: &str,
     target: impl Into<String>,
 ) -> Result<RuntimePromotionLease> {
+    acquire_for_generation_rotation_in_root(&paths::runtime_promotion_dir()?, operation, target)
+}
+
+/// [`acquire_for_generation_rotation`] below an already-resolved root.
+pub fn acquire_for_generation_rotation_in_root(
+    root: &Path,
+    operation: &str,
+    target: impl Into<String>,
+) -> Result<RuntimePromotionLease> {
     acquire_with_pin_policy(
+        root,
         operation,
         target.into(),
         String::new(),
@@ -635,6 +683,7 @@ impl BoundedAdmission<'_> {
 }
 
 fn acquire_with_pin_policy(
+    root: &Path,
     operation: &str,
     target: String,
     compatibility_key: String,
@@ -642,8 +691,7 @@ fn acquire_with_pin_policy(
     foreign_pin_policy: ForeignPinPolicy,
     mut admission: Option<&mut BoundedAdmission<'_>>,
 ) -> Result<RuntimePromotionLease> {
-    let root = paths::runtime_promotion_dir()?;
-    fs::create_dir_all(&root).map_err(io("create runtime promotion directory"))?;
+    fs::create_dir_all(root).map_err(io("create runtime promotion directory"))?;
     let path = root.join(LEASE_DIR);
     let pid = std::process::id();
     let generation = current_generation();
@@ -682,6 +730,7 @@ fn acquire_with_pin_policy(
                 // never return an unpublished guard.
                 if !path.exists() {
                     return acquire_with_pin_policy(
+                        root,
                         operation,
                         target,
                         compatibility_key,
@@ -734,9 +783,10 @@ fn acquire_with_pin_policy(
             if reclaimable(&held) {
                 // Rename is the ownership CAS: one recovery moves the stale
                 // directory while former owners cannot remove its replacement.
-                match archive_stale_lease(&root, &path, &held) {
+                match archive_stale_lease(root, &path, &held) {
                     Ok(_) => {
                         return acquire_with_pin_policy(
+                            root,
                             operation,
                             target,
                             compatibility_key,
@@ -747,6 +797,7 @@ fn acquire_with_pin_policy(
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         return acquire_with_pin_policy(
+                            root,
                             operation,
                             target,
                             compatibility_key,
@@ -763,15 +814,15 @@ fn acquire_with_pin_policy(
     };
 
     if foreign_pin_policy == ForeignPinPolicy::Block && lease.primary {
-        let admission_lock = open_admission_lock(&root)?;
+        let admission_lock = open_admission_lock(root)?;
         if let Some(admission) = admission.as_deref_mut() {
             wait_for_admission_lock(&lease, &admission_lock, admission)?;
-            wait_for_foreign_generation_pins(&root, &lease, Some((&lease, admission)))?;
+            wait_for_foreign_generation_pins(root, &lease, Some((&lease, admission)))?;
         } else {
             admission_lock
                 .lock_exclusive()
                 .map_err(io("reserve runtime promotion admission"))?;
-            wait_for_foreign_generation_pins(&root, &lease, None)?;
+            wait_for_foreign_generation_pins(root, &lease, None)?;
         }
         lease.admission_lock = Some(admission_lock);
     }

@@ -14,18 +14,14 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::output::MergeOutput;
 
-use super::connection::{
-    active_jobs_before_daemon_replacement, configured_runner_homeboy_build_identity,
-    disconnect_with_session, rotate_daemon_generation,
-};
+use super::connection::configured_runner_homeboy_build_identity;
 use super::execution::{exec_with_status_snapshot, exec_with_status_snapshot_in_roots};
 use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
 use super::{
-    connect_with_orphan_adoption, copy_snapshot_to_directory, exec, load, load_in_roots,
-    materialize_runner_extension_with_env, merge, merge_in_roots,
-    normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
-    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    copy_snapshot_to_directory, exec, load, load_in_roots, materialize_runner_extension_with_env,
+    merge, merge_in_roots, normalize_runner_command_env_for_homeboy_path,
+    plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
 };
 
@@ -633,7 +629,7 @@ pub fn refresh_homeboy_binary_in_roots(
         .and_then(|identity| identity_commit(&identity))
         .unwrap_or_else(|| format!("unverified-{}", uuid::Uuid::new_v4()));
     let promotion_lease =
-        acquire_runner_binary_promotion(&options.runner_id, &promotion_candidate)?;
+        acquire_runner_binary_promotion_in_roots(roots, &options.runner_id, &promotion_candidate)?;
     // Materialization may have waited behind a newer refresh. Re-read every
     // authority while holding the promotion lease. In particular, a daemon can
     // connect while materialization runs, so reconnect decisions cannot use the
@@ -840,7 +836,10 @@ pub fn refresh_homeboy_binary_in_roots(
     let interrupted_job_ids;
     if options.reconnect {
         promotion_lease.assert_generation()?;
-        let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
+        let active_jobs = super::connection::active_jobs_before_daemon_replacement_in_roots(
+            roots,
+            &plan.runner_id,
+        )?;
         let preserve_generations = super::generation_store::requires_generation_preserving_refresh(
             &plan.runner_id,
             refresh_session.as_ref(),
@@ -859,7 +858,8 @@ pub fn refresh_homeboy_binary_in_roots(
                 .iter()
                 .map(|job| job.job_id.clone())
                 .collect::<Vec<_>>();
-            if let Err(error) = rotate_daemon_generation(
+            if let Err(error) = super::connection::rotate_daemon_generation_in_roots(
+                roots,
                 &plan.runner_id,
                 &selected_binary_path,
                 candidate_version,
@@ -967,7 +967,13 @@ pub fn refresh_homeboy_binary_in_roots(
             }
         };
         if let Err(error) = disconnect_before_reconnect(refresh_session.as_ref(), |session| {
-            disconnect_with_session(&plan.runner_id, Some(session), options.force).map(|_| ())
+            super::connection::disconnect_with_session_in_roots(
+                roots,
+                &plan.runner_id,
+                Some(session),
+                options.force,
+            )
+            .map(|_| ())
         }) {
             return rollback_refresh_error_with(error, || {
                 restore_runner_homeboy_path_if_selected_in_roots(
@@ -993,57 +999,59 @@ pub fn refresh_homeboy_binary_in_roots(
         if refresh_session.is_some() {
             phase_summary.push(refresh_phase("disconnect", true, 0));
         }
-        let (report, connect_exit_code) = match connect_with_orphan_adoption(
-            &plan.runner_id,
-            refresh_owned_lease.as_deref(),
-            &[],
-            false,
-            None,
-            None,
-            None,
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                let readiness = blocked_refresh_readiness(&plan);
-                phase_summary.push(refresh_phase("reconnect_transport", true, 1));
-                return Ok((
-                    HomeboyBinaryRefreshOutput {
-                        variant: "refresh_homeboy",
-                        command: "runner.refresh_homeboy",
-                        runner_id: plan.runner_id.clone(),
-                        dry_run: false,
-                        plan: plan.clone(),
-                        identity: Some(identity.clone()),
-                        updated_fields: updated_fields.clone(),
-                        phase_summary,
-                        daemon_refreshed: false,
-                        interrupted_job_ids,
-                        selected_binary_path: selected_binary_path.clone(),
-                        next_actions: Vec::new(),
-                        reconnect_required: true,
-                        followup_commands: readiness.continuation.clone().into_iter().collect(),
-                        readiness: Some(readiness),
-                        reconnect_deferred: None,
-                        failure: Some(refresh_verification_failure(
-                            &plan,
-                            exec_output.clone(),
-                            error.message,
-                        )),
-                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
-                            diagnostic_ssh_bootstrap,
-                            &plan,
-                            &bootstrap,
-                            &identity,
-                            &updated_fields,
-                        )),
-                        rollback: rollback.clone(),
-                        build_transcript: Some(refresh_build_transcript(&exec_output)),
-                        artifacts: None,
-                    },
-                    1,
-                ));
-            }
-        };
+        let (report, connect_exit_code) =
+            match super::connection::connect_with_orphan_adoption_in_roots(
+                roots,
+                &plan.runner_id,
+                refresh_owned_lease.as_deref(),
+                &[],
+                false,
+                None,
+                None,
+                None,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    let readiness = blocked_refresh_readiness(&plan);
+                    phase_summary.push(refresh_phase("reconnect_transport", true, 1));
+                    return Ok((
+                        HomeboyBinaryRefreshOutput {
+                            variant: "refresh_homeboy",
+                            command: "runner.refresh_homeboy",
+                            runner_id: plan.runner_id.clone(),
+                            dry_run: false,
+                            plan: plan.clone(),
+                            identity: Some(identity.clone()),
+                            updated_fields: updated_fields.clone(),
+                            phase_summary,
+                            daemon_refreshed: false,
+                            interrupted_job_ids,
+                            selected_binary_path: selected_binary_path.clone(),
+                            next_actions: Vec::new(),
+                            reconnect_required: true,
+                            followup_commands: readiness.continuation.clone().into_iter().collect(),
+                            readiness: Some(readiness),
+                            reconnect_deferred: None,
+                            failure: Some(refresh_verification_failure(
+                                &plan,
+                                exec_output.clone(),
+                                error.message,
+                            )),
+                            bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                                diagnostic_ssh_bootstrap,
+                                &plan,
+                                &bootstrap,
+                                &identity,
+                                &updated_fields,
+                            )),
+                            rollback: rollback.clone(),
+                            build_transcript: Some(refresh_build_transcript(&exec_output)),
+                            artifacts: None,
+                        },
+                        1,
+                    ));
+                }
+            };
         let daemon_identity_verification = (connect_exit_code == 0)
             .then(|| verify_refreshed_daemon_topology(&plan.runner_id, &identity))
             .transpose()
@@ -1115,9 +1123,11 @@ pub fn refresh_homeboy_binary_in_roots(
             .get("git_commit")
             .and_then(Value::as_str)
         {
-            if let Err(readiness_error) =
-                probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
-            {
+            if let Err(readiness_error) = probe_reconnected_admission_readiness_in_roots(
+                roots,
+                &plan.runner_id,
+                identity_commit,
+            ) {
                 // The readiness probe can discover that the newly connected
                 // transport vanished. Never certify a transient connect as a
                 // successful reconnect when its postcondition is disconnected.
@@ -1251,7 +1261,24 @@ fn acquire_runner_binary_promotion(
     runner_id: &str,
     candidate_commit: &str,
 ) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_with(
+    acquire_runner_binary_promotion_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        candidate_commit,
+    )
+}
+
+/// [`acquire_runner_binary_promotion`] against an explicitly injected root.
+///
+/// The promotion lease store is machine-global by default, so an isolated
+/// refresh would otherwise contend against the host's live lease (#14362).
+fn acquire_runner_binary_promotion_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    candidate_commit: &str,
+) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
+    acquire_runner_binary_promotion_with_in_root(
+        &homeboy_core::paths::runtime_promotion_dir_in_root(roots.data()),
         runner_id,
         candidate_commit,
         super::lab_selection::emit_runtime_promotion_wait,
@@ -1263,7 +1290,22 @@ fn acquire_runner_binary_promotion_with(
     candidate_commit: &str,
     progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
 ) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key(
+    acquire_runner_binary_promotion_with_in_root(
+        &homeboy_core::paths::runtime_promotion_dir()?,
+        runner_id,
+        candidate_commit,
+        progress,
+    )
+}
+
+fn acquire_runner_binary_promotion_with_in_root(
+    root: &std::path::Path,
+    runner_id: &str,
+    candidate_commit: &str,
+    progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
+) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
+    homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key_in_root(
+        root,
         "runner binary promotion",
         runner_id.to_string(),
         candidate_commit,
@@ -1625,7 +1667,20 @@ pub(crate) fn probe_reconnected_admission_readiness(
     runner_id: &str,
     identity_commit: &str,
 ) -> Result<()> {
-    let session = super::connection::status_for_admission(runner_id)?
+    probe_reconnected_admission_readiness_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        identity_commit,
+    )
+}
+
+/// [`probe_reconnected_admission_readiness`] against an injected root.
+pub(crate) fn probe_reconnected_admission_readiness_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    identity_commit: &str,
+) -> Result<()> {
+    let session = super::connection::status_for_admission_in_roots(roots, runner_id)?
         .session
         .filter(|session| session.mode == super::RunnerTunnelMode::DirectSsh);
     let Some(session) = session else {
