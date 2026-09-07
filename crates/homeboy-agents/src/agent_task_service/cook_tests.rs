@@ -15562,6 +15562,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect_err("artifact preflight fails before shell execution");
         assert!(!replacement_gate_execution_started(
@@ -15570,6 +15571,28 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         )
         .expect("read replacement gate fence"));
         std::fs::rename(&unavailable_patch, &patch_path).expect("restore promotion artifact");
+        mark_replacement_gate_execution_started(&test_lifecycle_store(), "run-verify-replacement")
+            .expect("persist interrupted replacement execution");
+        agent_task_lifecycle::rewrite_record_for_test("run-verify-replacement", |record| {
+            record.metadata["replacement_gate_execution_fences"]["verify-replacement"]
+                ["owner_pid"] = serde_json::json!(u32::MAX);
+        })
+        .expect("simulate terminated interrupted executor");
+        let interrupted = verify_replacement_gates(
+            "cook-verify-replacement",
+            VerifyGateOptions {
+                verify: vec![reviewer_gate.clone()],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+            None,
+        )
+        .expect_err("interrupted gates require explicit rerun authority");
+        assert_eq!(
+            interrupted.details["recovery"]["kind"],
+            "external_candidate_bound_proof_required"
+        );
+        assert!(!gate_log.exists());
         let replacement = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
@@ -15580,6 +15603,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            Some("Chris approved rerunning after the interrupted executor".to_string()),
         )
         .expect("replacement gates complete");
 
@@ -15629,6 +15653,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect_err("completed inherited failure needs renewed authorization");
         assert_eq!(error.details["field"], "accept_inherited_failures");
@@ -15640,6 +15665,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect("completed replacement proof replays without rerunning gates");
         assert_eq!(replay.status, replacement.status);
@@ -15674,6 +15700,11 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
                 ["accept_inherited_failures"],
             true
+        );
+        assert_eq!(
+            record.metadata["latest_promotion"]["provenance"]
+                ["replacement_gate_execution_recovery"]["operator_authorization"],
+            "Chris approved rerunning after the interrupted executor"
         );
     });
 }
@@ -15715,6 +15746,7 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
+            None,
         )
         .expect_err("interrupted execution must fail closed");
 
@@ -15722,6 +15754,20 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
         assert_eq!(
             error.details["recovery"]["kind"],
             "external_candidate_bound_proof_required"
+        );
+        let live_error = verify_replacement_gates(
+            cook_id,
+            VerifyGateOptions {
+                verify: vec![format!("printf ran > {}", gate_log.display())],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+            Some("Chris approved rerunning after the interrupted executor".to_string()),
+        )
+        .expect_err("a live interrupted owner must veto an authorized rerun");
+        assert_eq!(
+            live_error.details["recovery"]["kind"],
+            "replacement_gate_execution_live"
         );
         assert!(!gate_log.exists());
         assert!(

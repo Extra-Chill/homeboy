@@ -1546,6 +1546,7 @@ pub fn verify_replacement_gates(
     cook_or_attempt_id: &str,
     gates: crate::agent_task_gate::VerifyGateOptions,
     external_authorization: String,
+    interrupted_rerun_authorization: Option<String>,
 ) -> Result<AgentTaskPromotionReport> {
     let run_id = super::cook_recipe::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
     let lifecycle_store =
@@ -1591,6 +1592,7 @@ pub fn verify_replacement_gates(
                 &run_id,
                 gates,
                 external_authorization,
+                interrupted_rerun_authorization,
             );
             match result {
                 Ok(report) => {
@@ -1623,6 +1625,7 @@ fn verify_replacement_gates_owned(
     run_id: &str,
     gates: crate::agent_task_gate::VerifyGateOptions,
     external_authorization: String,
+    interrupted_rerun_authorization: Option<String>,
 ) -> Result<AgentTaskPromotionReport> {
     let accept_inherited_failures = gates.accept_inherited_failures;
     let gate_timeout = gates.gate_timeout();
@@ -1648,8 +1651,17 @@ fn verify_replacement_gates_owned(
             None,
         ));
     }
-    if replacement_gate_execution_started(lifecycle_store, run_id)? {
+    let interrupted_rerun_authorization =
+        interrupted_rerun_authorization.filter(|authorization| !authorization.trim().is_empty());
+    let recovering_interrupted_execution =
+        replacement_gate_execution_started(lifecycle_store, run_id)?;
+    if recovering_interrupted_execution && interrupted_rerun_authorization.is_none() {
         return Err(interrupted_replacement_gate_execution_error(run_id));
+    }
+    if recovering_interrupted_execution
+        && replacement_gate_execution_is_live(lifecycle_store, run_id)?
+    {
+        return Err(live_replacement_gate_execution_error(run_id));
     }
     if !matches!(
         original.status,
@@ -1780,6 +1792,15 @@ fn verify_replacement_gates_owned(
                 },
             ),
     );
+    if recovering_interrupted_execution {
+        let authorization = interrupted_rerun_authorization
+            .expect("interrupted execution recovery requires explicit authorization");
+        replacement.provenance["replacement_gate_execution_recovery"] = serde_json::json!({
+            "schema": "homeboy/agent-task-replacement-gate-execution-recovery/v1",
+            "operator_authorization": authorization,
+            "automatic_rerun": false,
+        });
+    }
     record_replacement_gate_proof(
         &run_id,
         replacement,
@@ -1862,6 +1883,21 @@ pub(crate) fn replacement_gate_execution_started(
         .is_some())
 }
 
+fn replacement_gate_execution_is_live(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let record = lifecycle_store.read_record(run_id)?;
+    Ok(record
+        .metadata
+        .pointer(&format!(
+            "/{REPLACEMENT_GATE_EXECUTION_FENCES_KEY}/verify-replacement/owner_pid"
+        ))
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .is_some_and(homeboy_core::process::pid_is_running))
+}
+
 pub(crate) fn mark_replacement_gate_execution_started(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -1880,6 +1916,7 @@ pub(crate) fn mark_replacement_gate_execution_started(
         fences["verify-replacement"] = serde_json::json!({
             "schema": "homeboy/agent-task-replacement-gate-execution-fence/v1",
             "state": "started",
+            "owner_pid": std::process::id(),
         });
         true
     })?;
@@ -1899,8 +1936,26 @@ fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {
         "kind": "external_candidate_bound_proof_required",
         "run_id": run_id,
         "command": format!(
+            "homeboy agent-task verify-replacement {run_id} --authorize-external-proof <proof-authorization> --authorize-interrupted-rerun <rerun-authorization> --verify '<candidate-bound command>'"
+        ),
+        "external_proof_command": format!(
             "homeboy agent-task record-replacement-gate-proof {run_id} --promotion @replacement.json --authorize-external-proof <authorization>"
         ),
+    });
+    error
+}
+
+fn live_replacement_gate_execution_error(run_id: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "replacement_gate_proof",
+        "replacement gate execution still has a live owner; Homeboy will not rerun shell gates concurrently",
+        Some(run_id.to_string()),
+        Some(vec![format!("homeboy agent-task status {run_id}")]),
+    );
+    error.details["recovery"] = serde_json::json!({
+        "kind": "replacement_gate_execution_live",
+        "run_id": run_id,
+        "status_command": format!("homeboy agent-task status {run_id}"),
     });
     error
 }
