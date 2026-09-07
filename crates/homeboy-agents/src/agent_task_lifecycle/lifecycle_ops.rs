@@ -421,6 +421,19 @@ pub fn submit_plan(
     submit_plan_in_store(&lifecycle_store, plan, requested_run_id)
 }
 
+pub(crate) fn submit_plan_with_submission_metadata(
+    plan: &AgentTaskPlan,
+    run_id: &str,
+    submission_metadata: serde_json::Map<String, Value>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    lifecycle_store.submit_plan_with_current_runtime_and_metadata(
+        plan,
+        run_id,
+        Some(submission_metadata),
+    )
+}
+
 /// Submit a plan into an explicitly rooted store.
 ///
 /// The admission cancellation check is the reach that has to move with the
@@ -2667,6 +2680,9 @@ where
     if let Some(resolution) = homeboy_core::notification_route::current_resolution() {
         resolution.insert_into_metadata(&mut metadata);
     }
+    let replaces_control_plane_submission = submission_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.contains_key("control_plane_submission"));
     if let Some(submission_metadata) = submission_metadata {
         metadata
             .as_object_mut()
@@ -2737,6 +2753,11 @@ where
         ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
+            }
+        }
+        if !replaces_control_plane_submission {
+            if let Some(value) = existing.metadata.get("control_plane_submission") {
+                record.metadata["control_plane_submission"] = value.clone();
             }
         }
         if pre_execution_recovery {

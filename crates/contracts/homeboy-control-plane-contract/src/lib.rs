@@ -15,6 +15,7 @@ pub mod identity;
 pub mod resolve;
 pub mod resource;
 pub mod review;
+pub mod submission;
 
 pub use action::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome, ControlPlaneActionPayload,
@@ -50,4 +51,8 @@ pub use resource::{
 };
 pub use review::{
     ControlPlaneRunReview, ControlPlaneRunReviewRequest, CONTROL_PLANE_RUN_REVIEW_SCHEMA,
+};
+pub use submission::{
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
+    CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
 };

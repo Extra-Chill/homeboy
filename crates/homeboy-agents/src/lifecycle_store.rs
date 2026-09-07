@@ -195,24 +195,32 @@ impl AgentTaskLifecycleStore {
         plan: &AgentTaskPlan,
         run_id: &str,
     ) -> Result<AgentTaskRunRecord> {
-        self.submit_plan_with_runtime_admission_status(
+        self.submit_plan_with_current_runtime_and_metadata(plan, run_id, None)
+    }
+
+    pub(crate) fn submit_plan_with_current_runtime_and_metadata(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+        submission_metadata: Option<serde_json::Map<String, Value>>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::submit_plan_with_runtime_admission_in_store(
+            self,
             plan,
-            run_id,
+            Some(run_id),
             super::lifecycle_ops::execution_runner_id(),
-            &crate::agent_task_service::cook_pre_execution::store_admission_status(self),
+            submission_metadata,
+            Some(&crate::agent_task_service::cook_pre_execution::store_admission_status(self)),
             |run_id| {
                 let runtime_root =
                     homeboy_core::controller_runtime::runtime_root_in(self.roots().data())?;
                 homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
-                    &runtime_root,
-                    run_id,
-                    || {
+                    &runtime_root, run_id, || {
                         Ok(crate::agent_task_service::cook_pre_execution::runtime_admission_cancellation_requested(
                             &self.read_record(run_id)?,
                         ))
                     },
-                )
-                .map(|admission| admission.runtime)
+                ).map(|admission| admission.runtime)
             },
         )
     }
