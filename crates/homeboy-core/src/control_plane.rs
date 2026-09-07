@@ -87,6 +87,7 @@ pub fn review(
     requested_id: &RunId,
     request: &ControlPlaneRunReviewRequest,
 ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
+    request.validate()?;
     with_provider(|provider| provider.review(requested_id, request))
 }
 

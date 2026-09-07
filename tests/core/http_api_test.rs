@@ -486,7 +486,7 @@ fn control_plane_http_review_uses_the_typed_provider_contract() {
     let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
         path: format!(
-            "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/review?to_worktree=homeboy@candidate&provider_command=homeboy&provider_argv=promote"
+            "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/review?to_worktree=homeboy%40candidate&provider_argv=homeboy&provider_argv=--config%3Dpath+with+spaces"
         ),
         body: None,
     })
@@ -504,7 +504,29 @@ fn control_plane_http_review_uses_the_typed_provider_contract() {
     );
     assert_eq!(
         review.evidence["request"]["provider_argv"],
-        serde_json::json!(["promote"])
+        serde_json::json!(["homeboy", "--config=path with spaces"])
+    );
+}
+
+#[test]
+fn control_plane_http_review_rejects_conflicting_provider_inputs() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!(
+            "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/review?provider_command=homeboy&provider_argv=homeboy"
+        ),
+        body: None,
+    })
+    .expect("typed review error");
+
+    assert_eq!(response.status, 400);
+    let result: ControlPlaneResult<ControlPlaneRunReview> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(!result.ok);
+    assert_eq!(
+        result.error.expect("error").class,
+        homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
     );
 }
 

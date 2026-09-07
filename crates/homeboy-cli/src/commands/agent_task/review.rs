@@ -376,8 +376,11 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
     let gates = resolve_promotion_gates(
         &mut args.gates,
         args.gates_from_cook_recipe,
+        args.gates_from_resume_contract,
         source_run_id.as_deref(),
         &args.source,
+        task_id.as_deref(),
+        requested_artifact_id.as_deref(),
     )?;
     let artifact_id = if let Some(run_id) = source_run_id.as_deref() {
         requested_artifact_id
@@ -480,10 +483,13 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
 pub(crate) fn resolve_promotion_gates(
     gates: &mut VerifyGateArgs,
     from_cook_recipe: bool,
+    from_resume_contract: bool,
     source_run_id: Option<&str>,
     source: &str,
+    task_id: Option<&str>,
+    artifact_id: Option<&str>,
 ) -> homeboy::core::Result<VerifyGateOptions> {
-    if !from_cook_recipe {
+    if !from_cook_recipe && !from_resume_contract {
         gates.snapshot_file_inputs()?;
         return Ok(gates.clone().into());
     }
@@ -493,20 +499,75 @@ pub(crate) fn resolve_promotion_gates(
         || supplied_gates != VerifyGateOptions::default()
     {
         return Err(homeboy::core::Error::validation_invalid_argument(
-            "gates-from-cook-recipe",
-            "cannot combine a durable Cook gate reference with explicit gate options",
+            "durable_gate_reference",
+            "cannot combine a durable gate reference with explicit gate options",
             None,
             None,
         ));
     }
     let run_id = source_run_id.ok_or_else(|| {
         homeboy::core::Error::validation_invalid_argument(
-            "gates-from-cook-recipe",
-            "requires a source owned by a durable Cook attempt",
+            "durable_gate_reference",
+            "requires a durable run source",
             Some(source.to_string()),
             None,
         )
     })?;
+    if from_resume_contract {
+        let (task_id, artifact_id) = task_id.zip(artifact_id).ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "gates-from-resume-contract",
+                "requires exact --task-id and --artifact-id selectors",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        let durable = agent_task_lifecycle::durable_local_read(run_id)?;
+        let promotion = durable
+            .record
+            .metadata
+            .get("latest_promotion")
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "gates-from-resume-contract",
+                    "source run has no durable promotion resume contract",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })?;
+        let matches_task =
+            promotion.pointer("/source/task_id").and_then(Value::as_str) == Some(task_id);
+        let matches_artifact = promotion
+            .pointer("/patch_artifact/id")
+            .and_then(Value::as_str)
+            == Some(artifact_id);
+        if !matches_task || !matches_artifact {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "gates-from-resume-contract",
+                "durable promotion resume contract does not match the selected candidate",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let gate_policy = promotion
+            .pointer("/provenance/resume_contract/gates")
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "gates-from-resume-contract",
+                    "durable promotion resume contract has no gate policy",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })?;
+        return serde_json::from_value(gate_policy.clone()).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "gates-from-resume-contract",
+                format!("durable promotion resume contract has an invalid gate policy: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        });
+    }
     let recipe = agent_task_service::load_recipe_for_attempt(run_id)?.ok_or_else(|| {
         homeboy::core::Error::validation_invalid_argument(
             "gates-from-cook-recipe",

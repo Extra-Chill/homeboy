@@ -165,12 +165,142 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
         };
         let mut cli_gates = cook.gates;
 
-        let hydrated = review::resolve_promotion_gates(&mut cli_gates, true, Some(run_id), run_id)
-            .expect("hydrate durable Cook gates");
+        let hydrated = review::resolve_promotion_gates(
+            &mut cli_gates,
+            true,
+            false,
+            Some(run_id),
+            run_id,
+            None,
+            None,
+        )
+        .expect("hydrate durable Cook gates");
 
         assert_eq!(hydrated, gates);
         assert_eq!(hydrated.private_verify, [private_program]);
         assert_eq!(hydrated.input_sources[0].path, None);
+    });
+}
+
+#[test]
+fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
+    with_temp_home(|| {
+        let run_id = "run-private-resume-gates";
+        let private_program = "printf 'private token'";
+        let gates = homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            private_verify: vec![private_program.to_string()],
+            execution_policy:
+                homeboy::agents::agent_tasks::gate::AgentTaskGateExecutionPolicy::ContinueAll,
+            ..Default::default()
+        };
+        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
+            .expect("run completed");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["latest_promotion"] = json!({
+                "status": "gate_failed",
+                "source": { "task_id": "task-a" },
+                "patch_artifact": { "id": "patch-a" },
+                "target": { "worktree": "fixture@resume" },
+                "provenance": {
+                    "resume_contract": {
+                        "inputs": { "base_ref": "main" },
+                        "gates": gates,
+                    }
+                }
+            });
+        })
+        .expect("durable resume contract");
+
+        let (review_value, _) = review::review(ReviewArgs {
+            run_id: run_id.to_string(),
+            full: true,
+            to_worktree: None,
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review");
+        let serialized = serde_json::to_string(&review_value).expect("review JSON");
+        assert!(!serialized.contains(private_program));
+        let command = review_value["evidence"]["promotion_candidates"][0]["command"]
+            .as_array()
+            .expect("promotion command")
+            .iter()
+            .map(|argument| argument.as_str().expect("argument"))
+            .collect::<Vec<_>>();
+        let cli =
+            crate::cli_surface::Cli::try_parse_from(command).expect("generated command parses");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Promote(mut promote) = agent_task.command else {
+            panic!("promote command");
+        };
+        assert!(promote.gates_from_resume_contract);
+        let missing_selectors = review::resolve_promotion_gates(
+            &mut promote.gates,
+            false,
+            true,
+            Some(run_id),
+            run_id,
+            None,
+            None,
+        )
+        .expect_err("resume contract requires exact selectors");
+        assert!(missing_selectors
+            .message
+            .contains("--task-id and --artifact-id"));
+        let hydrated = review::resolve_promotion_gates(
+            &mut promote.gates,
+            false,
+            true,
+            Some(run_id),
+            run_id,
+            Some("task-a"),
+            Some("patch-a"),
+        )
+        .expect("hydrate durable resume gates");
+        assert_eq!(hydrated, gates);
+        assert_eq!(hydrated.private_verify, [private_program]);
+    });
+}
+
+#[test]
+fn review_does_not_advertise_a_command_for_an_invalid_resume_gate_contract() {
+    with_temp_home(|| {
+        let run_id = "run-invalid-resume-gates";
+        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
+            .expect("run completed");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["latest_promotion"] = json!({
+                "status": "gate_failed",
+                "source": { "task_id": "task-a" },
+                "patch_artifact": { "id": "patch-a" },
+                "target": { "worktree": "fixture@resume" },
+                "provenance": { "resume_contract": {
+                    "inputs": { "base_ref": "main" },
+                    "gates": { "gate_timeout_seconds": "not-a-number" }
+                }}
+            });
+        })
+        .expect("invalid durable resume contract");
+
+        let (review_value, _) = review::review(ReviewArgs {
+            run_id: run_id.to_string(),
+            full: true,
+            to_worktree: None,
+            provider_command: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review remains readable");
+        let candidate = &review_value["evidence"]["promotion_candidates"][0];
+
+        assert_eq!(candidate["ready"], false, "{candidate}");
+        assert!(candidate["command"].is_null());
+        assert_eq!(
+            candidate["unavailable_reason"],
+            "durable resume contract has an invalid gate policy"
+        );
     });
 }
 

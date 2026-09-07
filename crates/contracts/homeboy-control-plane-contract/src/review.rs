@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ControlPlaneRun, RunId};
+use crate::{ControlPlaneError, ControlPlaneRun, RunId};
 
 pub const CONTROL_PLANE_RUN_REVIEW_SCHEMA: &str = "homeboy/control-plane-run-review/v1";
 
@@ -18,6 +18,17 @@ pub struct ControlPlaneRunReviewRequest {
     pub provider_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_argv: Vec<String>,
+}
+
+impl ControlPlaneRunReviewRequest {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if self.provider_command.is_some() && !self.provider_argv.is_empty() {
+            return Err(ControlPlaneError::invalid_argument(
+                "provider_command and provider_argv are mutually exclusive",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Canonical durable review. `evidence` retains the complete bounded durable
@@ -51,5 +62,16 @@ mod tests {
             .expect("deserialize"),
             review
         );
+    }
+
+    #[test]
+    fn review_request_rejects_conflicting_provider_inputs() {
+        let request = ControlPlaneRunReviewRequest {
+            to_worktree: None,
+            provider_command: Some("provider".to_string()),
+            provider_argv: vec!["provider".to_string()],
+        };
+
+        assert!(request.validate().is_err());
     }
 }

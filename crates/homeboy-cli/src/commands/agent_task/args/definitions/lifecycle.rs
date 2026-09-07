@@ -686,8 +686,15 @@ pub struct PromoteArgs {
     /// Replay the exact gate policy from the source run's durable Cook recipe.
     /// Homeboy-generated review commands use this reference so private gate
     /// programs remain outside reviewer-facing command output.
-    #[arg(long = "gates-from-cook-recipe")]
+    #[arg(
+        long = "gates-from-cook-recipe",
+        conflicts_with = "gates_from_resume_contract"
+    )]
     pub gates_from_cook_recipe: bool,
+    /// Replay the exact gate policy from the source run's durable promotion
+    /// resume contract without exposing private gate programs in command output.
+    #[arg(long = "gates-from-resume-contract")]
+    pub gates_from_resume_contract: bool,
     /// Verification gate configuration to run before promotion.
     #[command(flatten)]
     pub gates: VerifyGateArgs,

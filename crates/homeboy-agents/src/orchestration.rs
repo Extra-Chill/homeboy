@@ -44,6 +44,8 @@ const URI_BOUND: usize = 512;
 const EVENT_PAGE_BOUND: usize = 100;
 const ACTION_INPUT_BOUND: usize = 128;
 const ACTION_REASON_BOUND: usize = 1_024;
+const REVIEW_EVIDENCE_BOUND: usize = 1024 * 1024;
+const REVIEW_EVIDENCE_FIELD_BOUND: usize = 256 * 1024;
 const ACTION_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
 const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
 const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -240,17 +242,30 @@ fn review_promotion_candidates(
                     .and_then(|promotion| promotion.pointer("/target/worktree"))
                     .and_then(Value::as_str)
                     .or(request.to_worktree.as_deref());
-                let command = destination.map(|destination| {
+                let command = destination.and_then(|destination| {
                     command.extend(["--to-worktree".to_string(), destination.to_string()]);
+                    let resume_contract = continuation
+                        .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
+                        .filter(|_| cook_contract.is_none());
+                    let resume_gate_error = resume_contract.and_then(|contract| {
+                        contract
+                            .get("gates")
+                            .ok_or("resume contract has no gate policy")
+                            .and_then(|gates| {
+                                serde_json::from_value::<crate::agent_task_gate::VerifyGateOptions>(
+                                    gates.clone(),
+                                )
+                                .map(|_| ())
+                                .map_err(|_| "resume contract has an invalid gate policy")
+                            })
+                            .err()
+                    });
                     if let Some(contract) = continuation
                         .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
                     {
                         append_resume_base(&mut command, contract);
-                        if cook_contract.is_none() {
-                            append_resume_gates(
-                                &mut command,
-                                contract.get("gates").unwrap_or(&Value::Null),
-                            );
+                        if resume_contract.is_some() && resume_gate_error.is_none() {
+                            command.push("--gates-from-resume-contract".to_string());
                         }
                     } else if let Some((base, _)) = cook_contract {
                         command.extend(["--base".to_string(), base.clone()]);
@@ -268,16 +283,17 @@ fn review_promotion_candidates(
                             .iter()
                             .map(|argument| format!("--provider-argv={argument}")),
                     );
-                    command
+                    resume_gate_error.is_none().then_some(command)
                 });
                 serde_json::json!({
                     "task_id": candidate.task_id,
                     "artifact_id": artifact_id,
                     "reason": candidate.reason,
                     "command": command,
-                    "ready": destination.is_some(),
+                    "ready": command.is_some(),
                     "destination_required": destination.is_none(),
                     "selection_required": selection_required,
+                    "unavailable_reason": (destination.is_some() && command.is_none()).then_some("durable resume contract has an invalid gate policy"),
                 })
             })
         })
@@ -287,80 +303,6 @@ fn review_promotion_candidates(
 fn append_resume_base(command: &mut Vec<String>, contract: &Value) {
     if let Some(base) = contract.pointer("/inputs/base_ref").and_then(Value::as_str) {
         command.extend(["--base".to_string(), base.to_string()]);
-    }
-}
-
-fn append_resume_gates(command: &mut Vec<String>, gates: &Value) {
-    for (key, flag) in [
-        ("verify", "--verify"),
-        ("private_verify", "--private-verify"),
-    ] {
-        for value in gates
-            .get(key)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            command.extend([flag.to_string(), value.to_string()]);
-        }
-    }
-    for (key, flag) in [
-        ("private_gate_reveal", "--private-gate-reveal"),
-        ("gate_timeout_seconds", "--gate-timeout-seconds"),
-        (
-            "gate_heartbeat_interval_seconds",
-            "--gate-heartbeat-interval-seconds",
-        ),
-        (
-            "gate_no_progress_timeout_seconds",
-            "--gate-no-progress-timeout-seconds",
-        ),
-    ] {
-        if let Some(value) = gates.get(key).and_then(|value| {
-            value
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| value.as_u64().map(|value| value.to_string()))
-        }) {
-            command.extend([flag.to_string(), value.replace('_', "-")]);
-        }
-    }
-    if gates.get("rerun_completed_gates").and_then(Value::as_bool) == Some(true) {
-        command.push("--rerun-completed-gates".to_string());
-    }
-    if let Some(environment) = gates.get("gate_environment") {
-        if let Some(mode) = environment.get("mode").and_then(Value::as_str) {
-            command.extend([
-                "--gate-environment-mode".to_string(),
-                mode.replace('_', "-"),
-            ]);
-        }
-        if let Some(variables) = environment.get("variables").and_then(Value::as_object) {
-            for (name, value) in variables {
-                if let Some(value) = value.as_str() {
-                    command.extend(["--gate-env".to_string(), format!("{name}={value}")]);
-                }
-            }
-        }
-        for (key, flag) in [
-            ("isolate_home", "--isolate-gate-home"),
-            ("isolate_xdg", "--isolate-gate-xdg"),
-        ] {
-            if let Some(value) = environment.get(key).and_then(Value::as_bool) {
-                command.push(format!("{flag}={value}"));
-            }
-        }
-        if let Some(inputs) = environment
-            .get("extension_inputs")
-            .and_then(Value::as_array)
-        {
-            for input in inputs {
-                if let Ok(input) = serde_json::to_string(input) {
-                    command.extend(["--gate-extension-input".to_string(), input]);
-                }
-            }
-        }
     }
 }
 
@@ -392,6 +334,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
         requested_id: &RunId,
         request: &ControlPlaneRunReviewRequest,
     ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
+        request.validate()?;
         let snapshot = self.lookup.get(requested_id)?.ok_or_else(|| {
             ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
         })?;
@@ -433,7 +376,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
         let canonical_candidate =
             review_canonical_candidate(&durable_read.record, aggregate_review.as_ref(), &resource);
         let (record, cleanup_evidence) = review_record_projection(&durable_read.record);
-        let evidence = serde_json::json!({
+        let evidence = bounded_review_evidence(serde_json::json!({
             "record": record,
             "logs": crate::agent_task_lifecycle::logs_in_store(&self.lookup.store, requested_id.as_str()).map_err(map_lifecycle_error)?,
             "artifacts": crate::agent_task_lifecycle::artifacts_in_store(&self.lookup.store, requested_id.as_str()).map_err(map_lifecycle_error)?,
@@ -450,7 +393,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
             "action_eligibility": resource.action_eligibility,
             "retry_context": review_retry_context(requested_id.as_str()),
             "read": { "phase": "controller_local", "mutated": false, "unavailable_sources": durable_read.unavailable_sources },
-        });
+        }));
         Ok(ControlPlaneRunReview {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_RUN_REVIEW_SCHEMA.to_string(),
             run: requested_id.clone(),
@@ -1229,6 +1172,78 @@ fn review_record_projection(record: &AgentTaskRunRecord) -> (Value, Vec<Value>) 
     })
     .collect();
     (value, evidence)
+}
+
+fn bounded_review_evidence(value: Value) -> Value {
+    let mut value = homeboy_core::redaction::redact_json(&value);
+    redact_private_gate_programs(&mut value);
+    let Some(fields) = value.as_object_mut() else {
+        return value;
+    };
+    for field in fields.values_mut() {
+        omit_oversized_review_field(field, REVIEW_EVIDENCE_FIELD_BOUND);
+    }
+    while json_size(&value) > REVIEW_EVIDENCE_BOUND {
+        let largest = value.as_object().and_then(|fields| {
+            fields
+                .iter()
+                .filter(|(_, field)| field.get("details_omitted").is_none())
+                .max_by_key(|(_, field)| json_size(field))
+                .map(|(key, _)| key.clone())
+        });
+        let Some(largest) = largest else {
+            break;
+        };
+        let fields = value.as_object_mut().expect("review evidence object");
+        let size = fields.get(&largest).map(json_size).unwrap_or_default();
+        fields.insert(largest, omitted_review_field(size));
+    }
+    value
+}
+
+fn redact_private_gate_programs(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if key == "private_verify" {
+                    let count = value.as_array().map(Vec::len).unwrap_or(1);
+                    *value = Value::Array(
+                        std::iter::repeat_n(Value::String("[private]".to_string()), count)
+                            .collect(),
+                    );
+                } else {
+                    redact_private_gate_programs(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_private_gate_programs(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn omit_oversized_review_field(value: &mut Value, limit: usize) {
+    let size = json_size(value);
+    if size > limit {
+        *value = omitted_review_field(size);
+    }
+}
+
+fn omitted_review_field(size_bytes: usize) -> Value {
+    serde_json::json!({
+        "details_omitted": true,
+        "reason": "review_evidence_byte_limit",
+        "size_bytes": size_bytes,
+    })
+}
+
+fn json_size(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 impl OrchestrationService<LifecycleStoreLookup> {
@@ -2293,9 +2308,9 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_resume_gates, event_page, live_provider_liveness, observed_file_timestamp, phase,
-        project_record, review_failure_reasons, LifecycleStoreLookup, OrchestrationService,
-        RunLookup, RunSnapshot,
+        bounded_review_evidence, event_page, live_provider_liveness, observed_file_timestamp,
+        phase, project_record, review_failure_reasons, LifecycleStoreLookup, OrchestrationService,
+        RunLookup, RunSnapshot, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -2623,34 +2638,36 @@ mod tests {
     }
 
     #[test]
-    fn review_resume_gate_contract_preserves_environment_policy() {
-        let mut command = Vec::new();
-        append_resume_gates(
-            &mut command,
-            &json!({
-                "gate_environment": {
-                    "mode": "replace",
-                    "variables": { "MODE": "test" },
-                    "isolate_home": true,
-                    "isolate_xdg": false,
-                    "extension_inputs": [{ "id": "wordpress", "source": "/opt/wordpress" }]
-                }
-            }),
-        );
+    fn review_rejects_conflicting_provider_inputs() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let error = service
+                .review(
+                    &RunId::new("missing-run").expect("run"),
+                    &ControlPlaneRunReviewRequest {
+                        to_worktree: None,
+                        provider_command: Some("provider".to_string()),
+                        provider_argv: vec!["provider".to_string()],
+                    },
+                )
+                .expect_err("conflicting provider inputs");
 
-        assert_eq!(
-            command,
-            vec![
-                "--gate-environment-mode",
-                "replace",
-                "--gate-env",
-                "MODE=test",
-                "--isolate-gate-home=true",
-                "--isolate-gate-xdg=false",
-                "--gate-extension-input",
-                "{\"id\":\"wordpress\",\"source\":\"/opt/wordpress\"}",
-            ]
-        );
+            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+        });
+    }
+
+    #[test]
+    fn review_evidence_is_redacted_and_byte_bounded() {
+        let evidence = bounded_review_evidence(json!({
+            "record": { "api_token": "super-secret" },
+            "aggregate": "x".repeat(REVIEW_EVIDENCE_BOUND * 2),
+        }));
+        let serialized = serde_json::to_vec(&evidence).expect("evidence JSON");
+
+        assert!(!String::from_utf8_lossy(&serialized).contains("super-secret"));
+        assert!(serialized.len() <= REVIEW_EVIDENCE_BOUND);
+        assert_eq!(evidence["aggregate"]["details_omitted"], true);
     }
 
     #[test]
@@ -2725,6 +2742,7 @@ mod tests {
             assert_eq!(review.evidence["cleanup_evidence"][0]["count"], 2);
             assert_eq!(review.evidence["cleanup_evidence"][1]["count"], 1);
             let serialized = serde_json::to_string(&review).expect("review JSON");
+            assert!(!serialized.contains("super-secret"));
             assert!(!serialized.contains("/private/unrelated-one"));
             assert!(!serialized.contains("/private/inaccessible"));
         });
