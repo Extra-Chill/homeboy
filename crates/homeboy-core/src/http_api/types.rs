@@ -75,6 +75,9 @@ pub enum HttpEndpoint {
         id: String,
     },
     ControlPlaneCapabilities,
+    ControlPlaneRuns {
+        request: homeboy_control_plane_contract::ControlPlaneRunListRequest,
+    },
     ControlPlaneRun {
         id: String,
     },
@@ -174,6 +177,7 @@ impl HttpEndpoint {
             Self::Activity => "activity.list",
             Self::ActivityItem { .. } => "activity.show",
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
+            Self::ControlPlaneRuns { .. } => "control_plane.runs.list",
             Self::ControlPlaneRun { .. } => "control_plane.runs.show",
             Self::ControlPlaneRunReview { .. } => "control_plane.runs.review",
             Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",

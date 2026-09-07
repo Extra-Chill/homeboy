@@ -21,10 +21,13 @@ pub struct ControlPlaneCapabilities {
 #[serde(rename_all = "snake_case")]
 pub enum ControlPlaneOperation {
     GetCapabilities,
+    ListRuns,
     GetRun,
     GetRunReview,
     GetRunEvents,
     ExecuteRunAction,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A resource identity this build serves.
@@ -83,6 +86,7 @@ mod tests {
             !document.operations.iter().any(|operation| !matches!(
                 operation,
                 ControlPlaneOperation::GetCapabilities
+                    | ControlPlaneOperation::ListRuns
                     | ControlPlaneOperation::GetRun
                     | ControlPlaneOperation::GetRunReview
                     | ControlPlaneOperation::GetRunEvents
@@ -98,6 +102,23 @@ mod tests {
             vec![
                 ControlPlaneOperation::GetCapabilities,
                 ControlPlaneOperation::GetRun
+            ]
+        );
+    }
+
+    #[test]
+    fn capabilities_tolerate_future_operation_names() {
+        let document: ControlPlaneCapabilities = serde_json::from_value(serde_json::json!({
+            "schema": CONTROL_PLANE_CAPABILITIES_SCHEMA,
+            "resources": ["run"],
+            "operations": ["get_run", "future_operation"]
+        }))
+        .expect("forward-compatible capabilities");
+        assert_eq!(
+            document.operations,
+            vec![
+                ControlPlaneOperation::GetRun,
+                ControlPlaneOperation::Unknown
             ]
         );
     }

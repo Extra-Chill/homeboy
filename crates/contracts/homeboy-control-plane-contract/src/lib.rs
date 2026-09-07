@@ -38,7 +38,7 @@ pub use event::{
 };
 pub use identity::{
     AttemptId, EventCursor, EventId, ExecutionId, IdentityError, MissionId, ProviderSessionId,
-    RunId, TaskId,
+    RunCursor, RunId, TaskId,
 };
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{
@@ -46,8 +46,9 @@ pub use resource::{
     ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
     ControlPlaneLocation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
-    ControlPlaneRun, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
-    CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
+    ControlPlaneRuntime, ControlPlaneStateSummary, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 pub use review::{
     ControlPlaneRunReview, ControlPlaneRunReviewRequest, CONTROL_PLANE_RUN_REVIEW_SCHEMA,

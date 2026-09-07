@@ -85,6 +85,10 @@ opaque_identity!(
     /// Opaque resume cursor returned by an event page.
     EventCursor
 );
+opaque_identity!(
+    /// Opaque continuation cursor returned by a run discovery page.
+    RunCursor
+);
 
 /// Why an identity newtype could not be constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]

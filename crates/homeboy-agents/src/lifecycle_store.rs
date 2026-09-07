@@ -16,7 +16,9 @@ use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::engine::local_files::{
     write_json_file as write_json, write_json_file_owner_only as write_private_json,
 };
-use homeboy_core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
+use homeboy_core::observation::{
+    ObservationStore, RunCursor as ObservationRunCursor, RunListFilter, RunRecord, RunStatus,
+};
 use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
 /// Durable agent-task lifecycle storage bound to immutable filesystem roots.
@@ -819,6 +821,29 @@ impl AgentTaskLifecycleStore {
             kind: Some("agent-task".to_string()),
             ..Default::default()
         })?)
+    }
+
+    /// Read one immutable-keyset page of typed agent-task records without
+    /// loading the full historical registry.
+    pub(crate) fn read_record_page(
+        &self,
+        after: Option<ObservationRunCursor>,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
+        let page = self
+            .open_observation_readonly()?
+            .list_runs_page(RunListFilter {
+                kind: Some("agent-task".to_string()),
+                limit: Some(i64::try_from(limit.clamp(1, 101)).expect("bounded page limit")),
+                after,
+                ..Default::default()
+            })?;
+        let records = page
+            .runs
+            .iter()
+            .map(record_from_run)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((records, page.truncated, page.next_cursor))
     }
 
     /// Register a Cook attempt using this store's record, lock, index, and

@@ -5,10 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId};
+use crate::identity::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunCursor, RunId};
 
 pub const CONTROL_PLANE_RESULT_SCHEMA: &str = "homeboy/control-plane-result/v1";
 pub const CONTROL_PLANE_RUN_SCHEMA: &str = "homeboy/control-plane-run/v1";
+pub const CONTROL_PLANE_RUN_PAGE_SCHEMA: &str = "homeboy/control-plane-run-page/v1";
 pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
     "homeboy/control-plane-action-eligibility/v1";
 
@@ -185,6 +186,47 @@ impl ControlPlaneRun {
     }
 }
 
+/// Generic, bounded discovery parameters. Product-specific selectors remain
+/// adapter-owned until they are shared by more than one control-plane client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRunListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<RunCursor>,
+    pub limit: u32,
+}
+
+impl Default for ControlPlaneRunListRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: 50,
+        }
+    }
+}
+
+impl ControlPlaneRunListRequest {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if !(1..=100).contains(&self.limit) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane run page limit must be between 1 and 100",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One stable page of canonical run resources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRunPage {
+    pub schema: String,
+    pub runs: Vec<ControlPlaneRun>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<RunCursor>,
+    pub has_more: bool,
+}
+
 /// Bounded live provider evidence. This intentionally carries timestamps and a
 /// source name only; provider output and filesystem paths remain out of status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -350,11 +392,11 @@ mod tests {
         ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
         ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
         ControlPlaneLocation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
-        ControlPlaneRun, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
+        ControlPlaneRuntime, ControlPlaneStateSummary, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
-    use crate::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId};
+    use crate::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunCursor, RunId};
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
@@ -467,6 +509,45 @@ mod tests {
         assert!(value.get("prompt").is_none());
         let decoded: ControlPlaneRun = serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, resource);
+    }
+
+    #[test]
+    fn run_page_round_trips_with_a_bounded_typed_cursor() {
+        let page = ControlPlaneRunPage {
+            schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
+            runs: vec![sample_run()],
+            next_cursor: Some(RunCursor::new(AGENT_TASK_RUN).expect("cursor")),
+            has_more: true,
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(value["schema"], CONTROL_PLANE_RUN_PAGE_SCHEMA);
+        assert_eq!(value["next_cursor"], AGENT_TASK_RUN);
+        let decoded: ControlPlaneRunPage = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded, page);
+
+        assert!(ControlPlaneRunListRequest {
+            limit: 0,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(ControlPlaneRunListRequest {
+            limit: 101,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn run_page_v1_golden_fixture_remains_compatible() {
+        let fixture = include_str!("../tests/fixtures/run-page-v1.json");
+        let page: ControlPlaneRunPage = serde_json::from_str(fixture).expect("v1 fixture");
+        assert_eq!(page.schema, CONTROL_PLANE_RUN_PAGE_SCHEMA);
+        assert_eq!(page.runs[0].run.as_str(), "run-fixture-1");
+        assert_eq!(page.runs[0].state, ControlPlaneRunState::Running);
+        assert!(page.next_cursor.is_none());
+        assert!(!page.has_more);
     }
 
     #[test]

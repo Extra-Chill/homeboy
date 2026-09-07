@@ -5,6 +5,7 @@
 //! projection. Construct with an explicit lookup — the service does not
 //! resolve ambient stores or providers itself.
 
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
@@ -13,16 +14,18 @@ use homeboy_control_plane_contract::{
     ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef,
     ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner,
-    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
-    ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+    ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunCursor,
+    RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -49,6 +52,8 @@ const REVIEW_EVIDENCE_FIELD_BOUND: usize = 256 * 1024;
 const ACTION_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
 const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
 const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const RUN_CURSOR_SCHEMA: &str = "homeboy/control-plane-run-cursor/v1";
+const RUN_CURSOR_BOUND: usize = 1024;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
 #[derive(Debug, Clone)]
@@ -57,10 +62,37 @@ pub struct RunSnapshot {
     pub plan: Option<AgentTaskPlan>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunPagePosition {
+    pub started_at: String,
+    pub run_id: String,
+}
+
+pub struct RunSnapshotPage {
+    pub snapshots: Vec<RunSnapshot>,
+    pub next_position: Option<RunPagePosition>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunCursorPayload {
+    schema: String,
+    started_at: String,
+    run_id: String,
+}
+
 /// Lookup used by [`OrchestrationService`]. Callers inject stores or test
 /// doubles; the service never opens an environment-rooted store itself.
 pub trait RunLookup {
     fn get(&self, id: &RunId) -> Result<Option<RunSnapshot>, ControlPlaneError>;
+}
+
+pub trait RunListLookup {
+    fn list(
+        &self,
+        after: Option<&RunPagePosition>,
+        limit: usize,
+    ) -> Result<RunSnapshotPage, ControlPlaneError>;
 }
 
 pub trait EventLookup {
@@ -80,6 +112,21 @@ impl LifecycleStoreLookup {
     pub fn new(store: AgentTaskLifecycleStore) -> Self {
         Self { store }
     }
+
+    fn plan(&self, run_id: &str) -> Result<Option<AgentTaskPlan>, ControlPlaneError> {
+        match self.store.read_controller_plan(run_id) {
+            Ok(plan) => Ok(Some(plan)),
+            Err(error)
+                if error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
+                    && error
+                        .message
+                        .contains("unsupported agent-task execution budget version") =>
+            {
+                Err(ControlPlaneError::invalid_argument(error.message))
+            }
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 impl RunLookup for LifecycleStoreLookup {
@@ -89,19 +136,39 @@ impl RunLookup for LifecycleStoreLookup {
             Err(error) if is_run_not_found(&error) => return Ok(None),
             Err(error) => return Err(ControlPlaneError::unavailable(error.message)),
         };
-        let plan = match self.store.read_controller_plan(&record.run_id) {
-            Ok(plan) => Some(plan),
-            Err(error)
-                if error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
-                    && error
-                        .message
-                        .contains("unsupported agent-task execution budget version") =>
-            {
-                return Err(ControlPlaneError::invalid_argument(error.message));
-            }
-            Err(_) => None,
-        };
+        let plan = self.plan(&record.run_id)?;
         Ok(Some(RunSnapshot { record, plan }))
+    }
+}
+
+impl RunListLookup for LifecycleStoreLookup {
+    fn list(
+        &self,
+        after: Option<&RunPagePosition>,
+        limit: usize,
+    ) -> Result<RunSnapshotPage, ControlPlaneError> {
+        let after = after.map(|position| homeboy_core::observation::RunCursor {
+            started_at: position.started_at.clone(),
+            id: position.run_id.clone(),
+        });
+        let (records, _truncated, next_cursor) = self
+            .store
+            .read_record_page(after, limit)
+            .map_err(map_lifecycle_error)?;
+        let snapshots = records
+            .into_iter()
+            .map(|record| {
+                let plan = self.plan(&record.run_id)?;
+                Ok(RunSnapshot { record, plan })
+            })
+            .collect::<Result<Vec<_>, ControlPlaneError>>()?;
+        Ok(RunSnapshotPage {
+            snapshots,
+            next_position: next_cursor.map(|cursor| RunPagePosition {
+                started_at: cursor.started_at,
+                run_id: cursor.id,
+            }),
+        })
     }
 }
 
@@ -135,11 +202,15 @@ impl<L: RunLookup> OrchestrationService<L> {
     }
 
     /// Operations available to a read-only injected lookup.
-    pub fn read_capabilities() -> ControlPlaneCapabilities {
+    pub fn read_capabilities() -> ControlPlaneCapabilities
+    where
+        L: RunListLookup,
+    {
         ControlPlaneCapabilities::new(
             vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
             ],
@@ -153,6 +224,72 @@ impl<L: RunLookup> OrchestrationService<L> {
         })?;
         project_record(&snapshot.record, snapshot.plan.as_ref())
     }
+}
+
+impl<L: RunLookup + RunListLookup> OrchestrationService<L> {
+    /// Stable, bounded, non-reconciling discovery over immutable submission
+    /// ordering. The cursor names the final run in the preceding page.
+    pub fn runs(
+        &self,
+        request: &ControlPlaneRunListRequest,
+    ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
+        request.validate()?;
+        let after = request.cursor.as_ref().map(decode_run_cursor).transpose()?;
+        let page = self.lookup.list(after.as_ref(), request.limit as usize)?;
+        let runs = page
+            .snapshots
+            .into_iter()
+            .map(|snapshot| project_record(&snapshot.record, snapshot.plan.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = page.next_position.is_some();
+        let next_cursor = page
+            .next_position
+            .as_ref()
+            .map(encode_run_cursor)
+            .transpose()?;
+        Ok(ControlPlaneRunPage {
+            schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
+            runs,
+            next_cursor,
+            has_more,
+        })
+    }
+}
+
+fn encode_run_cursor(position: &RunPagePosition) -> Result<RunCursor, ControlPlaneError> {
+    let bytes = serde_json::to_vec(&RunCursorPayload {
+        schema: RUN_CURSOR_SCHEMA.to_string(),
+        started_at: position.started_at.clone(),
+        run_id: position.run_id.clone(),
+    })
+    .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+    RunCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
+}
+
+fn decode_run_cursor(cursor: &RunCursor) -> Result<RunPagePosition, ControlPlaneError> {
+    if cursor.as_str().len() > RUN_CURSOR_BOUND {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane run cursor exceeds the size bound",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.as_str())
+        .map_err(|_| ControlPlaneError::invalid_argument("control-plane run cursor is invalid"))?;
+    let payload: RunCursorPayload = serde_json::from_slice(&bytes)
+        .map_err(|_| ControlPlaneError::invalid_argument("control-plane run cursor is invalid"))?;
+    if payload.schema != RUN_CURSOR_SCHEMA
+        || payload.started_at.trim().is_empty()
+        || payload.run_id.trim().is_empty()
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane run cursor is invalid",
+        ));
+    }
+    Ok(RunPagePosition {
+        started_at: payload.started_at,
+        run_id: payload.run_id,
+    })
 }
 
 fn review_promotion_candidates(
@@ -2268,6 +2405,15 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
     }
 
+    fn runs(
+        &self,
+        request: &ControlPlaneRunListRequest,
+    ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).runs(request)
+    }
+
     fn review(
         &self,
         requested_id: &RunId,
@@ -2310,7 +2456,8 @@ mod tests {
     use super::{
         bounded_review_evidence, event_page, live_provider_liveness, observed_file_timestamp,
         phase, project_record, review_failure_reasons, LifecycleStoreLookup, OrchestrationService,
-        RunLookup, RunSnapshot, REVIEW_EVIDENCE_BOUND,
+        RunListLookup, RunLookup, RunPagePosition, RunSnapshot, RunSnapshotPage,
+        REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -2320,12 +2467,12 @@ mod tests {
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
         ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCancelDisposition,
         ControlPlaneCancelResult, ControlPlaneErrorClass, ControlPlaneEvent,
-        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunReviewRequest,
-        ControlPlaneRunState, EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunListRequest,
+        ControlPlaneRunReviewRequest, ControlPlaneRunState, EventCursor, EventId, RunCursor, RunId,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
@@ -2336,6 +2483,7 @@ mod tests {
     const AGENT_TASK_RUN: &str =
         "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
 
+    #[derive(Clone)]
     struct MapLookup {
         snapshots: BTreeMap<String, RunSnapshot>,
     }
@@ -2347,6 +2495,43 @@ mod tests {
         ) -> Result<Option<RunSnapshot>, homeboy_control_plane_contract::ControlPlaneError>
         {
             Ok(self.snapshots.get(id.as_str()).cloned())
+        }
+    }
+
+    impl RunListLookup for MapLookup {
+        fn list(
+            &self,
+            after: Option<&RunPagePosition>,
+            limit: usize,
+        ) -> Result<RunSnapshotPage, homeboy_control_plane_contract::ControlPlaneError> {
+            let mut snapshots = self.snapshots.values().cloned().collect::<Vec<_>>();
+            snapshots.sort_by(|left, right| {
+                right
+                    .record
+                    .submitted_at
+                    .cmp(&left.record.submitted_at)
+                    .then_with(|| right.record.run_id.cmp(&left.record.run_id))
+            });
+            if let Some(after) = after {
+                snapshots.retain(|snapshot| {
+                    snapshot.record.submitted_at < after.started_at
+                        || (snapshot.record.submitted_at == after.started_at
+                            && snapshot.record.run_id < after.run_id)
+                });
+            }
+            let has_more = snapshots.len() > limit;
+            snapshots.truncate(limit);
+            let next_position = has_more.then(|| {
+                let last = snapshots.last().expect("nonempty truncated page");
+                RunPagePosition {
+                    started_at: last.record.submitted_at.clone(),
+                    run_id: last.record.run_id.clone(),
+                }
+            });
+            Ok(RunSnapshotPage {
+                snapshots,
+                next_position,
+            })
         }
     }
 
@@ -2602,6 +2787,7 @@ mod tests {
             capabilities.operations,
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunReview,
@@ -2609,6 +2795,108 @@ mod tests {
             ]
         );
         assert!(!capabilities.operations.is_empty());
+    }
+
+    #[test]
+    fn run_discovery_is_stably_paginated() {
+        let mut snapshots = BTreeMap::new();
+        for (run_id, submitted_at) in [
+            ("run-oldest", "2026-01-01T00:00:00Z"),
+            ("run-middle", "2026-01-02T00:00:00Z"),
+            ("run-newest", "2026-01-03T00:00:00Z"),
+        ] {
+            let mut snapshot = snapshot(run_id, None);
+            snapshot.record.submitted_at = submitted_at.to_string();
+            snapshots.insert(run_id.to_string(), snapshot);
+        }
+        let first_service = OrchestrationService::new(MapLookup {
+            snapshots: snapshots.clone(),
+        });
+        let first = first_service
+            .runs(&ControlPlaneRunListRequest {
+                limit: 1,
+                ..Default::default()
+            })
+            .expect("first page");
+        assert_eq!(first.runs[0].run.as_str(), "run-newest");
+        assert!(first.has_more);
+
+        let mut inserted = snapshot("run-inserted", None);
+        inserted.record.submitted_at = "2026-01-04T00:00:00Z".to_string();
+        snapshots.insert("run-inserted".to_string(), inserted);
+        let service = OrchestrationService::new(MapLookup { snapshots });
+        let second = service
+            .runs(&ControlPlaneRunListRequest {
+                cursor: first.next_cursor,
+                limit: 1,
+            })
+            .expect("second page");
+        assert_eq!(second.runs[0].run.as_str(), "run-middle");
+        assert!(second.has_more);
+
+        let third = service
+            .runs(&ControlPlaneRunListRequest {
+                cursor: second.next_cursor,
+                limit: 1,
+            })
+            .expect("third page");
+        assert_eq!(third.runs[0].run.as_str(), "run-oldest");
+        assert!(!third.has_more);
+        assert!(third.next_cursor.is_none());
+    }
+
+    #[test]
+    fn run_discovery_rejects_unknown_cursor_encodings() {
+        let error = service()
+            .runs(&ControlPlaneRunListRequest {
+                cursor: Some(RunCursor::new("not-a-run-cursor").expect("opaque cursor")),
+                limit: 10,
+            })
+            .expect_err("invalid cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+    }
+
+    #[test]
+    fn lifecycle_store_run_discovery_uses_bounded_keyset_pages() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            for (run_id, submitted_at) in [
+                ("run-oldest", "2026-01-01T00:00:00Z"),
+                ("run-middle", "2026-01-02T00:00:00Z"),
+                ("run-newest", "2026-01-03T00:00:00Z"),
+            ] {
+                let mut record = record(run_id);
+                record.submitted_at = submitted_at.to_string();
+                store.write_record(&record).expect("record");
+            }
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+
+            let first = service
+                .runs(&ControlPlaneRunListRequest {
+                    limit: 2,
+                    ..Default::default()
+                })
+                .expect("first page");
+            assert_eq!(
+                first
+                    .runs
+                    .iter()
+                    .map(|run| run.run.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["run-newest", "run-middle"]
+            );
+            assert!(first.has_more);
+
+            let second = service
+                .runs(&ControlPlaneRunListRequest {
+                    cursor: first.next_cursor,
+                    limit: 2,
+                })
+                .expect("second page");
+            assert_eq!(second.runs[0].run.as_str(), "run-oldest");
+            assert!(!second.has_more);
+            assert!(second.next_cursor.is_none());
+        });
     }
 
     #[test]

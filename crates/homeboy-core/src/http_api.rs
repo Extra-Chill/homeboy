@@ -96,6 +96,9 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["v1", "control-plane", "capabilities"]) => {
             Ok(HttpEndpoint::ControlPlaneCapabilities)
         }
+        (HttpMethod::Get, ["v1", "control-plane", "runs"]) => Ok(HttpEndpoint::ControlPlaneRuns {
+            request: control_plane_run_list_request(path)?,
+        }),
         (HttpMethod::Get, ["v1", "control-plane", "runs", id]) => {
             Ok(HttpEndpoint::ControlPlaneRun {
                 id: (*id).to_string(),
@@ -188,6 +191,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
+                "GET /v1/control-plane/runs".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
                 "GET /v1/control-plane/runs/:id/review".to_string(),
                 "GET /v1/control-plane/runs/:id/events".to_string(),
@@ -227,6 +231,9 @@ where
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRuns { request } => {
+            return control_plane_runs_response(endpoint.clone(), request);
         }
         HttpEndpoint::ControlPlaneRunReview { id, request } => {
             return control_plane_review_response(endpoint.clone(), id, request);
@@ -403,7 +410,8 @@ where
                 },
             )?,
         }),
-        HttpEndpoint::ControlPlaneRun { .. }
+        HttpEndpoint::ControlPlaneRuns { .. }
+        | HttpEndpoint::ControlPlaneRun { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
@@ -507,6 +515,16 @@ fn control_plane_capabilities_response() -> Result<HttpApiResponse> {
     )
 }
 
+fn control_plane_runs_response(
+    endpoint: HttpEndpoint,
+    request: &homeboy_control_plane_contract::ControlPlaneRunListRequest,
+) -> Result<HttpApiResponse> {
+    match crate::control_plane::runs(request) {
+        Ok(page) => control_plane_ok(endpoint, page),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
 fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<HttpApiResponse> {
     match control_plane_run(run_id) {
         Ok(resource) => control_plane_ok(endpoint, resource),
@@ -596,6 +614,59 @@ fn control_plane_run_id(
     homeboy_control_plane_contract::RunId::new(run_id).map_err(|error| {
         homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
     })
+}
+
+fn control_plane_run_list_request(
+    path: &str,
+) -> Result<homeboy_control_plane_contract::ControlPlaneRunListRequest> {
+    use homeboy_control_plane_contract::{ControlPlaneRunListRequest, RunCursor};
+
+    let limits = raw_query_values(path, "limit");
+    if limits.len() > 1 || limits.first().is_some_and(String::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "limit",
+            "control-plane run page limit must be provided exactly once and cannot be empty",
+            None,
+            None,
+        ));
+    }
+    let limit = limits
+        .into_iter()
+        .next()
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                Error::validation_invalid_argument(
+                    "limit",
+                    "control-plane run page limit must be an integer",
+                    Some(value),
+                    None,
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(50);
+    let cursors = raw_query_values(path, "cursor");
+    if cursors.len() > 1 || cursors.first().is_some_and(String::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "cursor",
+            "control-plane run cursor must be provided exactly once and cannot be empty",
+            None,
+            None,
+        ));
+    }
+    let cursor = cursors
+        .into_iter()
+        .next()
+        .map(RunCursor::new)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument("cursor", error.to_string(), None, None)
+        })?;
+    let request = ControlPlaneRunListRequest { cursor, limit };
+    request.validate().map_err(|error| {
+        Error::validation_invalid_argument("limit", error.message, Some(limit.to_string()), None)
+    })?;
+    Ok(request)
 }
 
 fn control_plane_events(
@@ -1564,6 +1635,18 @@ fn query_values(path: &str, key: &str) -> Vec<String> {
                     (name == key && !value.is_empty()).then(|| value.into_owned())
                 })
                 .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn raw_query_values(path: &str, key: &str) -> Vec<String> {
+    reqwest::Url::parse(&format!("http://localhost{path}"))
+        .ok()
+        .map(|url| {
+            url.query_pairs()
+                .filter(|(name, _)| name == key)
+                .map(|(_, value)| value.into_owned())
+                .collect()
         })
         .unwrap_or_default()
 }

@@ -12,11 +12,12 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
     ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
-    ControlPlaneRun, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-    EventCursor, EventId, MissionId, RunId, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, EventCursor, EventId, MissionId, RunCursor,
+    RunId, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
     CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
     CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 use homeboy_resource_topology_contract::{
     ResourceTopologyResourceKind, ResourceTopologyResourceRef,
@@ -348,11 +349,29 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
             vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
             vec![
                 ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::ExecuteRunAction,
             ],
         )
+    }
+
+    fn runs(
+        &self,
+        request: &ControlPlaneRunListRequest,
+    ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
+        let runs = if request.cursor.is_some() {
+            Vec::new()
+        } else {
+            vec![fixture_control_plane_run()]
+        };
+        Ok(ControlPlaneRunPage {
+            schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
+            runs,
+            next_cursor: None,
+            has_more: false,
+        })
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
@@ -435,6 +454,19 @@ fn routes_versioned_control_plane_endpoints() {
         HttpEndpoint::ControlPlaneCapabilities
     );
     assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs?limit=10&cursor=opaque-before",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRuns {
+            request: ControlPlaneRunListRequest {
+                cursor: Some(RunCursor::new("opaque-before").expect("cursor")),
+                limit: 10,
+            }
+        }
+    );
+    assert_eq!(
         http_api::route(HttpMethod::Get, "/v1/control-plane/runs/run-abc").expect("route"),
         HttpEndpoint::ControlPlaneRun {
             id: "run-abc".to_string()
@@ -478,6 +510,14 @@ fn routes_versioned_control_plane_endpoints() {
         .expect_err("the unversioned compatibility route is removed");
     http_api::route(HttpMethod::Get, "/v1/control-plane/missions")
         .expect_err("no extra resource family");
+    for path in [
+        "/v1/control-plane/runs?limit=",
+        "/v1/control-plane/runs?limit=1&limit=2",
+        "/v1/control-plane/runs?cursor=",
+        "/v1/control-plane/runs?cursor=one&cursor=two",
+    ] {
+        http_api::route(HttpMethod::Get, path).expect_err("ambiguous or empty page parameter");
+    }
 }
 
 #[test]
@@ -550,11 +590,30 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
         capabilities.operations,
         vec![
             ControlPlaneOperation::GetCapabilities,
+            ControlPlaneOperation::ListRuns,
             ControlPlaneOperation::GetRun,
             ControlPlaneOperation::GetRunEvents,
             ControlPlaneOperation::ExecuteRunAction,
         ]
     );
+}
+
+#[test]
+fn control_plane_http_lists_canonical_runs() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: "/v1/control-plane/runs?limit=1".to_string(),
+        body: None,
+    })
+    .expect("run page");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.list");
+    let result: ControlPlaneResult<ControlPlaneRunPage> =
+        serde_json::from_value(response.body).expect("result");
+    let page = result.resource.expect("page");
+    assert_eq!(page.schema, CONTROL_PLANE_RUN_PAGE_SCHEMA);
+    assert_eq!(page.runs, vec![fixture_control_plane_run()]);
 }
 
 #[test]
