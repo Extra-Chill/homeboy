@@ -168,6 +168,19 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
                 "homeboy runs artifact get {} {} -o <path>",
                 controller_run_id, artifact.id
             );
+            let unreachable_aliases =
+                homeboy_core::artifact_links::unreachable_public_artifact_aliases(&artifact)
+                    .iter()
+                    .map(homeboy_core::artifact_links::public_artifact_url_validation_json)
+                    .collect::<Vec<_>>();
+            let mut metadata = json!({
+                "controller_run_id": controller_run_id,
+                "controller_owned": true,
+                "fetch_command": fetch_command,
+            });
+            if !unreachable_aliases.is_empty() {
+                metadata["unreachable_aliases"] = json!(unreachable_aliases);
+            }
             Ok(JobArtifactMetadata {
                 id: artifact.id,
                 name: None,
@@ -179,11 +192,7 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
                     .and_then(|size| u64::try_from(size).ok()),
                 sha256: artifact.sha256,
                 content_base64: None,
-                metadata: Some(json!({
-                    "controller_run_id": controller_run_id,
-                    "controller_owned": true,
-                    "fetch_command": fetch_command,
-                })),
+                metadata: Some(metadata),
             })
         })
         .collect()
@@ -206,18 +215,19 @@ fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
             None,
         )
     })?;
-    let expected_sha256 = artifact
+    if artifact
         .sha256
         .as_deref()
         .filter(|sha| !sha.is_empty())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact.sha256",
-                "terminal artifact is missing controller checksum metadata",
-                Some(artifact.id.clone()),
-                None,
-            )
-        })?;
+        .is_none()
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact.sha256",
+            "terminal artifact is missing controller checksum metadata",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
     if artifact.mime.as_deref().is_none_or(str::is_empty) {
         return Err(Error::validation_invalid_argument(
             "artifact.mime",
@@ -240,15 +250,25 @@ fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
             None,
         ));
     }
-    if homeboy_core::artifact_metadata::sha256_file(path)? != expected_sha256 {
-        return Err(Error::validation_invalid_argument(
-            "artifact.sha256",
-            "terminal artifact bytes do not match controller checksum metadata",
-            Some(artifact.id.clone()),
-            None,
-        ));
+    match homeboy_core::artifact_links::classify_retained_artifact_availability(artifact)? {
+        homeboy_core::artifact_links::RetainedArtifactAvailability::Available { .. } => Ok(()),
+        homeboy_core::artifact_links::RetainedArtifactAvailability::Missing { reason } => {
+            Err(Error::validation_invalid_argument(
+                "artifact.path",
+                reason,
+                Some(artifact.id.clone()),
+                None,
+            ))
+        }
+        homeboy_core::artifact_links::RetainedArtifactAvailability::ChecksumMismatch { .. } => {
+            Err(Error::validation_invalid_argument(
+                "artifact.sha256",
+                "terminal artifact bytes do not match controller checksum metadata",
+                Some(artifact.id.clone()),
+                None,
+            ))
+        }
     }
-    Ok(())
 }
 
 /// Takes the caller's roots because the evidence this mirrors describes the run
