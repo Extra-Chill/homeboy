@@ -1399,6 +1399,24 @@ fn resolve_default_lab_runner_from_candidates(
 }
 
 pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
+    create_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        json_spec,
+        skip_existing,
+    )
+}
+
+/// [`create`] against an explicitly injected config root.
+///
+/// Existence checks and the persisted write both follow `roots`, so creating a
+/// runner in an injected root cannot observe or overwrite the ambient
+/// installation's registry (#14362).
+#[allow(dead_code)]
+pub fn create_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    json_spec: &str,
+    skip_existing: bool,
+) -> Result<CreateOutput<Runner>> {
     let raw = config::read_json_spec_to_string(json_spec)?;
     let value: Value = config::from_str(&raw)?;
 
@@ -1410,12 +1428,12 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runne
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
-            if skip_existing && load(&id).is_ok() {
+            if skip_existing && load_in_roots(roots, &id).is_ok() {
                 summary.record_skipped(id);
                 continue;
             }
 
-            match create_single_value(item.clone()) {
+            match create_single_value_in_roots(roots, item.clone()) {
                 Ok(result) => summary.record_created(result.id),
                 Err(err) => summary.record_error(id, err.message),
             }
@@ -1423,7 +1441,9 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runne
         return Ok(CreateOutput::Bulk(summary));
     }
 
-    Ok(CreateOutput::Single(create_single_value(value)?))
+    Ok(CreateOutput::Single(create_single_value_in_roots(
+        roots, value,
+    )?))
 }
 
 /// Inspect a legacy runner configuration without resolving or rendering values.
@@ -1526,6 +1546,58 @@ fn runner_secret_name(runner_id: &str, key: &str) -> String {
     format!("runner/{runner_id}/{key}")
 }
 
+/// [`merge`] against an explicitly injected config root.
+///
+/// Resolving the runner ambiently while merging into an injected root would
+/// read one installation's registry and write another's (#14362).
+#[allow(dead_code)]
+pub fn merge_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    id: Option<&str>,
+    json_spec: &str,
+    replace_fields: &[String],
+) -> Result<MergeOutput> {
+    let raw = config::read_json_spec_to_string(json_spec)?;
+    let parsed: Value = config::from_str(&raw)?;
+
+    if parsed.is_array() {
+        return Ok(MergeOutput::Bulk(config::merge_batch_from_json_in_root::<
+            Runner,
+        >(roots.config(), &raw)?));
+    }
+
+    let effective_id = id
+        .map(String::from)
+        .or_else(|| parsed.get("id").and_then(Value::as_str).map(String::from))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "id",
+                "Provide runner ID as argument or in JSON body",
+                None,
+                None,
+            )
+        })?;
+
+    if let Ok(runner) = config::load_in_root::<Runner>(roots.config(), &effective_id) {
+        if runner.kind == RunnerKind::Local {
+            return Ok(MergeOutput::Single(config::merge_from_json_in_root::<
+                Runner,
+            >(
+                roots.config(),
+                Some(&effective_id),
+                &raw,
+                replace_fields,
+            )?));
+        }
+    }
+
+    Ok(MergeOutput::Single(merge_server_runner(
+        &effective_id,
+        parsed,
+        replace_fields,
+    )?))
+}
+
 pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {
     let raw = config::read_json_spec_to_string(json_spec)?;
     let parsed: Value = config::from_str(&raw)?;
@@ -1601,7 +1673,10 @@ pub fn enable_server_runner(server_id: &str, patch: Value) -> Result<Runner> {
     Ok(runner_from_spec(server_id, spec))
 }
 
-fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
+fn create_single_value_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    value: Value,
+) -> Result<CreateResult<Runner>> {
     let id = value
         .get("id")
         .and_then(Value::as_str)
@@ -1615,7 +1690,7 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
 
     match runner.kind {
         RunnerKind::Local => {
-            if config::exists::<Runner>(&id) {
+            if config::exists_in_root::<Runner>(roots.config(), &id) {
                 return Err(Error::validation_invalid_argument(
                     "runner.id",
                     format!("runner '{}' already exists", id),
@@ -1624,7 +1699,7 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
                 ));
             }
             config::validate(&runner)?;
-            config::save(&runner)?;
+            config::save_in_root(roots.config(), &runner)?;
             Ok(CreateResult {
                 id: runner.id.clone(),
                 entity: runner,
