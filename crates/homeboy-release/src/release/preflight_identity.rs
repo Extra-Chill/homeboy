@@ -63,5 +63,5 @@ mod tests {
         assert!(error.message.contains("Release preflight source drift"));
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 }

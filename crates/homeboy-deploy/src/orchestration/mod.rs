@@ -1025,7 +1025,7 @@ mod tests {
             .success());
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn git_stdout(path: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")

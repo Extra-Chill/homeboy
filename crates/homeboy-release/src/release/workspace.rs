@@ -645,7 +645,7 @@ mod tests {
         OperationRecordStore::in_roots(&test_roots())
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     fn fixture_component(home: &tempfile::TempDir) -> Component {
         let remote = home.path().join("origin.git");

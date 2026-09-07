@@ -895,7 +895,7 @@ mod tests {
             .expect("projects without a policy retain legacy force semantics");
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     #[test]
     fn stale_local_source_refuses_until_explicitly_allowed() {

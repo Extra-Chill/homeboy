@@ -1357,7 +1357,7 @@ mod tests {
         );
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     #[test]
     fn release_state_status_uses_needs_release_public_name() {

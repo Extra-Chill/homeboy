@@ -391,7 +391,7 @@ mod tests {
         REQUIRE_FRESH_RUNTIME_OVERLAY_ENV, REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING,
     };
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     fn git_out(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")

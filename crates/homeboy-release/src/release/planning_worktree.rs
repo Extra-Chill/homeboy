@@ -483,7 +483,7 @@ mod tests {
     use homeboy_core::component::Component;
     use homeboy_core::git::UncommittedChanges;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn git_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("tempdir");

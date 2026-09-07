@@ -8,7 +8,7 @@ mod snapshots;
 mod update;
 
 /// Run a git command in `path`, asserting success. Shared test helper.
-use homeboy_core::test_support::run_git_fixture_command as git;
+use homeboy_core::test_support::run_git_command as git;
 
 /// Create a git repo with a single committed file then dirty the working tree.
 fn dirty_git_repo() -> tempfile::TempDir {

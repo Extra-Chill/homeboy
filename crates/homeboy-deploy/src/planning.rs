@@ -1014,7 +1014,7 @@ mod tests {
     use homeboy_core::server::SshClient;
     use tempfile::TempDir;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn init_source_repo(path: &Path) {
         run_git(path, &["init", "-q", "-b", "main"]);

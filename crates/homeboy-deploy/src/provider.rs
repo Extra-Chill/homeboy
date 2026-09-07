@@ -766,7 +766,7 @@ mod tests {
         );
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as git;
+    use homeboy_core::test_support::run_git_command as git;
 
     fn provider_repository(id: &str) -> tempfile::TempDir {
         let repository = tempfile::tempdir().expect("repository");

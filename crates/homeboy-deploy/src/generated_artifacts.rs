@@ -189,7 +189,7 @@ mod tests {
     use homeboy_core::component::{CleanupArtifactDeclaration, Component};
     use homeboy_core::defaults::deploy_generated_build_dir;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn git_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("tempdir");

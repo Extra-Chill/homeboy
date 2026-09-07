@@ -866,7 +866,7 @@ mod tests {
         }]
     }
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn write_zip(path: &Path, entries: &[(&str, &str)]) {
         let file = std::fs::File::create(path).expect("zip file");

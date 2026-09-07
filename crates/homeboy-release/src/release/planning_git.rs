@@ -315,7 +315,7 @@ mod tests {
     };
     use homeboy_core::component::Component;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn git_component(dir: &std::path::Path) -> Component {
         Component {

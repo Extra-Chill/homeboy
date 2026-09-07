@@ -101,7 +101,7 @@ pub(crate) use homeboy_core::tag_gap::{detect_tag_gap, warn_tag_gap};
 mod provenance_tests {
     use super::*;
 
-    use homeboy_core::test_support::run_git_fixture_command as run_git;
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn committed_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("tempdir");
