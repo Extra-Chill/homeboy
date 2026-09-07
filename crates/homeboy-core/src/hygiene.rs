@@ -877,19 +877,7 @@ mod tests {
 
     const PORTABLE_CONFIG_FILE: &str = "homeboy.json";
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     fn init_repo(path: &Path) {
         git(path, &["init", "-b", "main"]);

@@ -1041,21 +1041,8 @@ fn looks_like_path(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn run_git(root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as run_git;
 
     #[test]
     fn extract_method_rename() {
@@ -1611,19 +1598,7 @@ mod workspace_layout_tests {
     use super::*;
     use homeboy_extension_contract::TestDriftConfig;
 
-    fn run_git(root: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as run_git;
 
     fn rust_extension_options_at(root: &Path) -> DriftOptions {
         DriftOptions::from_config(

@@ -725,17 +725,5 @@ mod tests {
             .to_string()
     }
 
-    fn run_git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as run_git;
 }
