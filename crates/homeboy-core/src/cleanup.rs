@@ -323,46 +323,74 @@ fn reconstructable_admission_error(
 ) -> Error {
     let available_bytes = available_bytes.expect("measured reserve breach has available bytes");
     let path = root.display().to_string();
+    let (inspect_action, apply_action) = if let Ok(repository_root) = git_root(root) {
+        let repository_root = repository_root.display().to_string();
+        (
+            ExecutableAction::new(
+                "capacity.reserve.inspect_repository_artifacts",
+                "inspect reclaimable artifacts across repository worktrees",
+                "homeboy",
+                [
+                    "cleanup",
+                    "artifacts",
+                    "--path",
+                    repository_root.as_str(),
+                    "--all-worktrees",
+                    "--merged-only",
+                    "--sort",
+                    "size",
+                    "--limit",
+                    "100",
+                ],
+                ActionSafety::ReadOnly,
+            ),
+            ExecutableAction::new(
+                "capacity.reserve.apply_repository_artifacts",
+                "remove approved artifacts from merged repository worktrees",
+                "homeboy",
+                [
+                    "cleanup",
+                    "artifacts",
+                    "--path",
+                    repository_root.as_str(),
+                    "--all-worktrees",
+                    "--merged-only",
+                    "--sort",
+                    "size",
+                    "--limit",
+                    "100",
+                    "--apply",
+                ],
+                ActionSafety::Mutating,
+            ),
+        )
+    } else {
+        (
+            ExecutableAction::new(
+                "capacity.reserve.inspect_registered_repository_artifacts",
+                "inspect reclaimable artifacts in registered repositories",
+                "homeboy",
+                ["cleanup", "--include", "repo-artifacts"],
+                ActionSafety::ReadOnly,
+            ),
+            ExecutableAction::new(
+                "capacity.reserve.apply_registered_repository_artifacts",
+                "remove approved artifacts in registered repositories",
+                "homeboy",
+                ["cleanup", "--include", "repo-artifacts", "--apply"],
+                ActionSafety::Mutating,
+            ),
+        )
+    };
     Error::capacity_reserve(CapacityReserveDetails {
         filesystem: path.clone(),
         available_bytes,
         reserve_bytes,
         shortfall_bytes: reserve_bytes.saturating_sub(available_bytes),
     })
-    .with_action(ExecutableAction::new(
-        "capacity.reserve.inspect_cleanup",
-        "inspect scoped rebuildable artifacts",
-        "homeboy",
-        [
-            "cleanup",
-            "artifacts",
-            "--path",
-            path.as_str(),
-            "--sort",
-            "size",
-            "--limit",
-            "100",
-        ],
-        ActionSafety::ReadOnly,
-    ))
+    .with_action(inspect_action)
     .with_action(
-        ExecutableAction::new(
-            "capacity.reserve.apply_cleanup",
-            "remove approved scoped rebuildable artifacts",
-            "homeboy",
-            [
-                "cleanup",
-                "artifacts",
-                "--path",
-                path.as_str(),
-                "--sort",
-                "size",
-                "--limit",
-                "100",
-                "--apply",
-            ],
-            ActionSafety::Mutating,
-        )
+        apply_action
         .requiring_confirmation("approve scoped rebuildable artifact removal"),
     )
     .with_hint("Inspect scoped rebuildable artifacts, then explicitly approve their removal if appropriate.")
@@ -3316,6 +3344,14 @@ mod tests {
                 error.details["_homeboy_actions"][1]["required_confirmations"][0],
                 "approve scoped rebuildable artifact removal"
             );
+            assert_eq!(
+                error.details["_homeboy_actions"][0]["args"][4],
+                "--all-worktrees"
+            );
+            assert_eq!(
+                error.details["_homeboy_actions"][0]["args"][5],
+                "--merged-only"
+            );
             assert!(repo.path().join("target/debug/app").exists());
         });
     }
@@ -3338,6 +3374,10 @@ mod tests {
 
             assert_eq!(error.code.as_str(), "resource.capacity_reserve");
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
+            assert_eq!(
+                error.details["_homeboy_actions"][0]["args"],
+                json!(["cleanup", "--include", "repo-artifacts"])
+            );
         });
     }
 

@@ -769,8 +769,8 @@ impl Error {
         Self::new(
             ErrorCode::ResourceCapacityReserve,
             format!(
-                "Filesystem reserve shortfall: {} bytes available, {} bytes reserved, {} bytes short",
-                details.available_bytes, details.reserve_bytes, details.shortfall_bytes
+                "Filesystem reserve shortfall at {}: {} bytes available, {} bytes reserved, {} bytes short",
+                details.filesystem, details.available_bytes, details.reserve_bytes, details.shortfall_bytes
             ),
             to_details(details),
         )
