@@ -799,15 +799,25 @@ where
             let plan = plan_from_controller_request(request)?;
             let run_id =
                 controller_request_run_id(request, &record.loop_id, dedupe_key, &action.action_id);
-            let submitted = lifecycle::submit_plan(&plan, Some(&run_id))?;
-            record_controller_spawn(
-                record,
-                action,
-                dedupe_key,
-                entity_id,
-                &submitted.run_id,
-                request,
+            let outcome = crate::agent_task_submission_service::queue_prepared_plan_with_observer(
+                &crate::agent_task_submission_service::prepared_submission_request(
+                    Some(&run_id),
+                    true,
+                    "homeboy-controller",
+                )?,
+                crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan),
+                |submitted| {
+                    record_controller_spawn(
+                        record,
+                        action,
+                        dedupe_key,
+                        entity_id,
+                        &submitted.run_id,
+                        request,
+                    )
+                },
             )?;
+            let submitted = outcome.submitted;
             Ok((
                 execution_with_request_workflow_artifacts(
                     serde_json::json!({

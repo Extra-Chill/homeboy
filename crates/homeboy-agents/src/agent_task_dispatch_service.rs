@@ -12,7 +12,6 @@ use crate::agent_task_dispatch_plan::{
     build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
     preflight_dispatch_provider_secrets,
 };
-use crate::agent_task_lifecycle as lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
     default_backend_for_component, preflight_plan_provider_config_with_providers,
@@ -337,10 +336,14 @@ fn record_retryable_dispatch_admission_failure(
     mut error: Error,
 ) -> Error {
     let result = (|| {
-        let submitted = lifecycle::submit_plan(plan, requested_run_id)?;
-        lifecycle::record_pre_execution_failure(
-            &submitted.run_id,
-            plan,
+        let request = crate::agent_task_submission_service::prepared_submission_request(
+            requested_run_id,
+            false,
+            "homeboy-typed-dispatch",
+        )?;
+        let submitted = crate::agent_task_submission_service::reject_prepared_plan(
+            &request,
+            crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan.clone()),
             "admit_plan_provider_dispatchability",
             &error,
         )?;

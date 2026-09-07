@@ -19,8 +19,7 @@ use crate::agent_task_scheduler::{
     SharedAgentTaskExecutor,
 };
 use crate::agent_task_service::{
-    aggregate_exit_code, bind_runner_snapshot_workspace_attestations, terminal_run_result,
-    DerivedCookBaselineCapability,
+    aggregate_exit_code, bind_runner_snapshot_workspace_attestations, DerivedCookBaselineCapability,
 };
 use homeboy_core::{Error, Result};
 use serde_json::{json, Map, Value};
@@ -34,6 +33,7 @@ pub struct PreparedAgentTaskSubmission {
     lifecycle_store: Option<AgentTaskLifecycleStore>,
     harvest_context: Option<HarvestExecutionContext>,
     queued_plan_enrichment: bool,
+    claimed_plan_enrichment: bool,
 }
 
 impl PreparedAgentTaskSubmission {
@@ -43,6 +43,7 @@ impl PreparedAgentTaskSubmission {
             lifecycle_store: None,
             harvest_context: None,
             queued_plan_enrichment: false,
+            claimed_plan_enrichment: false,
         }
     }
 
@@ -58,6 +59,11 @@ impl PreparedAgentTaskSubmission {
 
     pub(crate) fn with_queued_plan_enrichment(mut self) -> Self {
         self.queued_plan_enrichment = true;
+        self
+    }
+
+    pub(crate) fn with_claimed_plan_enrichment(mut self) -> Self {
+        self.claimed_plan_enrichment = true;
         self
     }
 }
@@ -109,7 +115,22 @@ pub fn submit_prepared_plan(
     prepared: PreparedAgentTaskSubmission,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskSubmissionOutcome> {
-    submit_prepared_plan_inner(request, prepared, executor, None, |_| Ok(()))
+    submit_prepared_plan_inner(request, prepared, Some(executor), None, |_| Ok(()))
+}
+
+pub fn queue_prepared_plan(
+    request: &ControlPlaneSubmissionRequest,
+    prepared: PreparedAgentTaskSubmission,
+) -> Result<AgentTaskSubmissionOutcome> {
+    if !request.queue_only {
+        return Err(Error::validation_invalid_argument(
+            "queue_only",
+            "queue submission requires queue_only=true",
+            None,
+            None,
+        ));
+    }
+    submit_prepared_plan_inner(request, prepared, None, None, |_| Ok(()))
 }
 
 pub(crate) fn submit_prepared_plan_with_cook_baseline(
@@ -118,9 +139,13 @@ pub(crate) fn submit_prepared_plan_with_cook_baseline(
     executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
 ) -> Result<AgentTaskSubmissionOutcome> {
-    submit_prepared_plan_inner(request, prepared, executor, derived_cook_baseline, |_| {
-        Ok(())
-    })
+    submit_prepared_plan_inner(
+        request,
+        prepared,
+        Some(executor),
+        derived_cook_baseline,
+        |_| Ok(()),
+    )
 }
 
 pub(crate) fn submit_prepared_plan_with_observer<F>(
@@ -132,13 +157,243 @@ pub(crate) fn submit_prepared_plan_with_observer<F>(
 where
     F: FnOnce(&AgentTaskRunRecord) -> Result<()>,
 {
-    submit_prepared_plan_inner(request, prepared, executor, None, on_submitted)
+    submit_prepared_plan_inner(request, prepared, Some(executor), None, on_submitted)
+}
+
+pub(crate) fn queue_prepared_plan_with_observer<F>(
+    request: &ControlPlaneSubmissionRequest,
+    prepared: PreparedAgentTaskSubmission,
+    on_submitted: F,
+) -> Result<AgentTaskSubmissionOutcome>
+where
+    F: FnOnce(&AgentTaskRunRecord) -> Result<()>,
+{
+    if !request.queue_only {
+        return Err(Error::validation_invalid_argument(
+            "queue_only",
+            "queue submission requires queue_only=true",
+            None,
+            None,
+        ));
+    }
+    submit_prepared_plan_inner(request, prepared, None, None, on_submitted)
+}
+
+pub(crate) fn execute_claimed_plan(
+    run_id: &str,
+    mut prepared: PreparedAgentTaskSubmission,
+    executor: SharedAgentTaskExecutor,
+) -> Result<AgentTaskSubmissionOutcome> {
+    let request = prepared_submission_request(Some(run_id), false, "homeboy-claimed-run")?;
+    let lifecycle_store = prepared
+        .lifecycle_store
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
+    prepared.lifecycle_store = Some(lifecycle_store.clone());
+    with_submission_lock(&lifecycle_store, run_id, || {
+        let existing = lifecycle_store.read_record(run_id)?;
+        let identity = submission_identity(&request, &prepared.plan, Some(&existing), false, true)?;
+        if let Some(outcome) =
+            terminal_reuse_outcome(&identity, &lifecycle_store, existing.clone())?
+        {
+            return Ok(outcome);
+        }
+        if existing.state != AgentTaskRunState::Running {
+            return Err(Error::validation_invalid_argument(
+                "run",
+                format!(
+                    "claimed agent-task run '{}' must be running before execution",
+                    existing.run_id
+                ),
+                Some(existing.run_id),
+                None,
+            ));
+        }
+
+        let harvest_context = match prepared
+            .harvest_context
+            .take()
+            .map(Ok)
+            .unwrap_or_else(HarvestExecutionContext::from_current_process)
+        {
+            Ok(context) => context,
+            Err(error) => {
+                lifecycle_store.record_pre_execution_failure(
+                    run_id,
+                    &prepared.plan,
+                    "validate_harvest_transport",
+                    &error,
+                )?;
+                return Err(error);
+            }
+        };
+        if harvest_context.snapshot_signaled() {
+            bind_runner_snapshot_workspace_attestations(&mut prepared.plan)?;
+        }
+        lifecycle_store.write_controller_plan(run_id, &prepared.plan)?;
+        let binding = submission_metadata(&request, &prepared.plan, &identity)
+            .remove(SUBMISSION_METADATA_KEY)
+            .expect("submission binding");
+        lifecycle_store.mutate_record(run_id, |record| {
+            record.metadata[SUBMISSION_METADATA_KEY] = binding;
+            record.updated_at = Some(agent_task_lifecycle::now_timestamp());
+            true
+        })?;
+
+        let aggregate = run_with_scheduler(
+            &lifecycle_store,
+            prepared.plan.clone(),
+            run_id,
+            executor,
+            None,
+            harvest_context,
+        )?;
+        let record = lifecycle_store.record_run_aggregate(run_id, &prepared.plan, &aggregate)?;
+        acknowledgement_outcome(
+            &identity,
+            existing,
+            Some(record),
+            Some(aggregate.clone()),
+            aggregate_exit_code(&aggregate),
+            false,
+            ControlPlaneActionOutcome::Succeeded,
+        )
+    })
+}
+
+pub(crate) fn stage_prepared_plan(
+    request: &ControlPlaneSubmissionRequest,
+    prepared: PreparedAgentTaskSubmission,
+) -> Result<AgentTaskRunRecord> {
+    validate_submission_request(request)?;
+    let lifecycle_store = prepared
+        .lifecycle_store
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
+    with_submission_lock(&lifecycle_store, request.run.as_str(), || {
+        let existing = load_existing_record(&lifecycle_store, request.run.as_str())?;
+        let identity = submission_identity(
+            request,
+            &prepared.plan,
+            existing.as_ref(),
+            prepared.queued_plan_enrichment,
+            prepared.claimed_plan_enrichment,
+        )?;
+        if let Some(existing) = existing {
+            if existing.state.is_terminal()
+                && !crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
+                    &existing,
+                )
+            {
+                return Ok(existing);
+            }
+            if existing.state == AgentTaskRunState::Running {
+                return Err(Error::validation_invalid_argument(
+                    "run",
+                    format!("agent-task run '{}' is already running", existing.run_id),
+                    Some(existing.run_id),
+                    None,
+                )
+                .with_retryable(true));
+            }
+        }
+        persist_plan(
+            &lifecycle_store,
+            &prepared.plan,
+            request.run.as_str(),
+            submission_metadata(request, &prepared.plan, &identity),
+        )
+    })
+}
+
+pub(crate) fn execute_ephemeral_prepared_plan(
+    mut prepared: PreparedAgentTaskSubmission,
+    executor: SharedAgentTaskExecutor,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+) -> Result<AgentTaskAggregate> {
+    let harvest_context = prepared
+        .harvest_context
+        .take()
+        .map(Ok)
+        .unwrap_or_else(HarvestExecutionContext::from_current_process)?;
+    if harvest_context.snapshot_signaled() {
+        bind_runner_snapshot_workspace_attestations(&mut prepared.plan)?;
+    }
+    let scheduler =
+        AgentTaskScheduler::new_controller(executor).with_harvest_context(harvest_context);
+    let scheduler = match prepared.lifecycle_store {
+        Some(store) => scheduler.with_lifecycle_store(store),
+        None => scheduler,
+    };
+    Ok(scheduler.run_with_derived_cook_baseline(prepared.plan, derived_cook_baseline))
+}
+
+pub(crate) fn reject_prepared_plan(
+    request: &ControlPlaneSubmissionRequest,
+    prepared: PreparedAgentTaskSubmission,
+    phase: &str,
+    error: &Error,
+) -> Result<AgentTaskRunRecord> {
+    validate_submission_request(request)?;
+    let lifecycle_store = prepared
+        .lifecycle_store
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
+    with_submission_lock(&lifecycle_store, request.run.as_str(), || {
+        let existing = load_existing_record(&lifecycle_store, request.run.as_str())?;
+        let identity = submission_identity(
+            request,
+            &prepared.plan,
+            existing.as_ref(),
+            prepared.queued_plan_enrichment,
+            prepared.claimed_plan_enrichment,
+        )?;
+        if existing.as_ref().is_some_and(|record| {
+            record.state.is_terminal()
+                && !crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
+                    record,
+                )
+        }) {
+            return Ok(existing.expect("terminal record"));
+        }
+        let submitted = if existing
+            .as_ref()
+            .is_some_and(|record| record.state == AgentTaskRunState::Running)
+        {
+            lifecycle_store.write_controller_plan(request.run.as_str(), &prepared.plan)?;
+            let binding = submission_metadata(request, &prepared.plan, &identity)
+                .remove(SUBMISSION_METADATA_KEY)
+                .expect("submission binding");
+            lifecycle_store.mutate_record(request.run.as_str(), |record| {
+                record.metadata[SUBMISSION_METADATA_KEY] = binding;
+                record.updated_at = Some(agent_task_lifecycle::now_timestamp());
+                true
+            })?;
+            lifecycle_store.read_record(request.run.as_str())?
+        } else {
+            persist_plan(
+                &lifecycle_store,
+                &prepared.plan,
+                request.run.as_str(),
+                submission_metadata(request, &prepared.plan, &identity),
+            )?
+        };
+        lifecycle_store.record_pre_execution_failure(
+            &submitted.run_id,
+            &prepared.plan,
+            phase,
+            error,
+        )
+    })
 }
 
 fn submit_prepared_plan_inner<F>(
     request: &ControlPlaneSubmissionRequest,
     mut prepared: PreparedAgentTaskSubmission,
-    executor: SharedAgentTaskExecutor,
+    executor: Option<SharedAgentTaskExecutor>,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     on_submitted: F,
 ) -> Result<AgentTaskSubmissionOutcome>
@@ -166,7 +421,7 @@ where
 fn submit_prepared_plan_locked<F>(
     request: &ControlPlaneSubmissionRequest,
     mut prepared: PreparedAgentTaskSubmission,
-    executor: SharedAgentTaskExecutor,
+    executor: Option<SharedAgentTaskExecutor>,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     on_submitted: F,
 ) -> Result<AgentTaskSubmissionOutcome>
@@ -174,20 +429,22 @@ where
     F: FnOnce(&AgentTaskRunRecord) -> Result<()>,
 {
     let requested_run_id = request.run.as_str();
+    let lifecycle_store = prepared
+        .lifecycle_store
+        .as_ref()
+        .expect("submission store resolved before lock");
 
-    let existing = load_existing_record(prepared.lifecycle_store.as_ref(), requested_run_id)?;
+    let existing = load_existing_record(lifecycle_store, requested_run_id)?;
     let identity = submission_identity(
         request,
         &prepared.plan,
         existing.as_ref(),
         prepared.queued_plan_enrichment,
+        prepared.claimed_plan_enrichment,
     )?;
     if let Some(existing) = existing {
-        if let Some(outcome) = terminal_reuse_outcome(
-            &identity,
-            prepared.lifecycle_store.as_ref(),
-            existing.clone(),
-        )? {
+        if let Some(outcome) = terminal_reuse_outcome(&identity, lifecycle_store, existing.clone())?
+        {
             on_submitted(&existing)?;
             return Ok(outcome);
         }
@@ -205,7 +462,7 @@ where
     }
 
     let submitted = persist_plan(
-        prepared.lifecycle_store.as_ref(),
+        lifecycle_store,
         &prepared.plan,
         requested_run_id,
         submission_metadata(request, &prepared.plan, &identity),
@@ -222,6 +479,14 @@ where
             ControlPlaneActionOutcome::Succeeded,
         );
     }
+    let executor = executor.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "queue_only",
+            "executing submission requires an executor",
+            None,
+            None,
+        )
+    })?;
 
     let run_id = submitted.run_id.clone();
     let harvest_context = match prepared
@@ -233,7 +498,7 @@ where
         Ok(context) => context,
         Err(error) => {
             record_pre_execution_failure(
-                prepared.lifecycle_store.as_ref(),
+                lifecycle_store,
                 &run_id,
                 &prepared.plan,
                 "validate_harvest_transport",
@@ -245,21 +510,16 @@ where
     if harvest_context.snapshot_signaled() {
         bind_runner_snapshot_workspace_attestations(&mut prepared.plan)?;
     }
-    mark_running(prepared.lifecycle_store.as_ref(), &run_id)?;
+    mark_running(lifecycle_store, &run_id)?;
     let aggregate = run_with_scheduler(
-        prepared.lifecycle_store.as_ref(),
+        lifecycle_store,
         prepared.plan.clone(),
         &run_id,
         executor,
         derived_cook_baseline,
         harvest_context,
     )?;
-    let record = persist_aggregate(
-        prepared.lifecycle_store.as_ref(),
-        &run_id,
-        &prepared.plan,
-        &aggregate,
-    )?;
+    let record = persist_aggregate(lifecycle_store, &run_id, &prepared.plan, &aggregate)?;
     acknowledgement_outcome(
         &identity,
         submitted,
@@ -310,53 +570,27 @@ fn validate_submission_request(request: &ControlPlaneSubmissionRequest) -> Resul
 }
 
 fn load_existing_record(
-    store: Option<&AgentTaskLifecycleStore>,
+    store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    let exists = match store {
-        Some(store) => store.record_exists(run_id)?,
-        None => agent_task_lifecycle::run_record_exists(run_id)?,
-    };
-    if !exists {
+    if !store.record_exists(run_id)? {
         return Ok(None);
     }
-    let record = match store {
-        Some(store) => store.read_record(run_id)?,
-        None => agent_task_lifecycle::status(run_id)?,
-    };
-    Ok(Some(record))
+    store.read_record(run_id).map(Some)
 }
 
 fn terminal_reuse_outcome(
     identity: &SubmissionIdentity,
-    store: Option<&AgentTaskLifecycleStore>,
+    store: &AgentTaskLifecycleStore,
     existing: AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskSubmissionOutcome>> {
     if crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(&existing) {
         return Ok(None);
     }
-    if store.is_none() {
-        let Some(result) = terminal_run_result(&existing.run_id)? else {
-            return Ok(None);
-        };
-        return acknowledgement_outcome(
-            identity,
-            existing,
-            None,
-            Some(result.value),
-            result.exit_code,
-            false,
-            ControlPlaneActionOutcome::AlreadySatisfied,
-        )
-        .map(Some);
-    }
     if !existing.state.is_terminal() {
         return Ok(None);
     }
-    let aggregate = match store
-        .expect("store-rooted terminal reuse")
-        .read_aggregate(&existing.run_id)
-    {
+    let aggregate = match store.read_aggregate(&existing.run_id) {
         Ok(aggregate) => crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
         Err(_) => {
             return Err(Error::validation_invalid_argument(
@@ -386,74 +620,48 @@ fn terminal_reuse_outcome(
 }
 
 fn persist_plan(
-    store: Option<&AgentTaskLifecycleStore>,
+    store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     run_id: &str,
     submission_metadata: Map<String, Value>,
 ) -> Result<AgentTaskRunRecord> {
-    match store {
-        Some(store) => store.submit_plan_with_current_runtime_and_metadata(
-            plan,
-            run_id,
-            Some(submission_metadata),
-        ),
-        None => agent_task_lifecycle::submit_plan_with_submission_metadata(
-            plan,
-            run_id,
-            submission_metadata,
-        ),
-    }
+    store.submit_plan_with_current_runtime_and_metadata(plan, run_id, Some(submission_metadata))
 }
 
 fn record_pre_execution_failure(
-    store: Option<&AgentTaskLifecycleStore>,
+    store: &AgentTaskLifecycleStore,
     run_id: &str,
     plan: &AgentTaskPlan,
     phase: &str,
     error: &Error,
 ) -> Result<AgentTaskRunRecord> {
-    match store {
-        Some(store) => store.record_pre_execution_failure(run_id, plan, phase, error),
-        None => agent_task_lifecycle::record_pre_execution_failure(run_id, plan, phase, error),
-    }
+    store.record_pre_execution_failure(run_id, plan, phase, error)
 }
 
-fn mark_running(
-    store: Option<&AgentTaskLifecycleStore>,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    match store {
-        Some(store) => store.mark_running(run_id),
-        None => agent_task_lifecycle::mark_running(run_id),
-    }
+fn mark_running(store: &AgentTaskLifecycleStore, run_id: &str) -> Result<AgentTaskRunRecord> {
+    store.mark_running(run_id)
 }
 
 fn persist_aggregate(
-    store: Option<&AgentTaskLifecycleStore>,
+    store: &AgentTaskLifecycleStore,
     run_id: &str,
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    match store {
-        Some(store) => store.record_run_aggregate(run_id, plan, aggregate),
-        None => agent_task_lifecycle::record_run_aggregate(run_id, plan, aggregate),
-    }
+    store.record_run_aggregate(run_id, plan, aggregate)
 }
 
 fn run_with_scheduler(
-    store: Option<&AgentTaskLifecycleStore>,
+    store: &AgentTaskLifecycleStore,
     plan: AgentTaskPlan,
     run_id: &str,
     executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     harvest_context: HarvestExecutionContext,
 ) -> Result<AgentTaskAggregate> {
-    let scheduler =
-        AgentTaskScheduler::new_controller(executor).with_harvest_context(harvest_context);
-    let scheduler = match store {
-        Some(store) => scheduler.with_lifecycle_store(store.clone()),
-        None => scheduler,
-    };
+    let scheduler = AgentTaskScheduler::new_controller(executor)
+        .with_harvest_context(harvest_context)
+        .with_lifecycle_store(store.clone());
     Ok(scheduler
         .with_run_id(run_id.to_string())
         .run_with_derived_cook_baseline(plan, derived_cook_baseline))
@@ -506,6 +714,7 @@ fn submission_identity(
     plan: &AgentTaskPlan,
     existing: Option<&AgentTaskRunRecord>,
     queued_plan_enrichment: bool,
+    claimed_plan_enrichment: bool,
 ) -> Result<SubmissionIdentity> {
     let Some(existing) = existing else {
         return Ok(SubmissionIdentity {
@@ -536,6 +745,9 @@ fn submission_identity(
     let plan_fingerprint = plan_fingerprint(plan)?;
     let queue_to_run = queued_plan_enrichment
         && existing.state == AgentTaskRunState::Queued
+        && !request.queue_only;
+    let claimed_queue_to_run = claimed_plan_enrichment
+        && existing.state == AgentTaskRunState::Running
         && metadata["queue_only"].as_bool() == Some(true)
         && !request.queue_only;
     let concurrent_queue_completion = queued_plan_enrichment
@@ -549,6 +761,7 @@ fn submission_identity(
         || metadata["task_ids"] != json!(task_ids)
         || (metadata["plan_sha256"] != plan_fingerprint
             && !queue_to_run
+            && !claimed_queue_to_run
             && !concurrent_queue_completion)
     {
         return Err(submission_conflict(
@@ -800,6 +1013,51 @@ mod tests {
                 replay.acknowledgement.outcome,
                 ControlPlaneActionOutcome::AlreadySatisfied
             );
+        });
+    }
+
+    #[test]
+    fn staged_admission_survives_preparation_before_execution() {
+        with_isolated_home(|_| {
+            let run_id = "submission-staged-admission";
+            let queued_request =
+                prepared_submission_request(Some(run_id), true, "queue-actor").expect("queue");
+            queue_prepared_plan(
+                &queued_request,
+                PreparedAgentTaskSubmission::new(test_plan("staged-plan")),
+            )
+            .expect("queued");
+
+            let request =
+                prepared_submission_request(Some(run_id), false, "run-actor").expect("run");
+            let mut admitted = test_plan("staged-plan");
+            admitted.metadata["selected_provider"] = json!("fallback");
+            stage_prepared_plan(
+                &request,
+                PreparedAgentTaskSubmission::new(admitted.clone()).with_queued_plan_enrichment(),
+            )
+            .expect("stage admitted plan");
+            assert_eq!(
+                agent_task_lifecycle::load_plan(run_id)
+                    .expect("staged plan")
+                    .metadata["selected_provider"],
+                "fallback"
+            );
+
+            admitted.metadata["prepared_workspace"] = json!(true);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let outcome = submit_prepared_plan(
+                &request,
+                PreparedAgentTaskSubmission::new(admitted).with_queued_plan_enrichment(),
+                Arc::new(CountingExecutor {
+                    calls: Arc::clone(&calls),
+                    submitted_observed: None,
+                }),
+            )
+            .expect("execute prepared plan");
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(outcome.record.state, AgentTaskRunState::Succeeded);
         });
     }
 

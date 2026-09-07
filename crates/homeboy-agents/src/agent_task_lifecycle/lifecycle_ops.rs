@@ -421,19 +421,6 @@ pub fn submit_plan(
     submit_plan_in_store(&lifecycle_store, plan, requested_run_id)
 }
 
-pub(crate) fn submit_plan_with_submission_metadata(
-    plan: &AgentTaskPlan,
-    run_id: &str,
-    submission_metadata: serde_json::Map<String, Value>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    lifecycle_store.submit_plan_with_current_runtime_and_metadata(
-        plan,
-        run_id,
-        Some(submission_metadata),
-    )
-}
-
 /// Submit a plan into an explicitly rooted store.
 ///
 /// The admission cancellation check is the reach that has to move with the
