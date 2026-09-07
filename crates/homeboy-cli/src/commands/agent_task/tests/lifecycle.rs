@@ -2237,8 +2237,17 @@ fn unmaterialized_cook_resume_replays_the_canonical_action_result() {
         let replay = resume(args()).expect("replay admission resume");
 
         assert_eq!(replay, first);
-        assert_eq!(first.0["schema"], "homeboy/unmaterialized-cook-resume/v1");
-        assert_eq!(first.0["run_id"], run_id);
+        assert_eq!(
+            first.0["schema"],
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(first.0["action"], "resume");
+        assert_eq!(first.0["idempotency_key"], "resume-unmaterialized-1");
+        assert_eq!(
+            first.0["result"]["schema"],
+            "homeboy/unmaterialized-cook-resume/v1"
+        );
+        assert_eq!(first.0["result"]["data"]["run_id"], run_id);
     });
 }
 
@@ -4815,15 +4824,15 @@ fn verify_replacement_file_gates_are_snapshotted_before_execution() {
 }
 
 #[test]
-fn resume_command_executes_existing_run() {
+fn resume_command_executes_existing_run_and_returns_the_replayable_acknowledgement() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli")).expect("submitted");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (_value, exit_code) = run_resume_with_executor(
+        let (value, exit_code) = run_resume_with_executor(
             "run-resume-cli".to_string(),
             false,
-            None,
+            Some("resume-cli-1".to_string()),
             Arc::new(InspectingExecutor {
                 run_id: "run-resume-cli".to_string(),
                 observed_status: Arc::clone(&observed_status),
@@ -4839,8 +4848,39 @@ fn resume_command_executes_existing_run() {
         let completed = lifecycle_status("run-resume-cli").expect("completed status");
 
         assert_eq!(exit_code, 0);
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(value.clone()).expect("canonical action acknowledgement");
+        assert_eq!(
+            acknowledgement.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(
+            acknowledgement.action,
+            homeboy_control_plane_contract::ControlPlaneAction::Resume
+        );
+        assert_eq!(acknowledgement.idempotency_key, "resume-cli-1");
+        assert_eq!(
+            acknowledgement.resource.state,
+            homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+        );
         assert!(observed.metadata["resume_requested_at"].is_string());
         assert_eq!(completed.state, AgentTaskRunState::Succeeded);
+
+        let replay_executor = Arc::new(CapturingExecutor::default());
+        let replay = run_resume_with_executor(
+            "run-resume-cli".to_string(),
+            false,
+            Some("resume-cli-1".to_string()),
+            replay_executor.clone(),
+        )
+        .expect("replayed resume")
+        .0;
+        assert_eq!(replay, value);
+        assert!(replay_executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
     });
 }
 
