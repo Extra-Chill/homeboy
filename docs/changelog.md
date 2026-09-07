@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.369.1] - 2026-09-07
+
+### Changed
+- root workspace prune tests off the global home lock
+
+### Fixed
+- preserve retained artifact evidence
+- resolve managed adoption source
+
 ## [0.369.0] - 2026-09-07
 
 ### Changed
