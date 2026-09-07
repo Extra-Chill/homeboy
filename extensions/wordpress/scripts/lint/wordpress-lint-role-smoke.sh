@@ -22,6 +22,8 @@ mkdir -p \
     "${COMPONENT_DIR}/tests"
 
 touch "${EXTENSION_DIR}/phpcs.xml.dist" "${EXTENSION_DIR}/phpstan.neon.dist"
+mkdir -p "${EXTENSION_DIR}/rulesets"
+touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 ln -s "${SCRIPT_DIR}/phpstan-runner.sh" "${EXTENSION_DIR}/scripts/lint/phpstan-runner.sh"
 
 cat > "${COMPONENT_DIR}/scoper.inc.php" <<'PHP'

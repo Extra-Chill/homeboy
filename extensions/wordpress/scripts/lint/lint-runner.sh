@@ -358,7 +358,21 @@ for phpcs_config_name in phpcs.xml .phpcs.xml phpcs.xml.dist .phpcs.xml.dist; do
         break
     fi
 done
-PHPCS_CONFIG="${PHPCS_CONFIG:-${EXTENSION_PATH}/phpcs.xml.dist}"
+# Fall back to the shipped consumer ruleset (rulesets/homeboy-wordpress-project.xml),
+# NOT this extension's own phpcs.xml.dist, when the component has no PHPCS config of
+# its own. phpcs.xml.dist exists to dogfood the shipped ruleset for this extension's
+# own repo and references it via a relative `<rule ref="rulesets/...">` — PHPCS
+# resolves that relative path against the running process's CWD, not the referencing
+# ruleset file's directory. That CWD is the extension root during this extension's own
+# self-check lint (where phpcs.xml.dist correctly resolves), but is always the
+# consumer component's own directory here, so pointing at phpcs.xml.dist made PHPCS
+# fail to load *any* standard for every consumer with no ruleset of its own
+# (homeboy-extensions#2797): "ERROR: Referenced sniff \"rulesets/homeboy-wordpress-project.xml\"
+# does not exist." — which aborts before scanning a single file, not a scan that walks
+# vendor/. The shipped ruleset has no relative file refs (only named-standard refs
+# resolved via `installed_paths`, set up above), so it resolves identically regardless
+# of CWD.
+PHPCS_CONFIG="${PHPCS_CONFIG:-${EXTENSION_PATH}/rulesets/homeboy-wordpress-project.xml}"
 
 if [ "$COMPONENT_PHPCS_CONFIG" -eq 1 ]; then
     if [ -x "${PLUGIN_PATH}/vendor/bin/phpcs" ]; then
@@ -376,7 +390,7 @@ if [ ! -f "$PHPCS_BIN" ]; then
 fi
 
 if [ ! -f "$PHPCS_CONFIG" ]; then
-    echo "Error: phpcs.xml.dist not found at $PHPCS_CONFIG"
+    echo "Error: PHPCS config not found at $PHPCS_CONFIG"
     exit 1
 fi
 

@@ -258,6 +258,16 @@ above references this same file (`<rule ref="rulesets/homeboy-wordpress-project.
 so the extension's own lint run is the proof that the shipped artifact
 works — it is not a parallel, drifting copy.
 
+A component with no PHPCS config of its own (no `phpcs.xml`, `.phpcs.xml`,
+`phpcs.xml.dist`, or `.phpcs.xml.dist`) gets this shared ruleset automatically
+from the Lint capability — `homeboy lint`, `homeboy review`, and the
+`preflight.lint` release gate all resolve to it, with no `scripts.lint` or
+composer wiring required. The fallback is this file specifically, not
+`phpcs.xml.dist` above: `phpcs.xml.dist` references the shared ruleset via a
+relative `<rule ref>` that only resolves when PHPCS runs from this extension's
+own directory, which is true for this extension's self-check lint but never
+true for a consumer component (homeboy-extensions#2797).
+
 **Running it standalone** — a WordPress extension install exposes its
 own path via `homeboy extension exec`, which sets `HOMEBOY_EXTENSION_PATH`
 in the child process environment:
