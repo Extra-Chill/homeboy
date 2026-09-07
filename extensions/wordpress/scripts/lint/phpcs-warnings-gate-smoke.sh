@@ -41,6 +41,8 @@ mkdir -p \
     "${COMPONENT_DIR}"
 
 touch "${EXTENSION_DIR}/phpcs.xml.dist" "${EXTENSION_DIR}/phpstan.neon.dist"
+mkdir -p "${EXTENSION_DIR}/rulesets"
+touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 
 cat > "${COMPONENT_DIR}/plugin.php" <<'PHP'
 <?php

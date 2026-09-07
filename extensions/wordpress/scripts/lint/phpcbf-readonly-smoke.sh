@@ -16,9 +16,11 @@ PHPCBF_ARGS_FILE="${TMPDIR}/phpcbf-args.txt"
 mkdir -p \
     "${EXTENSION_DIR}/vendor/bin" \
     "${EXTENSION_DIR}/scripts/lib" \
+    "${EXTENSION_DIR}/rulesets" \
     "${COMPONENT_DIR}/includes"
 
 touch "${EXTENSION_DIR}/phpcs.xml.dist"
+touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 
 cat > "${COMPONENT_DIR}/plugin.php" <<'PHP'
 <?php

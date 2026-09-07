@@ -22,9 +22,11 @@ mkdir -p \
     "${EXTENSION_DIR}/vendor/bin" \
     "${EXTENSION_DIR}/vendor/wp-coding-standards/wpcs" \
     "${EXTENSION_DIR}/scripts/lint/php-fixers" \
+    "${EXTENSION_DIR}/rulesets" \
     "${COMPONENT_DIR}/vendor/bin"
 
 touch "${EXTENSION_DIR}/phpcs.xml.dist"
+touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 
 cat > "${COMPONENT_DIR}/plugin.php" <<'PHP'
 <?php
@@ -204,7 +206,10 @@ assert_exact_arg "$PHPCS_ARGS_FILE" "--standard=${expected_config}" "phpcs execu
 assert_fix_consumers "$expected_config" "$expected_phpcs_bin" extension
 rm "${COMPONENT_DIR}/phpcs.xml"
 
-expected_config="${EXTENSION_DIR}/phpcs.xml.dist"
+# No component ruleset at all: fall back to the shipped consumer ruleset
+# (rulesets/homeboy-wordpress-project.xml), not this extension's own
+# phpcs.xml.dist — see lint-runner.sh for why (homeboy-extensions#2797).
+expected_config="${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 expected_phpcs_bin="${EXTENSION_DIR}/vendor/bin/phpcs"
 run_lint 0
 assert_tool "$PHPCS_TOOL_FILE" extension phpcs

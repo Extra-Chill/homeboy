@@ -20,8 +20,9 @@ COMPONENT_DIR="${TMPDIR}/component"
 OUTPUT_FILE="${TMPDIR}/lint-output.txt"
 FINDINGS_FILE="${TMPDIR}/lint-findings.json"
 
-mkdir -p "${EXTENSION_DIR}/vendor/bin" "${COMPONENT_DIR}"
+mkdir -p "${EXTENSION_DIR}/vendor/bin" "${EXTENSION_DIR}/rulesets" "${COMPONENT_DIR}"
 touch "${EXTENSION_DIR}/phpcs.xml.dist"
+touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 
 cat > "${COMPONENT_DIR}/plugin.php" <<'PHP'
 <?php

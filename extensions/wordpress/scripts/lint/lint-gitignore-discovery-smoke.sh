@@ -10,8 +10,9 @@ EXTENSION_DIR="${TMP_DIR}/extension"
 COMPONENT_DIR="${TMP_DIR}/component"
 PHPCS_ARGS_FILE="${TMP_DIR}/phpcs-args.txt"
 
-mkdir -p "${EXTENSION_DIR}/vendor/bin" "${EXTENSION_DIR}/scripts/lint" "${COMPONENT_DIR}/src" "${COMPONENT_DIR}/artifacts/generated"
+mkdir -p "${EXTENSION_DIR}/vendor/bin" "${EXTENSION_DIR}/scripts/lint" "${EXTENSION_DIR}/rulesets" "${COMPONENT_DIR}/src" "${COMPONENT_DIR}/artifacts/generated"
 touch "${EXTENSION_DIR}/phpcs.xml.dist"
+touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 
 cat > "${COMPONENT_DIR}/plugin.php" <<'PHP'
 <?php

@@ -12,8 +12,9 @@ OUTPUT_FILE="${TMPDIR}/lint-output.txt"
 TARGET_FILE="${COMPONENT_DIR}/inc/Changed.php"
 UNRELATED_FILE="${COMPONENT_DIR}/inc/Unrelated.php"
 
-mkdir -p "${EXTENSION_DIR}/vendor/bin" "${EXTENSION_DIR}/scripts/lint/php-fixers" "${COMPONENT_DIR}/inc"
+mkdir -p "${EXTENSION_DIR}/vendor/bin" "${EXTENSION_DIR}/scripts/lint/php-fixers" "${EXTENSION_DIR}/rulesets" "${COMPONENT_DIR}/inc"
 touch "${EXTENSION_DIR}/phpcs.xml.dist"
+touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
 
 cat > "${COMPONENT_DIR}/component.php" <<'PHP'
 <?php
