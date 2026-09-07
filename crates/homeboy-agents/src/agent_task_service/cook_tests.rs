@@ -18016,11 +18016,14 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
                 package_root: ".".to_string(),
                 provider_id: "fixture".to_string(),
                 command: vec!["fixture-install".to_string()],
+                cwd: "/fixture".to_string(),
                 reason: "deterministic fixture".to_string(),
                 duration_ms: 17,
                 termination: homeboy_core::deps::DependencyHydrationTermination::Completed,
                 status: homeboy_core::deps::DependencyHydrationStatus::Succeeded,
                 exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
             });
         let candidate = crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
             changed_files: vec!["src/lib.rs".to_string()],

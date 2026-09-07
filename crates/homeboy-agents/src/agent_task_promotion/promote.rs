@@ -2417,16 +2417,27 @@ fn gate_setup_outcome_failure(
     classification: &str,
     outcome: &homeboy_core::deps::DependencyHydrationOutcome,
 ) -> Error {
+    let mut bounded_outcome = outcome.clone();
+    bounded_outcome.cwd = bounded_setup_error_text(&bounded_outcome.cwd);
+    bounded_outcome.stdout = bounded_setup_error_text(&bounded_outcome.stdout);
+    bounded_outcome.stderr = bounded_setup_error_text(&bounded_outcome.stderr);
+    let logs = [
+        (!bounded_outcome.stdout.is_empty()).then(|| format!("stdout: {}", bounded_outcome.stdout)),
+        (!bounded_outcome.stderr.is_empty()).then(|| format!("stderr: {}", bounded_outcome.stderr)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Error::dependency_step_failed(
         "promotion.gate_setup",
         outcome.provider_id.clone(),
         outcome.exit_code,
-        Vec::new(),
+        logs,
         Vec::new(),
         Some(outcome.command.join(" ")),
         Some(serde_json::json!({
             "classification": classification,
-            "outcome": outcome,
+            "outcome": bounded_outcome,
             "retry_action": "retry_dependency_hydration",
         })),
     )

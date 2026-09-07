@@ -502,6 +502,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 }
 
 fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
+    if string_value(payload, &["blocker", "code"]) == Some("controller_failure")
+        && string_value(payload, &["candidate", "state"]) == Some("verification_pending")
+    {
+        let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
+        return format!("homeboy agent-task cook-continue {cook_id}");
+    }
     const PREFERRED: [&str; 5] = ["reconcile", "resume", "retry", "review", "promote"];
     let Some(actions) = payload
         .pointer("/action_eligibility/actions")
@@ -1766,6 +1772,38 @@ mod tests {
         assert!(summary.contains("Artifacts: 1\n"), "{summary}");
         assert!(
             summary.contains("Next: homeboy agent-task review agent-task-cook-attempt-1\n"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn status_summary_routes_pending_cook_controller_failure_to_continuation() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "mission": "cook-14357",
+            "run": "cook-14357-attempt-1",
+            "state": "succeeded",
+            "candidate": { "state": "verification_pending" },
+            "blocker": {
+                "code": "controller_failure",
+                "message": "dependency hydration failed"
+            },
+            "artifacts": [],
+            "action_eligibility": {
+                "actions": [{
+                    "action": "review",
+                    "availability": "available"
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(
+            summary.contains("Next: homeboy agent-task cook-continue cook-14357\n"),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains("Next: homeboy agent-task review"),
             "{summary}"
         );
     }
