@@ -1208,6 +1208,32 @@ mod tests {
     }
 
     #[test]
+    fn registered_cleanup_artifacts_parse_preserves_global_placement() {
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from([
+                "homeboy",
+                "cleanup",
+                "artifacts",
+                "--placement",
+                "local",
+                "--path",
+                "/tmp/homeboy-cleanup-fixture",
+            ])
+            .expect("cleanup artifacts accepts global placement after its subcommand");
+        let (cli, _) =
+            Cli::from_registered_arg_matches(&matches).expect("registered cleanup parse succeeds");
+
+        assert_eq!(cli.placement, Placement::Local);
+        assert!(matches!(
+            cli.command,
+            Commands::Cleanup(crate::commands::cleanup::CleanupArgs {
+                command: Some(crate::commands::cleanup::CleanupCommand::Artifacts(_)),
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn placement_exposes_explicit_lab_or_local_fallback() {
         let cli =
             Cli::try_parse_from(["homeboy", "bench", "example", "--placement", "lab-or-local"])
