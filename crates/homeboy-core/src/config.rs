@@ -136,6 +136,42 @@ pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     with_config_lock_for("config mutation", operation)
 }
 
+/// Run a short mutation under the caller's monotonic deadline.
+pub fn with_config_lock_until<T>(
+    deadline: std::time::Instant,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock_path = paths::homeboy()?.join("config.lock");
+    if config_lock_is_held(&lock_path) {
+        return operation();
+    }
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create config lock directory".to_string()),
+            )
+        })?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("open config lock".to_string()))
+        })?;
+    let _guard = ConfigLockGuard::lock_until(
+        file,
+        &lock_path,
+        "bounded workspace reconciliation",
+        deadline,
+    )?;
+    let _depth = ConfigLockPathGuard::enter(&lock_path);
+    operation()
+}
+
 /// Run `operation` while holding the exclusive config lock under `config_root`.
 pub fn with_config_lock_at<T>(
     config_root: &Path,
@@ -399,6 +435,47 @@ fn config_lock_timeout_error(
 impl ConfigLockGuard {
     fn lock(mut file: File, lock_path: &Path, operation: &str) -> Result<Self> {
         lock_exclusive_bounded(&file, lock_path, operation)?;
+        let owner = ConfigLockOwner {
+            pid: std::process::id(),
+            operation: operation.to_string(),
+        };
+        let owner = serde_json::to_vec(&owner).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize config lock owner".to_string()),
+            )
+        })?;
+        file.set_len(0)
+            .and_then(|_| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|_| file.write_all(&owner))
+            .and_then(|_| file.sync_data())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("write config lock owner".to_string()),
+                )
+            })?;
+        Ok(Self { file })
+    }
+
+    fn lock_until(
+        mut file: File,
+        lock_path: &Path,
+        operation: &str,
+        deadline: std::time::Instant,
+    ) -> Result<Self> {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| {
+                Error::internal_io(
+                    "config lock deadline exhausted",
+                    Some(operation.to_string()),
+                )
+            })?;
+        #[cfg(unix)]
+        lock_bounded(&file, lock_path, operation, libc::LOCK_EX, Some(remaining))?;
+        #[cfg(not(unix))]
+        let _ = remaining;
         let owner = ConfigLockOwner {
             pid: std::process::id(),
             operation: operation.to_string(),
@@ -1831,6 +1908,29 @@ mod tests {
                 "timeout must respect the configured bound: {:?}",
                 error.details
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_scoped_config_lock_respects_the_supplied_deadline() {
+        crate::test_support::with_isolated_home(|_home| {
+            let lock_path = paths::homeboy().expect("config root").join("config.lock");
+            std::fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("config dir");
+            let holder = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("holder handle");
+            let _holder = ConfigLockGuard::lock(holder, &lock_path, "test holder")
+                .expect("holder acquires the lock");
+            let started = std::time::Instant::now();
+            let error =
+                with_config_lock_until(started + std::time::Duration::from_millis(40), || Ok(()))
+                    .expect_err("contended deadline-scoped lock must time out");
+            assert_eq!(error.details["kind"], "config_lock_timeout");
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
         });
     }
 

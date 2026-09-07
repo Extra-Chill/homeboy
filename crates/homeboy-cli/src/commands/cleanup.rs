@@ -1988,7 +1988,10 @@ fn cleanup_inventory_with_deadline(
             &args,
             deadline,
             CleanupCategoryCommandOverrides::default(),
-            || repo_artifacts_category(apply, deadline).map(|category| vec![category]),
+            || {
+                repo_artifacts_category(apply, cleanup_category_action_deadline(deadline))
+                    .map(|category| vec![category])
+            },
         );
     }
 
@@ -2001,11 +2004,26 @@ fn cleanup_inventory_with_deadline(
             deadline,
             CleanupCategoryCommandOverrides::default(),
             || {
-                let output = worktree::cleanup(WorktreeCleanupOptions {
-                    force: false,
-                    dry_run: !apply,
-                    cleanup_branches: apply,
-                    allow_unmerged_branches: false,
+                let category_deadline = cleanup_category_action_deadline(deadline);
+                let remaining = category_deadline
+                    .map(|deadline| {
+                        deadline.duration_since(SystemTime::now()).map_err(|_| {
+                            homeboy::core::Error::internal_unexpected(
+                                "cleanup category deadline exhausted before task-worktree cleanup",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let output = worktree::cleanup_page(worktree::WorktreeCleanupPageOptions {
+                    cleanup: WorktreeCleanupOptions {
+                        force: false,
+                        dry_run: !apply,
+                        cleanup_branches: apply,
+                        allow_unmerged_branches: false,
+                    },
+                    limit: args.limit.unwrap_or(500).max(1) as usize,
+                    cursor: args.cursor.clone(),
+                    deadline: remaining.and_then(|remaining| Instant::now().checked_add(remaining)),
                 })?;
                 task_worktrees_category(output, apply).map(|category| vec![category])
             },
@@ -2456,7 +2474,7 @@ fn cleanup_inventory_with_deadline(
                         cursor: args.cursor.clone(),
                         now: std::time::SystemTime::now(),
                         lease_ttl: policy.shared_store_lease_ttl(),
-                        deadline: None,
+                        deadline: cleanup_category_action_deadline(deadline),
                     })?;
                 category_from_output(
                     SHARED_CARGO_TARGETS_METADATA,
@@ -2500,11 +2518,7 @@ fn cleanup_inventory_with_deadline(
                         } else {
                             OutputBudget::COLLECTION.max_items
                         },
-                        deadline: deadline.or_else(|| {
-                            SystemTime::now().checked_add(Duration::from_secs(
-                                config.retention.automatic_retention_max_run_seconds,
-                            ))
-                        }),
+                        deadline: cleanup_category_action_deadline(deadline),
                     },
                 )?;
                 category_from_output(
@@ -3039,6 +3053,27 @@ fn cleanup_category_timeout(required: Duration, deadline: Option<SystemTime>) ->
                 .unwrap_or(Duration::ZERO),
         )
     })
+}
+
+/// Bound direct category work to the child process's inherited allowance, not
+/// merely the parent aggregate wall. Reserve time for the child to serialize
+/// evidence before its supervisor reaps it.
+fn cleanup_category_action_deadline(deadline: Option<SystemTime>) -> Option<SystemTime> {
+    let child_deadline = std::env::var(CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|milliseconds| {
+            SystemTime::now().checked_add(
+                Duration::from_millis(milliseconds)
+                    .saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE),
+            )
+        });
+    match (deadline, child_deadline) {
+        (Some(parent), Some(child)) => Some(parent.min(child)),
+        (Some(parent), None) => Some(parent),
+        (None, Some(child)) => Some(child),
+        (None, None) => None,
+    }
 }
 
 fn cleanup_category_heartbeat() -> Duration {
@@ -3772,6 +3807,10 @@ fn task_worktrees_category(
         output,
     )?;
     category.reconciliation_blocker_count = reconciliation_blocker_count;
+    if let Some(continuation) = category.output.get("continuation").and_then(Value::as_str) {
+        category.inventory_completeness = "partial".to_string();
+        category.continuation_command = continuation.to_string();
+    }
     Ok(category)
 }
 
@@ -5988,6 +6027,8 @@ mod tests {
                 candidates: Vec::new(),
                 removed: Vec::new(),
                 skipped: Vec::new(),
+                next_cursor: None,
+                continuation: None,
             },
             false,
         )
@@ -6016,6 +6057,8 @@ mod tests {
                 candidates: Vec::new(),
                 removed: Vec::new(),
                 skipped: Vec::new(),
+                next_cursor: None,
+                continuation: None,
             },
             false,
         )

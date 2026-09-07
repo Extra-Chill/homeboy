@@ -170,7 +170,11 @@ fn terminal_claim() -> crate::workspace_claim::WorkspaceClaim {
 struct FixedLivenessAuthority(WorktreeLivenessAuthority);
 
 impl WorktreeReconciliationAuthority for FixedLivenessAuthority {
-    fn acquire(&self, _: &TaskWorktreeRecord) -> Result<WorktreeLivenessAuthority> {
+    fn acquire(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority> {
         Ok(self.0.clone())
     }
 
@@ -178,6 +182,7 @@ impl WorktreeReconciliationAuthority for FixedLivenessAuthority {
         &self,
         _: &TaskWorktreeRecord,
         _: &crate::workspace_claim::WorkspaceClaim,
+        _: std::time::Instant,
     ) -> Result<bool> {
         Ok(true)
     }
@@ -187,10 +192,68 @@ impl WorktreeReconciliationAuthority for FixedLivenessAuthority {
     }
 }
 
+struct FailingReleaseAuthority;
+
+impl WorktreeReconciliationAuthority for FailingReleaseAuthority {
+    fn acquire(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority> {
+        Ok(WorktreeLivenessAuthority::Terminal {
+            claim: terminal_claim(),
+            provenance: "terminal claim with failed release".to_string(),
+        })
+    }
+
+    fn validate(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: &crate::workspace_claim::WorkspaceClaim,
+        _: std::time::Instant,
+    ) -> Result<bool> {
+        Ok(true)
+    }
+
+    fn release(
+        &self,
+        _: &crate::workspace_claim::WorkspaceClaim,
+        _: std::time::Instant,
+    ) -> Result<()> {
+        Err(Error::internal_unexpected("test authority release failed"))
+    }
+}
+
+struct RefusingAuthority;
+
+impl WorktreeReconciliationAuthority for RefusingAuthority {
+    fn bounded_inventory_apply_refusal(&self) -> Option<WorktreeInventoryApplyRefusal> {
+        Some(WorktreeInventoryApplyRefusal {
+            code: "remote_workspace_reconciliation_unsupported",
+            mutated_records: 0,
+            mutation_provenance: "none",
+            required_primitive: "durable remote claim release receipt and retry protocol",
+            message: "remote reconciliation is not available",
+        })
+    }
+
+    fn acquire(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority> {
+        panic!("refused inventory must not acquire an authority claim")
+    }
+}
+
 struct RestoreAuthority(PathBuf);
 
 impl WorktreeReconciliationAuthority for RestoreAuthority {
-    fn acquire(&self, _: &TaskWorktreeRecord) -> Result<WorktreeLivenessAuthority> {
+    fn acquire(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority> {
         fs::create_dir_all(&self.0).unwrap();
         Ok(WorktreeLivenessAuthority::Terminal {
             claim: terminal_claim(),
@@ -202,6 +265,7 @@ impl WorktreeReconciliationAuthority for RestoreAuthority {
         &self,
         _: &TaskWorktreeRecord,
         _: &crate::workspace_claim::WorkspaceClaim,
+        _: std::time::Instant,
     ) -> Result<bool> {
         Ok(true)
     }
@@ -212,8 +276,53 @@ struct SlowAuthority {
     release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
+struct CountingAuthority(std::sync::atomic::AtomicUsize);
+
+impl WorktreeReconciliationAuthority for CountingAuthority {
+    fn acquire(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(WorktreeLivenessAuthority::Incomplete {
+            reason: "test authority must not be called".to_string(),
+        })
+    }
+}
+
+struct DeadlineAuthority;
+
+impl WorktreeReconciliationAuthority for DeadlineAuthority {
+    fn acquire(
+        &self,
+        _: &TaskWorktreeRecord,
+        deadline: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority> {
+        while std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        Ok(WorktreeLivenessAuthority::Terminal {
+            claim: terminal_claim(),
+            provenance: "authority observed the supplied deadline".to_string(),
+        })
+    }
+
+    fn release(
+        &self,
+        _: &crate::workspace_claim::WorkspaceClaim,
+        _: std::time::Instant,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl WorktreeReconciliationAuthority for SlowAuthority {
-    fn acquire(&self, _: &TaskWorktreeRecord) -> Result<WorktreeLivenessAuthority> {
+    fn acquire(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority> {
         self.started.send(()).unwrap();
         self.release.lock().unwrap().recv().unwrap();
         Ok(WorktreeLivenessAuthority::Terminal {
@@ -226,6 +335,7 @@ impl WorktreeReconciliationAuthority for SlowAuthority {
         &self,
         _: &TaskWorktreeRecord,
         _: &crate::workspace_claim::WorkspaceClaim,
+        _: std::time::Instant,
     ) -> Result<bool> {
         Ok(true)
     }
@@ -1485,6 +1595,174 @@ fn inventory_reconciles_only_a_leased_terminal_clean_snapshot() {
 }
 
 #[test]
+fn inventory_does_not_hide_a_failed_authority_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    run_git(source.path(), &["branch", "task"]);
+    let record = fixture_record(source.path(), &sibling_worktree_path(source.path(), "gone"));
+    write_record(&store, &record).unwrap();
+
+    let error = inventory_with_store_and_authority(
+        WorktreeInventoryOptions {
+            limit: 10,
+            apply: true,
+            ..Default::default()
+        },
+        &store,
+        &dir.path().join("adopted"),
+        &FailingReleaseAuthority,
+    )
+    .expect_err("a completed reconciliation must surface an unreleased authority claim");
+
+    assert!(error.message.contains("test authority release failed"));
+}
+
+#[test]
+fn inventory_skips_authority_for_locally_blocked_missing_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    let mut preserve = fixture_record(
+        source.path(),
+        &sibling_worktree_path(source.path(), "preserve"),
+    );
+    preserve.cleanup_policy = CleanupPolicy::PreserveOnFailure;
+    preserve.id = "fixture@preserve".to_string();
+    write_record(&store, &preserve).unwrap();
+
+    let mut unavailable = fixture_record(
+        dir.path().join("missing-source").as_path(),
+        &dir.path().join("gone"),
+    );
+    unavailable.id = "fixture@unavailable".to_string();
+    write_record(&store, &unavailable).unwrap();
+
+    let dirty_source = git_repo();
+    run_git(dirty_source.path(), &["branch", "task"]);
+    fs::write(dirty_source.path().join("dirty-source.txt"), "dirty\n").unwrap();
+    let mut dirty = fixture_record(
+        dirty_source.path(),
+        &sibling_worktree_path(dirty_source.path(), "dirty"),
+    );
+    dirty.id = "fixture@dirty".to_string();
+    write_record(&store, &dirty).unwrap();
+
+    let unpushed_source = git_repo();
+    let unpushed_path = sibling_worktree_path(unpushed_source.path(), "unpushed");
+    merged_task_branch_with_stale_upstream(unpushed_source.path(), &unpushed_path);
+    let mut unpushed = fixture_record(unpushed_source.path(), &unpushed_path);
+    unpushed.id = "fixture@unpushed".to_string();
+    write_record(&store, &unpushed).unwrap();
+
+    let authority = CountingAuthority(std::sync::atomic::AtomicUsize::new(0));
+    let output = inventory_with_store_and_authority(
+        WorktreeInventoryOptions {
+            limit: 10,
+            apply: true,
+            ..Default::default()
+        },
+        &store,
+        &dir.path().join("adopted"),
+        &authority,
+    )
+    .unwrap();
+
+    assert_eq!(authority.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let reasons = output
+        .records
+        .iter()
+        .map(|item| item.missing_active.as_ref().unwrap().reason.clone())
+        .collect::<Vec<_>>();
+    assert!(reasons.contains(&MissingActiveWorktreeReason::PreserveOnFailure));
+    assert!(reasons.contains(&MissingActiveWorktreeReason::SourceCheckoutUnavailable));
+    assert!(reasons.contains(&MissingActiveWorktreeReason::SourceDirty));
+    assert!(reasons.contains(&MissingActiveWorktreeReason::UnpushedBranch));
+}
+
+#[test]
+fn inventory_apply_deadline_returns_a_retry_without_mutating_the_missing_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    run_git(source.path(), &["branch", "task"]);
+    let record = fixture_record(
+        source.path(),
+        &sibling_worktree_path(source.path(), "deadline"),
+    );
+    write_record(&store, &record).unwrap();
+
+    let output = inventory_with_store_and_authority(
+        WorktreeInventoryOptions {
+            limit: 10,
+            cursor: Some("fixture@before".to_string()),
+            apply: true,
+            apply_deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(10)),
+            ..Default::default()
+        },
+        &store,
+        &dir.path().join("adopted"),
+        &DeadlineAuthority,
+    )
+    .unwrap();
+
+    assert_eq!(output.records.len(), 0);
+    assert_eq!(
+        output.apply_continuation.as_deref(),
+        Some("homeboy worktree inventory --apply --limit 10 --cursor fixture@before")
+    );
+    assert!(output.truncated);
+    assert_eq!(
+        read_record(&store, &record.id).unwrap().state,
+        TaskWorktreeState::Active
+    );
+}
+
+#[test]
+fn inventory_apply_refusal_preserves_local_missing_diagnostics_without_acquiring() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    run_git(source.path(), &["branch", "task"]);
+    let record = fixture_record(source.path(), &sibling_worktree_path(source.path(), "gone"));
+    write_record(&store, &record).unwrap();
+
+    let output = inventory_with_store_and_authority(
+        WorktreeInventoryOptions {
+            limit: 10,
+            apply: true,
+            ..Default::default()
+        },
+        &store,
+        &dir.path().join("adopted"),
+        &RefusingAuthority,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output.authorization,
+        WorktreeInventoryAuthorization::ApplyRefused
+    );
+    assert_eq!(
+        output.apply_refusal.as_ref().map(|refusal| refusal.code),
+        Some("remote_workspace_reconciliation_unsupported")
+    );
+    assert_eq!(output.records.len(), 1);
+    assert_eq!(
+        output.records[0]
+            .missing_active
+            .as_ref()
+            .map(|missing| &missing.reason),
+        Some(&MissingActiveWorktreeReason::RequiresAuthoritativeLiveness)
+    );
+    assert!(output.records[0].reconciliation.is_none());
+    assert_eq!(
+        read_record(&store, &record.id).unwrap().state,
+        TaskWorktreeState::Active
+    );
+}
+
+#[test]
 fn inventory_refuses_expired_workspace_claims() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
@@ -2145,6 +2423,136 @@ fn cleanup_dry_run_reports_safe_candidate_without_removing() {
     assert_eq!(output.candidates[0].record.id, record.id);
     assert!(!output.candidates[0].safety.worktree_missing);
     assert_eq!(updated.state, TaskWorktreeState::Active);
+    assert!(worktree.exists());
+}
+
+#[test]
+fn cleanup_page_paginates_real_candidates_and_preserves_page_options_in_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let first_path = sibling_worktree_path(source.path(), "page-first");
+    let second_path = sibling_worktree_path(source.path(), "page-second");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "page-first",
+            &first_path.to_string_lossy(),
+        ],
+    );
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "page-second",
+            &second_path.to_string_lossy(),
+        ],
+    );
+    let store = dir.path().join("store");
+    let mut first = succeeded_record(source.path(), &first_path);
+    first.id = "fixture@page-first".to_string();
+    first.branch = "page-first".to_string();
+    let mut second = succeeded_record(source.path(), &second_path);
+    second.id = "fixture@page-second".to_string();
+    second.branch = "page-second".to_string();
+    write_record(&store, &first).unwrap();
+    write_record(&store, &second).unwrap();
+
+    let first_page = cleanup_with_store_page(
+        WorktreeCleanupPageOptions {
+            cleanup: WorktreeCleanupOptions {
+                force: false,
+                dry_run: true,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            },
+            limit: 1,
+            cursor: None,
+            deadline: None,
+        },
+        &store,
+    )
+    .unwrap();
+    assert_eq!(first_page.candidates.len(), 1);
+    assert_eq!(
+        first_page.next_cursor.as_deref(),
+        Some("fixture@page-first")
+    );
+    assert_eq!(
+        first_page.continuation.as_deref(),
+        Some("homeboy cleanup --include task-worktrees --limit 1 --cursor fixture@page-first")
+    );
+
+    let second_page = cleanup_with_store_page(
+        WorktreeCleanupPageOptions {
+            cleanup: WorktreeCleanupOptions {
+                force: false,
+                dry_run: true,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            },
+            limit: 1,
+            cursor: first_page.next_cursor,
+            deadline: None,
+        },
+        &store,
+    )
+    .unwrap();
+    assert_eq!(second_page.candidates.len(), 1);
+    assert_eq!(second_page.candidates[0].record.id, "fixture@page-second");
+    assert!(second_page.next_cursor.is_none());
+}
+
+#[test]
+fn expired_cleanup_apply_keeps_the_unprocessed_candidate_active_and_replays_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "expired-cleanup");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "expired-cleanup",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    let store = dir.path().join("store");
+    let record = succeeded_record(source.path(), &worktree);
+    write_record(&store, &record).unwrap();
+
+    let output = cleanup_with_store_page(
+        WorktreeCleanupPageOptions {
+            cleanup: WorktreeCleanupOptions {
+                force: false,
+                dry_run: false,
+                cleanup_branches: true,
+                allow_unmerged_branches: false,
+            },
+            limit: 7,
+            cursor: None,
+            deadline: Some(std::time::Instant::now()),
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert!(output.candidates.is_empty());
+    assert!(output.removed.is_empty());
+    assert_eq!(output.next_cursor, None);
+    assert_eq!(
+        output.continuation.as_deref(),
+        Some("homeboy cleanup --include task-worktrees --limit 7 --apply")
+    );
+    assert_eq!(
+        read_record(&store, &record.id).unwrap().state,
+        TaskWorktreeState::Active
+    );
     assert!(worktree.exists());
 }
 
