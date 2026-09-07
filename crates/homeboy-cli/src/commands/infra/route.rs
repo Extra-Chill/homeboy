@@ -3770,30 +3770,11 @@ fn materialize_agent_task_retry_handoff(
             },
             validate_generic_lab_command_replay_workspace,
         )?;
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Err(Error::validation_invalid_argument(
-            "retry",
-            acknowledgement
-                .message
-                .unwrap_or_else(|| "retry action failed".to_string()),
-            Some(retry.run_id.clone()),
-            None,
-        ));
-    }
-    if !acknowledgement.result.data["runnable"]
-        .as_bool()
-        .unwrap_or(false)
-    {
+    let retry_result = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
+    if !retry_result.runnable {
         return Ok(None);
     }
-    let record: agent_task_lifecycle::AgentTaskRunRecord =
-        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("decode retry action result for Lab handoff".to_string()),
-            )
-        })?;
+    let record = retry_result.record;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     if let Some(replay) = generic_lab_command_replay(&plan)? {
         let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);

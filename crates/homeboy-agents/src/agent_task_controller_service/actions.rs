@@ -635,20 +635,8 @@ pub(super) fn execute_retry_action(
             confirmed: true,
         },
     )?;
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Err(Error::validation_invalid_argument(
-            "retry",
-            acknowledgement
-                .message
-                .unwrap_or_else(|| "retry action failed".to_string()),
-            Some(target_run_id.to_string()),
-            None,
-        ));
-    }
-    let retry_record: crate::agent_task_lifecycle::AgentTaskRunRecord =
-        serde_json::from_value(acknowledgement.result.data["record"].clone())
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let retry = crate::agent_task_action_result::retry(&acknowledgement)?;
+    let retry_record = retry.record;
     let retry_run_id = retry_record.run_id.clone();
     if !record
         .task_lineage
@@ -683,7 +671,7 @@ pub(super) fn execute_retry_action(
             "target_run_id": target_run_id,
             "retry_run_id": retry_record.run_id,
             "record": retry_record,
-            "run": acknowledgement.result.data["runnable"],
+            "run": retry.runnable,
         }),
         0,
     ))
@@ -863,33 +851,24 @@ where
                     },
                     executor,
                 )?;
-            if acknowledgement.outcome
-                == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-            {
-                return Err(Error::validation_invalid_argument(
-                    "resume",
-                    acknowledgement
-                        .message
-                        .unwrap_or_else(|| "resume action failed".to_string()),
-                    Some(run_id),
-                    None,
-                ));
-            }
-            let aggregate_value = acknowledgement
-                .result
-                .data
-                .get("aggregate")
-                .cloned()
-                .unwrap_or_else(|| acknowledgement.result.data.clone());
-            if acknowledgement.result.data.get("aggregate").is_some() {
-                let aggregate = serde_json::from_value(aggregate_value.clone())
-                    .map_err(|error| Error::internal_json(error.to_string(), None))?;
-                record_controller_aggregate_evidence(record, entity_id, &run_id, &aggregate)?;
-            }
-            let exit_code = acknowledgement.result.data["exit_code"]
-                .as_i64()
-                .and_then(|code| i32::try_from(code).ok())
-                .unwrap_or_else(|| i32::from(acknowledgement.result.data["terminal"] == true) * 2);
+            let resume = crate::agent_task_action_result::resume(&acknowledgement)?;
+            let (aggregate_value, exit_code) = match resume {
+                crate::agent_task_action_result::ResumeActionResult::Resumed {
+                    aggregate,
+                    exit_code,
+                } => {
+                    record_controller_aggregate_evidence(record, entity_id, &run_id, &aggregate)?;
+                    (
+                        serde_json::to_value(aggregate)
+                            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                        exit_code,
+                    )
+                }
+                crate::agent_task_action_result::ResumeActionResult::UnmaterializedCook {
+                    result,
+                    terminal,
+                } => (result, i32::from(terminal) * 2),
+            };
             Ok((
                 execution_with_request_workflow_artifacts(
                     serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate_value }),

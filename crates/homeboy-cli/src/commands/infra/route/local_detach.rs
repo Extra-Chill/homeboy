@@ -184,31 +184,8 @@ pub(super) fn intercept_local_cook_retry(
                     confirmed: true,
                 },
             )?;
-            if acknowledgement.outcome
-                == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-            {
-                return Err(homeboy::core::Error::validation_invalid_argument(
-                    "retry",
-                    acknowledgement
-                        .message
-                        .unwrap_or_else(|| "retry action failed".to_string()),
-                    Some(retry.run_id.clone()),
-                    None,
-                ));
-            }
-            let record = serde_json::from_value(acknowledgement.result.data["record"].clone())
-                .map_err(|error| {
-                    homeboy::core::Error::internal_json(
-                        error.to_string(),
-                        Some("decode local detached retry action result".to_string()),
-                    )
-                })?;
-            (
-                acknowledgement.result.data["runnable"]
-                    .as_bool()
-                    .unwrap_or(false),
-                record,
-            )
+            let retry_result = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
+            (retry_result.runnable, retry_result.record)
         }
     };
     if !retry_runs || retry_record.state.is_terminal() {

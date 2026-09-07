@@ -581,25 +581,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
                 },
                 Some(reporter.callback()),
             )?;
-        if acknowledgement.outcome
-            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-        {
-            Err(Error::validation_invalid_argument(
-                "promote",
-                acknowledgement
-                    .message
-                    .unwrap_or_else(|| "promotion action failed".to_string()),
-                Some(run_id.to_string()),
-                None,
-            ))
-        } else {
-            serde_json::from_value(acknowledgement.result.data).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("decode promotion action result".to_string()),
-                )
-            })
-        }
+        homeboy::agents::agent_task_action_result::promote(&acknowledgement)
     } else {
         agent_task_service::execute_promotion_with_progress(
             promotion_request,
