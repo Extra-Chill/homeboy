@@ -2171,14 +2171,14 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
         std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
         std::fs::write(
             workspace.join("component/homeboy-deps.json"),
-            r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","exit 23"]}}}"#,
+            r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","printf 'install output'; printf 'install failure' >&2; exit 23"]}}}"#,
         )
         .expect("provider declaration");
         git(&workspace, &["add", "."]);
         git(&workspace, &["commit", "-m", "base"]);
         let (source_path, source) = write_patch_source(&temp);
         let mut provider = FakePromotionWorkspaceProvider {
-            workspace_path: Some(workspace),
+            workspace_path: Some(workspace.clone()),
             apply_to_git: true,
             ..Default::default()
         };
@@ -2211,6 +2211,23 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
         assert_eq!(
             error.details["cause"]["classification"],
             "destination_gate_setup"
+        );
+        assert_eq!(error.details["status"], 23);
+        assert_eq!(
+            error.details["cause"]["outcome"]["cwd"],
+            workspace.join("component").display().to_string()
+        );
+        assert_eq!(
+            error.details["cause"]["outcome"]["stdout"],
+            "install output"
+        );
+        assert_eq!(
+            error.details["cause"]["outcome"]["stderr"],
+            "install failure"
+        );
+        assert_eq!(
+            error.details["logs"],
+            serde_json::json!(["stdout: install output", "stderr: install failure"])
         );
         assert!(error.details["cause"]["outcome"].to_string().len() <= 20 * 1024);
         assert!(
