@@ -29,6 +29,8 @@ The wire schemas are:
 - `homeboy/extension-api-readiness-response/v1`
 - `homeboy/extension-api-invoke-request/v1`
 - `homeboy/extension-api-invoke-response/v1`
+- `homeboy/extension-api-execute-request/v1`
+- `homeboy/extension-api-execute-response/v1`
 - `homeboy/extension-api-action-invoke-request/v1`
 - `homeboy/extension-api-action-invoke-response/v1`
 - `homeboy/extension-api-environment-resolve-request/v1`
@@ -158,6 +160,32 @@ This synchronous operation is intentionally limited to analysis. It does not
 perform durable mutation and therefore has no idempotency, cancellation,
 reconciliation, activity, or terminal-result lifecycle.
 
+## Execute Invocation
+
+`extension::invoke::execute_api` runs the advertised `execute` capability after
+validating the typed request and resolving it through v1. Runtime execution is
+the authoritative readiness check so stale cached probe results do not change
+direct CLI behavior. The request selects extension and capability identity,
+optional project and component context, structured inputs, argv, execution
+mode, an optional step filter, and a required idempotency key. Command strings,
+working directory, secrets, and runner implementation details stay off the
+public contract.
+
+Core claims the key before mutable resolution and invokes the existing runtime
+execution engine once per accepted key. A repeated request with the same key
+and fingerprint returns the stored success or failure response without
+executing again. A repeated key with a different fingerprint returns
+`idempotency_conflict`. An accepted key that has not finished returns
+`invocation_in_progress`. Completed records survive process restarts within the
+same Homeboy data root. An interrupted invocation remains explicitly in
+progress rather than risking a second execution; a later slice can add recovery
+through cancel or reconcile. This slice does not advertise those operations or
+daemon transport.
+
+`homeboy extension run` constructs this request and projects the typed response
+into the existing CLI output and exit-code contract. Interactive and captured
+modes keep their previous streaming and capture behavior.
+
 ## Action Invocation
 
 `extension::invoke::action_api::invoke_action_api` executes one manifest action
@@ -277,14 +305,13 @@ stability.
 
 | Classification | Modules | Direction |
 | --- | --- | --- |
-| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, environment-resolution, deployment-provider execution, recipe-provider planning, and external-check hydration envelopes. |
+| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, execute invocation, environment-resolution, deployment-provider execution, recipe-provider planning, and external-check hydration envelopes. |
 | Stable API candidates | `capability`, `core_compat`, `exec_context`, `runtime_helper`, `sidecar_config` | Reuse or reference from future v1 operations after their wire semantics are reviewed. |
 | Extension-owned domain contracts | `action_types`, `agent_task_executor_declaration`, `autofix_config`, `bench_artifact`, `bench_diagnostics`, `bench_distribution`, `bench_gate`, `bench_metric_preset`, `bench_responsiveness`, `bench_result`, `bench_results`, `bench_stage`, `ci_config`, `ci_context`, `external_check_detail_resolver`, `external_storage_retention`, `fuzz_config`, `lint_result`, `lint_results`, `notification_transport_config`, `source_metadata_repair`, `test_analysis`, `test_drift`, `test_duration`, `test_inventory_config`, `test_parsing`, `test_result`, `test_results`, `test_workflow`, `trace_config`, `trace_parsing`, `trace_preview`, `trace_results`, `trace_spec`, `update_output`, `worktree_retention` | Remain portable domain schemas; the Extension API references their schema IDs rather than absorbing their fields. |
 | Manifest and implementation detail | `extension_contract_producer`, `hook_event`, `manifest`, `manifest_action_config`, `manifest_artifact_cleanup`, `manifest_capabilities`, `manifest_capability_config`, `manifest_deploy_config`, `manifest_test_config`, `manifest_toolchain_config`, `runner_contract`, `version` | Inputs and helpers used to build or execute descriptors. They are not a stable service API. |
 
 ## Next Operations
 
-The read-only invocation operation deliberately does not define a durable
-invocation lifecycle. Subsequent v1 slices will add idempotent mutation, cancel,
-reconcile, activity, and terminal-result contracts anchored to canonical
-control-plane references from issue #13697.
+Execute invocation uses durable idempotency within one Homeboy data root and
+does not define cancel, reconcile, activity, or daemon transport. Subsequent v1
+slices can add those operations without extending the control-plane kernel.

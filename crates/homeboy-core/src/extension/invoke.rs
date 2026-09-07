@@ -23,6 +23,8 @@ pub(crate) mod deadline_process;
 pub(crate) mod env_provider;
 mod environment;
 mod environment_api;
+mod execute_api;
+mod execute_idempotency;
 mod runner;
 mod runtime_helper;
 mod scenario_runner;
@@ -40,12 +42,13 @@ use homeboy_extension_contract::ExtensionManifest;
 pub use api::invoke_api;
 pub use context::ResolvedExtensionInvocationContext;
 pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
-use environment::{build_action_env, execute_extension_runtime};
+use environment::build_action_env;
 pub(crate) use environment::{build_exec_env, execute_extension_command, prepare_capability_run};
 pub use environment_api::{
     declared_environment_secret_names as declared_secret_names, resolve_environment_api,
     EnvironmentResolutionContext,
 };
+pub use execute_api::{execute_api, execute_response_result, execute_run_request};
 pub(crate) use runner::{read_extension_phase_timings, tail_lines};
 pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub(crate) use runtime_helper::WRITE_TEST_RESULTS_ENV;
@@ -232,42 +235,6 @@ fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) 
 
 /// Backward-compatible alias for existing command API usage.
 pub type ExtensionStepFilter = RunnerStepFilter;
-
-/// Execute a extension with optional project context.
-pub fn run_extension(
-    extension_id: &str,
-    project_id: Option<&str>,
-    component_id: Option<&str>,
-    inputs: Vec<(String, String)>,
-    args: Vec<String>,
-    mode: ExtensionExecutionMode,
-    filter: ExtensionStepFilter,
-) -> Result<ExtensionRunResult> {
-    let is_captured = matches!(mode, ExtensionExecutionMode::Captured);
-    let execution = execute_extension_runtime(
-        extension_id,
-        project_id,
-        component_id,
-        inputs,
-        args,
-        None,
-        None,
-        mode,
-        &filter,
-    )?;
-
-    let output = if is_captured && !execution.result.output.is_empty() {
-        Some(execution.result.output)
-    } else {
-        None
-    };
-
-    Ok(ExtensionRunResult {
-        exit_code: execution.result.exit_code,
-        project_id: execution.project_id,
-        output,
-    })
-}
 
 /// Execute a extension action (API call).
 pub fn run_action(
@@ -674,15 +641,16 @@ mod tests {
             })
             .expect("project");
 
-            let result = run_extension(
+            let result = execute_response_result(execute_api(&execute_run_request(
                 "fixture-extension",
                 Some("site"),
                 Some("fixture"),
                 vec![],
                 vec![],
                 ExtensionExecutionMode::Captured,
-                ExtensionStepFilter::default(),
-            )
+                &ExtensionStepFilter::default(),
+                "test:project-attachment".to_string(),
+            )))
             .expect("extension run");
 
             assert_eq!(
@@ -713,15 +681,16 @@ mod tests {
                 "#!/bin/sh\nprintf '%s|%s' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"\n",
             );
 
-            let result = run_extension(
+            let result = execute_response_result(execute_api(&execute_run_request(
                 "fixture-extension",
                 None,
                 Some("fixture"),
                 vec![],
                 vec![],
                 ExtensionExecutionMode::Captured,
-                ExtensionStepFilter::default(),
-            )
+                &ExtensionStepFilter::default(),
+                "test:component-identity".to_string(),
+            )))
             .expect("extension run");
 
             assert_eq!(

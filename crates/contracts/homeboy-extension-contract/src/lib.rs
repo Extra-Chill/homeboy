@@ -12,7 +12,7 @@
 //! ## 1. Versioned Extension API — [`api`]
 //!
 //! The negotiated request/response operations Homeboy serves and consumes:
-//! catalog, resolve, readiness, invocation, and the per-capability operations
+//! catalog, resolve, readiness, invocation, execute, and the per-capability operations
 //! for deployment providers, environments, external-check detail resolvers,
 //! recipe runs, and agent-task executors. Versioned explicitly; a change here is
 //! an API version change.
