@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.24] - 2026-09-07
+
+### Fixed
+- read runtimes shape from component env and fail on detector errors
+
 ## [2.15.23] - 2026-08-31
 
 ### Fixed
