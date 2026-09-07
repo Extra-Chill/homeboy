@@ -688,10 +688,8 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         Some(broker_url) => {
             crate::connection::reverse_broker_job_snapshot_at(broker_url, &runner_id, &job_id)?
         }
-        None => (
-            fetch_daemon_job(&runner_id, &job_id)?,
-            fetch_daemon_events(&runner_id, &job_id)?,
-        ),
+        None => runner_job_log_snapshot_with_owner_recovery(&runner_id, &job_id)
+            .map(|snapshot| (snapshot.job, snapshot.events))?,
     };
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let cwd = run.cwd.as_deref().unwrap_or("");
@@ -828,6 +826,55 @@ pub fn runner_job_log_snapshot(runner_id: &str, job_id: &str) -> Result<RunnerJo
         job: fetch_daemon_job(runner_id, job_id)?,
         events: fetch_daemon_events(runner_id, job_id)?,
     })
+}
+
+/// Refresh one mirrored run through its original daemon generation when the
+/// mutable admission daemon has rotated away from that job.
+fn runner_job_log_snapshot_with_owner_recovery(
+    runner_id: &str,
+    job_id: &str,
+) -> Result<RunnerJobLogSnapshot> {
+    runner_job_log_snapshot_with_owner_recovery_with(
+        runner_id,
+        job_id,
+        || runner_job_log_snapshot(runner_id, job_id),
+        |runner_id, job_id| crate::connection::reconnect_job_log_owner(runner_id, job_id),
+        |session, job_id| runner_job_log_snapshot_for_session(session, job_id),
+        crate::connection::close_reconnected_job_log_owner,
+    )
+}
+
+/// Keep the routing transaction independent from its direct-SSH transport so
+/// the exact owner selection remains deterministic and testable.
+pub(super) fn runner_job_log_snapshot_with_owner_recovery_with<
+    Owner,
+    Current,
+    Reconnect,
+    Snapshot,
+    Close,
+>(
+    runner_id: &str,
+    job_id: &str,
+    current: Current,
+    reconnect: Reconnect,
+    snapshot: Snapshot,
+    close: Close,
+) -> Result<RunnerJobLogSnapshot>
+where
+    Current: FnOnce() -> Result<RunnerJobLogSnapshot>,
+    Reconnect: FnOnce(&str, &str) -> Result<Owner>,
+    Snapshot: FnOnce(&Owner, &str) -> Result<RunnerJobLogSnapshot>,
+    Close: FnOnce(&Owner),
+{
+    match current() {
+        Ok(snapshot) => Ok(snapshot),
+        Err(_) => {
+            let owner = reconnect(runner_id, job_id)?;
+            let recovered = snapshot(&owner, job_id);
+            close(&owner);
+            recovered
+        }
+    }
 }
 
 pub fn runner_job_log_snapshot_for_session(
