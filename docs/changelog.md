@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.15] - 2026-09-07
+
+### Changed
+- return canonical resume acknowledgement
+- use the shared git fixture helper
+- return canonical retry acknowledgement
+
+### Fixed
+- recover finalized changelog history
+- enforce changelog ownership in lint
+- restore generated changelog history
+
 ## [0.367.14] - 2026-09-06
 
 ### Changed
