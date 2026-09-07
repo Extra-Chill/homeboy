@@ -17,6 +17,7 @@ use homeboy_core::resource_lifecycle_index::{
     ResourceLifecycle, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
 };
 
+use self::snapshots::workspace_snapshots_for_runner;
 use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
 };
@@ -1245,8 +1246,8 @@ pub fn hydrate_prepared_workspace_source_snapshot(
     if !remote_path.starts_with(&prepared_root) {
         return Ok(());
     }
-    let (snapshots, _) = workspace_snapshots(
-        &runner.id,
+    let (snapshots, _) = workspace_snapshots_for_runner(
+        runner,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
@@ -1411,8 +1412,8 @@ fn compatible_incremental_snapshot(
     excludes: &[String],
     controller_manifest: &super::snapshot::WorkspaceContentManifest,
 ) -> Result<Option<(RunnerWorkspaceSnapshotEntry, SnapshotManifestDelta)>> {
-    let (snapshots, _) = workspace_snapshots(
-        &runner.id,
+    let (snapshots, _) = workspace_snapshots_for_runner(
+        runner,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
