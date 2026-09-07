@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.368.0] - 2026-09-07
+
+### Added
+- add typed execute API
+
+### Changed
+- satisfy rustfmt on the harness-only closure
+- assert canonical review evidence
+- share one git output helper across crates
+- format review imports
+- canonicalize durable review
+- use the shared git fixture helper
+- return canonical promotion acknowledgement
+- normalize git fixture helpers onto the identity-neutral contract
+- use a shared identity-neutral git helper
+- centralize action result decoding
+- own cancellation convergence
+
+### Fixed
+- recover mirrored evidence from the job owner
+- treat test-harness config as source-relevant
+- retain promotion setup evidence
+- secure durable review handoffs
+- preserve review handoff inputs
+- preserve merged promotion projection
+
 ## [0.367.15] - 2026-09-07
 
 ### Changed
