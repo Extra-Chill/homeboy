@@ -329,6 +329,39 @@ fn append_resume_gates(command: &mut Vec<String>, gates: &Value) {
     if gates.get("rerun_completed_gates").and_then(Value::as_bool) == Some(true) {
         command.push("--rerun-completed-gates".to_string());
     }
+    if let Some(environment) = gates.get("gate_environment") {
+        if let Some(mode) = environment.get("mode").and_then(Value::as_str) {
+            command.extend([
+                "--gate-environment-mode".to_string(),
+                mode.replace('_', "-"),
+            ]);
+        }
+        if let Some(variables) = environment.get("variables").and_then(Value::as_object) {
+            for (name, value) in variables {
+                if let Some(value) = value.as_str() {
+                    command.extend(["--gate-env".to_string(), format!("{name}={value}")]);
+                }
+            }
+        }
+        for (key, flag) in [
+            ("isolate_home", "--isolate-gate-home"),
+            ("isolate_xdg", "--isolate-gate-xdg"),
+        ] {
+            if let Some(value) = environment.get(key).and_then(Value::as_bool) {
+                command.push(format!("{flag}={value}"));
+            }
+        }
+        if let Some(inputs) = environment
+            .get("extension_inputs")
+            .and_then(Value::as_array)
+        {
+            for input in inputs {
+                if let Ok(input) = serde_json::to_string(input) {
+                    command.extend(["--gate-extension-input".to_string(), input]);
+                }
+            }
+        }
+    }
 }
 
 fn review_retry_context(run_id: &str) -> Value {
@@ -874,8 +907,8 @@ fn review_failure_reasons(aggregate: &crate::agent_tasks::AgentTaskAggregate) ->
         for diagnostic in &outcome.diagnostics {
             diagnostics.push(serde_json::json!({
                 "task_id": outcome.task_id,
-                "class": diagnostic.class,
-                "message": diagnostic.message,
+                "class": redacted_bounded(&diagnostic.class, STATE_BOUND),
+                "message": redacted_bounded(&diagnostic.message, MESSAGE_BOUND),
                 "source": "diagnostics",
             }));
         }
@@ -927,8 +960,8 @@ fn collect_nested_diagnostics(value: &Value, task_id: &str, diagnostics: &mut Ve
                     ) {
                         diagnostics.push(serde_json::json!({
                             "task_id": task_id,
-                            "class": class,
-                            "message": message,
+                            "class": redacted_bounded(class, STATE_BOUND),
+                            "message": redacted_bounded(message, MESSAGE_BOUND),
                             "source": "nested_diagnostics",
                         }));
                     }
@@ -2260,8 +2293,9 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_page, live_provider_liveness, observed_file_timestamp, phase, project_record,
-        LifecycleStoreLookup, OrchestrationService, RunLookup, RunSnapshot,
+        append_resume_gates, event_page, live_provider_liveness, observed_file_timestamp, phase,
+        project_record, review_failure_reasons, LifecycleStoreLookup, OrchestrationService,
+        RunLookup, RunSnapshot,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -2586,6 +2620,78 @@ mod tests {
                 "durable_read.authoritative_aggregate_absent"
             );
         });
+    }
+
+    #[test]
+    fn review_resume_gate_contract_preserves_environment_policy() {
+        let mut command = Vec::new();
+        append_resume_gates(
+            &mut command,
+            &json!({
+                "gate_environment": {
+                    "mode": "replace",
+                    "variables": { "MODE": "test" },
+                    "isolate_home": true,
+                    "isolate_xdg": false,
+                    "extension_inputs": [{ "id": "wordpress", "source": "/opt/wordpress" }]
+                }
+            }),
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "--gate-environment-mode",
+                "replace",
+                "--gate-env",
+                "MODE=test",
+                "--isolate-gate-home=true",
+                "--isolate-gate-xdg=false",
+                "--gate-extension-input",
+                "{\"id\":\"wordpress\",\"source\":\"/opt/wordpress\"}",
+            ]
+        );
+    }
+
+    #[test]
+    fn review_failure_diagnostics_are_redacted_bounded_and_failure_only() {
+        let mut aggregate: crate::agent_tasks::AgentTaskAggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "plan",
+            "status": "failed",
+            "totals": { "skipped": 0 }
+        }))
+        .expect("aggregate");
+        aggregate.outcomes = vec![
+            crate::agent_tasks::AgentTaskOutcome {
+                task_id: "failed".to_string(),
+                status: crate::agent_tasks::AgentTaskOutcomeStatus::Failed,
+                outputs: json!({ "diagnostics": [{
+                    "class": "provider.error",
+                    "message": format!("token=secret {}", "x".repeat(1_000))
+                }] }),
+                ..Default::default()
+            },
+            crate::agent_tasks::AgentTaskOutcome {
+                task_id: "success".to_string(),
+                status: crate::agent_tasks::AgentTaskOutcomeStatus::Succeeded,
+                diagnostics: vec![serde_json::from_value(json!({
+                    "class": "provider.success",
+                    "message": "successful wrapper diagnostic"
+                }))
+                .expect("diagnostic")],
+                ..Default::default()
+            },
+        ];
+
+        let reasons = review_failure_reasons(&aggregate);
+
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons[0]["message"].as_str().is_some_and(|message| message
+                .starts_with("token=[REDACTED]")
+                && message.len() <= 259)
+        );
     }
 
     #[test]

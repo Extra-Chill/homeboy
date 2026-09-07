@@ -1552,22 +1552,18 @@ fn reconciled_stale_status_note(run: &RunRecord) -> Option<String> {
 }
 
 fn query_value(path: &str, key: &str) -> Option<String> {
-    path.split_once('?')?.1.split('&').find_map(|pair| {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (name == key && !value.is_empty()).then(|| value.to_string())
-    })
+    query_values(path, key).into_iter().next()
 }
 
 fn query_values(path: &str, key: &str) -> Vec<String> {
-    path.split_once('?')
-        .map(|(_, query)| {
-            query
-                .split('&')
-                .filter_map(|pair| {
-                    let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-                    (name == key && !value.is_empty()).then(|| value.to_string())
+    reqwest::Url::parse(&format!("http://localhost{path}"))
+        .ok()
+        .map(|url| {
+            url.query_pairs()
+                .filter_map(|(name, value)| {
+                    (name == key && !value.is_empty()).then(|| value.into_owned())
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default()
 }

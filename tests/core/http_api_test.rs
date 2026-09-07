@@ -443,7 +443,7 @@ fn routes_versioned_control_plane_endpoints() {
     assert_eq!(
         http_api::route(
             HttpMethod::Get,
-            "/v1/control-plane/runs/run-abc/review?to_worktree=homeboy@candidate&provider_argv=homeboy&provider_argv=promote",
+            "/v1/control-plane/runs/run-abc/review?to_worktree=homeboy%40candidate&provider_argv=homeboy&provider_argv=--config%3Dpath+with+spaces",
         )
         .expect("route"),
         HttpEndpoint::ControlPlaneRunReview {
@@ -451,7 +451,7 @@ fn routes_versioned_control_plane_endpoints() {
             request: ControlPlaneRunReviewRequest {
                 to_worktree: Some("homeboy@candidate".to_string()),
                 provider_command: None,
-                provider_argv: vec!["homeboy".to_string(), "promote".to_string()],
+                provider_argv: vec!["homeboy".to_string(), "--config=path with spaces".to_string()],
             },
         }
     );
