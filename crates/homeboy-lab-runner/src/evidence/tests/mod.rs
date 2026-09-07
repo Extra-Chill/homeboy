@@ -291,6 +291,75 @@ fn controller_terminal_metadata_keeps_fetch_fallback_without_public_origin() {
 }
 
 #[test]
+fn controller_terminal_metadata_keeps_verified_bytes_when_public_alias_returns_404() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let public_url = serve_public_alias(404);
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let path = home.path().join("report.txt");
+        let bytes = b"controller bytes";
+        fs::write(&path, bytes).expect("artifact");
+        let sha256 = homeboy_core::artifact_metadata::sha256_file(&path).expect("sha256");
+        let validation = homeboy_core::artifact_links::validate_public_artifact_url(&public_url);
+        store
+            .import_artifact(&ArtifactRecord {
+                id: "report".to_string(),
+                run_id: run.id.clone(),
+                kind: "report".to_string(),
+                artifact_type: "file".to_string(),
+                path: path.display().to_string(),
+                sha256: Some(sha256),
+                size_bytes: Some(bytes.len() as i64),
+                mime: Some("text/plain".to_string()),
+                metadata_json: json!({
+                    "public_url_validation": homeboy_core::artifact_links::public_artifact_url_validation_json(&validation),
+                }),
+                created_at: "2026-09-07T00:00:00Z".to_string(),
+                ..Default::default()
+            })
+            .expect("import retained artifact");
+
+        let metadata =
+            controller_artifact_metadata(std::slice::from_ref(&run)).expect("terminal metadata");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id, "report");
+        assert_eq!(
+            metadata[0].metadata.as_ref().expect("metadata")["fetch_command"],
+            format!("homeboy runs artifact get {} report -o <path>", run.id)
+        );
+        assert_eq!(
+            metadata[0].metadata.as_ref().expect("metadata")["unreachable_aliases"][0]
+                ["status_code"],
+            404
+        );
+        assert_eq!(
+            metadata[0].metadata.as_ref().expect("metadata")["unreachable_aliases"][0]["error"],
+            "public artifact URL returned HTTP 404"
+        );
+    });
+}
+
+fn serve_public_alias(status: u16) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind public alias");
+    let addr = listener.local_addr().expect("alias address");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept alias probe");
+        let mut buffer = [0; 1024];
+        let _ = stream.read(&mut buffer);
+        let body = "missing";
+        write!(
+            stream,
+            "HTTP/1.1 {status} Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write alias response");
+    });
+    format!("http://{addr}/artifact")
+}
+
+#[test]
 fn test_download_remote_artifact_rejects_non_runner_token() {
     let err = download_remote_artifact("/tmp/raw-file", None).expect_err("reject raw path");
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
