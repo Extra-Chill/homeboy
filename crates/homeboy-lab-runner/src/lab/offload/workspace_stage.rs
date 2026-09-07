@@ -3271,14 +3271,7 @@ mod tests {
         });
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(output.status.success(), "git {} failed", args.join(" "));
-    }
+    use homeboy_core::test_support::run_git_fixture_command as git;
 
     fn git_output(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
