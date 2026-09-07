@@ -1012,14 +1012,7 @@ mod remote_base_tests {
     use super::*;
     use std::process::Command;
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git runs")
-            .success());
-    }
+    use homeboy_core::test_support::run_git_command as git;
 
     fn repo() -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("temp repo");

@@ -3556,19 +3556,7 @@ fn prepare_dirty_scheduler_workspace(scratch: &std::path::Path) {
     std::fs::write(fixture.join("untracked.txt"), "generated\n").expect("fixture state");
 }
 
-fn run_git(cwd: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_core::test_support::run_git_command as run_git;
 
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The reservation is made through the sibling that was handed

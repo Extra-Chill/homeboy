@@ -9,19 +9,7 @@ use std::sync::{Arc, Mutex};
 
 static DEFAULT_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-fn git(cwd: &std::path::Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_core::test_support::run_git_command as git;
 
 fn linked_cook_source(temp: &tempfile::TempDir) -> std::path::PathBuf {
     let repository = temp.path().join("repository");
