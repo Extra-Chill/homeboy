@@ -356,6 +356,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Lint(args)) => {
             let requested_source = args.release_readiness_source.clone();
             let component = args.comp.load()?;
+            reject_manual_changelog_edit_for_lint(&component, &args)?;
             prepare_local_review_dependencies(&component)?;
             to_value_with_readiness_provenance(
                 lint::run(review_lint_args(args)),
@@ -921,6 +922,42 @@ fn manual_changelog_edit(
         component.release.allow_manual_changelog_edits,
         None,
     )
+}
+
+fn reject_manual_changelog_edit_for_lint(
+    component: &homeboy::core::component::Component,
+    args: &lint::LintArgs,
+) -> homeboy::core::Result<()> {
+    let changed_files = match (args.changed.changed_since(), args.changed.changed_only) {
+        _ if args.changed.lab.lab_changed_files_json.is_some()
+            || args.changed.lab.since.precomputed_changed_files.is_some() =>
+        {
+            args.changed.resolve()?
+        }
+        (Some(git_ref), _) => Some(git::get_files_changed_since(
+            &component.local_path,
+            git_ref,
+        )?),
+        (_, true) => Some(git::get_dirty_files(&component.local_path)?),
+        _ => None,
+    };
+    let Some(changed_files) = changed_files else {
+        return Ok(());
+    };
+    let Some(violation) = changelog::detect_manual_changelog_edit(
+        component.changelog_target.as_deref(),
+        &changed_files,
+        component.release.allow_manual_changelog_edits,
+        None,
+    ) else {
+        return Ok(());
+    };
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "changed-files",
+        violation.message,
+        Some(violation.path),
+        None,
+    ))
 }
 
 fn manual_release_owned_mutations(
@@ -1784,6 +1821,31 @@ mod tests {
         component.release.allow_manual_changelog_edits = false;
         component.changelog_target = None;
         assert!(manual_changelog_edit(&component, &review_context).is_none());
+    }
+
+    #[test]
+    fn direct_review_lint_rejects_a_manual_changelog_edit_before_ci_execution() {
+        let mut args = lint::LintArgs::for_test("fixture", ".");
+        args.changed.lab.since.precomputed_changed_files =
+            Some(vec!["docs/changelog.md".to_string()]);
+        let component = homeboy::core::component::Component {
+            local_path: ".".to_string(),
+            changelog_target: Some("docs/changelog.md".to_string()),
+            ..Default::default()
+        };
+
+        let error = reject_manual_changelog_edit_for_lint(&component, &args)
+            .expect_err("CI lint must reject release-owned changelog edits");
+
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error
+            .message
+            .contains("Homeboy generates changelog entries"));
+        assert_eq!(error.details["field"], "changed-files");
+        assert_eq!(error.details["id"], "docs/changelog.md");
     }
 
     fn review_args_fixture() -> ReviewArgs {
