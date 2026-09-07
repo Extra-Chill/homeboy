@@ -8156,7 +8156,7 @@ pub(super) fn resume(args: ResumeArgs) -> CmdResult<Value> {
 
 pub(super) fn run_resume_with_executor(
     run_id: String,
-    full: bool,
+    _full: bool,
     idempotency_key: Option<String>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
@@ -8187,33 +8187,21 @@ pub(super) fn run_resume_with_executor(
             None,
         ));
     }
-    if acknowledgement.result.schema == "homeboy/unmaterialized-cook-resume/v1" {
-        let exit_code = if acknowledgement.result.data["terminal"] == true {
+    let exit_code = if acknowledgement.result.schema == "homeboy/unmaterialized-cook-resume/v1" {
+        if acknowledgement.result.data["terminal"] == true {
             2
         } else {
             0
-        };
-        return Ok((acknowledgement.result.data, exit_code));
-    }
-    let aggregate: AgentTaskAggregate = serde_json::from_value(
-        acknowledgement.result.data["aggregate"].clone(),
-    )
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("decode resume action result".to_string()),
-        )
-    })?;
-    let exit_code = acknowledgement.result.data["exit_code"]
-        .as_i64()
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or(0);
+        }
+    } else {
+        acknowledgement.result.data["exit_code"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or(0)
+    };
     Ok((
-        if full {
-            aggregate_value_with_failure_reasons(&aggregate)
-        } else {
-            super::status::compact_aggregate_summary(&aggregate, Some(&run_id))
-        },
+        serde_json::to_value(acknowledgement)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
         exit_code,
     ))
 }
