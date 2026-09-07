@@ -9,7 +9,7 @@ use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -57,36 +57,34 @@ const STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT: usize = 2 * 1024;
 const BOUNDED_FULL_STATUS_BYTE_LIMIT: usize = 16 * 1024;
 const CANCEL_PROJECTION_BYTE_LIMIT: usize = 4 * 1024;
 
-/// Default terminal projection for cancellation. The complete, redacted record
-/// remains available through `--full` and the lossless `--output` artifact.
+/// Default terminal projection for cancellation. The complete, redacted action
+/// acknowledgement remains available through `--full` and `--output`.
 pub(crate) fn bounded_cancel_report(value: Value) -> Value {
-    let cancellation = value.get("cancellation").cloned().unwrap_or(Value::Null);
+    let cancellation = value
+        .pointer("/result/data")
+        .cloned()
+        .unwrap_or(Value::Null);
     let run_id = cancellation
         .get("run_id")
-        .or_else(|| value.get("run_id"))
+        .or_else(|| value.get("run"))
         .and_then(Value::as_str)
         .filter(|run_id| run_id.len() <= COMPACT_TEXT_LIMIT)
         .unwrap_or("<oversized-run-id>");
-    let status_command = cancellation
-        .get("status_command")
-        .and_then(Value::as_str)
-        .filter(|command| command.len() <= COMPACT_TEXT_LIMIT)
-        .unwrap_or("homeboy agent-task status <run-id>");
+    let status_command = format!("homeboy agent-task status {}", quote_arg(run_id));
     let projection = json!({
-        "schema": CANCELLATION_SCHEMA,
+        "schema": homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
         "presentation": "bounded_operator_projection",
         "run": {
-            "requested": bounded_value(cancellation.get("requested_run_id").unwrap_or(&Value::Null)),
+            "requested": bounded_value(value.get("run").unwrap_or(&Value::Null)),
             "id": run_id,
-            "prior_state": bounded_value(cancellation.get("prior_state").unwrap_or(&Value::Null)),
-            "state": bounded_value(cancellation.get("state").unwrap_or(&Value::Null)),
+            "state": bounded_value(value.pointer("/resource/state").unwrap_or(&Value::Null)),
         },
         "cancellation": {
-            "acknowledgement": bounded_value(cancellation.get("acknowledgement").unwrap_or(&Value::Null)),
-            "accepted": bounded_value(cancellation.get("accepted").unwrap_or(&Value::Null)),
-            "outcome": bounded_value(cancellation.get("outcome").unwrap_or(&Value::Null)),
+            "acknowledgement": bounded_value(value.get("acknowledgement").unwrap_or(&Value::Null)),
+            "accepted": bounded_value(value.get("outcome").unwrap_or(&Value::Null)),
+            "disposition": bounded_value(cancellation.get("disposition").unwrap_or(&Value::Null)),
             "terminal": bounded_value(cancellation.get("terminal").unwrap_or(&Value::Null)),
-            "live_process_outcome": bounded_value(cancellation.get("outcome").unwrap_or(&Value::Null)),
+            "waited_seconds": bounded_value(cancellation.get("waited_seconds").unwrap_or(&Value::Null)),
         },
         "next_action": { "command": status_command },
         "output_budget": {
@@ -100,7 +98,7 @@ pub(crate) fn bounded_cancel_report(value: Value) -> Value {
         projection
     } else {
         json!({
-            "schema": CANCELLATION_SCHEMA,
+            "schema": homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
             "presentation": "bounded_operator_projection",
             "run": { "id": "<oversized-run-id>" },
             "next_action": { "command": "homeboy agent-task status <run-id>" },
@@ -3503,33 +3501,7 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
     Ok((report, 0))
 }
 
-/// Cancellation is only partly synchronous, so `cancel` reports what actually
-/// happened rather than an unqualified success word.
-///
-/// The canonical control-plane action returns as soon as the cancellation
-/// *request* is durable. For a controller-owned staging job that is strictly an
-/// acknowledgement — `controller_job_cancellation` is persisted with phase
-/// `requested` and the controller keeps tearing its provider down afterwards —
-/// and for a run whose provider tree is not reachable from this host the durable
-/// terminal state is published by whoever owns it. Reporting `succeeded` for
-/// that acknowledgement is what made #12572 dishonest: the word claimed the run
-/// was cancelled while its process tree was still alive.
-///
-/// So this waits for the durable record to converge, and bounds that wait. The
-/// bound sits well above controller-local teardown (process termination allows a
-/// 2s SIGTERM grace plus a 2s SIGKILL reap grace) and well below the two-minute
-/// wrapper timeouts operators and agents run `cancel` under, so the command
-/// always answers before its caller gives up on it.
-const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
-
-/// Poll interval inside [`CANCEL_TERMINAL_WAIT`]. Each poll is a reconciling
-/// read, so it stays coarse rather than hammering the durable store.
-const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
-
-const CANCELLATION_SCHEMA: &str = "homeboy/agent-task-cancellation/v1";
-
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
-    let prior_state = run_state_name(agent_task_lifecycle::status(&args.run_id)?.state);
     let idempotency_key = args
         .idempotency_key
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -3549,448 +3521,58 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
             confirmed: true,
         },
     )?;
-    let record = agent_task_lifecycle::status(acknowledgement.run.as_str())?;
-    if record.state.is_terminal() {
-        return Ok(attach_action_acknowledgement(
-            cancel_output(
-                &args.run_id,
-                &prior_state,
-                record,
-                CancelOutcome::Terminal {
-                    waited: Duration::ZERO,
-                    polls: 0,
-                },
-            ),
-            &acknowledgement,
-        ));
-    }
-    // A provider that reserved a terminal result before cancellation could apply
-    // deliberately keeps the run joinable for that import, so there is nothing to
-    // converge on and nothing to wait for. Say that instead of polling a record
-    // cancellation was intentionally not applied to.
-    if record
-        .metadata
-        .get("cancellation_deferred_for_terminal_provider")
-        .is_some()
-    {
-        return Ok(attach_action_acknowledgement(
-            cancel_output(
-                &args.run_id,
-                &prior_state,
-                record,
-                CancelOutcome::DeferredForTerminalProvider,
-            ),
-            &acknowledgement,
-        ));
-    }
-    Ok(attach_action_acknowledgement(
-        wait_for_cancellation_to_settle(&args.run_id, &prior_state, record),
-        &acknowledgement,
+    let exit_code = cancel_exit_code(acknowledgement.outcome, &acknowledgement.result)?;
+    Ok((
+        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+        exit_code,
     ))
 }
 
-fn attach_action_acknowledgement(
-    (mut value, exit_code): (Value, i32),
-    acknowledgement: &homeboy_control_plane_contract::ControlPlaneActionAcknowledgement,
-) -> (Value, i32) {
-    if let Some(cancellation) = value.get_mut("cancellation").and_then(Value::as_object_mut) {
-        cancellation.insert(
-            "acknowledgement".to_string(),
-            json!(acknowledgement.acknowledgement),
-        );
-        cancellation.insert(
-            "idempotency_key".to_string(),
-            json!(acknowledgement.idempotency_key),
-        );
+fn cancel_exit_code(
+    outcome: homeboy_control_plane_contract::ControlPlaneActionOutcome,
+    payload: &homeboy_control_plane_contract::ControlPlaneActionPayload,
+) -> homeboy::core::Result<i32> {
+    if outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed {
+        return Ok(1);
     }
-    (value, exit_code)
-}
-
-/// Poll the durable record of a run whose cancellation was accepted.
-///
-/// This is the reconciling read rather than a raw record read on purpose: an
-/// asynchronously cancelled controller-owned job converges through
-/// `reconcile_controller_job_cancellation`, which only runs on that path. The
-/// runner probe is disabled so an unavailable runner cannot stretch each poll
-/// and eat the bound.
-struct CancelTerminalPoller;
-
-impl WatchPoller for CancelTerminalPoller {
-    type Item = AgentTaskRunRecord;
-
-    fn poll(&self, run_id: &str) -> homeboy::core::Result<Self::Item> {
-        Ok(agent_task_lifecycle::reconcile_status_with_options(
-            run_id,
-            agent_task_lifecycle::AgentTaskStatusOptions {
-                runner_probe: agent_task_lifecycle::AgentTaskRunnerProbe::Never,
-            },
-        )?
-        .record)
-    }
-
-    fn is_terminal(&self, item: &Self::Item) -> bool {
-        item.state.is_terminal()
-    }
-}
-
-/// Why `agent-task cancel` stopped waiting.
-enum CancelOutcome {
-    /// The run is durably terminal: either it already was when the cancellation
-    /// request returned, or it converged inside the bounded wait.
-    Terminal { waited: Duration, polls: u64 },
-    /// A provider reserved a terminal result first, so cancellation was
-    /// deliberately not applied and the run stays joinable for that import.
-    DeferredForTerminalProvider,
-    /// Cancellation is durably requested, but its teardown is owned elsewhere
-    /// and had not converged when the bound expired.
-    Requested {
-        waited: Duration,
-        polls: u64,
-        /// Set when the bounded observation itself failed. The cancellation
-        /// request is already durable, so a failed *read* of its convergence is
-        /// reported here rather than as a failed cancellation.
-        observation_error: Option<String>,
-    },
-}
-
-/// Wait a bounded time for an accepted cancellation to become durably terminal.
-fn wait_for_cancellation_to_settle(
-    requested_run_id: &str,
-    prior_state: &str,
-    accepted: AgentTaskRunRecord,
-) -> (Value, i32) {
-    let run_id = accepted.run_id.clone();
-    // A command that is about to block for seconds says so, so the wait is
-    // legible instead of looking like the #12572 hang it replaces.
-    eprintln!(
-        "Cancellation of agent-task run {run_id} was accepted; waiting up to {}s for its durable terminal state.",
-        CANCEL_TERMINAL_WAIT.as_secs()
-    );
-    let started = Instant::now();
-    let waited = watch_loop(
-        &CancelTerminalPoller,
-        &run_id,
-        &WatchConfig {
-            interval: CANCEL_TERMINAL_POLL_INTERVAL,
-            timeout: Some(CANCEL_TERMINAL_WAIT),
-        },
-        std::thread::sleep,
-        || started.elapsed(),
-        |_, _| {},
-    );
-    match waited {
-        Ok(result) if result.timed_out() => cancel_output(
-            requested_run_id,
-            prior_state,
-            result.item,
-            CancelOutcome::Requested {
-                waited: result.waited,
-                polls: result.poll_count,
-                observation_error: None,
-            },
-        ),
-        Ok(result) => cancel_output(
-            requested_run_id,
-            prior_state,
-            result.item,
-            CancelOutcome::Terminal {
-                waited: result.waited,
-                polls: result.poll_count,
-            },
-        ),
-        // The cancellation request is already durable. A failed observation of
-        // its convergence is an unconverged wait, never a failed cancellation.
-        Err(error) => cancel_output(
-            requested_run_id,
-            prior_state,
-            accepted,
-            CancelOutcome::Requested {
-                waited: started.elapsed(),
-                polls: 0,
-                observation_error: Some(error.message),
-            },
-        ),
-    }
-}
-
-/// Project one cancellation attempt onto the durable record it acted on.
-///
-/// Every field is additive: the serialized record keeps its historical shape and
-/// gains `cancellation`, `summary`, and — only when the bound expired — the
-/// `timed_out` command status that stops this from reading as a completed
-/// cancellation.
-fn cancel_output(
-    requested_run_id: &str,
-    prior_state: &str,
-    record: AgentTaskRunRecord,
-    outcome: CancelOutcome,
-) -> (Value, i32) {
-    let run_id = record.run_id.clone();
-    let state = run_state_name(record.state);
-    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
-    surface_cancellation_recovery(&mut value);
-    let (cancellation, summary, exit_code) =
-        cancellation_projection(requested_run_id, prior_state, &run_id, &state, &outcome);
-    let status_command = cancellation["status_command"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let converged = cancellation["terminal"].as_bool().unwrap_or(false);
-    if let Value::Object(fields) = &mut value {
-        fields.insert("cancellation".to_string(), cancellation);
-        fields.insert("summary".to_string(), json!(&summary));
-        if exit_code != 0 {
-            fields.insert("status".to_string(), json!("timed_out"));
-        }
-    }
-
-    let mut metadata = CommandActionableMetadata {
-        refs: CommandResultRefs {
-            agent_tasks: vec![agent_task_ref(&run_id)],
-            ..Default::default()
-        },
-        next_actions: vec![CommandNextAction::new("show status", status_command)
-            .with_kind(CommandNextActionKind::Show)],
-        ..Default::default()
-    };
-    if !converged {
-        metadata.next_actions.push(
-            CommandNextAction::new(
-                "reconcile run",
-                format!(
-                    "homeboy agent-task reconcile {} --dry-run",
-                    quote_arg(&run_id)
-                ),
-            )
-            .with_kind(CommandNextActionKind::Repair),
-        );
-    }
-    attach_actionable_metadata(&mut value, metadata);
-    (value, exit_code)
-}
-
-/// Build the cancellation projection, its operator-facing summary, and the exit
-/// code for one outcome. Pure so every reported wording is directly testable.
-fn cancellation_projection(
-    requested_run_id: &str,
-    prior_state: &str,
-    run_id: &str,
-    state: &str,
-    outcome: &CancelOutcome,
-) -> (Value, String, i32) {
-    let status_command = format!("homeboy agent-task status {}", quote_arg(run_id));
-    let mut cancellation = json!({
-        "schema": CANCELLATION_SCHEMA,
-        "requested_run_id": requested_run_id,
-        "run_id": run_id,
-        "prior_state": prior_state,
-        "state": state,
-        "accepted": true,
-        "wait_timeout_secs": CANCEL_TERMINAL_WAIT.as_secs(),
-        "status_command": status_command,
-    });
-    let wait_accounting = match outcome {
-        CancelOutcome::Terminal { waited, polls } => Some((*waited, *polls)),
-        CancelOutcome::Requested { waited, polls, .. } => Some((*waited, *polls)),
-        CancelOutcome::DeferredForTerminalProvider => None,
-    };
-    if let Some((waited, polls)) = wait_accounting {
-        cancellation["waited_secs"] = json!(waited.as_secs());
-        cancellation["poll_count"] = json!(polls);
-    }
-
-    let (outcome_name, terminal, summary, exit_code) = match outcome {
-        CancelOutcome::Terminal { .. } if state == "cancelled" => (
-            "cancelled",
-            true,
-            format!(
-                "Cancellation of agent-task run {run_id} took effect: its durable state is cancelled."
-            ),
-            0,
-        ),
-        CancelOutcome::Terminal { .. } => (
-            "terminal_without_cancellation",
-            true,
-            format!(
-                "Cancellation of agent-task run {run_id} was requested, but the run reached terminal \
-                 state `{state}` instead of cancelled; that terminal result is authoritative."
-            ),
-            0,
-        ),
-        CancelOutcome::DeferredForTerminalProvider => (
-            "deferred_for_terminal_provider",
-            false,
-            format!(
-                "Cancellation of agent-task run {run_id} was deliberately not applied: a provider had \
-                 already reserved a terminal result, so the run stays joinable for that import. \
-                 Check `{status_command}`."
-            ),
-            0,
-        ),
-        CancelOutcome::Requested {
-            observation_error, ..
-        } => {
-            let mut summary = format!(
-                "Cancellation of agent-task run {run_id} was accepted and its teardown is still in \
-                 flight: the run did not reach a terminal state within {}s. Check \
-                 `{status_command}`.",
-                CANCEL_TERMINAL_WAIT.as_secs()
-            );
-            if let Some(error) = observation_error {
-                cancellation["observation_error"] = json!(error);
-                summary = format!("{summary} Observing that convergence failed: {error}.");
-            }
-            ("cancellation_requested", false, summary, TIMEOUT_EXIT_CODE)
-        }
-    };
-    cancellation["outcome"] = json!(outcome_name);
-    cancellation["terminal"] = json!(terminal);
-    cancellation["message"] = json!(&summary);
-    (cancellation, summary, exit_code)
-}
-
-fn run_state_name(state: agent_task_lifecycle::AgentTaskRunState) -> String {
-    serde_json::to_value(state)
-        .ok()
-        .and_then(|state| state.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
+    let result: homeboy_control_plane_contract::ControlPlaneCancelResult =
+        serde_json::from_value(payload.data.clone()).map_err(|error| {
+            homeboy::core::Error::internal_unexpected(format!(
+                "canonical cancellation result: {error}"
+            ))
+        })?;
+    Ok((result.disposition
+        == homeboy_control_plane_contract::ControlPlaneCancelDisposition::Requested)
+        .then_some(TIMEOUT_EXIT_CODE)
+        .unwrap_or(0))
 }
 
 #[cfg(test)]
-mod cancellation_outcome_tests {
+mod cancel_exit_code_tests {
     use super::*;
 
     #[test]
-    fn a_converged_cancellation_reports_the_cancelled_state_and_succeeds() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "cook-12572",
-            "queued",
-            "agent-task-12572",
-            "cancelled",
-            &CancelOutcome::Terminal {
-                waited: Duration::from_secs(2),
-                polls: 3,
-            },
-        );
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(projection["schema"], CANCELLATION_SCHEMA);
-        assert_eq!(projection["outcome"], "cancelled");
-        assert_eq!(projection["terminal"], true);
-        assert_eq!(projection["requested_run_id"], "cook-12572");
-        assert_eq!(projection["prior_state"], "queued");
-        assert_eq!(projection["run_id"], "agent-task-12572");
-        assert_eq!(projection["waited_secs"], 2);
-        assert_eq!(projection["poll_count"], 3);
-        assert_eq!(projection["message"], summary);
-        assert!(
-            summary.contains("agent-task-12572"),
-            "unexpected: {summary}"
-        );
-    }
-
-    /// The #12572 acceptance: an unconverged cancellation must not be reported
-    /// with a success word, and it must name the run plus a next command.
-    #[test]
-    fn an_unconverged_cancellation_times_out_with_the_run_id_and_a_next_command() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "running",
-            "agent-task-12572",
-            "running",
-            &CancelOutcome::Requested {
-                waited: CANCEL_TERMINAL_WAIT,
-                polls: 15,
-                observation_error: None,
-            },
-        );
-
-        assert_eq!(exit_code, TIMEOUT_EXIT_CODE);
-        assert_eq!(projection["outcome"], "cancellation_requested");
-        assert_eq!(projection["terminal"], false);
-        assert_eq!(projection["accepted"], true);
-        assert_eq!(projection["state"], "running");
+    fn unconverged_accepted_cancellation_maps_to_timeout() {
+        let result = homeboy_control_plane_contract::ControlPlaneCancelResult {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+            disposition: homeboy_control_plane_contract::ControlPlaneCancelDisposition::Requested,
+            terminal: false,
+            wait_timeout_seconds: 15,
+            waited_seconds: 15,
+            poll_count: 15,
+            observation_error: None,
+        };
+        let payload = homeboy_control_plane_contract::ControlPlaneActionPayload {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+            data: serde_json::to_value(result).expect("serialize result"),
+        };
         assert_eq!(
-            projection["wait_timeout_secs"],
-            CANCEL_TERMINAL_WAIT.as_secs()
-        );
-        assert_eq!(
-            projection["status_command"],
-            "homeboy agent-task status agent-task-12572"
-        );
-        assert!(
-            summary.contains("agent-task-12572"),
-            "unexpected: {summary}"
-        );
-        assert!(
-            summary.contains("homeboy agent-task status agent-task-12572"),
-            "unexpected: {summary}"
-        );
-        assert!(!summary.contains("succeeded"), "unexpected: {summary}");
-    }
-
-    #[test]
-    fn a_failed_convergence_observation_is_not_a_failed_cancellation() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "running",
-            "agent-task-12572",
-            "running",
-            &CancelOutcome::Requested {
-                waited: Duration::from_secs(1),
-                polls: 1,
-                observation_error: Some("daemon unreachable".to_string()),
-            },
-        );
-
-        assert_eq!(exit_code, TIMEOUT_EXIT_CODE);
-        assert_eq!(projection["outcome"], "cancellation_requested");
-        assert_eq!(projection["accepted"], true);
-        assert_eq!(projection["observation_error"], "daemon unreachable");
-        assert!(
-            summary.contains("daemon unreachable"),
-            "unexpected: {summary}"
-        );
-    }
-
-    /// A cancellation that lost the race to a terminal provider result must not
-    /// claim the run was cancelled.
-    #[test]
-    fn a_run_that_went_terminal_another_way_is_reported_as_such() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "running",
-            "agent-task-12572",
-            "succeeded",
-            &CancelOutcome::Terminal {
-                waited: Duration::from_secs(1),
-                polls: 2,
-            },
-        );
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(projection["outcome"], "terminal_without_cancellation");
-        assert_eq!(projection["terminal"], true);
-        assert!(summary.contains("succeeded"), "unexpected: {summary}");
-    }
-
-    #[test]
-    fn a_deferred_cancellation_reports_the_deferral_without_a_wait() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "running",
-            "agent-task-12572",
-            "running",
-            &CancelOutcome::DeferredForTerminalProvider,
-        );
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(projection["outcome"], "deferred_for_terminal_provider");
-        assert_eq!(projection["terminal"], false);
-        assert!(projection.get("waited_secs").is_none());
-        assert!(
-            summary.contains("deliberately not applied"),
-            "unexpected: {summary}"
+            cancel_exit_code(
+                homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded,
+                &payload,
+            )
+            .expect("exit code"),
+            TIMEOUT_EXIT_CODE
         );
     }
 }
@@ -4219,39 +3801,6 @@ fn evidence_refs_with_tasks(
         }
     }
     entries
-}
-
-/// Hoist live-cancellation recovery details to the top level of the cancel
-/// response so an operator sees the exact safe commands + process identifiers
-/// without digging through `metadata` (#5680 acceptance: never force manual
-/// process spelunking).
-fn surface_cancellation_recovery(value: &mut Value) {
-    let metadata = value.get("metadata").cloned().unwrap_or(Value::Null);
-
-    if let Some(live) = metadata.get("live_cancellation").cloned() {
-        value["live_cancellation"] = live;
-    }
-
-    if let Some(unsupported) = metadata.get("live_cancellation_unsupported").cloned() {
-        let recovery_commands = unsupported
-            .get("recovery_commands")
-            .cloned()
-            .unwrap_or(Value::Array(Vec::new()));
-        let reason = unsupported
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("live cancellation is not available for this provider on this host");
-        value["live_cancellation_unsupported"] = unsupported.clone();
-        value["recovery"] = json!({
-            "message": format!(
-                "Live cancellation could not signal the provider process tree directly: {reason}. Run the commands below to terminate it safely.",
-            ),
-            "owner_pid": unsupported.get("owner_pid").cloned().unwrap_or(Value::Null),
-            "runner_id": unsupported.get("runner_id").cloned().unwrap_or(Value::Null),
-            "runner_job_id": unsupported.get("runner_job_id").cloned().unwrap_or(Value::Null),
-            "recovery_commands": recovery_commands,
-        });
-    }
 }
 
 fn collect_hydrated_evidence_diagnostics(
