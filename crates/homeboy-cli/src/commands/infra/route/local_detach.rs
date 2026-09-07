@@ -60,6 +60,8 @@ const HANDOFF_SCHEMA: &str = "homeboy/agent-task-cook-local-detach-handoff/v1";
 /// a pending handoff, never an unproven acceptance.
 const DEFAULT_HANDOFF_TIMEOUT_MS: u64 = 30_000;
 const HANDOFF_POLL: Duration = Duration::from_millis(100);
+const CHILD_DIAGNOSTIC_LOG_BYTES: u64 = 16 * 1024;
+const CHILD_DIAGNOSTIC_TEXT_CHARS: usize = 2_048;
 
 /// Test and operator override for the bounded handoff wait.
 const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
@@ -780,8 +782,9 @@ pub(super) fn intercept_local_detached_cook(
         if let Some(reason) = detached_handoff_rejection_reason(handoff.state) {
             let _ = controller_client.cancel(controller_job.job_id(), reason);
             terminate_and_reap_detached_child(&mut child);
-            return Err(empty_detached_plan_error(
-                Some(controller_job.job_id()),
+            return Err(detached_child_pre_admission_error(
+                controller_job.job_id(),
+                &log_path,
                 reason,
             ));
         }
@@ -1395,6 +1398,116 @@ fn empty_detached_plan_error(job_id: Option<&str>, problem: &str) -> Error {
         "replay": "re-run the original detached Cook command",
     });
     error
+}
+
+/// Return a child error only when the captured stream proves it is Homeboy's
+/// typed command result. Arbitrary child output is evidence for the session log,
+/// not safe structured data for an operator-facing error.
+fn detached_child_pre_admission_error(job_id: &str, log_path: &Path, problem: &str) -> Error {
+    let diagnostic = detached_child_diagnostic(log_path);
+    let (message, child_diagnostic, diagnostic_unavailable_reason) = match diagnostic {
+        Ok(diagnostic) => (
+            format!(
+                "detached Cook failed before durable admission: {}",
+                diagnostic["message"].as_str().unwrap_or(problem)
+            ),
+            Some(diagnostic),
+            None,
+        ),
+        Err(reason) => (problem.to_string(), None, Some(reason)),
+    };
+    let mut error = Error::validation_invalid_argument(
+        "detach-after-handoff",
+        message,
+        None,
+        Some(vec![
+            format!("Inspect the controller job with: homeboy daemon status (controller job: {job_id})."),
+            "No durable agent-task run was created; re-run the original detached Cook command after addressing the failure.".to_string(),
+        ]),
+    );
+    error.details = json!({
+        "field": "detach-after-handoff",
+        "problem": problem,
+        "classification": "detached_cook_pre_admission_failure",
+        "controller_job": {
+            "id": job_id,
+            "reference_type": "controller_job",
+            "agent_task_status_compatible": false,
+            "follow_up": "homeboy daemon status",
+        },
+        "durable_agent_task_run": {
+            "exists": false,
+        },
+        "child_diagnostic": child_diagnostic,
+        "child_diagnostic_unavailable_reason": diagnostic_unavailable_reason,
+        "launcher_log": log_path.display().to_string(),
+        "replay": "re-run the original detached Cook command",
+    });
+    error
+}
+
+fn detached_child_diagnostic(log_path: &Path) -> Result<Value, &'static str> {
+    let file =
+        std::fs::File::open(log_path).map_err(|_| "child diagnostic log could not be read")?;
+    let mut bytes = Vec::new();
+    file.take(CHILD_DIAGNOSTIC_LOG_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "child diagnostic log could not be read")?;
+    if bytes.is_empty() {
+        return Err("child diagnostic log was empty");
+    }
+    if bytes.len() as u64 == CHILD_DIAGNOSTIC_LOG_BYTES {
+        return Err("child diagnostic log exceeded the bounded diagnostic capture");
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "child diagnostic log did not contain a typed command result")?;
+    let error = value
+        .as_object()
+        .filter(|result| {
+            result.get("schema").and_then(Value::as_str) == Some("homeboy/command-result/v3")
+                && result.get("success").and_then(Value::as_bool) == Some(false)
+        })
+        .and_then(|result| result.get("error"))
+        .filter(|error| {
+            error.get("code").and_then(Value::as_str).is_some()
+                && error.get("message").and_then(Value::as_str).is_some()
+        })
+        .cloned()
+        .ok_or("child diagnostic log did not contain a typed command error")?;
+    let mut error = homeboy::core::redaction::redact_json(&error);
+    bound_child_diagnostic(&mut error, 0);
+    Ok(error)
+}
+
+fn bound_child_diagnostic(value: &mut Value, depth: usize) {
+    if depth >= 4 {
+        *value = Value::String("[omitted: diagnostic depth limit]".to_string());
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            if text.chars().count() > CHILD_DIAGNOSTIC_TEXT_CHARS {
+                *text = format!(
+                    "{}...[truncated]",
+                    text.chars()
+                        .take(CHILD_DIAGNOSTIC_TEXT_CHARS)
+                        .collect::<String>()
+                );
+            }
+        }
+        Value::Array(items) => {
+            items.truncate(8);
+            for item in items {
+                bound_child_diagnostic(item, depth + 1);
+            }
+        }
+        Value::Object(entries) => {
+            for item in entries.values_mut() {
+                bound_child_diagnostic(item, depth + 1);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The launcher's only output: a bounded, machine-readable handoff naming the
@@ -2039,6 +2152,79 @@ mod tests {
             envelope["controller_job"]["job_id"],
             "3f2b1c00-0000-4000-8000-000000000001"
         );
+    }
+
+    #[test]
+    fn an_exited_child_preserves_a_bounded_redacted_typed_diagnostic() {
+        let directory = tempfile::tempdir().expect("diagnostic directory");
+        let log_path = directory.path().join("cook.log");
+        std::fs::write(
+            &log_path,
+            serde_json::to_vec(&json!({
+                "schema": "homeboy/command-result/v3",
+                "success": false,
+                "error": {
+                    "code": "validation.invalid_argument",
+                    "message": format!("provider token=super-secret was rejected {}", "x".repeat(CHILD_DIAGNOSTIC_TEXT_CHARS)),
+                    "details": { "field": "provider", "nested": { "value": "x" } },
+                    "hints": ["supply a valid provider"]
+                }
+            }))
+            .expect("serialize typed child diagnostic"),
+        )
+        .expect("write child diagnostic");
+
+        let error = detached_child_pre_admission_error(
+            "controller-job-14376",
+            &log_path,
+            "detached Cook exited before materializing an executable plan",
+        );
+
+        assert_eq!(
+            error.details["classification"],
+            "detached_cook_pre_admission_failure"
+        );
+        assert_eq!(
+            error.details["child_diagnostic"]["code"],
+            "validation.invalid_argument"
+        );
+        assert_eq!(
+            error.details["child_diagnostic"]["details"]["field"],
+            "provider"
+        );
+        let child_message = error.details["child_diagnostic"]["message"]
+            .as_str()
+            .expect("typed message");
+        assert!(child_message.contains("[REDACTED]"));
+        assert!(child_message.ends_with("...[truncated]"));
+        assert_eq!(error.details["durable_agent_task_run"]["exists"], false);
+        assert_eq!(
+            error.details["controller_job"]["agent_task_status_compatible"],
+            false
+        );
+        assert_eq!(
+            error.details["controller_job"]["follow_up"],
+            "homeboy daemon status"
+        );
+    }
+
+    #[test]
+    fn missing_child_diagnostic_uses_a_narrow_explained_fallback() {
+        let directory = tempfile::tempdir().expect("diagnostic directory");
+        let log_path = directory.path().join("absent-cook.log");
+
+        let error = detached_child_pre_admission_error(
+            "controller-job-absent",
+            &log_path,
+            "detached Cook exited before materializing an executable plan",
+        );
+
+        assert_eq!(error.details["child_diagnostic"], Value::Null);
+        assert_eq!(
+            error.details["child_diagnostic_unavailable_reason"],
+            "child diagnostic log could not be read"
+        );
+        assert_eq!(error.details["durable_agent_task_run"]["exists"], false);
     }
 
     /// A launcher that dressed an unproven handoff as an accepted one would
