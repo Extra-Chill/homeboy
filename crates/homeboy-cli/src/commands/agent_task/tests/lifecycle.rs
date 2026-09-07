@@ -4323,11 +4323,20 @@ fn cancel_command_marks_queued_run_cancelled() {
             idempotency_key: Some("cli-cancel-1".to_string()),
         })
         .expect("cancelled");
-        // The reported outcome must describe the durable effect, not merely that
-        // the request was accepted (#12572).
-        assert_eq!(value["cancellation"]["outcome"], "cancelled");
-        assert_eq!(value["cancellation"]["terminal"], true);
-        assert_eq!(value["cancellation"]["run_id"], "run-cli-cancel");
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(value.clone()).expect("canonical acknowledgement");
+        let result: homeboy_control_plane_contract::ControlPlaneCancelResult =
+            serde_json::from_value(acknowledgement.result.data.clone()).expect("typed result");
+        assert_eq!(
+            acknowledgement.result.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA
+        );
+        assert_eq!(
+            result.disposition,
+            homeboy_control_plane_contract::ControlPlaneCancelDisposition::Cancelled
+        );
+        assert!(result.terminal);
+        assert_eq!(acknowledgement.resource.run.as_str(), "run-cli-cancel");
         let replay = cancel(CancelArgs {
             run_id: "run-cli-cancel".to_string(),
             full: false,
@@ -4336,14 +4345,14 @@ fn cancel_command_marks_queued_run_cancelled() {
         })
         .expect("replayed cancellation")
         .0;
-        assert_eq!(
-            replay["cancellation"]["acknowledgement"],
-            value["cancellation"]["acknowledgement"]
-        );
-        let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
+        assert_eq!(replay, value);
 
         assert_eq!(exit_code, 0);
-        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            acknowledgement.resource.state,
+            homeboy_control_plane_contract::ControlPlaneRunState::Cancelled
+        );
+        let record = agent_task_lifecycle::status("run-cli-cancel").expect("record");
         assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
         assert_eq!(record.metadata["cancel_reason"], json!("not selected"));
     });
@@ -4422,19 +4431,11 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
 
         assert_eq!(exit_code, 0);
         assert_eq!(
-            value["cancellation"]["outcome"],
+            value["result"]["data"]["disposition"],
             "deferred_for_terminal_provider"
         );
-        assert_eq!(value["cancellation"]["terminal"], false);
-        assert_eq!(value["state"], "running");
-        assert!(
-            value["summary"]
-                .as_str()
-                .expect("summary")
-                .contains("deliberately not applied"),
-            "unexpected summary: {}",
-            value["summary"]
-        );
+        assert_eq!(value["result"]["data"]["terminal"], false);
+        assert_ne!(value["resource"]["state"], "cancelled");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "a deliberate deferral must not consume the convergence wait"

@@ -553,7 +553,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         &to_worktree,
         promotion_request.gates.gate_heartbeat_interval(),
     );
-    let report = if let Some(run_id) = source_run_id.as_deref() {
+    if let Some(run_id) = source_run_id.as_deref() {
         let acknowledgement =
             homeboy::agents::orchestration::execute_promotion_action_from_current_environment(
                 run_id,
@@ -581,31 +581,18 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
                 },
                 Some(reporter.callback()),
             )?;
-        if acknowledgement.outcome
-            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-        {
-            Err(Error::validation_invalid_argument(
-                "promote",
-                acknowledgement
-                    .message
-                    .unwrap_or_else(|| "promotion action failed".to_string()),
-                Some(run_id.to_string()),
-                None,
-            ))
-        } else {
-            serde_json::from_value(acknowledgement.result.data).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("decode promotion action result".to_string()),
-                )
-            })
-        }
-    } else {
-        agent_task_service::execute_promotion_with_progress(
-            promotion_request,
-            Some(reporter.callback()),
-        )
-    };
+        reporter.finish();
+        let report = homeboy::agents::agent_task_action_result::promote(&acknowledgement)?;
+        let exit_code = i32::from(report.status == AgentTaskPromotionStatus::GateFailed);
+        return Ok((
+            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+            exit_code,
+        ));
+    }
+    let report = agent_task_service::execute_promotion_with_progress(
+        promotion_request,
+        Some(reporter.callback()),
+    );
     reporter.finish();
     let report = report?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
@@ -615,15 +602,6 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
     };
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
     value["handoff"] = promotion_handoff(&report, &to_worktree);
-    if let Some(run_id) = source_run_id.filter(|_| !args.dry_run) {
-        let record = agent_task_lifecycle::reconcile_status(&run_id)?;
-        value["recorded_on_run"] = serde_json::json!({
-            "run_id": record.run_id,
-            "metadata_key": "latest_promotion",
-            "status_command": format!("homeboy agent-task status {}", run_id)
-        });
-    }
-
     Ok((value, exit_code))
 }
 

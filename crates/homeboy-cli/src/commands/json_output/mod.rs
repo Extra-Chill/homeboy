@@ -1317,24 +1317,21 @@ mod tests {
     #[test]
     fn cancel_stdout_is_compact_redacted_and_output_file_retains_full_evidence() {
         let payload = serde_json::json!({
-            "run_id": "cancel-run",
-            "state": "cancelled",
+            "schema": "homeboy/control-plane-action-acknowledgement/v1",
+            "acknowledgement": "cancel-run:action:cancel:key",
+            "run": "cancel-run",
+            "outcome": "succeeded",
+            "resource": { "run": "cancel-run", "state": "cancelled" },
+            "result": { "schema": "homeboy/control-plane-cancel-result/v1", "data": {
+                "schema": "homeboy/control-plane-cancel-result/v1",
+                "disposition": "cancelled", "terminal": true, "wait_timeout_seconds": 15,
+                "waited_seconds": 0, "poll_count": 0
+            }},
             "metadata": {
                 "provider_launch_environment": { "OPENAI_API_KEY": "actual-secret" },
                 "replay_argv": (0..500).map(|_| "x".repeat(256)).collect::<Vec<_>>(),
                 "execution_records": (0..500).map(|_| serde_json::json!({ "output": "x".repeat(256) })).collect::<Vec<_>>(),
-            },
-            "cancellation": {
-                "requested_run_id": "cook-cancel-run",
-                "run_id": "cancel-run",
-                "prior_state": "running",
-                "state": "cancelled",
-                "acknowledgement": "cancel-run:action:cancel:key",
-                "accepted": true,
-                "outcome": "cancelled",
-                "terminal": true,
-                "status_command": "homeboy agent-task status cancel-run",
-            },
+            }
         });
         let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, Some("cancel"), true);
         let stdout = run.stdout_result.as_ref().expect("bounded stdout");
@@ -1345,9 +1342,8 @@ mod tests {
             "projection was {} bytes",
             rendered.len()
         );
-        assert_eq!(stdout["run"]["prior_state"], "running");
         assert_eq!(stdout["run"]["state"], "cancelled");
-        assert_eq!(stdout["cancellation"]["live_process_outcome"], "cancelled");
+        assert_eq!(stdout["cancellation"]["disposition"], "cancelled");
         assert_eq!(
             stdout["next_action"]["command"],
             "homeboy agent-task status cancel-run"

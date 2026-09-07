@@ -7,6 +7,7 @@
 //! boundary.
 
 pub mod agent_task;
+pub mod agent_task_action_result;
 pub(crate) mod agent_task_aggregate;
 pub mod agent_task_artifacts;
 pub mod agent_task_batch;

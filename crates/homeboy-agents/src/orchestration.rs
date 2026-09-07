@@ -10,12 +10,13 @@ use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneBlocker,
-    ControlPlaneCancelParameters, ControlPlaneCapabilities, ControlPlaneError,
-    ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness, ControlPlaneLocation,
-    ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource,
-    ControlPlaneRun, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
-    ExecutionId, ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
+    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef,
+    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner,
+    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunState,
+    ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
@@ -23,6 +24,7 @@ use homeboy_control_plane_contract::{
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde_json::Value;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, claim_operation_with_intent_in_store,
@@ -42,6 +44,8 @@ const EVENT_PAGE_BOUND: usize = 100;
 const ACTION_INPUT_BOUND: usize = 128;
 const ACTION_REASON_BOUND: usize = 1_024;
 const ACTION_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
+const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One bounded non-reconciling read of the durable record and optional plan.
 #[derive(Debug, Clone)]
@@ -253,7 +257,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         ControlPlaneAction::Cancel if record.state.is_terminal() => (
                             ControlPlaneActionOutcome::AlreadySatisfied,
                             project_record(&record, None)?,
-                            ControlPlaneActionPayload::empty(),
+                            cancel_result_payload(cancel_result_for_record(
+                                &record,
+                                Duration::ZERO,
+                                0,
+                                None,
+                            )),
                             Some("run is already terminal".to_string()),
                         ),
                         ControlPlaneAction::Cancel => {
@@ -270,12 +279,15 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 requested_id.as_str(),
                                 parameters.reason.as_deref(),
                             ) {
-                                Ok(cancelled) => (
-                                    ControlPlaneActionOutcome::Succeeded,
-                                    project_record(&cancelled, None)?,
-                                    ControlPlaneActionPayload::empty(),
-                                    None,
-                                ),
+                                Ok(cancelled) => {
+                                    let (observed, result) = self.converge_cancellation(&cancelled);
+                                    (
+                                        ControlPlaneActionOutcome::Succeeded,
+                                        project_record(&observed, None)?,
+                                        cancel_result_payload(result),
+                                        None,
+                                    )
+                                }
                                 Err(error) => (
                                     ControlPlaneActionOutcome::Failed,
                                     project_record(&record, None)?,
@@ -383,12 +395,21 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                         .store
                                         .read_record(&resolved)
                                         .map_err(map_lifecycle_error)?;
+                                    let mut result =
+                                        serde_json::to_value(&report).unwrap_or_default();
+                                    result["handoff"] = promotion_handoff(&report);
+                                    if !parameters.dry_run {
+                                        result["recorded_on_run"] = serde_json::json!({
+                                            "run_id": current.run_id,
+                                            "metadata_key": "latest_promotion",
+                                        });
+                                    }
                                     (
                                         ControlPlaneActionOutcome::Succeeded,
                                         project_record(&current, None)?,
                                         ControlPlaneActionPayload {
                                             schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
-                                            data: serde_json::to_value(report).unwrap_or_default(),
+                                            data: result,
                                         },
                                         None,
                                     )
@@ -553,6 +574,136 @@ impl OrchestrationService<LifecycleStoreLookup> {
             }
         }
     }
+}
+
+impl OrchestrationService<LifecycleStoreLookup> {
+    /// Reconcile an accepted cancellation through the canonical lifecycle owner.
+    /// Runner probes stay disabled: cancellation convergence is controller-owned
+    /// and a remote runner must not consume this bounded acknowledgement window.
+    fn converge_cancellation(
+        &self,
+        accepted: &AgentTaskRunRecord,
+    ) -> (AgentTaskRunRecord, ControlPlaneCancelResult) {
+        let started = Instant::now();
+        let mut polls = 0;
+        let mut observed = accepted.clone();
+        loop {
+            match crate::agent_task_lifecycle::reconcile_status_in_store(
+                &self.lookup.store,
+                &accepted.run_id,
+                crate::agent_task_lifecycle::AgentTaskStatusOptions {
+                    runner_probe: crate::agent_task_lifecycle::AgentTaskRunnerProbe::Never,
+                },
+                false,
+            ) {
+                Ok(status) => {
+                    observed = status.record;
+                    if observed.state.is_terminal()
+                        || observed
+                            .metadata
+                            .get("cancellation_deferred_for_terminal_provider")
+                            .is_some()
+                    {
+                        return (
+                            observed.clone(),
+                            cancel_result_for_record(&observed, started.elapsed(), polls, None),
+                        );
+                    }
+                }
+                Err(error) => {
+                    return (
+                        observed.clone(),
+                        cancel_result_for_record(
+                            &observed,
+                            started.elapsed(),
+                            polls,
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    );
+                }
+            }
+            if started.elapsed() >= CANCEL_TERMINAL_WAIT {
+                return (
+                    observed.clone(),
+                    cancel_result_for_record(&observed, started.elapsed(), polls, None),
+                );
+            }
+            std::thread::sleep(CANCEL_TERMINAL_POLL_INTERVAL);
+            polls += 1;
+        }
+    }
+}
+
+fn cancel_result_for_record(
+    record: &AgentTaskRunRecord,
+    waited: Duration,
+    poll_count: u64,
+    observation_error: Option<String>,
+) -> ControlPlaneCancelResult {
+    let disposition = if record.state == AgentTaskRunState::Cancelled {
+        ControlPlaneCancelDisposition::Cancelled
+    } else if record.state.is_terminal() {
+        ControlPlaneCancelDisposition::TerminalWithoutCancellation
+    } else if record
+        .metadata
+        .get("cancellation_deferred_for_terminal_provider")
+        .is_some()
+    {
+        ControlPlaneCancelDisposition::DeferredForTerminalProvider
+    } else {
+        ControlPlaneCancelDisposition::Requested
+    };
+    ControlPlaneCancelResult {
+        schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+        disposition,
+        terminal: record.state.is_terminal(),
+        wait_timeout_seconds: CANCEL_TERMINAL_WAIT.as_secs(),
+        waited_seconds: waited.as_secs(),
+        poll_count,
+        observation_error,
+    }
+}
+
+fn cancel_result_payload(result: ControlPlaneCancelResult) -> ControlPlaneActionPayload {
+    ControlPlaneActionPayload {
+        schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+        data: serde_json::to_value(result).expect("control-plane cancellation result serializes"),
+    }
+}
+
+fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionReport) -> Value {
+    let target_applied = report.status.patch_promoted();
+    let verified = matches!(
+        report.status,
+        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+    );
+    let next_action = if report.status.gate_failed() {
+        "patch promoted but deterministic gates failed; use gate feedback before finalizing"
+    } else if target_applied && verified {
+        "patch promoted and deterministic gates verified; finalize a PR"
+    } else if target_applied {
+        "patch promoted into the target worktree; verify, then finalize a PR"
+    } else {
+        "dry run only; rerun promote without `--dry-run` before finalizing"
+    };
+
+    serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-handoff/v1",
+        "states": {
+            "patch_artifact_produced": true,
+            "candidate_retained": true,
+            "target_applied": target_applied,
+            "patch_promoted": target_applied,
+            "verified": verified,
+            "finalized": false,
+            "pr_opened": false,
+        },
+        "boundary": report.status.handoff_boundary(),
+        "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
+            "homeboy agent-task finalize-pr --recover {run_id}"
+        )),
+        "next_actions": [next_action],
+    })
 }
 
 fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), ControlPlaneError> {
@@ -1463,11 +1614,12 @@ mod tests {
     use crate::agent_task_schedule::AgentTaskPlan;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
-        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneErrorClass,
-        ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState,
-        EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCancelDisposition,
+        ControlPlaneCancelResult, ControlPlaneErrorClass, ControlPlaneEvent,
+        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState, EventCursor, EventId,
+        RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
         CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -1776,6 +1928,14 @@ mod tests {
                 .execute_action(&run, &request)
                 .expect("first action");
             assert_eq!(first.outcome, ControlPlaneActionOutcome::AlreadySatisfied);
+            let result: ControlPlaneCancelResult =
+                serde_json::from_value(first.result.data.clone())
+                    .expect("typed cancellation result");
+            assert_eq!(
+                result.disposition,
+                ControlPlaneCancelDisposition::TerminalWithoutCancellation
+            );
+            assert!(result.terminal);
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
                 first
@@ -1829,6 +1989,47 @@ mod tests {
             assert_eq!(first.result.schema, "homeboy/agent-task-reconcile/v1");
             assert_eq!(
                 service.execute_action(&run, &reconcile).expect("replay"),
+                first
+            );
+        });
+    }
+
+    #[test]
+    fn accepted_cancel_returns_the_converged_resource_and_replays_without_waiting_again() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("cancel-converges", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("queued record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "cancel-converges-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "not selected" }),
+                },
+                confirmed: true,
+            };
+
+            let first = service.execute_action(&run, &request).expect("cancel");
+            let result: ControlPlaneCancelResult =
+                serde_json::from_value(first.result.data.clone())
+                    .expect("typed cancellation result");
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(first.resource.state, ControlPlaneRunState::Cancelled);
+            assert_eq!(result.disposition, ControlPlaneCancelDisposition::Cancelled);
+            assert!(result.terminal);
+            assert_eq!(result.poll_count, 0);
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
                 first
             );
         });
@@ -2009,6 +2210,74 @@ mod tests {
             let replay = execute().expect("failed replay");
 
             assert_eq!(first.outcome, ControlPlaneActionOutcome::Failed);
+            assert_eq!(replay, first);
+            assert_eq!(executions.get(), 1);
+        });
+    }
+
+    #[test]
+    fn promotion_action_owns_handoff_recording_and_idempotent_replay() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Promote,
+                idempotency_key: "promote-request-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({
+                        "source": "{}",
+                        "source_run_id": AGENT_TASK_RUN,
+                        "to_worktree": "homeboy@candidate",
+                        "dry_run": false,
+                    }),
+                },
+                confirmed: true,
+            };
+            let report: crate::agent_task_promotion::AgentTaskPromotionReport =
+                serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "applied",
+                "source": { "kind": "aggregate", "run_id": AGENT_TASK_RUN, "task_id": "task" },
+                "to_worktree": "homeboy@candidate",
+                "target": { "worktree": "homeboy@candidate" },
+                "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                "operator_notification": { "status": "completed", "message": "complete" },
+                }))
+                .expect("promotion report");
+            let executions = std::rc::Rc::new(std::cell::Cell::new(0));
+            let execute = || {
+                let executions = std::rc::Rc::clone(&executions);
+                let report = report.clone();
+                service.execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    || panic!("resume delegate must not run"),
+                    move |_| {
+                        executions.set(executions.get() + 1);
+                        Ok(report)
+                    },
+                )
+            };
+
+            let first = execute().expect("promote");
+            let replay = execute().expect("replay");
+
+            assert_eq!(first.result.schema, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA);
+            assert_eq!(
+                first.result.data["handoff"]["states"]["target_applied"],
+                true
+            );
+            assert_eq!(
+                first.result.data["recorded_on_run"]["metadata_key"],
+                "latest_promotion"
+            );
             assert_eq!(replay, first);
             assert_eq!(executions.get(), 1);
         });

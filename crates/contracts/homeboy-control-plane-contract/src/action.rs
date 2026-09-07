@@ -12,6 +12,7 @@ pub const CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA: &str =
     "homeboy/control-plane-empty-action-payload/v1";
 pub const CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-cancel-parameters/v1";
+pub const CONTROL_PLANE_CANCEL_RESULT_SCHEMA: &str = "homeboy/control-plane-cancel-result/v1";
 pub const CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA: &str = "homeboy/control-plane-retry-parameters/v1";
 pub const CONTROL_PLANE_RETRY_RESULT_SCHEMA: &str = "homeboy/control-plane-retry-result/v1";
 pub const CONTROL_PLANE_RESUME_RESULT_SCHEMA: &str = "homeboy/control-plane-resume-result/v1";
@@ -41,6 +42,33 @@ impl ControlPlaneActionPayload {
 pub struct ControlPlaneCancelParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// The durable convergence observed after a cancellation request was accepted.
+///
+/// `Requested` means the request is durable, while terminalization was not
+/// observed within the bounded reconciliation window (or that observation
+/// failed). It is deliberately distinct from a failed cancellation action.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneCancelDisposition {
+    Cancelled,
+    TerminalWithoutCancellation,
+    DeferredForTerminalProvider,
+    Requested,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneCancelResult {
+    pub schema: String,
+    pub disposition: ControlPlaneCancelDisposition,
+    pub terminal: bool,
+    pub wait_timeout_seconds: u64,
+    pub waited_seconds: u64,
+    pub poll_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,5 +167,25 @@ mod tests {
         let value = serde_json::to_value(&acknowledgement).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA);
         assert_eq!(value["outcome"], "succeeded");
+    }
+
+    #[test]
+    fn cancel_result_is_versioned_and_distinguishes_unconverged_requests() {
+        let result = ControlPlaneCancelResult {
+            schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+            disposition: ControlPlaneCancelDisposition::Requested,
+            terminal: false,
+            wait_timeout_seconds: 15,
+            waited_seconds: 15,
+            poll_count: 15,
+            observation_error: Some("controller unavailable".to_string()),
+        };
+        let value = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(value["schema"], CONTROL_PLANE_CANCEL_RESULT_SCHEMA);
+        assert_eq!(value["disposition"], "requested");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneCancelResult>(value).expect("deserialize"),
+            result
+        );
     }
 }

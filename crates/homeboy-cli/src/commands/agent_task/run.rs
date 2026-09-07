@@ -14,7 +14,6 @@ use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord;
 use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
@@ -8176,28 +8175,15 @@ pub(super) fn run_resume_with_executor(
             },
             executor,
         )?;
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Err(Error::validation_invalid_argument(
-            "resume",
-            acknowledgement
-                .message
-                .unwrap_or_else(|| "resume action failed".to_string()),
-            Some(run_id),
-            None,
-        ));
-    }
-    let exit_code = if acknowledgement.result.schema == "homeboy/unmaterialized-cook-resume/v1" {
-        if acknowledgement.result.data["terminal"] == true {
-            2
-        } else {
-            0
-        }
-    } else {
-        acknowledgement.result.data["exit_code"]
-            .as_i64()
-            .and_then(|code| i32::try_from(code).ok())
-            .unwrap_or(0)
+    let exit_code = match homeboy::agents::agent_task_action_result::resume(&acknowledgement)? {
+        homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
+            exit_code,
+            ..
+        } => exit_code,
+        homeboy::agents::agent_task_action_result::ResumeActionResult::UnmaterializedCook {
+            terminal,
+            ..
+        } => i32::from(terminal) * 2,
     };
     Ok((
         serde_json::to_value(acknowledgement)
@@ -8287,31 +8273,10 @@ where
             confirmed: true,
         },
     )?;
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Err(Error::validation_invalid_argument(
-            "retry",
-            acknowledgement
-                .message
-                .unwrap_or_else(|| "retry action failed".to_string()),
-            Some(args.run_id),
-            None,
-        ));
-    }
-    let execute = args.run
-        && acknowledgement.result.data["runnable"]
-            .as_bool()
-            .unwrap_or(false);
+    let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
+    let execute = args.run && retry.runnable;
     if execute {
-        let record: AgentTaskRunRecord = serde_json::from_value(
-            acknowledgement.result.data["record"].clone(),
-        )
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("decode retry action result".to_string()),
-            )
-        })?;
+        let record = retry.record;
         if record.metadata["cook_id"].is_string() {
             return continue_cook_with_queued_execution(
                 CookContinueArgs {
