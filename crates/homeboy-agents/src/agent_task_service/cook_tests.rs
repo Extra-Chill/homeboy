@@ -15440,7 +15440,7 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
 }
 
 #[test]
-fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
+fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_proof() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
@@ -15522,6 +15522,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         .expect("serialize failed promotion");
         failed["source"]["task_id"] =
             serde_json::json!(options.identity.initial_plan.tasks[0].task_id.clone());
+        failed["status"] = serde_json::json!("verification_pending");
         failed["patch_artifact"]["id"] = serde_json::json!("committed-changes");
         failed["verified_base"]["sha"] =
             serde_json::json!(
@@ -15663,7 +15664,11 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         assert_eq!(
             record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
                 ["original_history"]["status"],
-            "gate_failed"
+            "verification_pending"
+        );
+        assert_eq!(
+            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]["reason"],
+            "interrupted_original_verification"
         );
         assert_eq!(
             record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
@@ -18938,6 +18943,10 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         assert_eq!(original_reference["index"], 0);
         assert_eq!(original_reference["status"], "gate_failed");
         assert_eq!(original_reference["deterministic_gate_count"], 1);
+        assert_eq!(
+            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]["reason"],
+            "infrastructure_invalid_original_gates"
+        );
         assert_eq!(
             original_reference["sha256"],
             homeboy_engine_primitives::content_hash::sha256_hex(
