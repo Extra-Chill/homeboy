@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.3] - 2026-09-07
+
+### Fixed
+- read native MariaDB support from packageCapabilities
+
 ## [3.45.2] - 2026-09-07
 
 ### Fixed
