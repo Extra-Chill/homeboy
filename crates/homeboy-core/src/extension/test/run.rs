@@ -1364,22 +1364,50 @@ fn run_main_test_workflow_inner(
                     preview
                 };
 
-                let message = format!(
-                    "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
-                    impacted.len(),
-                );
+                // A harness-config change cannot be answered by "add a test":
+                // the changed file decides how tests run, so only executing the
+                // suite proves it still works. Say that instead.
+                let harness_only = impacted
+                    .iter()
+                    .all(|file| crate::extension::test::drift::is_test_harness_config_path(file));
+
+                let message = if harness_only {
+                    format!(
+                        "Changed-scope test gate selected zero tests, but {} test-harness config file(s) changed since {changed_ref}: {impacted_summary}. A harness change is the one change a zero-test run cannot evidence, because the harness itself was never exercised.",
+                        impacted.len(),
+                    )
+                } else {
+                    format!(
+                        "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
+                        impacted.len(),
+                    )
+                };
                 let findings = Some(vec![HomeboyFinding::builder("test", message.clone())
-                    .rule("changed_scope_zero_tests_for_source_change")
+                    .rule(if harness_only {
+                        "changed_scope_zero_tests_for_harness_change"
+                    } else {
+                        "changed_scope_zero_tests_for_source_change"
+                    })
                     .category("test-scope")
                     .severity("error")
                     .build()]);
-                let hints = Some(vec![
-                    format!(
-                        "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
-                        args.component_id
-                    ),
-                    "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
-                ]);
+                let hints = Some(if harness_only {
+                    vec![
+                        format!(
+                            "Run the full suite so the harness change is exercised: homeboy review test {}",
+                            args.component_id
+                        ),
+                        "A green changed-scope run here would only mean no source changed, not that the harness still works.".to_string(),
+                    ]
+                } else {
+                    vec![
+                        format!(
+                            "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
+                            args.component_id
+                        ),
+                        "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
+                    ]
+                });
 
                 return Ok(TestRunWorkflowResult {
                     status: "failed".to_string(),
