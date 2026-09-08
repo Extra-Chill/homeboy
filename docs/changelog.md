@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.369.9] - 2026-09-08
+
+### Fixed
+- hydrate historical adoption base
+- authenticate adoption reuse fingerprint
+- reap detached descendants on runner cancellation
+- bind adoption promotion reuse
+
 ## [0.369.8] - 2026-09-08
 
 ### Fixed
