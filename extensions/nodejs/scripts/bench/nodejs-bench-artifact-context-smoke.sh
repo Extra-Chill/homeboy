@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 HOMEBOY_BENCH_RESULTS_FILE="$TMP_DIR/results/bench-results.json" \
 HOMEBOY_BENCH_ARTIFACTS_DIR="$TMP_DIR/artifacts" \
 HELPER_UNDER_TEST="$SCRIPT_DIR/lib/artifact-context.mjs" \
-REDACTION_UNDER_TEST="$SCRIPT_DIR/lib/redaction.mjs" \
+REDACTION_UNDER_TEST="$SCRIPT_DIR/../../../scripts/lib/redaction.mjs" \
 node --input-type=module - <<'EOF'
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';

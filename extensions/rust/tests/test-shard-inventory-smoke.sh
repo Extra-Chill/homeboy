@@ -189,7 +189,10 @@ for name in names:
     if mode == "retry-suffix-out-of-range" and name == "unit::alpha":
         runtime_name = f"{runtime_name}#4294967297"
     # This is the libtest-json-plus terminal event shape emitted by nextest.
-    print(json.dumps({"type": "test", "name": runtime_name, "event": event, "exec_time": 0.001}))
+    record = {"type": "test", "name": runtime_name, "event": event, "exec_time": 0.001}
+    if event == "failed":
+        record["stdout"] = "thread 'unit::beta' panicked: assertion failed: expected retained evidence"
+    print(json.dumps(record))
     if mode == "string-event" and name == "unit::alpha":
         # Released nextest output can interleave a JSON string with terminal events.
         print(json.dumps("nextest progress"))
@@ -243,6 +246,11 @@ homeboy_runner_init() {
 }
 should_run_step() { return 0; }
 EOF
+cat > "$WORK_DIR/settings.sh" <<'EOF'
+homeboy_setting() { local settings="${HOMEBOY_SETTINGS_JSON:-}"; [ -n "$settings" ] || settings='{}'; printf '%s' "$settings" | jq -r --arg key "$1" --arg default "${3:-}" '.[$key] // $default'; }
+homeboy_setting_bool() { local settings="${HOMEBOY_SETTINGS_JSON:-}"; [ -n "$settings" ] || settings='{}'; printf '%s' "$settings" | jq -r --arg key "$1" --arg default "$2" '.[$key] // $default'; }
+EOF
+export HOMEBOY_RUNTIME_SETTINGS_HELPER="$WORK_DIR/settings.sh"
 cat > "$WORK_DIR/command-capture.sh" <<'EOF'
 homeboy_run_step_capture() {
   local output_var="$1" exit_var="$2" step_name="$3"
@@ -856,6 +864,7 @@ evidence = json.load(open(sys.argv[3]))
 assert [record["test_name"] for record in evidence] == ["pre-existing failure", "shard-smoke::lib::shard_smoke::unit::beta"], evidence
 inventory_ids = {test["id"] for test in json.load(open(sys.argv[5]))["tests"]}
 assert evidence[-1]["test_id"] in inventory_ids, (evidence, inventory_ids)
+assert "assertion failed: expected retained evidence" in evidence[-1]["stdout_excerpt"], evidence
 PY
 
 # A list validation failure is preflight-only: no batch run may have started.

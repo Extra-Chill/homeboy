@@ -481,8 +481,34 @@ rust_capture_stdout() {
     "$@" > "$stdout_file"
 }
 
+# The host capture may retain only a bounded command-log tail. Tee nextest's
+# machine events before that boundary so an early failure remains diagnosable.
+rust_capture_nextest_events() {
+    local events_file="$1"
+    shift
+    rm -f "${events_file}.complete"
+    local -a pipe_status
+    if "$@" 2>&1 | tee "$events_file"; then
+        pipe_status=("${PIPESTATUS[@]}")
+    else
+        pipe_status=("${PIPESTATUS[@]}")
+    fi
+    local child_exit="${pipe_status[0]}" tee_exit="${pipe_status[1]}"
+    if [ "$tee_exit" -eq 0 ] && ! : > "${events_file}.complete"; then
+        tee_exit=1
+    fi
+    if [ "$tee_exit" -ne 0 ]; then
+        echo "Rust nextest event capture failed; event evidence is incomplete." >&2
+    fi
+    # Preserve a real child failure when both the child and tee fail. Otherwise,
+    # a capture failure must itself make the run fail rather than bless partial
+    # evidence as a successful test run.
+    [ "$child_exit" -ne 0 ] && return "$child_exit"
+    return "$tee_exit"
+}
+
 rust_nextest_counts() {
-    python3 - "${EXTENSION_PATH}/scripts" "$1" "$2" "$3" <<'PY'
+    python3 - "${EXTENSION_PATH}/scripts" "$1" "$2" "$3" "$4" <<'PY'
 import json
 import sys
 
@@ -493,6 +519,7 @@ from nextest_events_lib import (
     PASSED_STATUSES,
     SKIPPED_STATUSES,
     TERMINAL_STATUSES,
+    failure_context,
     read_test_events,
     retry_base_identity,
 )
@@ -500,6 +527,7 @@ from rust_test_identity import canonical_test_id
 
 expected = json.load(open(sys.argv[3], encoding="utf-8"))["selected"]
 failed_names_file = sys.argv[4]
+failure_context_file = sys.argv[5]
 
 def planned_identity(item):
     values = (item.get("package"), item.get("target_kind"), item.get("target"), item.get("name"))
@@ -530,7 +558,8 @@ for item in expected:
     planned_by_emitted[emitted] = planned
 
 outcomes = {}
-for name, emitted, status in read_test_events(sys.argv[2]):
+contexts = {}
+for name, emitted, status, event in read_test_events(sys.argv[2]):
     if emitted is None:
         # Child processes inherit libtest JSON. Scheduler preflight, not their
         # diagnostics, is the authority for shard membership.
@@ -556,6 +585,10 @@ for name, emitted, status in read_test_events(sys.argv[2]):
     if planned in outcomes:
         raise SystemExit(f"Rust test shard error: nextest emitted an unexpected or duplicate test identity: {name}")
     outcomes[planned] = status
+    if status in FAILED_STATUSES:
+        contexts[planned] = failure_context(event)
+    else:
+        contexts.pop(planned, None)
 missing = expected_identities - outcomes.keys()
 unexpected_missing = missing - expected_skipped
 if unexpected_missing:
@@ -574,6 +607,12 @@ with open(failed_names_file, "w", encoding="utf-8") as handle:
     handle.write("\n".join(failed_names))
     if failed_names:
         handle.write("\n")
+with open(failure_context_file, "w", encoding="utf-8") as handle:
+    json.dump([
+        {"name": canonical_test_id(package, target_kind, target, test), "stdout_excerpt": contexts.get((package, target_kind, target, test), ("", ""))[0], "stderr_excerpt": contexts.get((package, target_kind, target, test), ("", ""))[1]}
+        for package, target_kind, target, test in sorted(expected_identities)
+        if outcomes.get((package, target_kind, target, test)) in FAILED_STATUSES
+    ], handle)
 print(f"{passed}\t{failed}\t{skipped}")
 PY
 }
@@ -598,7 +637,8 @@ PY
 # nothing all land there, and all three must reach the caller as "unmeasured"
 # rather than as a fabricated zero that would read as a pass.
 rust_nextest_unsharded_counts() {
-    python3 - "${EXTENSION_PATH}/scripts" "$1" "$2" <<'PY'
+    python3 - "${EXTENSION_PATH}/scripts" "$1" "$2" "$3" <<'PY'
+import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
@@ -608,14 +648,17 @@ from nextest_events_lib import (
     PASSED_STATUSES,
     SKIPPED_STATUSES,
     TERMINAL_STATUSES,
+    failure_context,
     read_test_events,
     retry_base_identity,
 )
 
 failed_names_file = sys.argv[3]
+failure_context_file = sys.argv[4]
 
 outcomes = {}
-for name, emitted, status in read_test_events(sys.argv[2]):
+contexts = {}
+for name, emitted, status, event in read_test_events(sys.argv[2]):
     # An unplanned identity is not evidence of anything wrong here. Child
     # processes inherit libtest JSON, and with no manifest there is nothing to
     # call it a mismatch against -- so it is simply not one of our tests.
@@ -629,6 +672,10 @@ for name, emitted, status in read_test_events(sys.argv[2]):
     if base is not None and base != "invalid":
         emitted = base
     outcomes[emitted] = status
+    if status in FAILED_STATUSES:
+        contexts[emitted] = failure_context(event)
+    else:
+        contexts.pop(emitted, None)
 
 if not outcomes:
     raise SystemExit(1)
@@ -648,19 +695,24 @@ with open(failed_names_file, "w", encoding="utf-8") as handle:
     handle.write("\n".join(failed_names))
     if failed_names:
         handle.write("\n")
+with open(failure_context_file, "w", encoding="utf-8") as handle:
+    json.dump([
+        {"name": f"{package}::{target}${test}", "stdout_excerpt": contexts.get((package, target, test), ("", ""))[0], "stderr_excerpt": contexts.get((package, target, test), ("", ""))[1]}
+        for package, target, test in sorted(outcomes)
+        if outcomes[(package, target, test)] in FAILED_STATUSES
+    ], handle)
 print(f"{passed + failed + skipped}\t{passed}\t{failed}\t{skipped}")
 PY
 }
 
 rust_merge_failure_evidence() {
-    local failed_names_file="$1" inventory_file="${2:-}" records_file failures_file canonical_names name record
+    local failed_names_file="$1" inventory_file="${2:-}" context_file="${3:-}" records_file failures_file canonical_names name record
     homeboy_test_failures_enabled || return 0
     [ -s "$failed_names_file" ] || return 0
 
-    canonical_names="$failed_names_file"
+    canonical_names="$(mktemp)" || return 1
     if [ -n "$inventory_file" ]; then
-        canonical_names="$(mktemp)" || return 1
-        if ! python3 - "${EXTENSION_PATH}/scripts" "$failed_names_file" "$inventory_file" "$canonical_names" <<'PY'
+        if ! python3 - "${EXTENSION_PATH}/scripts" "$failed_names_file" "$inventory_file" "$canonical_names" "$context_file" <<'PY'
 import json
 import sys
 
@@ -670,6 +722,7 @@ from rust_test_identity import canonical_test_id
 
 inventory = json.load(open(sys.argv[3], encoding="utf-8"))
 tests = inventory.get("inventory", inventory).get("tests", [])
+contexts = {item.get("name"): item for item in json.load(open(sys.argv[5], encoding="utf-8"))} if sys.argv[5] else {}
 with open(sys.argv[4], "w", encoding="utf-8") as output:
     for raw in open(sys.argv[2], encoding="utf-8"):
         package, target, name = emitted_identity(raw.rstrip("\n"))
@@ -684,7 +737,26 @@ with open(sys.argv[4], "w", encoding="utf-8") as output:
                 f"Rust test failure identity is not uniquely present in inventory: {raw.rstrip()!r}"
             )
         item = matches[0]
-        output.write(canonical_test_id(package, item["target_kind"], target, name) + "\n")
+        canonical = canonical_test_id(package, item["target_kind"], target, name)
+        context = contexts.get(raw.rstrip("\n"), {})
+        output.write(json.dumps({"name": canonical, "stdout_excerpt": context.get("stdout_excerpt", ""), "stderr_excerpt": context.get("stderr_excerpt", "")}) + "\n")
+PY
+        then
+            rm -f "$canonical_names"
+            return 1
+        fi
+    else
+        if ! python3 - "$failed_names_file" "$canonical_names" "$context_file" <<'PY'
+import json
+import sys
+
+contexts = {item.get("name"): item for item in json.load(open(sys.argv[3], encoding="utf-8"))} if sys.argv[3] else {}
+with open(sys.argv[2], "w", encoding="utf-8") as output:
+    for raw in open(sys.argv[1], encoding="utf-8"):
+        name = raw.rstrip("\n")
+        if name:
+            context = contexts.get(name, {})
+            output.write(json.dumps({"name": name, "stdout_excerpt": context.get("stdout_excerpt", ""), "stderr_excerpt": context.get("stderr_excerpt", "")}) + "\n")
 PY
         then
             rm -f "$canonical_names"
@@ -697,14 +769,15 @@ PY
         rm -f "$records_file"
         return 1
     }
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        record="$(homeboy_test_failure_record_json "rust-test" "$name" "" "" "" "Rust test runner reported failed test: ${name}" "test_failure")"
+    while IFS= read -r record; do
+        [ -n "$record" ] || continue
+        name="$(printf '%s' "$record" | jq -r '.name')"
+        record="$(homeboy_test_failure_record_json "rust-test" "$name" "" "" "" "Rust test runner reported failed test: ${name}" "test_failure" "$(printf '%s' "$record" | jq -r '.stdout_excerpt // ""')" "$(printf '%s' "$record" | jq -r '.stderr_excerpt // ""')")"
         printf '%s\n' "$record" >> "$records_file"
     done < "$canonical_names"
     if ! jq -s '.' "$records_file" > "$failures_file"; then
         rm -f "$records_file" "$failures_file"
-        [ "$canonical_names" = "$failed_names_file" ] || rm -f "$canonical_names"
+        rm -f "$canonical_names"
         return 1
     fi
     if homeboy_test_failures_merge_file "$failures_file"; then
@@ -712,11 +785,11 @@ PY
     else
         local merge_exit=$?
         rm -f "$records_file" "$failures_file"
-        [ "$canonical_names" = "$failed_names_file" ] || rm -f "$canonical_names"
+        rm -f "$canonical_names"
         return "$merge_exit"
     fi
     rm -f "$records_file" "$failures_file"
-    [ "$canonical_names" = "$failed_names_file" ] || rm -f "$canonical_names"
+    rm -f "$canonical_names"
 }
 
 rust_run_test_child() {
@@ -731,9 +804,12 @@ rust_run_test_child() {
 
 rust_nextest_cleanup() {
     local status="${1:-$?}" path
-    for path in "${NEXTEST_BATCH_FAILED_NAMES:-}" "${NEXTEST_FAILED_NAMES:-}" "${NEXTEST_EXECUTION_DATA:-}" "${SHARD_OUTPUT:-}" "${NEXTEST_LIST_JSON:-}" "${NEXTEST_LIST_OUTPUT:-}" "${SHARD_DATA:-}"; do
+    for path in "${NEXTEST_BATCH_FAILED_NAMES:-}" "${NEXTEST_BATCH_FAILURE_CONTEXT:-}" "${NEXTEST_FAILED_NAMES:-}" "${NEXTEST_FAILURE_CONTEXT:-}" "${NEXTEST_EXECUTION_DATA:-}" "${SHARD_OUTPUT:-}" "${SHARD_EVENTS:-}" "${NEXTEST_LIST_JSON:-}" "${NEXTEST_LIST_OUTPUT:-}" "${SHARD_DATA:-}"; do
         [ -z "$path" ] || homeboy_runner_harness_cleanup_path file "$path" || true
     done
+    if [ -n "${SHARD_EVENTS:-}" ]; then
+        homeboy_runner_harness_cleanup_path file "${SHARD_EVENTS}.complete" || true
+    fi
     [ -z "${NEXTEST_BATCH_DIR:-}" ] || homeboy_runner_harness_cleanup_path directory "$NEXTEST_BATCH_DIR" || true
     return "$status"
 }
@@ -1166,6 +1242,12 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             exit 1
         fi
         homeboy_runner_harness_register_cleanup "$NEXTEST_FAILED_NAMES"
+        NEXTEST_FAILURE_CONTEXT="$(mktemp)" || {
+            rust_nextest_cleanup 1
+            exit 1
+        }
+        printf '[]\n' > "$NEXTEST_FAILURE_CONTEXT"
+        homeboy_runner_harness_register_cleanup "$NEXTEST_FAILURE_CONTEXT"
         for NEXTEST_BATCH in "$NEXTEST_BATCH_DIR"/*.json; do
             [ -f "$NEXTEST_BATCH" ] || continue
             NEXTEST_FILTER="${NEXTEST_FILTERS[$NEXTEST_BATCH]}"
@@ -1176,7 +1258,22 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 rust_nextest_cleanup 1
                 exit 1
             fi
-            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- rust_run_test_child env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${NEXTEST_RUN_SOURCE_ARGS[@]}" --test-threads "$(rust_nextest_shard_threads)" --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
+            SHARD_EVENTS="$(mktemp)" || {
+                rust_nextest_cleanup 1
+                exit 1
+            }
+            homeboy_runner_harness_register_cleanup "$SHARD_EVENTS"
+            homeboy_run_step_capture SHARD_OUTPUT NEXTEST_BATCH_EXIT "cargo nextest run" -- rust_capture_nextest_events "$SHARD_EVENTS" rust_run_test_child env NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${NEXTEST_RUN_SOURCE_ARGS[@]}" --test-threads "$(rust_nextest_shard_threads)" --no-fail-fast --no-tests fail --message-format libtest-json-plus --message-format-version 0.1 -E "$NEXTEST_FILTER" || true
+            [ ! -f "${SHARD_EVENTS}.complete" ] || homeboy_runner_harness_register_cleanup "${SHARD_EVENTS}.complete"
+            if [ ! -f "${SHARD_EVENTS}.complete" ]; then
+                echo "Rust shard event capture is incomplete; not deriving counts from a partial batch." >&2
+                SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
+                SHARD_EXECUTED=$((SHARD_PASSED + SHARD_FAILED + SHARD_SKIPPED))
+                rust_merge_failure_evidence "$NEXTEST_FAILED_NAMES" "" "$NEXTEST_FAILURE_CONTEXT" || true
+                rust_emit_shard_result truncated "$SHARD_TOTAL" "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED" "$((SHARD_ELAPSED*1000))"
+                rust_nextest_cleanup 1
+                exit 1
+            fi
             if ! NEXTEST_BATCH_FAILED_NAMES="$(mktemp)"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
@@ -1184,7 +1281,12 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
                 exit 1
             fi
             homeboy_runner_harness_register_cleanup "$NEXTEST_BATCH_FAILED_NAMES"
-            if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_OUTPUT" "$NEXTEST_BATCH" "$NEXTEST_BATCH_FAILED_NAMES")"; then
+            NEXTEST_BATCH_FAILURE_CONTEXT="$(mktemp)" || {
+                rust_nextest_cleanup 1
+                exit 1
+            }
+            homeboy_runner_harness_register_cleanup "$NEXTEST_BATCH_FAILURE_CONTEXT"
+            if ! NEXTEST_COUNTS="$(rust_nextest_counts "$SHARD_EVENTS" "$NEXTEST_BATCH" "$NEXTEST_BATCH_FAILED_NAMES" "$NEXTEST_BATCH_FAILURE_CONTEXT")"; then
                 SHARD_ELAPSED=$(( $(date +%s) - SHARD_STARTED ))
                 rust_emit_shard_result failed "$SHARD_TOTAL" 0 0 0 0 "$((SHARD_ELAPSED*1000))"
                 rust_nextest_cleanup 1
@@ -1192,7 +1294,11 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             fi
             IFS=$'\t' read -r PASSED FAILED SKIPPED <<< "$NEXTEST_COUNTS"
             cat "$NEXTEST_BATCH_FAILED_NAMES" >> "$NEXTEST_FAILED_NAMES"
+            jq -s 'add' "$NEXTEST_FAILURE_CONTEXT" "$NEXTEST_BATCH_FAILURE_CONTEXT" > "${NEXTEST_FAILURE_CONTEXT}.next"
+            mv "${NEXTEST_FAILURE_CONTEXT}.next" "$NEXTEST_FAILURE_CONTEXT"
             rm -f "$NEXTEST_BATCH_FAILED_NAMES"
+            rm -f "$NEXTEST_BATCH_FAILURE_CONTEXT"
+            rm -f "$SHARD_EVENTS"
             SHARD_PASSED=$((SHARD_PASSED + PASSED))
             SHARD_FAILED=$((SHARD_FAILED + FAILED))
             SHARD_SKIPPED=$((SHARD_SKIPPED + SKIPPED))
@@ -1205,7 +1311,7 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
             rust_checkpoint_shard_progress "$SHARD_EXECUTED" "$SHARD_PASSED" "$SHARD_FAILED" "$SHARD_SKIPPED"
             echo "Rust shard progress: executed=${SHARD_EXECUTED}/${SHARD_TOTAL} passed=${SHARD_PASSED} failed=${SHARD_FAILED} skipped=${SHARD_SKIPPED}"
         done
-        if rust_merge_failure_evidence "$NEXTEST_FAILED_NAMES"; then
+        if rust_merge_failure_evidence "$NEXTEST_FAILED_NAMES" "" "$NEXTEST_FAILURE_CONTEXT"; then
             :
         else
             NEXTEST_MERGE_EXIT=$?
@@ -1284,6 +1390,8 @@ RUST_MEASURED_PASSED=0
 RUST_MEASURED_FAILED=0
 RUST_MEASURED_SKIPPED=0
 RUST_MEASURED_FAILED_NAMES=""
+RUST_MEASURED_FAILURE_CONTEXT=""
+RUST_NEXTEST_EVENTS=""
 if [ "$SELECTED_RUNNER" = "nextest" ] && rust_nextest_measured_counts_enabled; then
     NEXTEST_MEASURED=1
 fi
@@ -1415,22 +1523,29 @@ rust_measure_nextest_run() {
     RUST_MEASURED_FAILED=0
     RUST_MEASURED_SKIPPED=0
     RUST_MEASURED_FAILED_NAMES=""
+    RUST_MEASURED_FAILURE_CONTEXT=""
 
-    local failed_names counts
+    local failed_names failure_context counts
     if ! homeboy_runner_harness_temp failed_names "homeboy-rust-nextest-failed.XXXXXX"; then
         echo "Rust nextest counts unavailable: could not allocate a failed-name file." >&2
         return 0
     fi
-
-    if ! counts="$(rust_nextest_unsharded_counts "$TEST_TMPFILE" "$failed_names")"; then
-        echo "Rust nextest reported no structured test counts: the run emitted no test events." >&2
+    if ! homeboy_runner_harness_temp failure_context "homeboy-rust-nextest-failure-context.XXXXXX"; then
         rm -f "$failed_names"
+        echo "Rust nextest counts unavailable: could not allocate a failure-context file." >&2
+        return 0
+    fi
+
+    if ! counts="$(rust_nextest_unsharded_counts "${RUST_NEXTEST_EVENTS:-$TEST_TMPFILE}" "$failed_names" "$failure_context")"; then
+        echo "Rust nextest reported no structured test counts: the run emitted no test events." >&2
+        rm -f "$failed_names" "$failure_context"
         return 0
     fi
 
     IFS=$'\t' read -r RUST_MEASURED_TOTAL RUST_MEASURED_PASSED RUST_MEASURED_FAILED RUST_MEASURED_SKIPPED <<< "$counts"
     RUST_MEASURED_STATUS=measured
     RUST_MEASURED_FAILED_NAMES="$failed_names"
+    RUST_MEASURED_FAILURE_CONTEXT="$failure_context"
     if type homeboy_write_test_results >/dev/null 2>&1; then
         homeboy_write_test_results "$RUST_MEASURED_TOTAL" "$RUST_MEASURED_PASSED" "$RUST_MEASURED_FAILED" "$RUST_MEASURED_SKIPPED" ""
     fi
@@ -1443,14 +1558,28 @@ rust_execute_test_run() {
     fi
 
     rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "started" 0
-    homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- rust_run_test_child "${COMMAND_BINARY[@]}" "$@" || true
+    if [ "$NEXTEST_MEASURED" = "1" ]; then
+        RUST_NEXTEST_EVENTS="$(mktemp)" || {
+            echo "Rust nextest counts unavailable: could not allocate an event file." >&2
+            return 1
+        }
+        homeboy_runner_harness_register_cleanup "$RUST_NEXTEST_EVENTS"
+        homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- rust_capture_nextest_events "$RUST_NEXTEST_EVENTS" rust_run_test_child "${COMMAND_BINARY[@]}" "$@" || true
+        [ ! -f "${RUST_NEXTEST_EVENTS}.complete" ] || homeboy_runner_harness_register_cleanup "${RUST_NEXTEST_EVENTS}.complete"
+    else
+        homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- rust_run_test_child "${COMMAND_BINARY[@]}" "$@" || true
+    fi
     rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "completed" "$TEST_EXIT"
 
     if [ "$NEXTEST_MEASURED" = "1" ]; then
         # The cargo adapter keys on `test result:` lines, which a libtest-json
         # stream never contains. Routing this run through it would parse nothing
         # and write nothing.
-        rust_measure_nextest_run
+        if [ -f "${RUST_NEXTEST_EVENTS}.complete" ]; then
+            rust_measure_nextest_run
+        else
+            echo "Rust nextest event capture is incomplete; not deriving counts from a partial stream." >&2
+        fi
         return 0
     fi
 
@@ -1495,6 +1624,10 @@ if [ "$TEST_EXIT" -eq 0 ] \
     echo ""
     echo "Derived test scope executed no tests; re-running the full test command."
     rm -f "$TEST_TMPFILE"
+    if [ -n "${RUST_NEXTEST_EVENTS:-}" ]; then
+        rm -f "$RUST_NEXTEST_EVENTS" "${RUST_NEXTEST_EVENTS}.complete"
+    fi
+    RUST_NEXTEST_EVENTS=""
 
     TEST_ARGS=(
         test
@@ -1543,6 +1676,9 @@ if [ $TEST_EXIT -eq 0 ]; then
     echo ""
     echo "Rust tests passed"
     rm -f "$TEST_TMPFILE"
+    if [ -n "${RUST_NEXTEST_EVENTS:-}" ]; then
+        rm -f "$RUST_NEXTEST_EVENTS" "${RUST_NEXTEST_EVENTS}.complete"
+    fi
 else
     # Extract failure details
     SUMMARY=$(rust_test_summary_line)
@@ -1562,7 +1698,7 @@ else
             python3 "${EXTENSION_PATH}/scripts/test-shard-inventory.py" \
                 --project "$PROJECT_PATH" --runner nextest --output "$RUST_FAILURE_INVENTORY" || true
         fi
-        rust_merge_failure_evidence "${RUST_MEASURED_FAILED_NAMES:-}" "$RUST_FAILURE_INVENTORY" || true
+        rust_merge_failure_evidence "${RUST_MEASURED_FAILED_NAMES:-}" "$RUST_FAILURE_INVENTORY" "${RUST_MEASURED_FAILURE_CONTEXT:-}" || true
     elif homeboy_test_failures_enabled; then
         homeboy_runner_harness_temp TEST_FAILURES_TMP "homeboy-rust-test-failures.XXXXXX"
         homeboy_runner_harness_temp TEST_FAILURE_INVENTORY "homeboy-rust-cargo-inventory.XXXXXX"
@@ -1577,6 +1713,9 @@ else
     FAILED_STEP="$COMMAND_LABEL"
     FAILURE_REPLAY_MODE="none"
     rm -f "$TEST_TMPFILE"
+    if [ -n "${RUST_NEXTEST_EVENTS:-}" ]; then
+        rm -f "$RUST_NEXTEST_EVENTS" "${RUST_NEXTEST_EVENTS}.complete"
+    fi
     exit $TEST_EXIT
 fi
 
