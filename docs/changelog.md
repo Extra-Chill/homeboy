@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.370.0] - 2026-09-08
+
+### Added
+- inspect durable jobs
+
+### Changed
+- Rotate local daemon generations
+
+### Fixed
+- honor managed extension snapshots
+
 ## [0.369.10] - 2026-09-08
 
 ### Fixed
