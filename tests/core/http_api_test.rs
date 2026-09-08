@@ -12,16 +12,18 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
-    ControlPlaneEventSource, ControlPlaneMission, ControlPlaneMissionListRequest,
-    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
-    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
-    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId, MissionCursor,
-    MissionId, RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    ControlPlaneEventSource, ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+    ControlPlaneState, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
+    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId,
+    ExecutionId, MissionCursor, MissionId, RunCursor, RunId, TaskCursor, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
     CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
@@ -300,6 +302,7 @@ fn fixture_control_plane_run() -> ControlPlaneRun {
     resource.mission = Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"));
     resource.state = ControlPlaneRunState::Succeeded;
     resource.created_at = "2026-01-01T00:00:00Z".to_string();
+    resource.execution = Some(ExecutionId::new("job-1").expect("execution"));
     resource
 }
 
@@ -334,6 +337,16 @@ fn fixture_control_plane_attempt() -> ControlPlaneAttempt {
         started_at: "2026-01-01T00:00:00Z".to_string(),
         finished_at: None,
         execution: None,
+    }
+}
+
+fn fixture_control_plane_execution() -> ControlPlaneExecution {
+    ControlPlaneExecution {
+        schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
+        run: RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run"),
+        execution: ExecutionId::new("job-1").expect("execution"),
+        state: ControlPlaneState::Succeeded,
+        runner_id: Some("runner-1".to_string()),
     }
 }
 
@@ -393,6 +406,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneResource::Run,
                 ControlPlaneResource::Task,
                 ControlPlaneResource::Attempt,
+                ControlPlaneResource::Execution,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -406,6 +420,8 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::ListTaskAttempts,
                 ControlPlaneOperation::GetTaskAttempt,
+                ControlPlaneOperation::ListRunExecutions,
+                ControlPlaneOperation::GetRunExecution,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::ExecuteRunAction,
             ],
@@ -525,6 +541,28 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
         })
     }
 
+    fn execution(
+        &self,
+        run: &RunId,
+        execution: &ExecutionId,
+    ) -> Result<ControlPlaneExecution, ControlPlaneError> {
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN || execution.as_str() != "job-1" {
+            return Err(ControlPlaneError::not_found("execution not found"));
+        }
+        Ok(fixture_control_plane_execution())
+    }
+
+    fn executions(&self, run: &RunId) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("run not found"));
+        }
+        Ok(ControlPlaneExecutionPage {
+            schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            executions: vec![fixture_control_plane_execution()],
+        })
+    }
+
     fn submit(
         &self,
         request: &ControlPlaneSubmissionRequest,
@@ -637,6 +675,24 @@ fn routes_versioned_control_plane_endpoints() {
                 cursor: Some(MissionCursor::new("opaque-before").expect("cursor")),
                 limit: 10,
             }
+        }
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/v1/control-plane/runs/run-abc/executions",)
+            .expect("route"),
+        HttpEndpoint::ControlPlaneRunExecutions {
+            id: "run-abc".to_string(),
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/executions/job%2F1",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRunExecution {
+            id: "run-abc".to_string(),
+            execution_id: "job%2F1".to_string(),
         }
     );
     assert_eq!(
@@ -851,6 +907,8 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
             ControlPlaneOperation::GetRunTask,
             ControlPlaneOperation::ListTaskAttempts,
             ControlPlaneOperation::GetTaskAttempt,
+            ControlPlaneOperation::ListRunExecutions,
+            ControlPlaneOperation::GetRunExecution,
             ControlPlaneOperation::GetRunEvents,
             ControlPlaneOperation::ExecuteRunAction,
         ]
@@ -999,6 +1057,37 @@ fn control_plane_http_lists_and_gets_task_scoped_attempts() {
     let result: ControlPlaneResult<ControlPlaneAttempt> =
         serde_json::from_value(response.body).expect("result");
     assert_eq!(result.resource, Some(fixture_control_plane_attempt()));
+}
+
+#[test]
+fn control_plane_http_lists_and_gets_run_scoped_executions() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/executions"),
+        body: None,
+    })
+    .expect("execution page");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.executions.list");
+    let result: ControlPlaneResult<ControlPlaneExecutionPage> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.resource.expect("page").executions,
+        vec![fixture_control_plane_execution()]
+    );
+
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/executions/job%2D1"),
+        body: None,
+    })
+    .expect("execution detail");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.executions.show");
+    let result: ControlPlaneResult<ControlPlaneExecution> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(result.resource, Some(fixture_control_plane_execution()));
 }
 
 #[test]

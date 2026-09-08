@@ -14,7 +14,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
     ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
     ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEvidenceRef, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
+    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
     ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
     ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
@@ -25,7 +26,8 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
@@ -286,6 +288,7 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneResource::Run,
                 ControlPlaneResource::Task,
                 ControlPlaneResource::Attempt,
+                ControlPlaneResource::Execution,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -299,6 +302,8 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::ListTaskAttempts,
                 ControlPlaneOperation::GetTaskAttempt,
+                ControlPlaneOperation::ListRunExecutions,
+                ControlPlaneOperation::GetRunExecution,
                 ControlPlaneOperation::GetRunEvents,
             ],
         )
@@ -317,19 +322,7 @@ impl<L: RunLookup> OrchestrationService<L> {
             .lookup
             .get(run)?
             .ok_or_else(|| ControlPlaneError::not_found(format!("run not found: {run}")))?;
-        let mut matches = snapshot
-            .record
-            .tasks
-            .iter()
-            .filter(|candidate| candidate.task_id == task.as_str());
-        let matched = matches.next().ok_or_else(|| {
-            ControlPlaneError::not_found(format!("task not found in run {run}: {task}"))
-        })?;
-        if matches.next().is_some() {
-            return Err(ControlPlaneError::invalid_argument(format!(
-                "run {run} contains duplicate task identity {task}"
-            )));
-        }
+        let matched = unique_task(&snapshot.record, run, task)?;
         project_task(&snapshot.record, matched)
     }
 
@@ -446,6 +439,51 @@ impl<L: RunLookup> OrchestrationService<L> {
             has_more,
         })
     }
+
+    pub fn execution(
+        &self,
+        run: &RunId,
+        requested: &ExecutionId,
+    ) -> Result<ControlPlaneExecution, ControlPlaneError> {
+        self.executions(run)?
+            .executions
+            .into_iter()
+            .find(|execution| execution.execution == *requested)
+            .ok_or_else(|| {
+                ControlPlaneError::not_found(format!(
+                    "execution not found in run {run}: {requested}"
+                ))
+            })
+    }
+
+    pub fn executions(&self, run: &RunId) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
+        let snapshot = self
+            .lookup
+            .get(run)?
+            .ok_or_else(|| ControlPlaneError::not_found(format!("run not found: {run}")))?;
+        let executions = execution(&snapshot.record)?
+            .map(|execution| {
+                let runner_id = snapshot.record.runner_id().ok_or_else(|| {
+                    ControlPlaneError::invalid_argument(format!(
+                        "run {run} has a runner job without its runner identity"
+                    ))
+                })?;
+                Ok::<_, ControlPlaneError>(vec![ControlPlaneExecution {
+                    schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
+                    run: run.clone(),
+                    execution,
+                    state: run_state(&snapshot.record),
+                    runner_id: Some(runner_id.to_string()),
+                }])
+            })
+            .transpose()?
+            .unwrap_or_default();
+        Ok(ControlPlaneExecutionPage {
+            schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            executions,
+        })
+    }
 }
 
 fn provider_attempts(
@@ -454,6 +492,7 @@ fn provider_attempts(
 ) -> Result<Vec<ControlPlaneAttempt>, ControlPlaneError> {
     let run = RunId::new(&record.run_id)
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    unique_task(record, &run, task)?;
     let executions = record
         .metadata
         .get("provider_executions")
@@ -475,6 +514,26 @@ fn provider_attempts(
         )));
     }
     Ok(attempts)
+}
+
+fn unique_task<'a>(
+    record: &'a AgentTaskRunRecord,
+    run: &RunId,
+    task: &TaskId,
+) -> Result<&'a crate::agent_task_lifecycle::AgentTaskRunTask, ControlPlaneError> {
+    let mut matches = record
+        .tasks
+        .iter()
+        .filter(|candidate| candidate.task_id == task.as_str());
+    let matched = matches.next().ok_or_else(|| {
+        ControlPlaneError::not_found(format!("task not found in run {run}: {task}"))
+    })?;
+    if matches.next().is_some() {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "run {run} contains duplicate task identity {task}"
+        )));
+    }
+    Ok(matched)
 }
 
 fn project_provider_attempt(
@@ -3027,6 +3086,22 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).attempts(run, task, request)
     }
 
+    fn execution(
+        &self,
+        run: &RunId,
+        execution: &ExecutionId,
+    ) -> Result<ControlPlaneExecution, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).execution(run, execution)
+    }
+
+    fn executions(&self, run: &RunId) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).executions(run)
+    }
+
     fn submit(
         &self,
         request: &ControlPlaneSubmissionRequest,
@@ -3130,12 +3205,12 @@ mod tests {
         ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneMissionListRequest,
         ControlPlaneOperation, ControlPlaneRunListRequest, ControlPlaneRunReviewRequest,
         ControlPlaneRunState, ControlPlaneState, ControlPlaneSubmissionRequest,
-        ControlPlaneTaskListRequest, EventCursor, EventId, MissionId, RunCursor, RunId, TaskId,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        ControlPlaneTaskListRequest, EventCursor, EventId, ExecutionId, MissionId, RunCursor,
+        RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -3475,6 +3550,8 @@ mod tests {
                 ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::ListTaskAttempts,
                 ControlPlaneOperation::GetTaskAttempt,
+                ControlPlaneOperation::ListRunExecutions,
+                ControlPlaneOperation::GetRunExecution,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
@@ -3582,6 +3659,8 @@ mod tests {
                 "owner_identity": "run-with-tasks:m-task:2"
             }
         ]);
+        run_snapshot.record.metadata["runner_id"] = json!("runner-1");
+        run_snapshot.record.metadata["runner_job_id"] = json!("job-1");
         let service = OrchestrationService::new(MapLookup {
             snapshots: BTreeMap::from([("run-with-tasks".to_string(), run_snapshot)]),
         });
@@ -3635,6 +3714,25 @@ mod tests {
             .attempt(&run, &TaskId::new("m-task").expect("task"), 2)
             .expect("active attempt");
         assert_eq!(active.state, ControlPlaneState::Running);
+        let executions = service.executions(&run).expect("execution page");
+        assert_eq!(executions.executions.len(), 1);
+        assert_eq!(executions.executions[0].execution.as_str(), "job-1");
+        assert_eq!(
+            executions.executions[0].runner_id.as_deref(),
+            Some("runner-1")
+        );
+        let execution = service
+            .execution(&run, &ExecutionId::new("job-1").expect("execution"))
+            .expect("execution detail");
+        assert_eq!(execution.state, ControlPlaneState::Succeeded);
+        let error = service
+            .attempts(
+                &run,
+                &TaskId::new("missing-task").expect("task"),
+                &ControlPlaneAttemptListRequest::default(),
+            )
+            .expect_err("attempt discovery requires its parent task");
+        assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
         let error = service
             .tasks(
                 &RunId::new("another-run").expect("run"),
@@ -3672,6 +3770,23 @@ mod tests {
         let error = duplicate_service
             .tasks(&duplicate_run, &ControlPlaneTaskListRequest::default())
             .expect_err("duplicate task identities fail closed");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+
+        let mut unbound = snapshot("run-with-unbound-job", None);
+        unbound
+            .record
+            .metadata
+            .as_object_mut()
+            .expect("metadata")
+            .remove("runner_id");
+        unbound.record.metadata["runner_job_id"] = json!("job-without-runner");
+        let unbound_run = RunId::new("run-with-unbound-job").expect("run");
+        let unbound_service = OrchestrationService::new(MapLookup {
+            snapshots: BTreeMap::from([("run-with-unbound-job".to_string(), unbound)]),
+        });
+        let error = unbound_service
+            .executions(&unbound_run)
+            .expect_err("partial runner binding fails closed");
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
     }
 

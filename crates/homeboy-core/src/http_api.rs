@@ -151,6 +151,17 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 )
             })?,
         }),
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "executions"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunExecutions {
+                id: (*id).to_string(),
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "executions", execution_id]) => {
+            Ok(HttpEndpoint::ControlPlaneRunExecution {
+                id: (*id).to_string(),
+                execution_id: (*execution_id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "runs", id, "review"]) => {
             Ok(HttpEndpoint::ControlPlaneRunReview {
                 id: (*id).to_string(),
@@ -310,6 +321,12 @@ where
                 task_id,
                 *attempt_number,
             );
+        }
+        HttpEndpoint::ControlPlaneRunExecutions { id } => {
+            return control_plane_run_executions_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRunExecution { id, execution_id } => {
+            return control_plane_run_execution_response(endpoint.clone(), id, execution_id);
         }
         HttpEndpoint::ControlPlaneMissions { request } => {
             return control_plane_missions_response(endpoint.clone(), request);
@@ -507,6 +524,8 @@ where
         | HttpEndpoint::ControlPlaneRunTask { .. }
         | HttpEndpoint::ControlPlaneTaskAttempts { .. }
         | HttpEndpoint::ControlPlaneTaskAttempt { .. }
+        | HttpEndpoint::ControlPlaneRunExecutions { .. }
+        | HttpEndpoint::ControlPlaneRunExecution { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
@@ -697,6 +716,33 @@ fn control_plane_task_attempt_response(
     }
 }
 
+fn control_plane_run_executions_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+) -> Result<HttpApiResponse> {
+    let result =
+        control_plane_run_id(run_id).and_then(|run| crate::control_plane::executions(&run));
+    match result {
+        Ok(executions) => control_plane_ok(endpoint, executions),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_run_execution_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    execution_id: &str,
+) -> Result<HttpApiResponse> {
+    let result = control_plane_run_id(run_id).and_then(|run| {
+        control_plane_execution_id(execution_id)
+            .and_then(|execution| crate::control_plane::execution(&run, &execution))
+    });
+    match result {
+        Ok(execution) => control_plane_ok(endpoint, execution),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
 fn control_plane_mission_response(
     endpoint: HttpEndpoint,
     mission_id: &str,
@@ -747,6 +793,30 @@ fn control_plane_task_id(
         );
     }
     homeboy_control_plane_contract::TaskId::new(task_id).map_err(|error| {
+        homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+    })
+}
+
+fn control_plane_execution_id(
+    execution_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ExecutionId,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let execution_id = crate::execution_contract::decode_uri_component_strict(execution_id)
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "execution id contains invalid percent encoding",
+            )
+        })?;
+    if execution_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
+        return Err(
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                "execution id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"
+            )),
+        );
+    }
+    homeboy_control_plane_contract::ExecutionId::new(execution_id).map_err(|error| {
         homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
     })
 }

@@ -19,6 +19,8 @@ pub const CONTROL_PLANE_TASK_SCHEMA: &str = "homeboy/control-plane-task/v1";
 pub const CONTROL_PLANE_TASK_PAGE_SCHEMA: &str = "homeboy/control-plane-task-page/v1";
 pub const CONTROL_PLANE_ATTEMPT_SCHEMA: &str = "homeboy/control-plane-attempt/v1";
 pub const CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA: &str = "homeboy/control-plane-attempt-page/v1";
+pub const CONTROL_PLANE_EXECUTION_SCHEMA: &str = "homeboy/control-plane-execution/v1";
+pub const CONTROL_PLANE_EXECUTION_PAGE_SCHEMA: &str = "homeboy/control-plane-execution-page/v1";
 pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
     "homeboy/control-plane-action-eligibility/v1";
 
@@ -391,6 +393,25 @@ pub struct ControlPlaneAttemptPage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<AttemptCursor>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneExecution {
+    pub schema: String,
+    pub run: RunId,
+    pub execution: ExecutionId,
+    pub state: ControlPlaneState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneExecutionPage {
+    pub schema: String,
+    pub run: RunId,
+    pub executions: Vec<ControlPlaneExecution>,
 }
 
 /// Bounded live provider evidence. This intentionally carries timestamps and a
