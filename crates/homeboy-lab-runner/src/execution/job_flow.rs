@@ -485,12 +485,14 @@ fn control_plane_terminal_job_status(
     match state {
         ControlPlaneRunState::Succeeded
         | ControlPlaneRunState::CandidateRecoverable
-        | ControlPlaneRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        | ControlPlaneRunState::PartialRecoverable
+        | ControlPlaneRunState::Skipped => Some(JobStatus::Succeeded),
         ControlPlaneRunState::PartialFailure
         | ControlPlaneRunState::Failed
         | ControlPlaneRunState::TimedOut => Some(JobStatus::Failed),
         ControlPlaneRunState::Cancelled => Some(JobStatus::Cancelled),
         ControlPlaneRunState::Queued
+        | ControlPlaneRunState::Blocked
         | ControlPlaneRunState::Running
         | ControlPlaneRunState::Stale
         | ControlPlaneRunState::Unknown => None,
@@ -508,6 +510,7 @@ mod tests {
             ControlPlaneRunState::Succeeded,
             ControlPlaneRunState::CandidateRecoverable,
             ControlPlaneRunState::PartialRecoverable,
+            ControlPlaneRunState::Skipped,
         ] {
             assert_eq!(
                 control_plane_terminal_job_status(state),
@@ -530,6 +533,7 @@ mod tests {
         );
         for state in [
             ControlPlaneRunState::Queued,
+            ControlPlaneRunState::Blocked,
             ControlPlaneRunState::Running,
             ControlPlaneRunState::Stale,
             ControlPlaneRunState::Unknown,

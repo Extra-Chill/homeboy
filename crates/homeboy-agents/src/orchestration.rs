@@ -17,16 +17,17 @@ use homeboy_control_plane_contract::{
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
     ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
     ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState,
     ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
-    ExecutionId, MissionCursor, MissionId, ProviderSessionId, RunCursor, RunId,
+    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, ExecutionId,
+    MissionCursor, MissionId, ProviderSessionId, RunCursor, RunId, TaskCursor, TaskId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,7 @@ const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
 const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RUN_CURSOR_SCHEMA: &str = "homeboy/control-plane-run-cursor/v1";
 const MISSION_CURSOR_SCHEMA: &str = "homeboy/control-plane-mission-cursor/v1";
+const TASK_CURSOR_SCHEMA: &str = "homeboy/control-plane-task-cursor/v1";
 const RUN_CURSOR_BOUND: usize = 1024;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -93,6 +95,14 @@ struct MissionCursorPayload {
     schema: String,
     created_at: String,
     mission_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskCursorPayload {
+    schema: String,
+    run_id: String,
+    task_id: String,
 }
 
 /// Lookup used by [`OrchestrationService`]. Callers inject stores or test
@@ -262,6 +272,7 @@ impl<L: RunLookup> OrchestrationService<L> {
             vec![
                 ControlPlaneResource::Mission,
                 ControlPlaneResource::Run,
+                ControlPlaneResource::Task,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -271,6 +282,8 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
+                ControlPlaneOperation::ListRunTasks,
+                ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::GetRunEvents,
             ],
         )
@@ -283,6 +296,148 @@ impl<L: RunLookup> OrchestrationService<L> {
         })?;
         project_record(&snapshot.record, snapshot.plan.as_ref())
     }
+
+    pub fn task(&self, run: &RunId, task: &TaskId) -> Result<ControlPlaneTask, ControlPlaneError> {
+        let snapshot = self
+            .lookup
+            .get(run)?
+            .ok_or_else(|| ControlPlaneError::not_found(format!("run not found: {run}")))?;
+        let mut matches = snapshot
+            .record
+            .tasks
+            .iter()
+            .filter(|candidate| candidate.task_id == task.as_str());
+        let matched = matches.next().ok_or_else(|| {
+            ControlPlaneError::not_found(format!("task not found in run {run}: {task}"))
+        })?;
+        if matches.next().is_some() {
+            return Err(ControlPlaneError::invalid_argument(format!(
+                "run {run} contains duplicate task identity {task}"
+            )));
+        }
+        project_task(&snapshot.record, matched)
+    }
+
+    pub fn tasks(
+        &self,
+        run: &RunId,
+        request: &ControlPlaneTaskListRequest,
+    ) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
+        request.validate()?;
+        let after = request
+            .cursor
+            .as_ref()
+            .map(|cursor| decode_task_cursor(cursor, run))
+            .transpose()?;
+        let snapshot = self
+            .lookup
+            .get(run)?
+            .ok_or_else(|| ControlPlaneError::not_found(format!("run not found: {run}")))?;
+        let mut tasks = snapshot.record.tasks.iter().collect::<Vec<_>>();
+        tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        if tasks
+            .windows(2)
+            .any(|pair| pair[0].task_id == pair[1].task_id)
+        {
+            return Err(ControlPlaneError::invalid_argument(format!(
+                "run {run} contains duplicate task identities"
+            )));
+        }
+        if let Some(after) = after.as_ref() {
+            tasks.retain(|task| task.task_id > *after);
+        }
+        let has_more = tasks.len() > request.limit as usize;
+        tasks.truncate(request.limit as usize);
+        let projected = tasks
+            .into_iter()
+            .map(|task| project_task(&snapshot.record, task))
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_cursor = has_more
+            .then(|| {
+                projected
+                    .last()
+                    .expect("nonempty truncated task page")
+                    .task
+                    .clone()
+            })
+            .map(|task| encode_task_cursor(run, &task))
+            .transpose()?;
+        Ok(ControlPlaneTaskPage {
+            schema: CONTROL_PLANE_TASK_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            tasks: projected,
+            next_cursor,
+            has_more,
+        })
+    }
+}
+
+fn project_task(
+    record: &AgentTaskRunRecord,
+    task: &crate::agent_task_lifecycle::AgentTaskRunTask,
+) -> Result<ControlPlaneTask, ControlPlaneError> {
+    let run = RunId::new(&record.run_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let task_id = TaskId::new(&task.task_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let mission = crate::agent_task_lifecycle::canonical_mission(record)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.message))?;
+    Ok(ControlPlaneTask {
+        schema: CONTROL_PLANE_TASK_SCHEMA.to_string(),
+        mission,
+        run,
+        task: task_id,
+        state: task_state(task.state),
+    })
+}
+
+fn task_state(state: crate::agent_tasks::AgentTaskState) -> ControlPlaneState {
+    match state {
+        crate::agent_tasks::AgentTaskState::Queued => ControlPlaneState::Queued,
+        crate::agent_tasks::AgentTaskState::Blocked => ControlPlaneState::Blocked,
+        crate::agent_tasks::AgentTaskState::Skipped => ControlPlaneState::Skipped,
+        crate::agent_tasks::AgentTaskState::Running => ControlPlaneState::Running,
+        crate::agent_tasks::AgentTaskState::Succeeded => ControlPlaneState::Succeeded,
+        crate::agent_tasks::AgentTaskState::CandidateRecoverable => {
+            ControlPlaneState::CandidateRecoverable
+        }
+        crate::agent_tasks::AgentTaskState::Failed => ControlPlaneState::Failed,
+        crate::agent_tasks::AgentTaskState::Cancelled => ControlPlaneState::Cancelled,
+        crate::agent_tasks::AgentTaskState::TimedOut => ControlPlaneState::TimedOut,
+    }
+}
+
+fn encode_task_cursor(run: &RunId, task: &TaskId) -> Result<TaskCursor, ControlPlaneError> {
+    let bytes = serde_json::to_vec(&TaskCursorPayload {
+        schema: TASK_CURSOR_SCHEMA.to_string(),
+        run_id: run.as_str().to_string(),
+        task_id: task.as_str().to_string(),
+    })
+    .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+    TaskCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
+}
+
+fn decode_task_cursor(cursor: &TaskCursor, run: &RunId) -> Result<String, ControlPlaneError> {
+    if cursor.as_str().len() > RUN_CURSOR_BOUND {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane task cursor exceeds the size bound",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.as_str())
+        .map_err(|_| ControlPlaneError::invalid_argument("control-plane task cursor is invalid"))?;
+    let payload: TaskCursorPayload = serde_json::from_slice(&bytes)
+        .map_err(|_| ControlPlaneError::invalid_argument("control-plane task cursor is invalid"))?;
+    if payload.schema != TASK_CURSOR_SCHEMA
+        || payload.run_id != run.as_str()
+        || payload.task_id.trim().is_empty()
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane task cursor is invalid for this run",
+        ));
+    }
+    Ok(payload.task_id)
 }
 
 impl<L: RunLookup + MissionLookup> OrchestrationService<L> {
@@ -2617,6 +2772,22 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).runs(request)
     }
 
+    fn task(&self, run: &RunId, task: &TaskId) -> Result<ControlPlaneTask, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).task(run, task)
+    }
+
+    fn tasks(
+        &self,
+        run: &RunId,
+        request: &ControlPlaneTaskListRequest,
+    ) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).tasks(run, request)
+    }
+
     fn submit(
         &self,
         request: &ControlPlaneSubmissionRequest,
@@ -2709,21 +2880,22 @@ mod tests {
         REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
-        AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+        AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
     };
     use crate::agent_task_schedule::AgentTaskPlan;
+    use crate::agent_tasks::AgentTaskState;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
         ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCancelDisposition,
         ControlPlaneCancelResult, ControlPlaneErrorClass, ControlPlaneEvent,
         ControlPlaneEventSource, ControlPlaneMissionListRequest, ControlPlaneOperation,
         ControlPlaneRunListRequest, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-        ControlPlaneSubmissionRequest, EventCursor, EventId, MissionId, RunCursor, RunId,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        ControlPlaneState, ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EventCursor,
+        EventId, MissionId, RunCursor, RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -3059,6 +3231,8 @@ mod tests {
                 ControlPlaneOperation::SubmitRun,
                 ControlPlaneOperation::ListRuns,
                 ControlPlaneOperation::GetRun,
+                ControlPlaneOperation::ListRunTasks,
+                ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
@@ -3126,6 +3300,101 @@ mod tests {
                 limit: 10,
             })
             .expect_err("invalid cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+    }
+
+    #[test]
+    fn task_discovery_is_run_scoped_bounded_and_cursor_bound() {
+        let mut run_snapshot = snapshot("run-with-tasks", None);
+        run_snapshot.record.tasks = [
+            ("z-task", AgentTaskState::Succeeded),
+            ("a-task", AgentTaskState::Running),
+            ("m-task", AgentTaskState::Blocked),
+        ]
+        .into_iter()
+        .map(|(task_id, state)| AgentTaskRunTask {
+            task_id: task_id.to_string(),
+            state,
+            backend: "fixture".to_string(),
+            selector: None,
+            model: None,
+            provider_ref: None,
+        })
+        .collect();
+        let service = OrchestrationService::new(MapLookup {
+            snapshots: BTreeMap::from([("run-with-tasks".to_string(), run_snapshot)]),
+        });
+        let run = RunId::new("run-with-tasks").expect("run");
+        let first = service
+            .tasks(
+                &run,
+                &ControlPlaneTaskListRequest {
+                    limit: 2,
+                    ..Default::default()
+                },
+            )
+            .expect("first task page");
+        assert_eq!(
+            first
+                .tasks
+                .iter()
+                .map(|task| task.task.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-task", "m-task"]
+        );
+        assert!(first.has_more);
+        let detail = service
+            .task(&run, &TaskId::new("m-task").expect("task"))
+            .expect("task detail");
+        assert_eq!(detail.state, ControlPlaneState::Blocked);
+        let second = service
+            .tasks(
+                &run,
+                &ControlPlaneTaskListRequest {
+                    cursor: first.next_cursor.clone(),
+                    limit: 2,
+                },
+            )
+            .expect("second task page");
+        assert_eq!(second.tasks[0].task.as_str(), "z-task");
+        assert!(!second.has_more);
+        let error = service
+            .tasks(
+                &RunId::new("another-run").expect("run"),
+                &ControlPlaneTaskListRequest {
+                    cursor: first.next_cursor,
+                    limit: 2,
+                },
+            )
+            .expect_err("cursor is bound to its run");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+
+        let mut duplicate = snapshot("run-with-duplicates", None);
+        duplicate.record.tasks = vec![
+            AgentTaskRunTask {
+                task_id: "same-task".to_string(),
+                state: AgentTaskState::Running,
+                backend: "fixture".to_string(),
+                selector: None,
+                model: None,
+                provider_ref: None,
+            },
+            AgentTaskRunTask {
+                task_id: "same-task".to_string(),
+                state: AgentTaskState::Succeeded,
+                backend: "fixture".to_string(),
+                selector: None,
+                model: None,
+                provider_ref: None,
+            },
+        ];
+        let duplicate_run = RunId::new("run-with-duplicates").expect("run");
+        let duplicate_service = OrchestrationService::new(MapLookup {
+            snapshots: BTreeMap::from([("run-with-duplicates".to_string(), duplicate)]),
+        });
+        let error = duplicate_service
+            .tasks(&duplicate_run, &ControlPlaneTaskListRequest::default())
+            .expect_err("duplicate task identities fail closed");
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
     }
 

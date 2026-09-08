@@ -93,6 +93,10 @@ opaque_identity!(
     /// Opaque continuation cursor returned by a mission discovery page.
     MissionCursor
 );
+opaque_identity!(
+    /// Opaque continuation cursor returned by a run-scoped task page.
+    TaskCursor
+);
 
 /// Why an identity newtype could not be constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]

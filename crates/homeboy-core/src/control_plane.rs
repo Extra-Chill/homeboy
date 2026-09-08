@@ -9,8 +9,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneError, ControlPlaneEventPage, ControlPlaneMission, ControlPlaneMissionListRequest,
     ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneRun, ControlPlaneRunListRequest,
     ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
-    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, EventCursor, MissionId,
-    RunId,
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, MissionId, RunId, TaskId,
 };
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
@@ -46,6 +46,22 @@ pub trait ControlPlaneProvider: Send + Sync {
     ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
         Err(ControlPlaneError::unavailable(
             "control-plane run discovery is unavailable",
+        ))
+    }
+
+    fn task(&self, run: &RunId, task: &TaskId) -> Result<ControlPlaneTask, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane task not found in run {run}: {task}"
+        )))
+    }
+
+    fn tasks(
+        &self,
+        _run: &RunId,
+        _request: &ControlPlaneTaskListRequest,
+    ) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
+        Err(ControlPlaneError::unavailable(
+            "control-plane task discovery is unavailable",
         ))
     }
 
@@ -128,6 +144,18 @@ pub fn runs(
 ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
     request.validate()?;
     with_provider(|provider| provider.runs(request))
+}
+
+pub fn task(run: &RunId, task: &TaskId) -> Result<ControlPlaneTask, ControlPlaneError> {
+    with_provider(|provider| provider.task(run, task))
+}
+
+pub fn tasks(
+    run: &RunId,
+    request: &ControlPlaneTaskListRequest,
+) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
+    request.validate()?;
+    with_provider(|provider| provider.tasks(run, request))
 }
 
 pub fn submit(

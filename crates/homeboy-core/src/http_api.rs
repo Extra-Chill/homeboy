@@ -117,6 +117,18 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 id: (*id).to_string(),
             })
         }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "tasks"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunTasks {
+                id: (*id).to_string(),
+                request: control_plane_task_list_request(path)?,
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "tasks", task_id]) => {
+            Ok(HttpEndpoint::ControlPlaneRunTask {
+                id: (*id).to_string(),
+                task_id: (*task_id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "runs", id, "review"]) => {
             Ok(HttpEndpoint::ControlPlaneRunReview {
                 id: (*id).to_string(),
@@ -209,6 +221,8 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /v1/control-plane/runs".to_string(),
                 "POST /v1/control-plane/runs".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
+                "GET /v1/control-plane/runs/:id/tasks".to_string(),
+                "GET /v1/control-plane/runs/:id/tasks/:task_id".to_string(),
                 "GET /v1/control-plane/runs/:id/review".to_string(),
                 "GET /v1/control-plane/runs/:id/events".to_string(),
                 "POST /v1/control-plane/runs/:id/actions".to_string(),
@@ -247,6 +261,12 @@ where
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRunTasks { id, request } => {
+            return control_plane_run_tasks_response(endpoint.clone(), id, request);
+        }
+        HttpEndpoint::ControlPlaneRunTask { id, task_id } => {
+            return control_plane_run_task_response(endpoint.clone(), id, task_id);
         }
         HttpEndpoint::ControlPlaneMissions { request } => {
             return control_plane_missions_response(endpoint.clone(), request);
@@ -440,6 +460,8 @@ where
         | HttpEndpoint::ControlPlaneRuns { .. }
         | HttpEndpoint::ControlPlaneRunSubmit
         | HttpEndpoint::ControlPlaneRun { .. }
+        | HttpEndpoint::ControlPlaneRunTasks { .. }
+        | HttpEndpoint::ControlPlaneRunTask { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
@@ -563,6 +585,33 @@ fn control_plane_missions_response(
     }
 }
 
+fn control_plane_run_tasks_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    request: &homeboy_control_plane_contract::ControlPlaneTaskListRequest,
+) -> Result<HttpApiResponse> {
+    let result =
+        control_plane_run_id(run_id).and_then(|run| crate::control_plane::tasks(&run, request));
+    match result {
+        Ok(tasks) => control_plane_ok(endpoint, tasks),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_run_task_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    task_id: &str,
+) -> Result<HttpApiResponse> {
+    let result = control_plane_run_id(run_id).and_then(|run| {
+        control_plane_task_id(task_id).and_then(|task| crate::control_plane::task(&run, &task))
+    });
+    match result {
+        Ok(task) => control_plane_ok(endpoint, task),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
 fn control_plane_mission_response(
     endpoint: HttpEndpoint,
     mission_id: &str,
@@ -589,6 +638,30 @@ fn control_plane_mission_id(
         );
     }
     homeboy_control_plane_contract::MissionId::new(mission_id).map_err(|error| {
+        homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+    })
+}
+
+fn control_plane_task_id(
+    task_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::TaskId,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let task_id =
+        crate::execution_contract::decode_uri_component_strict(task_id).ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "task id contains invalid percent encoding",
+            )
+        })?;
+    if task_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
+        return Err(
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                "task id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"
+            )),
+        );
+    }
+    homeboy_control_plane_contract::TaskId::new(task_id).map_err(|error| {
         homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
     })
 }
@@ -844,6 +917,59 @@ fn control_plane_mission_list_request(
             Error::validation_invalid_argument("cursor", error.to_string(), None, None)
         })?;
     let request = ControlPlaneMissionListRequest { cursor, limit };
+    request.validate().map_err(|error| {
+        Error::validation_invalid_argument("limit", error.message, Some(limit.to_string()), None)
+    })?;
+    Ok(request)
+}
+
+fn control_plane_task_list_request(
+    path: &str,
+) -> Result<homeboy_control_plane_contract::ControlPlaneTaskListRequest> {
+    use homeboy_control_plane_contract::{ControlPlaneTaskListRequest, TaskCursor};
+
+    let limits = raw_query_values(path, "limit");
+    if limits.len() > 1 || limits.first().is_some_and(String::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "limit",
+            "control-plane task page limit must be provided exactly once and cannot be empty",
+            None,
+            None,
+        ));
+    }
+    let limit = limits
+        .into_iter()
+        .next()
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                Error::validation_invalid_argument(
+                    "limit",
+                    "control-plane task page limit must be an integer",
+                    Some(value),
+                    None,
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(50);
+    let cursors = raw_query_values(path, "cursor");
+    if cursors.len() > 1 || cursors.first().is_some_and(String::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "cursor",
+            "control-plane task cursor must be provided exactly once and cannot be empty",
+            None,
+            None,
+        ));
+    }
+    let cursor = cursors
+        .into_iter()
+        .next()
+        .map(TaskCursor::new)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument("cursor", error.to_string(), None, None)
+        })?;
+    let request = ControlPlaneTaskListRequest { cursor, limit };
     request.validate().map_err(|error| {
         Error::validation_invalid_argument("limit", error.message, Some(limit.to_string()), None)
     })?;

@@ -26,6 +26,8 @@ pub enum ControlPlaneOperation {
     SubmitRun,
     ListRuns,
     GetRun,
+    ListRunTasks,
+    GetRunTask,
     GetRunReview,
     GetRunEvents,
     ExecuteRunAction,
@@ -94,6 +96,8 @@ mod tests {
                     | ControlPlaneOperation::SubmitRun
                     | ControlPlaneOperation::ListRuns
                     | ControlPlaneOperation::GetRun
+                    | ControlPlaneOperation::ListRunTasks
+                    | ControlPlaneOperation::GetRunTask
                     | ControlPlaneOperation::GetRunReview
                     | ControlPlaneOperation::GetRunEvents
                     | ControlPlaneOperation::ExecuteRunAction
