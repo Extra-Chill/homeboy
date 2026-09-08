@@ -208,9 +208,7 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
             },
         );
     let provider_total = report.provider_readiness.as_ref().map_or(0, |readiness| {
-        readiness.ready_for.len()
-            + readiness.blocked_for.len()
-            + readiness.unverified_for.len()
+        readiness.ready_for.len() + readiness.blocked_for.len() + readiness.unverified_for.len()
     });
     let runner_id = bounded_text(&report.runner_id);
     let failed_repairs = report
