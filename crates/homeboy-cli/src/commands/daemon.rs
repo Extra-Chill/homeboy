@@ -2,8 +2,10 @@ use clap::{Args, CommandFactory, Subcommand};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::time::Instant;
 use uuid::Uuid;
 
+use homeboy::core::api_jobs::{DaemonJobInspection, JobEvent, JobStatus, JobStore};
 use homeboy::core::daemon::{
     self, BrokerConfig, BrokerConfigOptions, DaemonCandidateReconciliationResult,
     DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult,
@@ -201,6 +203,57 @@ enum DaemonCommand {
     },
     /// Fetch artifact bytes through the local daemon byte endpoint
     ArtifactGet(DaemonArtifactGetArgs),
+    /// Inspect durable daemon jobs without reading the internal store directly
+    Jobs(DaemonJobsArgs),
+}
+
+#[derive(Args)]
+pub struct DaemonJobsArgs {
+    #[command(subcommand)]
+    command: DaemonJobsCommand,
+}
+
+#[derive(Subcommand)]
+enum DaemonJobsCommand {
+    /// List compact durable daemon-job projections
+    List(DaemonJobsListArgs),
+    /// Show one daemon job; --full includes retained events
+    Show(DaemonJobsShowArgs),
+    /// Wait for one daemon job to reach a terminal state
+    Watch(DaemonJobsWatchArgs),
+}
+
+#[derive(Args)]
+pub struct DaemonJobsListArgs {
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    operation: Option<String>,
+    #[arg(long)]
+    lease: Option<String>,
+    #[arg(long)]
+    run: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args)]
+pub struct DaemonJobsShowArgs {
+    pub job_id: Uuid,
+    /// Include retained event payloads and checkpoints; compact output omits them.
+    #[arg(long)]
+    full: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct DaemonJobsWatchArgs {
+    pub job_id: Uuid,
+    #[arg(long, default_value = "5m", conflicts_with = "forever")]
+    timeout: String,
+    #[arg(long, conflicts_with = "timeout")]
+    forever: bool,
+    #[arg(long, default_value = "2s")]
+    interval: String,
 }
 
 #[derive(Args, Clone)]
@@ -234,6 +287,52 @@ pub enum DaemonOutput {
     Status(Value),
     BrokerConfig(BrokerConfig),
     ArtifactGet(DaemonArtifactGetOutput),
+    JobsList(DaemonJobsListOutput),
+    JobsShow(DaemonJobsShowOutput),
+    JobsWatch(DaemonJobsWatchOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonJobSummary {
+    pub id: Uuid,
+    pub status: JobStatus,
+    pub operation: String,
+    pub lease_id: Option<String>,
+    pub linked_durable_run_id: Option<String>,
+    pub child_identity: Option<homeboy::core::api_jobs::DaemonJobChildIdentity>,
+    pub age_ms: u64,
+    pub terminal_disposition: Option<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonJobsListOutput {
+    pub command: &'static str,
+    pub jobs: Vec<DaemonJobSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonJobsShowOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub job: DaemonJobSummary,
+    pub retained_event_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<JobEvent>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonJobsWatchOutput {
+    pub command: &'static str,
+    pub job_id: Uuid,
+    pub status: JobStatus,
+    pub terminal: bool,
+    pub timed_out: bool,
+    pub waited_secs: u64,
+    pub poll_count: u64,
+    pub job: DaemonJobSummary,
 }
 
 /// The resolved recovery, and what was done about it.
@@ -458,6 +557,195 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             0,
         )),
         DaemonCommand::ArtifactGet(args) => artifact_get(args),
+        DaemonCommand::Jobs(args) => jobs(args),
+    }
+}
+
+fn jobs(args: DaemonJobsArgs) -> CmdResult<DaemonOutput> {
+    match args.command {
+        DaemonJobsCommand::List(args) => jobs_list(args),
+        DaemonJobsCommand::Show(args) => jobs_show(args),
+        DaemonJobsCommand::Watch(args) => jobs_watch(args),
+    }
+}
+
+fn job_store() -> homeboy::core::Result<JobStore> {
+    JobStore::open_without_reconciliation(homeboy::core::paths::daemon_jobs_file()?)
+}
+
+fn jobs_list(args: DaemonJobsListArgs) -> CmdResult<DaemonOutput> {
+    let status = args.status.as_deref().map(parse_job_status).transpose()?;
+    let store = job_store()?;
+    let mut jobs = store
+        .list()
+        .into_iter()
+        .rev()
+        .filter_map(|job| {
+            if status.is_some_and(|status| job.status != status)
+                || args
+                    .operation
+                    .as_ref()
+                    .is_some_and(|operation| &job.operation != operation)
+                || args
+                    .lease
+                    .as_ref()
+                    .is_some_and(|lease| job.daemon_lease_id.as_ref() != Some(lease))
+            {
+                return None;
+            }
+            let inspection = store.inspection(job.id).ok()?;
+            args.run
+                .as_ref()
+                .is_none_or(|run| inspection.linked_durable_run_id.as_ref() == Some(run))
+                .then(|| job_summary(inspection))
+        })
+        .collect::<Vec<_>>();
+    jobs.truncate(args.limit);
+    Ok((
+        DaemonOutput::JobsList(DaemonJobsListOutput {
+            command: "daemon.jobs.list",
+            jobs,
+        }),
+        0,
+    ))
+}
+
+fn jobs_show(args: DaemonJobsShowArgs) -> CmdResult<DaemonOutput> {
+    let store = job_store()?;
+    let inspection = require_job_inspection(&store, args.job_id)?;
+    let events = store.events(args.job_id)?;
+    let checkpoint = args.full.then(|| inspection.checkpoint.clone()).flatten();
+    Ok((
+        DaemonOutput::JobsShow(DaemonJobsShowOutput {
+            command: "daemon.jobs.show",
+            job: job_summary(inspection),
+            retained_event_count: events.len(),
+            events: args.full.then_some(events),
+            checkpoint,
+        }),
+        0,
+    ))
+}
+
+fn jobs_watch(args: DaemonJobsWatchArgs) -> CmdResult<DaemonOutput> {
+    use crate::commands::utils::watch::{watch_loop, WatchConfig, WatchPoller, TIMEOUT_EXIT_CODE};
+    struct Poller;
+    impl WatchPoller for Poller {
+        type Item = DaemonJobInspection;
+        fn poll(&self, id: &str) -> homeboy::core::Result<Self::Item> {
+            let job_id = Uuid::parse_str(id).map_err(|_| missing_or_pruned_job(Uuid::nil()))?;
+            require_job_inspection(&job_store()?, job_id)
+        }
+        fn is_terminal(&self, item: &Self::Item) -> bool {
+            item.job.status.is_terminal()
+        }
+    }
+    let interval = crate::commands::utils::watch::parse_duration("--interval", &args.interval)?;
+    let timeout = (!args.forever)
+        .then(|| crate::commands::utils::watch::parse_duration("--timeout", &args.timeout))
+        .transpose()?;
+    let started = Instant::now();
+    let result = watch_loop(
+        &Poller,
+        &args.job_id.to_string(),
+        &WatchConfig { interval, timeout },
+        std::thread::sleep,
+        || started.elapsed(),
+        |job, poll| {
+            eprintln!(
+                "homeboy daemon jobs watch {}: poll {poll} status={}",
+                job.job.id,
+                job.job.status.as_str()
+            )
+        },
+    )?;
+    let timed_out = result.timed_out();
+    let exit_code = if timed_out {
+        TIMEOUT_EXIT_CODE
+    } else {
+        exit_code_for_job_status(result.item.job.status)
+    };
+    let status = result.item.job.status;
+    Ok((
+        DaemonOutput::JobsWatch(DaemonJobsWatchOutput {
+            command: "daemon.jobs.watch",
+            job_id: args.job_id,
+            status,
+            terminal: !timed_out,
+            timed_out,
+            waited_secs: result.waited.as_secs(),
+            poll_count: result.poll_count,
+            job: job_summary(result.item),
+        }),
+        exit_code,
+    ))
+}
+
+fn parse_job_status(value: &str) -> homeboy::core::Result<JobStatus> {
+    match value {
+        "queued" => Ok(JobStatus::Queued),
+        "running" => Ok(JobStatus::Running),
+        "succeeded" => Ok(JobStatus::Succeeded),
+        "failed" => Ok(JobStatus::Failed),
+        "cancelled" => Ok(JobStatus::Cancelled),
+        _ => Err(Error::validation_invalid_argument(
+            "status",
+            "expected queued, running, succeeded, failed, or cancelled",
+            Some(value.to_string()),
+            None,
+        )),
+    }
+}
+
+fn exit_code_for_job_status(status: JobStatus) -> i32 {
+    if status == JobStatus::Succeeded {
+        0
+    } else {
+        1
+    }
+}
+
+fn require_job_inspection(
+    store: &JobStore,
+    job_id: Uuid,
+) -> homeboy::core::Result<DaemonJobInspection> {
+    store
+        .inspection(job_id)
+        .map_err(|_| missing_or_pruned_job(job_id))
+}
+
+fn missing_or_pruned_job(job_id: Uuid) -> Error {
+    let mut error = Error::validation_invalid_argument("job_id", "daemon job is missing or its retained terminal record was pruned", Some(job_id.to_string()), Some(vec!["Inspect linked durable evidence with `homeboy runs show <run-id>` or `homeboy agent-task status <run-id>` when a prior job response named one.".to_string()]));
+    error.details["classification"] = serde_json::json!("daemon_job_missing_or_pruned");
+    error.details["retention"] = serde_json::json!(
+        "terminal daemon jobs and events are retained within bounded store limits"
+    );
+    error
+}
+
+fn job_summary(inspection: DaemonJobInspection) -> DaemonJobSummary {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let id = inspection.job.id;
+    let mut next_actions = vec![format!("homeboy daemon jobs show {id}")];
+    if !inspection.job.status.is_terminal() {
+        next_actions.push(format!("homeboy daemon jobs watch {id}"));
+    }
+    if let Some(run_id) = &inspection.linked_durable_run_id {
+        next_actions.push(format!("homeboy runs show {run_id}"));
+    }
+    DaemonJobSummary {
+        id,
+        status: inspection.job.status,
+        operation: inspection.job.operation,
+        lease_id: inspection.job.daemon_lease_id,
+        linked_durable_run_id: inspection.linked_durable_run_id,
+        child_identity: inspection.child_identity,
+        age_ms: now_ms.saturating_sub(inspection.job.created_at_ms),
+        terminal_disposition: inspection.terminal_disposition,
+        next_actions,
     }
 }
 
@@ -949,6 +1237,64 @@ mod tests {
 
     use super::*;
     use crate::cli_surface::{Cli, Commands};
+
+    #[test]
+    fn daemon_job_status_filters_and_watch_exit_semantics_are_stable() {
+        assert!(Cli::try_parse_from([
+            "homeboy", "daemon", "jobs", "list", "--status", "running", "--limit", "1"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "jobs",
+            "show",
+            "00000000-0000-0000-0000-000000000001",
+            "--full"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "jobs",
+            "watch",
+            "00000000-0000-0000-0000-000000000001",
+            "--timeout",
+            "1s"
+        ])
+        .is_ok());
+        assert_eq!(
+            parse_job_status("running").expect("status"),
+            JobStatus::Running
+        );
+        assert!(parse_job_status("pass").is_err());
+        assert_eq!(exit_code_for_job_status(JobStatus::Succeeded), 0);
+        for status in [
+            JobStatus::Queued,
+            JobStatus::Running,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+        ] {
+            assert_eq!(
+                exit_code_for_job_status(status),
+                1,
+                "{status:?} must not report success"
+            );
+        }
+    }
+
+    #[test]
+    fn pruned_or_unknown_daemon_job_has_a_typed_retention_diagnostic() {
+        let error = missing_or_pruned_job(Uuid::nil());
+        assert_eq!(
+            error.details["classification"],
+            "daemon_job_missing_or_pruned"
+        );
+        assert!(error.details["retention"].as_str().is_some());
+        assert!(error
+            .message
+            .contains("missing or its retained terminal record was pruned"));
+    }
 
     #[test]
     fn daemon_status_parser_exposes_the_explicit_full_surface() {
