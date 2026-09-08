@@ -4,7 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use super::{sqlite_error, ObservationDbStatus};
 use crate::{paths, Result};
@@ -339,6 +339,13 @@ const MIGRATIONS: &[Migration] = &[
             ON control_plane_event_appends(run_id, sequence) WHERE event_json IS NOT NULL;
         "#,
     },
+    Migration {
+        // Migration 18 introduced the canonical mission index, but existing
+        // agent-task rows were only indexed after their next lifecycle write.
+        // Backfill them once so read-only discovery is complete after upgrade.
+        version: 20,
+        sql: "",
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.
@@ -415,7 +422,7 @@ pub(crate) fn apply_migrations(connection: &Connection) -> Result<()> {
             )))?;
             continue;
         }
-        apply_migration_sql(&tx, migration)?;
+        apply_migration(&tx, migration)?;
         tx.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
             rusqlite::params![migration.version, chrono::Utc::now().to_rfc3339()],
@@ -430,6 +437,103 @@ pub(crate) fn apply_migrations(connection: &Connection) -> Result<()> {
         )))?;
     }
 
+    Ok(())
+}
+
+fn apply_migration(connection: &Connection, migration: &Migration) -> Result<()> {
+    apply_migration_sql(connection, migration)?;
+    if migration.version == 20 {
+        backfill_control_plane_missions(connection)?;
+    }
+    Ok(())
+}
+
+fn backfill_control_plane_missions(connection: &Connection) -> Result<()> {
+    use homeboy_control_plane_contract::{resolve, IdentityKind};
+
+    let mut statement = connection
+        .prepare(
+            "SELECT id, started_at, COALESCE(finished_at, started_at), metadata_json \
+             FROM runs WHERE kind = 'agent-task' ORDER BY id",
+        )
+        .map_err(sqlite_error("prepare control-plane mission backfill"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(sqlite_error("read control-plane mission backfill"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sqlite_error("collect control-plane mission backfill"))?;
+    drop(statement);
+
+    for (run_id, created_at, updated_at, metadata_json) in rows {
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json).map_err(|error| {
+                crate::Error::internal_json(
+                    error.to_string(),
+                    Some(format!("backfill control-plane mission for run {run_id}")),
+                )
+            })?;
+        let mission = if let Some(fanout_id) = metadata
+            .pointer("/agent_task_run/metadata/fanout/id")
+            .and_then(serde_json::Value::as_str)
+        {
+            resolve(IdentityKind::FanoutPortfolioId, fanout_id)
+                .map_err(|error| {
+                    crate::Error::internal_json(
+                        error.to_string(),
+                        Some(format!("backfill fanout mission for run {run_id}")),
+                    )
+                })?
+                .mission
+        } else {
+            resolve(IdentityKind::RunId, &run_id)
+                .ok()
+                .and_then(|resolved| resolved.mission)
+        };
+        let Some(mission) = mission else {
+            continue;
+        };
+        let existing = connection
+            .query_row(
+                "SELECT mission_id FROM control_plane_mission_runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite_error(
+                "read existing control-plane mission ownership",
+            ))?;
+        if existing
+            .as_deref()
+            .is_some_and(|value| value != mission.as_str())
+        {
+            return Err(crate::Error::internal_unexpected(format!(
+                "control-plane run {run_id} is already owned by mission {}, not {}",
+                existing.expect("checked existing mission"),
+                mission
+            )));
+        }
+        connection
+            .execute(
+                "INSERT INTO control_plane_missions(id, created_at, updated_at) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(id) DO UPDATE SET updated_at = MAX(updated_at, excluded.updated_at)",
+                rusqlite::params![mission.as_str(), created_at, updated_at],
+            )
+            .map_err(sqlite_error("backfill control-plane mission"))?;
+        connection
+            .execute(
+                "INSERT INTO control_plane_mission_runs(mission_id, run_id) VALUES (?1, ?2) \
+                 ON CONFLICT(run_id) DO NOTHING",
+                rusqlite::params![mission.as_str(), run_id],
+            )
+            .map_err(sqlite_error("backfill control-plane mission run"))?;
+    }
     Ok(())
 }
 
@@ -1041,6 +1145,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn migration_20_backfills_pre_index_agent_task_missions_once() {
+        let connection = schema_through_migration(19);
+        let regular_run = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+        let fanout_run = "agent-task-401a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+        connection
+            .execute(
+                "INSERT INTO runs(id, kind, started_at, finished_at, status, metadata_json) \
+                 VALUES (?1, 'agent-task', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'pass', '{}')",
+                [regular_run],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runs(id, kind, started_at, status, metadata_json) \
+                 VALUES (?1, 'agent-task', '2026-01-02T00:00:00Z', 'running', ?2)",
+                rusqlite::params![
+                    fanout_run,
+                    serde_json::json!({
+                        "agent_task_run": {
+                            "metadata": { "fanout": { "id": "portfolio-13697" } }
+                        }
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runs(id, kind, started_at, status, metadata_json) \
+                 VALUES ('release-unrelated', 'release', '2026-01-03T00:00:00Z', 'pass', '{}')",
+                [],
+            )
+            .unwrap();
+
+        apply_migrations(&connection).unwrap();
+        apply_migrations(&connection).unwrap();
+
+        let mappings = connection
+            .prepare(
+                "SELECT mission_id, run_id FROM control_plane_mission_runs ORDER BY mission_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            mappings,
+            vec![
+                (
+                    "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e".to_string(),
+                    regular_run.to_string(),
+                ),
+                ("portfolio-13697".to_string(), fanout_run.to_string()),
+            ]
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT updated_at FROM control_plane_missions WHERE id = ?1",
+                    ["agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e"],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "2026-01-01T00:01:00Z"
+        );
+    }
+
     fn seed_owned_and_orphaned_children(connection: &Connection) {
         // These rows model state written *while FK enforcement was off* -- the
         // exact scenario migration 13 exists to clean up, and what
@@ -1120,7 +1295,7 @@ mod tests {
             .filter(|migration| migration.version <= max_version)
         {
             let tx = connection.transaction().unwrap();
-            apply_migration_sql(&tx, migration).unwrap();
+            apply_migration(&tx, migration).unwrap();
             tx.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'test')",
                 [migration.version],
