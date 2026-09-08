@@ -4,6 +4,7 @@ use homeboy_core::error::{ActionSafety, CommandEvidence, Error, ExecutableAction
 use homeboy_core::extension;
 use homeboy_engine_primitives::test_execution::suite_timeout_from_env;
 use homeboy_extension_contract::runner_contract::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS;
+use homeboy_extension_contract::test_result::TestCounts;
 use homeboy_extension_contract::ExtensionCapability;
 use std::path::Path;
 
@@ -338,7 +339,7 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
 
         return Err(quality_error_with_evidence(
             "test",
-            format!("Tests failed (exit code {})", workflow.exit_code),
+            self_check_test_failure_message(workflow.test_counts.as_ref(), workflow.exit_code),
             evidence,
         ));
     }
@@ -471,6 +472,30 @@ fn scoped_skip_guidance(field: &str) -> Vec<String> {
     }
 }
 
+/// Summarize a failed self-check test gate without asserting more than the run
+/// proved.
+///
+/// "Tests failed" is a claim about test outcomes. A gate that executed nothing
+/// never observed a test outcome, so that phrasing sends operators to the test
+/// baseline when the fault is in the runner or its environment — a managed
+/// runtime service that never provisioned reads exactly like a red suite
+/// (homeboy#14426).
+///
+/// Only a measured zero is rewritten. `test_counts: None` is left alone on
+/// purpose: it is the ordinary shape for a plain `scripts.test` shell runner
+/// that never reports counts, so absence of measurement cannot be
+/// distinguished here from a runner that died before measuring. Rewording it
+/// would relabel healthy gates on a guess. A runner that positively reported
+/// zero executed tests is proof, and proof is the only thing this reclassifies.
+fn self_check_test_failure_message(test_counts: Option<&TestCounts>, exit_code: i32) -> String {
+    match test_counts {
+        Some(counts) if counts.total == 0 => format!(
+            "Test gate could not execute: test runner reported zero executed tests (exit code {exit_code})"
+        ),
+        _ => format!("Tests failed (exit code {exit_code})"),
+    }
+}
+
 fn code_quality_failure_message(check: &str, output: &extension::invoke::RunnerOutput) -> String {
     if is_runner_infrastructure_failure(output) {
         format!(
@@ -499,12 +524,14 @@ fn is_runner_infrastructure_failure(output: &extension::invoke::RunnerOutput) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        code_quality_failure_message, is_runner_infrastructure_failure, validate_lint_quality,
-        validate_test_quality, validate_test_secret_env, LintQualityOutcome,
+        code_quality_failure_message, is_runner_infrastructure_failure,
+        self_check_test_failure_message, validate_lint_quality, validate_test_quality,
+        validate_test_secret_env, LintQualityOutcome,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
     use homeboy_core::error::Error;
     use homeboy_core::extension::invoke::RunnerOutput;
+    use homeboy_extension_contract::test_result::TestCounts;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -729,6 +756,44 @@ mod tests {
         assert_eq!(
             code_quality_failure_message("Tests", &infra),
             "Tests runner infrastructure failure (exit code 2)"
+        );
+    }
+
+    /// A release test gate that executed nothing must not be summarized as a
+    /// test failure.
+    ///
+    /// This is the homeboy#14426 shape: wp-codebox could not provision the
+    /// managed MySQL service on a Docker-free host, so PHPUnit never ran. The
+    /// gate reported `total: 0` and the release still printed "Tests failed
+    /// (exit code 1)", which routed the investigation to the test baseline
+    /// instead of the runtime provider that actually failed.
+    #[test]
+    fn zero_executed_tests_are_not_summarized_as_a_test_failure() {
+        assert_eq!(
+            self_check_test_failure_message(Some(&TestCounts::new(0, 0, 0, 0)), 1),
+            "Test gate could not execute: test runner reported zero executed tests (exit code 1)"
+        );
+    }
+
+    /// Absent counts are the ordinary shape for a plain `scripts.test` shell
+    /// runner, so they must keep the original wording. Pinning this stops a
+    /// later "unmeasured means it could not execute" generalization from
+    /// relabelling every healthy script-based gate.
+    #[test]
+    fn missing_test_counts_keep_the_test_failure_summary() {
+        assert_eq!(
+            self_check_test_failure_message(None, 1),
+            "Tests failed (exit code 1)"
+        );
+    }
+
+    /// A measured suite with real failures keeps the original wording, so this
+    /// change stays scoped to unmeasured runs.
+    #[test]
+    fn measured_test_failures_keep_the_test_failure_summary() {
+        assert_eq!(
+            self_check_test_failure_message(Some(&TestCounts::new(3, 2, 1, 0)), 1),
+            "Tests failed (exit code 1)"
         );
     }
 
