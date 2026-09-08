@@ -127,6 +127,12 @@ struct ConsumeRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct CredentialDeliveryConsumeRequest {
+    runner_id: String,
+    claim_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct OwnerValidationRequest {
     runner_id: String,
     claim_id: String,
@@ -845,6 +851,12 @@ fn update(
             Ok(body) => daemon_endpoint_response("runner.jobs.consume", body),
             Err(err) => auth_or_bad_request(err),
         },
+        operation if operation.starts_with("credentials/") => {
+            match consume_credential_delivery(job_id, operation, body, job_store, auth) {
+                Ok(body) => daemon_endpoint_response("runner.jobs.credentials.consume", body),
+                Err(err) => auth_or_bad_request(err),
+            }
+        }
         "validate-owner" => match validate_owner(job_id, body, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.jobs.owner.validate", body),
             Err(err) => auth_or_bad_request(err),
@@ -953,6 +965,7 @@ fn finish(
         &request.claim_id,
         request.result,
     )?;
+    job_store.discard_ephemeral_credential_delivery(job_id);
     release_terminal_workspace_owner(job_store, job_id);
     Ok(json!({
         "command": "api.runner.jobs.finish",
@@ -1050,6 +1063,37 @@ fn consume(
         "job": job,
         "context_id": request.context_id,
     }))
+}
+
+fn consume_credential_delivery(
+    job_id: Uuid,
+    operation: &str,
+    body: Option<Value>,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    let delivery_id = operation
+        .strip_prefix("credentials/")
+        .filter(|id| !id.is_empty())
+        .filter(|id| !id.contains('/'))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "path",
+                "invalid credential delivery path",
+                None,
+                None,
+            )
+        })?;
+    let request: CredentialDeliveryConsumeRequest =
+        parse_body(body, "remote runner credential delivery consume request")?;
+    auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
+    let env = job_store.consume_ephemeral_credential_delivery(
+        job_id,
+        &request.runner_id,
+        &request.claim_id,
+        delivery_id,
+    )?;
+    Ok(json!({ "env": env }))
 }
 
 /// This is deliberately separate from consume: the worker uses it immediately

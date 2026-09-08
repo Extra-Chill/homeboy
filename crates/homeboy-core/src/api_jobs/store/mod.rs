@@ -61,6 +61,10 @@ pub struct JobStore {
     pub(super) next_event_sequence: Arc<AtomicU64>,
     pub(super) persistence: Option<Arc<JobStorePersistence>>,
     pub(super) daemon_lease_id: Option<String>,
+    /// Controller-supplied credentials are intentionally process-local. They
+    /// never enter the durable queue snapshot or its event stream.
+    pub(super) credential_deliveries:
+        Arc<Mutex<HashMap<uuid::Uuid, super::remote_runner::EphemeralCredentialDelivery>>>,
     #[cfg(test)]
     terminal_write_failures: Arc<AtomicU64>,
     #[cfg(test)]
@@ -610,6 +614,7 @@ impl JobStore {
                 terminal_job_retention_bytes,
             })),
             daemon_lease_id: None,
+            credential_deliveries: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -771,6 +776,7 @@ impl JobStore {
                 terminal_job_retention_bytes,
             })),
             daemon_lease_id: None,
+            credential_deliveries: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]

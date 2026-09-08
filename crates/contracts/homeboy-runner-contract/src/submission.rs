@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -7,6 +9,16 @@ use crate::{
 
 pub const RUNNER_API_SUBMIT_REQUEST_SCHEMA: &str = "homeboy/runner-api-submit-request/v1";
 pub const RUNNER_API_SUBMIT_RESPONSE_SCHEMA: &str = "homeboy/runner-api-submit-response/v1";
+
+/// Values supplied over the authenticated submission transport for a single
+/// claimed execution. This is deliberately not part of the durable envelope.
+/// The broker must retain it only in memory and make it available once to the
+/// runner that owns the live claim.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerCredentialDelivery {
+    pub env: BTreeMap<String, String>,
+}
 
 /// The transport-neutral admission request for one canonical runner execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -20,6 +32,10 @@ pub struct RunnerApiSubmitRequest {
     pub workspace_claim_binding: Option<WorkspaceClaimBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
+    /// Ephemeral controller-owned credentials. Never persist this value or
+    /// include it in a replay fingerprint, event, or response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_delivery: Option<RunnerCredentialDelivery>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +71,7 @@ mod tests {
             envelope: RunnerExecutionEnvelope::planned("run-1", "test"),
             workspace_claim_binding: None,
             workspace_owner_lease: None,
+            credential_delivery: None,
         };
         let value = serde_json::to_value(&request).expect("submit request JSON");
         assert_eq!(value["schema"], RUNNER_API_SUBMIT_REQUEST_SCHEMA);
@@ -91,6 +108,7 @@ mod tests {
                     expires_at_ms: 100,
                 }),
             }),
+            credential_delivery: None,
             workspace_owner_lease: Some(crate::WorkspaceOwnerLease {
                 schema: WORKSPACE_OWNER_LEASE_SCHEMA.to_string(),
                 protocol: WorkspaceOwnerLeaseProtocol::current(),

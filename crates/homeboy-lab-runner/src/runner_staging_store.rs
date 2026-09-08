@@ -1062,6 +1062,7 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                         envelope: execution,
                         workspace_claim_binding: None,
                         workspace_owner_lease: None,
+                        credential_delivery: None,
                     },
                 )?;
                 Ok(job.id.to_string())

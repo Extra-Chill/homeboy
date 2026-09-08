@@ -28,8 +28,8 @@ use homeboy_lab_contract::lab::execution_envelope::{
 };
 use homeboy_runner_contract::{
     is_internal_control_env, RunnerApiClaimedExecution, RunnerApiSubmitRequest,
-    RunnerMutationArtifacts, RunnerResourceMetrics, RUNNER_API_SUBMIT_REQUEST_SCHEMA,
-    RUNNER_API_V1,
+    RunnerCredentialDelivery, RunnerCredentialDeliveryDescriptor, RunnerMutationArtifacts,
+    RunnerResourceMetrics, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
 };
 
 /// Broker metadata is durable queue input. Keep command-file payloads bounded
@@ -37,6 +37,19 @@ use homeboy_runner_contract::{
 const MAX_COMMAND_ASSET_COUNT: usize = 16;
 const MAX_COMMAND_ASSET_BASE64_BYTES: usize = 1_400_000;
 const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
+const MAX_CREDENTIAL_DELIVERY_BYTES: usize = 65_536;
+const CREDENTIAL_DELIVERY_TTL_MS: u64 = 60_000;
+
+/// Plaintext is accepted only over the authenticated submission transport and
+/// retained in process memory until the matching live claim consumes it.
+#[derive(Debug, Clone)]
+pub(super) struct EphemeralCredentialDelivery {
+    id: String,
+    env: std::collections::BTreeMap<String, String>,
+    claim_id: Option<String>,
+    expires_at_ms: u64,
+    consumed: bool,
+}
 
 pub use homeboy_api_jobs_contract::metadata::{JobArtifactMetadata, RunnerJobLifecycleMetadata};
 
@@ -494,6 +507,8 @@ pub struct RemoteRunnerJobClaim {
     pub workspace_claim_protocol: Option<crate::workspace_claim::WorkspaceClaimProtocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_owner_lease_protocol: Option<crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_delivery: Option<RunnerCredentialDeliveryDescriptor>,
 }
 
 impl RemoteRunnerJobClaim {
@@ -529,6 +544,7 @@ impl RemoteRunnerJobClaim {
             execution_protocol: self.execution_protocol.clone(),
             workspace_claim_protocol: self.workspace_claim_protocol.clone(),
             workspace_owner_lease_protocol: self.workspace_owner_lease_protocol.clone(),
+            credential_delivery: self.credential_delivery.clone(),
         })
     }
 }
@@ -993,6 +1009,7 @@ impl JobStore {
             envelope: request.execution_envelope(),
             workspace_claim_binding: request.workspace_claim_binding,
             workspace_owner_lease: request.workspace_owner_lease,
+            credential_delivery: None,
         })
     }
 
@@ -1016,6 +1033,7 @@ impl JobStore {
             ));
         }
         let fingerprint = runner_api_submission_payload_fingerprint(&submission)?;
+        let credential_delivery = submission.credential_delivery.clone();
         let envelope = redacted_envelope_for_durable_replay(submission.envelope);
         let dispatch = envelope.dispatch.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -1051,6 +1069,9 @@ impl JobStore {
             lease.verify_shape(timestamp_ms())?;
         }
         let secret_env_plan = envelope.secret_env.clone().unwrap_or_default();
+        if let Some(delivery) = credential_delivery.as_ref() {
+            Self::validate_ephemeral_credential_delivery(delivery, &secret_env_plan)?;
+        }
         reject_inline_durable_secret_env(&dispatch.env, &secret_env_plan)?;
         let lab_runner_workload = lab_runner_workload_from_execution_envelope(&envelope)?;
         super::with_runner_job_preparation(|preparation| {
@@ -1076,7 +1097,7 @@ impl JobStore {
                 )
             })?;
         let now = timestamp_ms();
-        self.admit_remote_runner_job(
+        let job = self.admit_remote_runner_job(
             RemoteRunnerAdmission {
                 operation: dispatch.operation.clone(),
                 runner_id: dispatch.runner_id.clone(),
@@ -1098,7 +1119,105 @@ impl JobStore {
                 },
             },
             now,
-        )
+        )?;
+        if let Some(delivery) = credential_delivery {
+            self.attach_ephemeral_credential_delivery(job.id, delivery, &secret_env_plan)?;
+        }
+        Ok(job)
+    }
+
+    fn attach_ephemeral_credential_delivery(
+        &self,
+        job_id: Uuid,
+        delivery: RunnerCredentialDelivery,
+        plan: &SecretEnvPlan,
+    ) -> Result<()> {
+        Self::validate_ephemeral_credential_delivery(&delivery, plan)?;
+        let mut deliveries = self
+            .credential_deliveries
+            .lock()
+            .expect("credential delivery mutex poisoned");
+        deliveries
+            .entry(job_id)
+            .or_insert_with(|| EphemeralCredentialDelivery {
+                id: Uuid::new_v4().to_string(),
+                env: delivery.env,
+                claim_id: None,
+                expires_at_ms: timestamp_ms().saturating_add(CREDENTIAL_DELIVERY_TTL_MS),
+                consumed: false,
+            });
+        Ok(())
+    }
+
+    fn validate_ephemeral_credential_delivery(
+        delivery: &RunnerCredentialDelivery,
+        plan: &SecretEnvPlan,
+    ) -> Result<()> {
+        let names = plan.secret_env_names();
+        if delivery.env.is_empty()
+            || delivery.env.keys().any(|name| !names.contains(name))
+            || delivery
+                .env
+                .iter()
+                .any(|(name, value)| name.trim().is_empty() || value.is_empty())
+            || delivery
+                .env
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>()
+                > MAX_CREDENTIAL_DELIVERY_BYTES
+        {
+            return Err(Error::validation_invalid_argument(
+                "credential_delivery",
+                "credential delivery must contain only planned, bounded non-empty secret values",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn consume_ephemeral_credential_delivery(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        claim_id: &str,
+        delivery_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
+        let mut deliveries = self
+            .credential_deliveries
+            .lock()
+            .expect("credential delivery mutex poisoned");
+        let delivery = deliveries.get_mut(&job_id).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "credential_delivery",
+                "controller credential delivery is unavailable",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        if delivery.id != delivery_id
+            || delivery.claim_id.as_deref() != Some(claim_id)
+            || delivery.consumed
+            || delivery.expires_at_ms <= timestamp_ms()
+        {
+            return Err(Error::validation_invalid_argument(
+                "credential_delivery",
+                "controller credential delivery is expired, revoked, or already consumed",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        delivery.consumed = true;
+        Ok(std::mem::take(&mut delivery.env))
+    }
+
+    pub fn discard_ephemeral_credential_delivery(&self, job_id: Uuid) {
+        self.credential_deliveries
+            .lock()
+            .expect("credential delivery mutex poisoned")
+            .remove(&job_id);
     }
 
     pub(crate) fn submit_legacy_remote_runner_job(
@@ -1598,6 +1717,25 @@ impl JobStore {
         let workspace_owner_lease_protocol = workspace_owner_lease
             .is_some()
             .then(crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current);
+        let credential_delivery = {
+            let mut deliveries = self
+                .credential_deliveries
+                .lock()
+                .expect("credential delivery mutex poisoned");
+            deliveries.get_mut(&job.id).and_then(|delivery| {
+                if delivery.expires_at_ms <= timestamp_ms() || delivery.consumed {
+                    return None;
+                }
+                delivery.claim_id = job.claim_id.clone();
+                Some(RunnerCredentialDeliveryDescriptor {
+                    delivery_id: delivery.id.clone(),
+                    env_names: delivery.env.keys().cloned().collect(),
+                    expires_at_ms: delivery
+                        .expires_at_ms
+                        .min(job.claim_expires_at_ms.unwrap_or_default()),
+                })
+            })
+        };
         Ok(Some(RemoteRunnerJobClaim {
             job,
             envelope,
@@ -1608,6 +1746,7 @@ impl JobStore {
             execution_protocol,
             workspace_claim_protocol,
             workspace_owner_lease_protocol,
+            credential_delivery,
         }))
     }
 
@@ -1873,7 +2012,9 @@ impl JobStore {
                 ));
             }
         }
-        self.cancel(job_id, reason)
+        let job = self.cancel(job_id, reason)?;
+        self.discard_ephemeral_credential_delivery(job_id);
+        Ok(job)
     }
 
     /// Cancel exactly one daemon-local runner job after proving its durable
@@ -2015,6 +2156,7 @@ impl JobStore {
         let mut reconciled = Vec::new();
         for job_id in expired_ids {
             reconciled.push(self.fail(job_id, "remote runner claim expired")?);
+            self.discard_ephemeral_credential_delivery(job_id);
         }
         Ok(reconciled)
     }
