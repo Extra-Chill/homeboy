@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.7] - 2026-09-08
+
+### Fixed
+- inventory and replay declared standalone PHP suites
+
 ## [3.45.6] - 2026-09-08
 
 ### Fixed
