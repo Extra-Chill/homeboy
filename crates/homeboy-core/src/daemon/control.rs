@@ -30,6 +30,7 @@ use crate::process::{
 };
 
 use super::acquire_daemon_job_admission_fence;
+use super::generation_store::{self, DAEMON_ROUTER_BYPASS_ENV, DAEMON_ROUTER_DIR_ENV};
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
@@ -110,17 +111,20 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
 
 /// Supervise one daemon child and persist its bounded termination evidence.
 /// This is shared by local and SSH launches because SSH invokes the same CLI.
-pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
+pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> Result<()> {
     let exe = std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve current executable".to_string()),
         )
     })?;
-    let state_dir = crate::paths::daemon_state_file()?
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("daemon state file has no parent"))?
-        .to_path_buf();
+    let state_dir = match state_dir {
+        Some(state_dir) => state_dir.to_path_buf(),
+        None => crate::paths::daemon_state_file()?
+            .parent()
+            .ok_or_else(|| Error::internal_unexpected("daemon state file has no parent"))?
+            .to_path_buf(),
+    };
     let child = Command::new(exe)
         // The argument is the portable, exact ownership proof used when a
         // platform cannot inspect a process environment. Keep it aligned with
@@ -1342,7 +1346,145 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// Return a live daemon under the lifecycle lock, or start one when its lease
 /// is absent or its recorded PID is dead.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
+    if let Some(endpoint) = generation_store::admitting()? {
+        let state_path = Path::new(&endpoint.state_dir).join("state.json");
+        let validation = super::validate_lease_file(&state_path)?;
+        if validation.fresh && validation.running && validation.reachable {
+            let state = validation.state.expect("fresh lease has state");
+            return Ok(DaemonStartResult {
+                pid: state.pid,
+                address: state.address,
+                state_path: state.state_path,
+                lease_id: state.lease_id,
+            });
+        }
+    }
+    let status = read_status()?;
+    if status.running && !status.fresh {
+        return rotate_stale_generation(
+            addr,
+            status.state.as_ref().expect("running lease has state"),
+        );
+    }
     ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
+}
+
+/// Start B in an isolated state directory, then publish it as the admission
+/// owner. A remains untouched: its lease, job store, and endpoint continue to
+/// own all work admitted before this atomic registry update.
+fn rotate_stale_generation(addr: &str, current: &super::DaemonState) -> Result<DaemonStartResult> {
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock_for_ensure(ENSURE_RUNNING_STARTUP_WAIT)?;
+    generation_store::seed(current)?;
+    if let Some(endpoint) = generation_store::admitting()? {
+        let validation =
+            super::validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))?;
+        if validation.fresh && validation.running && validation.reachable {
+            let state = validation.state.expect("fresh lease has state");
+            return Ok(DaemonStartResult {
+                pid: state.pid,
+                address: state.address,
+                state_path: state.state_path,
+                lease_id: state.lease_id,
+            });
+        }
+    }
+
+    let state_dir = generation_store::generation_state_dir()?;
+    let router_dir = generation_store::router_dir()?;
+    std::fs::create_dir_all(&state_dir).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", state_dir.display())),
+        )
+    })?;
+    let startup_token = uuid::Uuid::new_v4().to_string();
+    let exe = std::env::current_exe().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve current executable".to_string()),
+        )
+    })?;
+    let mut command = Command::new(exe);
+    command
+        .args([
+            "daemon",
+            "supervise",
+            "--addr",
+            addr,
+            "--startup-token",
+            &startup_token,
+            "--state-dir",
+        ])
+        .arg(&state_dir)
+        .env(crate::paths::DAEMON_STATE_DIR_ENV, &state_dir)
+        .env(DAEMON_ROUTER_DIR_ENV, &router_dir)
+        .env(DAEMON_STARTUP_TOKEN_ENV, &startup_token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach_from_launcher_session(&mut command);
+    let _child = command.spawn().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("spawn daemon generation".to_string()),
+        )
+    })?;
+    let state_path = state_dir.join("state.json");
+    for _ in 0..STARTUP_LEASE_OBSERVATIONS {
+        let validation = super::validate_lease_file(&state_path)?;
+        if validation.fresh && validation.running && validation.reachable {
+            let state = validation.state.expect("fresh lease has state");
+            if state.startup_token != startup_token {
+                return Err(Error::internal_unexpected(
+                    "replacement daemon published a mismatched startup token",
+                ));
+            }
+            generation_store::activate(&state)?;
+            return Ok(DaemonStartResult {
+                pid: state.pid,
+                address: state.address,
+                state_path: state.state_path,
+                lease_id: state.lease_id,
+            });
+        }
+        thread::sleep(STARTUP_LEASE_POLL);
+    }
+    Err(Error::internal_unexpected(
+        "replacement daemon did not publish a fresh isolated lease",
+    ))
+}
+
+/// Retire only a registry-authorized drained generation through its own
+/// lease-scoped stop gate. The child command repeats the exact state directory
+/// and lease rather than signaling a PID selected by the newer generation.
+pub(super) fn stop_drained_generation(
+    endpoint: &generation_store::LocalDaemonEndpoint,
+) -> Result<()> {
+    let exe = std::env::current_exe().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve current executable".to_string()),
+        )
+    })?;
+    let status = Command::new(exe)
+        .args(["daemon", "stop", "--lease-id", &endpoint.lease_id])
+        .env(crate::paths::DAEMON_STATE_DIR_ENV, &endpoint.state_dir)
+        .env(DAEMON_ROUTER_BYPASS_ENV, "1")
+        .status()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("retire drained daemon generation".to_string()),
+            )
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::internal_unexpected(
+            "drained daemon generation lease stop failed",
+        ))
+    }
 }
 
 /// The optional controller operation id is intentionally additive. Existing
@@ -2795,6 +2937,9 @@ fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
     if let Some(url) = daemon_url.filter(|url| !url.trim().is_empty()) {
         return Ok(url);
     }
+    if let Some(endpoint) = generation_store::admitting()? {
+        return Ok(format!("http://{}", endpoint.address));
+    }
     let status = read_status()?;
     let admits_work = status.admits_work();
     let Some(state) = status.state.filter(|_| admits_work) else {
@@ -2838,6 +2983,32 @@ pub fn fetch_artifact_to_path(
     daemon_url: Option<String>,
     output: Option<PathBuf>,
 ) -> Result<ArtifactFetchOutcome> {
+    if daemon_url.is_none() {
+        let mut endpoints = generation_store::admitting()?
+            .into_iter()
+            .collect::<Vec<_>>();
+        endpoints.extend(generation_store::generations()?);
+        let mut last_error = None;
+        for endpoint in endpoints {
+            match fetch_artifact_to_path(
+                run_id,
+                artifact_id,
+                Some(format!("http://{}", endpoint.address)),
+                output.clone(),
+            ) {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        return Err(last_error.unwrap_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                "no local daemon generation is available for artifact routing",
+                Some(artifact_id.to_string()),
+                None,
+            )
+        }));
+    }
     let daemon_url = resolve_daemon_url(daemon_url)?;
     let content_url = artifact_content_url(&daemon_url, run_id, artifact_id)?;
     let output_path = output.unwrap_or_else(|| default_artifact_output_path(artifact_id));
