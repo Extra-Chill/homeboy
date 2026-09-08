@@ -47,7 +47,7 @@ homeboy_wordpress_discover_phpunit_files() {
         echo "ERROR: WP Codebox canonical PHPUnit discovery failed." >&2
         return 1
     fi
-    if ! jq -e '.schema == "wp-codebox/phpunit-discovery/v1" and (.files | type == "array" and length > 0)' "$discovery_tmp" >/dev/null 2>&1; then
+    if ! jq -e '.schema == "wp-codebox/phpunit-discovery/v1" and (.files | type == "array")' "$discovery_tmp" >/dev/null 2>&1; then
         rm -f "$discovery_tmp"
         echo "ERROR: WP Codebox returned an invalid canonical PHPUnit discovery result." >&2
         return 1
@@ -55,11 +55,215 @@ homeboy_wordpress_discover_phpunit_files() {
     mv "$discovery_tmp" "$output_file"
 }
 
+# Standalone suite declarations. These four helpers live above the
+# inventory-only branch because inventory mode must enumerate the same declared
+# standalone PHP suite the full-suite selector runs, without executing any of
+# it; everything below consumes them at runtime only.
+
+# Components that use executable PHP scripts without the shared `*-smoke.php`
+# convention declare their component-relative paths or shell-glob patterns in
+# standalone_php_test_paths. The declaration classifies already-selected files;
+# it never broadens a changed scope or turns support files into tests by default.
+homeboy_wordpress_is_declared_standalone_php_test_file() {
+    local test_file="$1"
+    local declared_path
+    local declared_paths
+
+    case "$test_file" in
+        *.php)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    if [ -z "${HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
+        declared_paths="$(homeboy_setting standalone_php_test_paths '.standalone_php_test_paths // [] | if type == "array" and all(.[]; type == "string") then .[] else error("expected an array of strings") end')" || {
+            echo "ERROR: standalone_php_test_paths must be an array of strings." >&2
+            return 2
+        }
+        HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS="$declared_paths"
+        HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS_LOADED=1
+    fi
+    declared_paths="$HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS"
+    while IFS= read -r declared_path; do
+        [ -n "$declared_path" ] || continue
+        case "$declared_path" in
+            /*|..|../*|*/../*)
+                echo "ERROR: standalone_php_test_paths contains an invalid component-relative selector: ${declared_path}" >&2
+                return 2
+                ;;
+        esac
+        if [[ "$test_file" == $declared_path ]]; then
+            return 0
+        fi
+    done <<< "$declared_paths"
+    return 1
+}
+
+# The test manifest is the runner's environment source of truth for changed
+# scopes and shard replay, so the full-suite selector reads it as a second
+# standalone declaration beside standalone_php_test_paths. Entries whose
+# resolved environment is standalone-php (per-file environment or
+# default_environment fallback, validated against homeboy/test-manifest/v1)
+# belong to the standalone suite. The manifest parses once per run and caches
+# like the glob declaration above; per-file membership is a plain comparison
+# against component-relative manifest keys.
+homeboy_wordpress_manifest_standalone_php_test_paths() {
+    if [ -n "${HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
+        printf '%s\n' "$HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS"
+        return 0
+    fi
+
+    local manifest_path="${HOMEBOY_WORDPRESS_TEST_MANIFEST:-${PLUGIN_PATH}/homeboy-test-manifest.json}"
+    local declared_paths
+
+    if [ ! -e "$manifest_path" ]; then
+        HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS=""
+        HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED=1
+        return 0
+    fi
+
+    declared_paths="$(jq -r '
+        if type != "object" or .schema != "homeboy/test-manifest/v1" then
+            error("expected schema homeboy/test-manifest/v1")
+        elif (.tests | type) != "object" then
+            error("expected tests object")
+        else
+            (.default_environment // "wordpress") as $defaultEnvironment
+            | .tests
+            | to_entries[]
+            | (.value.environment // $defaultEnvironment) as $environment
+            | if $environment == "wordpress" or $environment == "standalone-php" then
+                (select($environment == "standalone-php") | .key)
+              else
+                error("unsupported environment " + ($environment | tostring))
+              end
+        end
+    ' "$manifest_path" 2>/dev/null)" || {
+        echo "ERROR: invalid WordPress test manifest: ${manifest_path}" >&2
+        return 2
+    }
+
+    HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS="$declared_paths"
+    HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED=1
+    printf '%s\n' "$declared_paths"
+}
+
+homeboy_wordpress_is_manifest_standalone_php_test_file() {
+    local test_file="$1"
+    local declared_path
+
+    if [ -z "${HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
+        homeboy_wordpress_manifest_standalone_php_test_paths >/dev/null || return 2
+    fi
+    while IFS= read -r declared_path; do
+        [ -n "$declared_path" ] || continue
+        if [ "$test_file" = "$declared_path" ]; then
+            return 0
+        fi
+    done <<< "$HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS"
+    return 1
+}
+
+homeboy_wordpress_collect_full_suite_standalone_php_files() {
+    local test_file test_rel declared_status
+    local selected=0
+    local routed=0
+    local excluded=0
+
+    FULL_SUITE_STANDALONE_PHP_FILES=""
+    FULL_SUITE_STANDALONE_PHP_SELECTED=0
+    FULL_SUITE_STANDALONE_PHP_ROUTED=0
+    FULL_SUITE_STANDALONE_PHP_EXCLUDED=0
+
+    # Both declaration sources load once per run, so per-file classification
+    # below is a plain shell comparison. The suite is the union of the glob
+    # declaration and the manifest's standalone-php entries; a file both
+    # sources declare is selected once.
+    homeboy_wordpress_manifest_standalone_php_test_paths >/dev/null || return $?
+
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        test_rel="${test_file#"${PLUGIN_PATH}/"}"
+        if homeboy_wordpress_is_declared_standalone_php_test_file "$test_rel"; then
+            selected=$((selected + 1))
+            FULL_SUITE_STANDALONE_PHP_FILES+="${FULL_SUITE_STANDALONE_PHP_FILES:+$'\n'}${test_rel}"
+            routed=$((routed + 1))
+            echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
+        else
+            declared_status=$?
+            [ "$declared_status" -eq 1 ] || return "$declared_status"
+            if homeboy_wordpress_is_manifest_standalone_php_test_file "$test_rel"; then
+                selected=$((selected + 1))
+                FULL_SUITE_STANDALONE_PHP_FILES+="${FULL_SUITE_STANDALONE_PHP_FILES:+$'\n'}${test_rel}"
+                routed=$((routed + 1))
+                echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
+            else
+                declared_status=$?
+                [ "$declared_status" -eq 1 ] || return "$declared_status"
+                # Only declared files belong to this standalone suite.
+                # Everything else retains its existing PHPUnit/support-file
+                # classification.
+                excluded=$((excluded + 1))
+            fi
+        fi
+    done < <(find "$PLUGIN_PATH" -type f -name '*.php' -print | sort)
+
+    FULL_SUITE_STANDALONE_PHP_SELECTED="$selected"
+    FULL_SUITE_STANDALONE_PHP_ROUTED="$routed"
+    FULL_SUITE_STANDALONE_PHP_EXCLUDED="$excluded"
+}
+
+# Regenerate the current test inventory without running any of it: canonical
+# PHPUnit discovery plus the declared standalone PHP suite, exactly the suite
+# full-suite execution would run, bound to the fingerprints core re-derives.
+# Inventory-only mode writes the plan-time document with this; shard replay
+# regenerates with it to prove an assigned shard still matches the current
+# suite.
+homeboy_wordpress_regenerate_test_inventory() {
+    local output_file="$1"
+    local runner="$2"
+    local discovery_tmp standalone_tmp
+
+    discovery_tmp="$(mktemp)" || return 1
+    standalone_tmp="$(mktemp)" || {
+        rm -f "$discovery_tmp"
+        return 1
+    }
+    if ! homeboy_wordpress_collect_full_suite_standalone_php_files >/dev/null; then
+        rm -f "$discovery_tmp" "$standalone_tmp"
+        return 2
+    fi
+    printf '%s' "$FULL_SUITE_STANDALONE_PHP_FILES" > "$standalone_tmp"
+    if ! homeboy_wordpress_discover_phpunit_files "$discovery_tmp"; then
+        rm -f "$discovery_tmp" "$standalone_tmp"
+        return 2
+    fi
+    if ! python3 "${SCRIPT_DIR}/test-inventory.py" \
+        --project "$PLUGIN_PATH" \
+        --extension-path "$EXTENSION_PATH" \
+        --runner "$runner" \
+        --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
+        --discovery-file "$discovery_tmp" \
+        --standalone-list "$standalone_tmp" \
+        --output "$output_file"; then
+        rm -f "$discovery_tmp" "$standalone_tmp"
+        return 2
+    fi
+    rm -f "$discovery_tmp" "$standalone_tmp"
+}
+
 # Inventory-only mode enumerates the suite without running any of it, so that
 # Homeboy can plan bounded shards. It must return before any runner is selected:
 # a producer that executed tests would defeat the point, and core deliberately
 # withholds the changed-scope environment here because an inventory is a
 # complete enumeration rather than a changed-test execution.
+#
+# The enumerated suite is the one full-suite execution runs: WP Codebox
+# canonical PHPUnit discovery plus the declared standalone PHP suite. Empty
+# PHPUnit discovery is valid when standalone declarations exist, because a
+# component's default release suite may be entirely standalone (#2719).
 #
 # The document is written by a Python producer, not by this shell, because the
 # `inventory_fingerprint` contract is literally Python's
@@ -79,31 +283,16 @@ if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
         echo "Error: could not create temporary WordPress test inventory." >&2
         exit 1
     }
-    discovery_data="$(mktemp)" || {
+    if ! homeboy_wordpress_regenerate_test_inventory "$inventory_data" "${HOMEBOY_WORDPRESS_INVENTORY_RUNNER:-wordpress}"; then
         rm -f "$inventory_data"
-        echo "Error: could not create temporary WordPress PHPUnit discovery result." >&2
-        exit 1
-    }
-    if ! homeboy_wordpress_discover_phpunit_files "$discovery_data"; then
-        rm -f "$inventory_data" "$discovery_data"
-        exit 1
-    fi
-    if ! python3 "$INVENTORY_TOOL" \
-        --project "$PLUGIN_PATH" \
-        --extension-path "$EXTENSION_PATH" \
-        --runner "${HOMEBOY_WORDPRESS_INVENTORY_RUNNER:-wordpress}" \
-        --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
-        --discovery-file "$discovery_data" \
-        --output "$inventory_data"; then
-        rm -f "$inventory_data" "$discovery_data"
         exit 1
     fi
     if ! cp "$inventory_data" "$HOMEBOY_TEST_INVENTORY_FILE"; then
-        rm -f "$inventory_data" "$discovery_data"
+        rm -f "$inventory_data"
         exit 1
     fi
     cat "$inventory_data"
-    rm -f "$inventory_data" "$discovery_data"
+    rm -f "$inventory_data"
     exit 0
 fi
 
@@ -950,112 +1139,6 @@ homeboy_wordpress_is_php_smoke_file() {
     esac
 }
 
-# Components that use executable PHP scripts without the shared `*-smoke.php`
-# convention declare their component-relative paths or shell-glob patterns in
-# standalone_php_test_paths. The declaration classifies already-selected files;
-# it never broadens a changed scope or turns support files into tests by default.
-homeboy_wordpress_is_declared_standalone_php_test_file() {
-    local test_file="$1"
-    local declared_path
-    local declared_paths
-
-    case "$test_file" in
-        *.php)
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-
-    if [ -z "${HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
-        declared_paths="$(homeboy_setting standalone_php_test_paths '.standalone_php_test_paths // [] | if type == "array" and all(.[]; type == "string") then .[] else error("expected an array of strings") end')" || {
-            echo "ERROR: standalone_php_test_paths must be an array of strings." >&2
-            return 2
-        }
-        HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS="$declared_paths"
-        HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS_LOADED=1
-    fi
-    declared_paths="$HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_PATHS"
-    while IFS= read -r declared_path; do
-        [ -n "$declared_path" ] || continue
-        case "$declared_path" in
-            /*|..|../*|*/../*)
-                echo "ERROR: standalone_php_test_paths contains an invalid component-relative selector: ${declared_path}" >&2
-                return 2
-                ;;
-        esac
-        if [[ "$test_file" == $declared_path ]]; then
-            return 0
-        fi
-    done <<< "$declared_paths"
-    return 1
-}
-
-# The test manifest is the runner's environment source of truth for changed
-# scopes and shard replay, so the full-suite selector reads it as a second
-# standalone declaration beside standalone_php_test_paths. Entries whose
-# resolved environment is standalone-php (per-file environment or
-# default_environment fallback, validated against homeboy/test-manifest/v1)
-# belong to the standalone suite. The manifest parses once per run and caches
-# like the glob declaration above; per-file membership is a plain comparison
-# against component-relative manifest keys.
-homeboy_wordpress_manifest_standalone_php_test_paths() {
-    if [ -n "${HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
-        printf '%s\n' "$HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS"
-        return 0
-    fi
-
-    local manifest_path="${HOMEBOY_WORDPRESS_TEST_MANIFEST:-${PLUGIN_PATH}/homeboy-test-manifest.json}"
-    local declared_paths
-
-    if [ ! -e "$manifest_path" ]; then
-        HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS=""
-        HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED=1
-        return 0
-    fi
-
-    declared_paths="$(jq -r '
-        if type != "object" or .schema != "homeboy/test-manifest/v1" then
-            error("expected schema homeboy/test-manifest/v1")
-        elif (.tests | type) != "object" then
-            error("expected tests object")
-        else
-            (.default_environment // "wordpress") as $defaultEnvironment
-            | .tests
-            | to_entries[]
-            | (.value.environment // $defaultEnvironment) as $environment
-            | if $environment == "wordpress" or $environment == "standalone-php" then
-                (select($environment == "standalone-php") | .key)
-              else
-                error("unsupported environment " + ($environment | tostring))
-              end
-        end
-    ' "$manifest_path" 2>/dev/null)" || {
-        echo "ERROR: invalid WordPress test manifest: ${manifest_path}" >&2
-        return 2
-    }
-
-    HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS="$declared_paths"
-    HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED=1
-    printf '%s\n' "$declared_paths"
-}
-
-homeboy_wordpress_is_manifest_standalone_php_test_file() {
-    local test_file="$1"
-    local declared_path
-
-    if [ -z "${HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
-        homeboy_wordpress_manifest_standalone_php_test_paths >/dev/null || return 2
-    fi
-    while IFS= read -r declared_path; do
-        [ -n "$declared_path" ] || continue
-        if [ "$test_file" = "$declared_path" ]; then
-            return 0
-        fi
-    done <<< "$HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS"
-    return 1
-}
-
 homeboy_wordpress_load_test_shard_manifest() {
     local manifest_path="${HOMEBOY_TEST_SHARD_MANIFEST:-}"
     local shard_id shard_tests test_file test_rel selected_count
@@ -1102,27 +1185,11 @@ homeboy_wordpress_load_test_shard_manifest() {
     }
 
     current_inventory="$(mktemp)" || return 1
-    local current_discovery
-    current_discovery="$(mktemp)" || {
+    if ! homeboy_wordpress_regenerate_test_inventory "$current_inventory" wordpress; then
         rm -f "$current_inventory"
-        return 1
-    }
-    if ! homeboy_wordpress_discover_phpunit_files "$current_discovery"; then
-        rm -f "$current_inventory" "$current_discovery"
-        return 2
-    fi
-    if ! python3 "${SCRIPT_DIR}/test-inventory.py" \
-        --project "$PLUGIN_PATH" \
-        --extension-path "$EXTENSION_PATH" \
-        --runner wordpress \
-        --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
-        --discovery-file "$current_discovery" \
-        --output "$current_inventory" >/dev/null; then
-        rm -f "$current_inventory" "$current_discovery"
         echo "ERROR: could not regenerate the current WordPress test inventory for shard validation." >&2
         return 2
     fi
-    rm -f "$current_discovery"
 
     current_runner="$(jq -r '.runner_fingerprint' "$current_inventory")"
     current_workspace="$(jq -r '.workspace_fingerprint' "$current_inventory")"
@@ -1239,80 +1306,71 @@ homeboy_wordpress_write_host_php_results() {
     fi
 }
 
-homeboy_wordpress_collect_full_suite_standalone_php_files() {
-    local test_file test_rel declared_status
-    local selected=0
-    local routed=0
-    local excluded=0
-
-    FULL_SUITE_STANDALONE_PHP_FILES=""
-    FULL_SUITE_STANDALONE_PHP_SELECTED=0
-    FULL_SUITE_STANDALONE_PHP_ROUTED=0
-    FULL_SUITE_STANDALONE_PHP_EXCLUDED=0
-
-    # Both declaration sources load once per run, so per-file classification
-    # below is a plain shell comparison. The suite is the union of the glob
-    # declaration and the manifest's standalone-php entries; a file both
-    # sources declare is selected once.
-    homeboy_wordpress_manifest_standalone_php_test_paths >/dev/null || return $?
-
-    while IFS= read -r test_file; do
-        [ -n "$test_file" ] || continue
-        test_rel="${test_file#"${PLUGIN_PATH}/"}"
-        if homeboy_wordpress_is_declared_standalone_php_test_file "$test_rel"; then
-            selected=$((selected + 1))
-            FULL_SUITE_STANDALONE_PHP_FILES+="${FULL_SUITE_STANDALONE_PHP_FILES:+$'\n'}${test_rel}"
-            routed=$((routed + 1))
-            echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
-        else
-            declared_status=$?
-            [ "$declared_status" -eq 1 ] || return "$declared_status"
-            if homeboy_wordpress_is_manifest_standalone_php_test_file "$test_rel"; then
-                selected=$((selected + 1))
-                FULL_SUITE_STANDALONE_PHP_FILES+="${FULL_SUITE_STANDALONE_PHP_FILES:+$'\n'}${test_rel}"
-                routed=$((routed + 1))
-                echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
-            else
-                declared_status=$?
-                [ "$declared_status" -eq 1 ] || return "$declared_status"
-                # Only declared files belong to this standalone suite.
-                # Everything else retains its existing PHPUnit/support-file
-                # classification.
-                excluded=$((excluded + 1))
-            fi
-        fi
-    done < <(find "$PLUGIN_PATH" -type f -name '*.php' -print | sort)
-
-    FULL_SUITE_STANDALONE_PHP_SELECTED="$selected"
-    FULL_SUITE_STANDALONE_PHP_ROUTED="$routed"
-    FULL_SUITE_STANDALONE_PHP_EXCLUDED="$excluded"
-}
-
 homeboy_wordpress_replay_test_shard() {
-    local test_file test_rel
+    local test_file test_rel declared_status
     local phpunit_files=""
+    local standalone_files=""
     local selected=0
     local routed=0
+    local standalone_status=0
+    local phpunit_status=0
+    local shard_status=0
 
     while IFS= read -r test_file; do
         [ -n "$test_file" ] || continue
         selected=$((selected + 1))
         test_rel="$(homeboy_wordpress_rel_test_file "$test_file")" || return 2
-        phpunit_files+="${phpunit_files:+$'\n'}${test_rel}"
-        echo "TEST_SHARD_ROUTE:${test_rel}:runner=phpunit"
-        routed=$((routed + 1))
+        # Route on the same declarations that made the member part of the
+        # standalone suite in the inventory: a declared standalone PHP test
+        # replays through the bounded host-PHP runner, everything else through
+        # the WordPress runtime backend.
+        if homeboy_wordpress_is_declared_standalone_php_test_file "$test_rel"; then
+            standalone_files+="${standalone_files:+$'\n'}${test_rel}"
+            echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-php-smoke"
+            routed=$((routed + 1))
+        else
+            declared_status=$?
+            [ "$declared_status" -eq 1 ] || return "$declared_status"
+            if homeboy_wordpress_is_manifest_standalone_php_test_file "$test_rel"; then
+                standalone_files+="${standalone_files:+$'\n'}${test_rel}"
+                echo "TEST_SHARD_ROUTE:${test_rel}:runner=host-php-smoke"
+                routed=$((routed + 1))
+            else
+                declared_status=$?
+                [ "$declared_status" -eq 1 ] || return "$declared_status"
+                phpunit_files+="${phpunit_files:+$'\n'}${test_rel}"
+                echo "TEST_SHARD_ROUTE:${test_rel}:runner=phpunit"
+                routed=$((routed + 1))
+            fi
+        fi
     done <<< "$HOMEBOY_WORDPRESS_SHARD_TEST_FILES"
 
+    # A mixed shard must run both backends even when the first fails, and the
+    # exit status is the worst of the two: returning early would let a failing
+    # half erase the other half's evidence, and passing early would let one
+    # half's success erase the other's failure. The runtime backend's status
+    # takes precedence when both fail, matching full-suite behavior.
+    if [ -n "$standalone_files" ]; then
+        homeboy_wordpress_run_standalone_php_smoke_files "$standalone_files" || standalone_status=$?
+    fi
     if [ -n "$phpunit_files" ]; then
         export HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES="$phpunit_files"
         WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || return $?
-        bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}" || return $?
+        bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}" || phpunit_status=$?
     fi
 
     [ "$selected" -eq "$routed" ] || {
         echo "ERROR: WordPress shard ${HOMEBOY_WORDPRESS_SHARD_ID} routed ${routed} of ${selected} assigned tests." >&2
         return 2
     }
+    shard_status="$phpunit_status"
+    if [ "$shard_status" -eq 0 ]; then
+        shard_status="$standalone_status"
+    fi
+    if [ "$shard_status" -ne 0 ]; then
+        echo "TEST_SHARD_SUMMARY:id=${HOMEBOY_WORDPRESS_SHARD_ID} selected=${selected} routed=${routed} status=failed"
+        return "$shard_status"
+    fi
     echo "TEST_SHARD_SUMMARY:id=${HOMEBOY_WORDPRESS_SHARD_ID} selected=${selected} routed=${routed} status=passed"
     if ! type homeboy_write_test_results >/dev/null 2>&1 && [ -n "${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}" ] && [ -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS" ]; then
         # shellcheck source=/dev/null
