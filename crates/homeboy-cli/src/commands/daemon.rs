@@ -1,5 +1,6 @@
 use clap::{Args, CommandFactory, Subcommand};
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Instant;
 use uuid::Uuid;
@@ -174,8 +175,12 @@ enum DaemonCommand {
         #[arg(long, requires = "lease_id")]
         force: bool,
     },
-    /// Show daemon state and selected local address
-    Status,
+    /// Show daemon health and actionable recovery state
+    Status {
+        /// Include complete daemon process and recovery evidence.
+        #[arg(long)]
+        full: bool,
+    },
     /// Render deployable reverse-runner broker service configuration
     BrokerConfig {
         /// Stable loopback address for the VPS service.
@@ -277,7 +282,7 @@ pub enum DaemonOutput {
     RecoverMissingLeaseState(DaemonStateLossRecoveryResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
-    Status(DaemonStatus),
+    Status(Value),
     BrokerConfig(BrokerConfig),
     ArtifactGet(DaemonArtifactGetOutput),
     JobsList(DaemonJobsListOutput),
@@ -526,7 +531,10 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             }
             Ok((DaemonOutput::Stop(result), 0))
         }
-        DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),
+        DaemonCommand::Status { full } => {
+            let status = daemon::read_status()?;
+            Ok((DaemonOutput::Status(status_output(status, full)), 0))
+        }
         DaemonCommand::BrokerConfig {
             listen_addr,
             binary_path,
@@ -736,6 +744,128 @@ fn job_summary(inspection: DaemonJobInspection) -> DaemonJobSummary {
         terminal_disposition: inspection.terminal_disposition,
         next_actions,
     }
+}
+
+const COMPACT_STATUS_BYTES: usize = 8 * 1024;
+const COMPACT_STATUS_TEXT_LIMIT: usize = 256;
+const COMPACT_STATUS_CANDIDATE_LIMIT: usize = 4;
+const COMPACT_STATUS_JOB_LIMIT: usize = 8;
+
+/// Status collection remains lossless in core. The CLI's default is deliberately
+/// a bounded decision surface; `--full` is the existing complete evidence view.
+fn status_output(status: DaemonStatus, full: bool) -> Value {
+    if full {
+        return serde_json::to_value(status).expect("daemon status serializes");
+    }
+
+    bounded_status_projection(&status)
+}
+
+fn bounded_status_projection(status: &DaemonStatus) -> Value {
+    let unrelated_candidates = status
+        .process_candidates
+        .iter()
+        .filter(|candidate| candidate.ownership == daemon::DaemonProcessOwnership::Unrelated)
+        .count();
+    let relevant_candidates = status
+        .process_candidates
+        .iter()
+        .filter(|candidate| candidate.ownership != daemon::DaemonProcessOwnership::Unrelated)
+        .take(COMPACT_STATUS_CANDIDATE_LIMIT)
+        .map(|candidate| {
+            json!({
+                "pid": candidate.pid,
+                "ownership": candidate.ownership,
+                "executable": bounded_text(&candidate.executable),
+                "endpoint": candidate.bind_endpoint.as_deref().map(bounded_text),
+                "store": candidate.durable_store_path.as_deref().map(bounded_text),
+            })
+        })
+        .collect::<Vec<_>>();
+    let active_jobs = status
+        .active_job_recovery_evidence
+        .iter()
+        .take(COMPACT_STATUS_JOB_LIMIT)
+        .map(|job| {
+            json!({
+                "job_id": job.job_id,
+                "operation": bounded_text(&job.operation),
+                "status": job.status,
+                "disposition": job.disposition,
+                "child_pid": job.child_pid,
+                "linked_durable_run_id": job.linked_durable_run_id.as_deref().map(bounded_text),
+            })
+        })
+        .collect::<Vec<_>>();
+    let next_actions = status
+        .freshness
+        .repair_plan
+        .iter()
+        .take(COMPACT_STATUS_CANDIDATE_LIMIT)
+        .map(|step| json!({ "code": step.code, "command": step.command }))
+        .collect::<Vec<_>>();
+    let projection = json!({
+        "schema": "homeboy/daemon-status/v1",
+        "running": status.running,
+        "fresh": status.fresh,
+        "reachable": status.reachable,
+        "admits_work": status.admits_work(),
+        "summary": bounded_text(&status.summary),
+        "daemon": {
+            "lease_id": status.freshness.lease_id,
+            "pid": status.freshness.pid,
+            "address": status.state.as_ref().map(|state| bounded_text(&state.address)),
+            "active_build": status.freshness.daemon_build_identity.as_deref().map(bounded_text),
+            "active_version": status.freshness.daemon_version.as_deref().map(bounded_text),
+            "desired_build": bounded_text(&homeboy::core::build_identity::current().display),
+        },
+        "recovery": {
+            "stale_reason_code": status.freshness.stale_reason_code,
+            "restartable": status.freshness.restartable,
+            "replacement_blocked": status.replacement_blocked,
+            "blocker": status.replacement_blocked_reason.as_deref().map(bounded_text),
+            "next_actions": next_actions,
+        },
+        "active_jobs": active_jobs,
+        "process_candidates": relevant_candidates,
+        "truncation": {
+            "active_jobs": { "shown": active_jobs.len(), "omitted": status.active_job_recovery_evidence.len().saturating_sub(active_jobs.len()) },
+            "process_candidates": { "shown": relevant_candidates.len(), "unrelated": unrelated_candidates, "omitted": status.process_candidates.len().saturating_sub(relevant_candidates.len()) },
+            "omitted_sections": ["state", "runtime_paths", "ownership_evidence", "termination_evidence", "candidate_cmdlines", "complete_job_recovery_evidence"],
+            "full_command": "homeboy daemon status --full",
+        },
+    });
+    if status_projection_bytes(&projection) <= COMPACT_STATUS_BYTES {
+        projection
+    } else {
+        json!({
+            "schema": "homeboy/daemon-status/v1",
+            "running": status.running,
+            "fresh": status.fresh,
+            "reachable": status.reachable,
+            "admits_work": status.admits_work(),
+            "summary": "daemon status details exceed the default response budget",
+            "recovery": { "replacement_blocked": status.replacement_blocked },
+            "truncation": { "full_command": "homeboy daemon status --full", "omitted": "see_full_output" },
+        })
+    }
+}
+
+fn status_projection_bytes(projection: &Value) -> usize {
+    serde_json::to_vec(&DaemonOutput::Status(projection.clone()))
+        .expect("daemon status output serializes")
+        .len()
+}
+
+fn bounded_text(value: &str) -> String {
+    if value.len() <= COMPACT_STATUS_TEXT_LIMIT {
+        return value.to_string();
+    }
+    let end = value
+        .char_indices()
+        .find_map(|(index, _)| (index >= COMPACT_STATUS_TEXT_LIMIT).then_some(index))
+        .unwrap_or(value.len());
+    format!("{}...", &value[..end])
 }
 
 /// Resolve the recovery for the local daemon and either print it or run it.
@@ -1161,6 +1291,46 @@ mod tests {
         assert!(error
             .message
             .contains("missing or its retained terminal record was pruned"));
+    }
+
+    #[test]
+    fn daemon_status_parser_exposes_the_explicit_full_surface() {
+        assert!(Cli::try_parse_from(["homeboy", "daemon", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["homeboy", "daemon", "status", "--full"]).is_ok());
+    }
+
+    #[test]
+    fn daemon_status_default_projection_is_bounded_and_full_retains_candidates() {
+        with_isolated_home(|_| {
+            let mut status = daemon::read_status().expect("status");
+            status.process_candidates = (0..200)
+                .map(|pid| daemon::DaemonProcessCandidate {
+                    pid,
+                    process_start_identity: None,
+                    executable: format!("/very/long/path/{}", "x".repeat(1024)),
+                    executable_digest: None,
+                    cmdline: "evidence ".repeat(2048),
+                    bind_endpoint: Some("127.0.0.1:7421".to_string()),
+                    durable_store_path: Some(format!("/tmp/{pid}/jobs.json")),
+                    build_identity: None,
+                    startup_token: Some("token".repeat(512)),
+                    ownership: daemon::DaemonProcessOwnership::Unrelated,
+                })
+                .collect();
+
+            let compact = status_output(status.clone(), false);
+            let full = status_output(status, true);
+
+            assert!(status_projection_bytes(&compact) <= COMPACT_STATUS_BYTES);
+            assert_eq!(compact["process_candidates"].as_array().unwrap().len(), 0);
+            assert_eq!(
+                compact["truncation"]["process_candidates"]["unrelated"],
+                200
+            );
+            assert_eq!(compact["truncation"]["process_candidates"]["omitted"], 200);
+            assert_eq!(full["process_candidates"].as_array().unwrap().len(), 200);
+            assert!(full.to_string().len() > COMPACT_STATUS_BYTES);
+        });
     }
 
     #[test]

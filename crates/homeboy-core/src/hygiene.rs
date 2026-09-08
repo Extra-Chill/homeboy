@@ -409,14 +409,13 @@ fn checkout_hygiene_snapshot(
     }
     let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
     let (mut behind, mut ahead) = git_ahead_behind(&path);
-    if checkout.role == "validation_dependency"
-        && !allowed
+    let refreshable = !allowed
         && upstream.is_some()
         && dirty == Some(false)
         && ahead.unwrap_or(0) == 0
         && behind.unwrap_or(0) > 0
-        && git_status(&path, &["merge", "--ff-only", "@{upstream}"])
-    {
+        && (checkout.role == "validation_dependency" || is_managed_extension_cache(&path));
+    if refreshable && git_status(&path, &["merge", "--ff-only", "@{upstream}"]) {
         head = git_output(&path, &["rev-parse", "HEAD"]);
         (behind, ahead) = git_ahead_behind(&path);
     }
@@ -436,6 +435,26 @@ fn checkout_hygiene_snapshot(
     };
     apply_lab_source_evidence(&mut snapshot);
     Ok(snapshot)
+}
+
+/// A non-linked installed extension is controller-managed cache state. It can
+/// advance only when it is clean, follows an upstream, and has no explicit pin.
+/// Linked/dev sources remain developer-owned and are left to normal hygiene.
+fn is_managed_extension_cache(path: &Path) -> bool {
+    let Ok(extensions_dir) = crate::paths::extensions() else {
+        return false;
+    };
+    if path.parent() != Some(extensions_dir.as_path())
+        || std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    {
+        return false;
+    }
+
+    std::fs::read_to_string(path.join(".source-requested-ref"))
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
 }
 
 fn lab_source_evidence_from_snapshot(
@@ -945,6 +964,138 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
         assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn dependency_hygiene_fast_forwards_clean_managed_extension_cache() {
+        crate::test_support::with_isolated_home(|_| {
+            let extension = crate::paths::extensions().unwrap().join("wordpress");
+            fs::create_dir_all(&extension).unwrap();
+            let remote = init_repo_with_upstream(&extension);
+            assert!(is_managed_extension_cache(&extension));
+            let writer = tempfile::tempdir().unwrap();
+            git(
+                writer.path(),
+                &[
+                    "clone",
+                    "--branch",
+                    "main",
+                    remote.path().to_str().unwrap(),
+                    ".",
+                ],
+            );
+            git(writer.path(), &["config", "user.email", "test@example.com"]);
+            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
+            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
+            git(writer.path(), &["add", "."]);
+            git(writer.path(), &["commit", "-m", "remote update"]);
+            git(writer.path(), &["push", "origin", "HEAD:main"]);
+
+            let snapshots = require_checkout_hygiene_without_lifecycle(
+                vec![DependencyCheckout {
+                    id: "wordpress".to_string(),
+                    role: "extension".to_string(),
+                    path: extension.clone(),
+                }],
+                DependencyHygieneOptions { allow_stale: false },
+            )
+            .expect("clean managed extension cache should fast-forward");
+
+            assert_eq!(snapshots[0].behind, Some(0));
+            assert_eq!(
+                snapshots[0].head,
+                git_output(writer.path(), &["rev-parse", "HEAD"])
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_hygiene_leaves_pinned_extension_cache_unchanged() {
+        crate::test_support::with_isolated_home(|_| {
+            let extension = crate::paths::extensions().unwrap().join("wordpress");
+            fs::create_dir_all(&extension).unwrap();
+            let remote = init_repo_with_upstream(&extension);
+            let writer = tempfile::tempdir().unwrap();
+            git(
+                writer.path(),
+                &[
+                    "clone",
+                    "--branch",
+                    "main",
+                    remote.path().to_str().unwrap(),
+                    ".",
+                ],
+            );
+            git(writer.path(), &["config", "user.email", "test@example.com"]);
+            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
+            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
+            git(writer.path(), &["add", "."]);
+            git(writer.path(), &["commit", "-m", "remote update"]);
+            git(writer.path(), &["push", "origin", "HEAD:main"]);
+            fs::write(extension.join(".source-requested-ref"), "main\n").unwrap();
+
+            let err = require_checkout_hygiene_without_lifecycle(
+                vec![DependencyCheckout {
+                    id: "wordpress".to_string(),
+                    role: "extension".to_string(),
+                    path: extension.clone(),
+                }],
+                DependencyHygieneOptions { allow_stale: false },
+            )
+            .expect_err("explicit extension pin must not chase its upstream");
+
+            assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
+            assert_ne!(
+                git_output(&extension, &["rev-parse", "HEAD"]),
+                git_output(writer.path(), &["rev-parse", "HEAD"])
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_hygiene_leaves_dirty_or_divergent_extension_cache_unchanged() {
+        crate::test_support::with_isolated_home(|_| {
+            let extension = crate::paths::extensions().unwrap().join("wordpress");
+            fs::create_dir_all(&extension).unwrap();
+            let remote = init_repo_with_upstream(&extension);
+            let writer = tempfile::tempdir().unwrap();
+            git(
+                writer.path(),
+                &[
+                    "clone",
+                    "--branch",
+                    "main",
+                    remote.path().to_str().unwrap(),
+                    ".",
+                ],
+            );
+            git(writer.path(), &["config", "user.email", "test@example.com"]);
+            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
+            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
+            git(writer.path(), &["add", "."]);
+            git(writer.path(), &["commit", "-m", "remote update"]);
+            git(writer.path(), &["push", "origin", "HEAD:main"]);
+            fs::write(extension.join("local.txt"), "local\n").unwrap();
+            git(&extension, &["add", "."]);
+            git(&extension, &["commit", "-m", "local update"]);
+            fs::write(extension.join("dirty.txt"), "dirty\n").unwrap();
+            let head_before = git_output(&extension, &["rev-parse", "HEAD"]);
+
+            let err = require_checkout_hygiene_without_lifecycle(
+                vec![DependencyCheckout {
+                    id: "wordpress".to_string(),
+                    role: "extension".to_string(),
+                    path: extension.clone(),
+                }],
+                DependencyHygieneOptions { allow_stale: false },
+            )
+            .expect_err("dirty divergent extension cache must remain untouched");
+
+            assert_eq!(err.details["checkouts"][0]["dirty"].as_bool(), Some(true));
+            assert_eq!(err.details["checkouts"][0]["ahead"].as_u64(), Some(1));
+            assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
+            assert_eq!(git_output(&extension, &["rev-parse", "HEAD"]), head_before);
+        });
     }
 
     #[test]

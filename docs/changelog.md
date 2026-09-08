@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.369.10] - 2026-09-08
+
+### Fixed
+- refresh managed extension caches before admission
+- retain explicit runner for provider readiness
+- protect reachable stale owners
+- stage the materialized Cook workspace
+- compact default status output
+- stop summarizing an unexecuted test gate as "Tests failed"
+
 ## [0.369.9] - 2026-09-08
 
 ### Fixed

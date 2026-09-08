@@ -1790,7 +1790,7 @@ pub(crate) fn run_lab_offload_inner(
             plan,
             messages,
             &runner_workspace_root,
-            remote_runner_homeboy_path(&runner, "Lab offload preflight")?,
+            final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?,
             &runner_status,
             overhead,
         );
