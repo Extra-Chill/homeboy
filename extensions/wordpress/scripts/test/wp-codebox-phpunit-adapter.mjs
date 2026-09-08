@@ -20,6 +20,15 @@ import { configuredWpCodeboxRuntimeCrashGraceSeconds, createWpCodeboxRuntimeCras
 const require = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-selection.js');
 
+// Diagnostic codes that describe a managed runtime service which never became
+// usable, so nothing downstream of it could have run. `teardown-failed` is
+// deliberately excluded: teardown happens after the workload, so a service that
+// served the run and then failed to release is not why PHPUnit did not execute.
+// Declared with the module constants because this file runs work at top level;
+// a `const` sited next to its helper is still in its temporal dead zone when
+// that top-level await reaches it.
+const RUNTIME_SERVICE_PREEXECUTION_FAILURES = new Set(['provider-unavailable', 'provision-failed', 'readiness-failed', 'interrupted']);
+
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
 const discoveryOnly = process.env.HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY === '1';
 const phpunitTimeoutSeconds = configuredWpCodeboxPhpunitTimeoutSeconds(process.env, settings);
@@ -1384,7 +1393,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     await writeFile(testResultsPath, `${JSON.stringify(results, null, 2)}\n`);
   }
 
-  const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog, recipeRunSteps);
+  const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog, recipeRunSteps, managedRuntimeServices);
   await writeFile(path.join(filesDirectory, 'phpunit-execution-diagnosis.json'), `${JSON.stringify(diagnosis, null, 2)}\n`);
 
   process.stdout.write('Structured PHPUnit evidence: artifact://files/test-results.json\n');
@@ -1414,7 +1423,24 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
 // reached the sandbox bootstrap at all (or that stopped inside a recipe step),
 // and is evaluated before the bootstrap_evidence_unavailable fallback so the
 // most specific stage wins.
-async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog, recipeRunSteps) {
+// The first managed runtime service that never reached a usable state. Reads
+// upstream WP Codebox lifecycle evidence only; it never infers a failure from
+// log text.
+function unprovisionedRuntimeService(managedRuntimeServices) {
+  return (Array.isArray(managedRuntimeServices) ? managedRuntimeServices : [])
+    .filter(isObject)
+    .find((service) => {
+      const code = isObject(service.diagnostic) ? service.diagnostic.code : undefined;
+      if (typeof code === 'string') {
+        return RUNTIME_SERVICE_PREEXECUTION_FAILURES.has(code);
+      }
+      // No diagnostic code: trust the lifecycle, but only when it never reached
+      // readiness. A released service completed its job.
+      return service.lifecycle === 'failed' && service.readiness !== 'ready';
+    });
+}
+
+async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog, recipeRunSteps, managedRuntimeServices = []) {
   const summary = isObject(results?.summary) ? results.summary : {};
   const executed = Number.isInteger(summary.total) ? summary.total : 0;
   const markers = stageLog === null
@@ -1454,6 +1480,33 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
     }
     if (executed > 0) {
       return { cause: 'tests_executed', detail: `PHPUnit executed ${executed} test(s).`, remediation: 'No execution diagnosis is required.' };
+    }
+    // Ranked above the runtime crash and every ledger-derived cause by the same
+    // rule the crash branch states: a dependency that never came up is what
+    // stopped the run, and everything downstream of it -- an unparseable
+    // payload, an empty step ledger, a truncated log -- is wreckage. Ranked
+    // above the crash specifically because provisioning precedes execution, so
+    // a service that failed to provision cannot itself be a consequence of a
+    // trap that happened later.
+    const failedService = unprovisionedRuntimeService(managedRuntimeServices);
+    if (failedService) {
+      const diagnostic = isObject(failedService.diagnostic) ? failedService.diagnostic : {};
+      const provider = typeof failedService.provider === 'string' ? failedService.provider : 'unknown';
+      const command = typeof diagnostic.command === 'string' ? diagnostic.command : null;
+      const service = `The '${failedService.id}' ${failedService.kind} service`;
+      const evidence = 'Inspect artifact://files/managed-runtime-services.json for the service lifecycle evidence.';
+      if (diagnostic.code === 'provider-unavailable') {
+        return {
+          cause: 'runtime_service_provider_unavailable',
+          detail: `${service} could not be provisioned because its '${provider}' provider is unavailable on this host${command ? ` (${command} was not found)` : ''}, so PHPUnit never started.`,
+          remediation: `Run the test on a host that provides '${provider}', or select a provider this host can satisfy with the wp_codebox_database_service setting. ${evidence}`,
+        };
+      }
+      return {
+        cause: 'runtime_service_provision_failed',
+        detail: `${service} never became usable (${diagnostic.code || failedService.lifecycle}), so PHPUnit never started.`,
+        remediation: `${evidence} logs/recipe-run.stderr.log retains the provisioning output.`,
+      };
     }
     // Ranked under the stage markers, which name the failing seam directly, and
     // over every ledger-derived cause: with a trapped runtime the ledger is a

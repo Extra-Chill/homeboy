@@ -129,6 +129,7 @@
     "test:wp-codebox-phpunit-bounded-output": "node tests/wp-codebox-phpunit-bounded-output-smoke.mjs",
     "test:wp-codebox-phpunit-evidence": "node tests/wp-codebox-phpunit-evidence-smoke.mjs",
     "test:wp-codebox-phpunit-aggregate": "node tests/wp-codebox-phpunit-aggregate-smoke.mjs",
+    "test:wp-codebox-phpunit-runtime-service-diagnosis": "node tests/wp-codebox-phpunit-runtime-service-diagnosis-smoke.mjs",
     "test:wp-codebox-database-service": "node tests/wp-codebox-database-service-smoke.mjs",
     "test:wp-codebox-native-database-canary": "node tests/wp-codebox-native-database-canary.mjs",
     "test:wp-codebox-doctor": "bash scripts/test/wp-codebox-doctor-smoke.sh",
