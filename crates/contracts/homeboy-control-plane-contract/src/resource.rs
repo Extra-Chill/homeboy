@@ -205,6 +205,34 @@ pub struct ControlPlaneBlocker {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub message: String,
+    /// Typed durable state when this blocker is an admission decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Bounded, redacted durable reason when it differs from the legacy message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ControlPlaneAdmissionRetry>,
+}
+
+/// Bounded automatic reconciliation state for a durable admission blocker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneAdmissionRetry {
+    pub policy: String,
+    pub attempts: u64,
+    pub max_attempts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<String>,
+    pub disposition: ControlPlaneAdmissionRetryDisposition,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneAdmissionRetryDisposition {
+    AutomaticReconciliationScheduled,
+    AutomaticReconciliationDue,
+    Exhausted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -376,6 +404,9 @@ mod tests {
         resource.blocker = Some(ControlPlaneBlocker {
             code: Some("stale".to_string()),
             message: "runner_disconnected".to_string(),
+            state: None,
+            reason: None,
+            retry: None,
         });
         resource.owner = Some(ControlPlaneOwner {
             kind: "runner".to_string(),
