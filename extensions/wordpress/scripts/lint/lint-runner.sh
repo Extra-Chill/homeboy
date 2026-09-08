@@ -297,35 +297,35 @@ homeboy_php_syntax_check() {
     return 0
 }
 
-# The WordPress lint profile targets production plugin/theme runtime files. Keep
-# php-scoper config, build tooling, smoke harnesses, PHPUnit tests, and generated
-# vendored code out of that profile; syntax checking is enough for those roles.
-if [ -n "${HOMEBOY_LINT_FILE:-}" ] || [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
-    RUNTIME_LINT_FILES=()
-    NON_RUNTIME_LINT_FILES=()
+# Partition every lint target by WordPress lint role, for full-repository
+# lints and scoped file/glob targets alike (#2799). The WordPress lint profile
+# targets production plugin/theme runtime files. Keep php-scoper config, build
+# tooling, smoke harnesses, PHPUnit tests, and generated vendored code out of
+# that profile; syntax checking is enough for those roles.
+RUNTIME_LINT_FILES=()
+NON_RUNTIME_LINT_FILES=()
 
-    for lint_target in "${LINT_FILES[@]}"; do
-        rel_target=$(homeboy_lint_relpath "$lint_target")
-        if [ -f "$lint_target" ] && ! homeboy_wordpress_runtime_lint_file "$rel_target"; then
-            NON_RUNTIME_LINT_FILES+=("$lint_target")
-        else
-            RUNTIME_LINT_FILES+=("$lint_target")
-        fi
-    done
-
-    if [ "${#NON_RUNTIME_LINT_FILES[@]}" -gt 0 ]; then
-        echo "Non-runtime WordPress lint profile: syntax-checking ${#NON_RUNTIME_LINT_FILES[@]} file(s)"
-        homeboy_php_syntax_check "${NON_RUNTIME_LINT_FILES[@]}"
+for lint_target in "${LINT_FILES[@]}"; do
+    rel_target=$(homeboy_lint_relpath "$lint_target")
+    if [ -f "$lint_target" ] && ! homeboy_wordpress_runtime_lint_file "$rel_target"; then
+        NON_RUNTIME_LINT_FILES+=("$lint_target")
+    else
+        RUNTIME_LINT_FILES+=("$lint_target")
     fi
+done
 
-    if [ "${#RUNTIME_LINT_FILES[@]}" -eq 0 ]; then
-        echo "Skipping production WordPress lint profile for non-runtime file scope"
-        echo "Linting passed"
-        exit 0
-    fi
-
-    LINT_FILES=("${RUNTIME_LINT_FILES[@]}")
+if [ "${#NON_RUNTIME_LINT_FILES[@]}" -gt 0 ]; then
+    echo "Non-runtime WordPress lint profile: syntax-checking ${#NON_RUNTIME_LINT_FILES[@]} file(s)"
+    homeboy_php_syntax_check "${NON_RUNTIME_LINT_FILES[@]}"
 fi
+
+if [ "${#RUNTIME_LINT_FILES[@]}" -eq 0 ]; then
+    echo "Skipping production WordPress lint profile for non-runtime file scope"
+    echo "Linting passed"
+    exit 0
+fi
+
+LINT_FILES=("${RUNTIME_LINT_FILES[@]}")
 
 PHPCS_BIN="${EXTENSION_PATH}/vendor/bin/phpcs"
 PHPCBF_BIN="${EXTENSION_PATH}/vendor/bin/phpcbf"

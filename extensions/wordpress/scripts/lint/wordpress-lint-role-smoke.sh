@@ -2,9 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
+SIDECAR_WRITER_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_SIDECAR_WRITER sidecar-writer.sh)"
 RUNNER="${SCRIPT_DIR}/lint-runner.sh"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
+    echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
 
 EXTENSION_DIR="${TMPDIR}/extension"
 COMPONENT_DIR="${TMPDIR}/component"
@@ -13,17 +22,20 @@ PHPSTAN_CALLS_FILE="${TMPDIR}/phpstan-calls.txt"
 RESOLVE_CONTEXT_HELPER="${TMPDIR}/resolve-context.sh"
 DETECT_COMPONENT_HELPER="${TMPDIR}/detect-component.sh"
 DEPENDENCY_HELPER="${TMPDIR}/validation-dependencies.sh"
+RUNNER_STEPS_HELPER="${TMPDIR}/runner-steps.sh"
 
 mkdir -p \
     "${EXTENSION_DIR}/vendor/bin" \
     "${EXTENSION_DIR}/scripts/lint" \
-    "${EXTENSION_DIR}/scripts/lib" \
     "${COMPONENT_DIR}/tools" \
     "${COMPONENT_DIR}/tests"
 
 touch "${EXTENSION_DIR}/phpcs.xml.dist" "${EXTENSION_DIR}/phpstan.neon.dist"
 mkdir -p "${EXTENSION_DIR}/rulesets"
 touch "${EXTENSION_DIR}/rulesets/homeboy-wordpress-project.xml"
+# The symlinked phpstan-runner computes its root as the fake tmp root; share
+# the real scripts tree there so its unconditional shared-lib source resolves.
+ln -s "${ROOT_DIR}/scripts" "${TMPDIR}/scripts"
 ln -s "${SCRIPT_DIR}/phpstan-runner.sh" "${EXTENSION_DIR}/scripts/lint/phpstan-runner.sh"
 
 cat > "${COMPONENT_DIR}/scoper.inc.php" <<'PHP'
@@ -72,8 +84,10 @@ homeboy_resolve_validation_dependency_paths() {
 }
 SH
 
-cat > "${EXTENSION_DIR}/scripts/lib/runner-steps.sh" <<'SH'
+cat > "$RUNNER_STEPS_HELPER" <<'SH'
 should_run_step() {
+    # This fixture stubs PHPCS/PHPStan only; it has no ESLint runtime.
+    [ "$1" = "eslint" ] && return 1
     return 0
 }
 SH
@@ -136,6 +150,8 @@ run_lint_file() {
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
     HOMEBOY_RUNTIME_DETECT_COMPONENT="$DETECT_COMPONENT_HELPER" \
     HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
+    HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNNER_STEPS_HELPER" \
     PHPCS_ARGS_FILE="$PHPCS_ARGS_FILE" \
     PHPSTAN_CALLS_FILE="$PHPSTAN_CALLS_FILE" \
     HOMEBOY_SUMMARY_MODE=1 \
@@ -149,7 +165,13 @@ assert_equals '0' "$(cat "$PHPSTAN_CALLS_FILE")" 'scoper config skips PHPStan ru
 
 run_lint_file 'tools/build-autoloader.php'
 assert_contains '--exclude=WordPress.WP.AlternativeFunctions,WordPress.PHP.DevelopmentFunctions,WordPress.Security.EscapeOutput' "$PHPCS_ARGS_FILE" 'tooling role excludes WordPress runtime-only PHPCS sniffs'
-assert_equals '0' "$(cat "$PHPSTAN_CALLS_FILE")" 'tooling role skips PHPStan runtime static analysis'
+# Tooling files are plain build-time PHP: PHPStan still runs for them (binary
+# probe + analysis). Only scoper config, smoke harnesses, and PHPUnit tests
+# skip static analysis via phpstan-runner's role gate.
+if [ "$(cat "$PHPSTAN_CALLS_FILE")" = "0" ]; then
+    echo "FAIL: tooling role should still run PHPStan (probe + analysis)" >&2
+    exit 1
+fi
 
 run_lint_file 'tests/BFBConversionUnitTest.php'
 assert_equals '0' "$(cat "$PHPSTAN_CALLS_FILE")" 'WordPress PHPUnit test role skips unsupported host PHPStan context'
