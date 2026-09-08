@@ -573,7 +573,10 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .and_then(|_| usize_value(payload, &["aggregate_review", "summary", "failed"]))
         .unwrap_or(0);
     let metrics = code_production_metrics(payload);
-    let promotable = metrics.candidate_state.is_available();
+    let promotable = matches!(
+        metrics.candidate_state,
+        CandidateState::ApplyReady | CandidateState::PatchAvailable
+    );
     let patch = promotable
         .then(|| string_value(payload, &["promotion_candidates", "0", "artifact_id"]))
         .flatten();
