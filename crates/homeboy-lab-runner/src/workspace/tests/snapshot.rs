@@ -1777,6 +1777,88 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
 }
 
 #[test]
+fn snapshot_staging_runtime_owner_fixture() {
+    let Some(source) = std::env::var_os("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_SOURCE") else {
+        return;
+    };
+    let ready = std::path::PathBuf::from(
+        std::env::var_os("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_READY").expect("fixture ready path"),
+    );
+    let source = std::path::PathBuf::from(source);
+    let manifest = snapshot_input_manifest(&source, &[]).expect("fixture input manifest");
+    let stage = materialize_snapshot_stage(&source, &[], &manifest, None).expect("fixture stage");
+    fs::write(&ready, stage.path().display().to_string()).expect("publish fixture stage path");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn snapshot_staging_runtime_owner_protects_live_stage_and_reclaims_killed_stage() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source");
+        let input = source.path().join("input.txt");
+        fs::write(&input, "source bytes").expect("write source");
+        let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
+        let live = materialize_snapshot_stage(source.path(), &[], &manifest, None)
+            .expect("stage with runtime owner");
+        let live_path = live.path().to_path_buf();
+
+        let active = homeboy_core::engine::temp::cleanup_runtime_tmp(
+            true,
+            0,
+            Some("homeboy-snapshot-stage"),
+            10,
+        )
+        .expect("clean active runtime stage");
+        assert_eq!(active.removed_count, 0);
+        assert!(live_path.exists(), "live owner must protect its stage");
+        assert_eq!(
+            fs::read_to_string(&input).expect("read source"),
+            "source bytes"
+        );
+        drop(live);
+
+        let ready = source.path().join("stage-ready");
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .arg("snapshot_staging_runtime_owner_fixture")
+                .env("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_SOURCE", source.path())
+                .env("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_READY", &ready)
+                .spawn()
+                .expect("start stage owner fixture");
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let abandoned = std::path::PathBuf::from(
+            fs::read_to_string(&ready).expect("fixture must publish its stage path"),
+        );
+        child.kill().expect("SIGKILL stage owner fixture");
+        child.wait().expect("reap killed stage owner fixture");
+
+        let reclaimed = homeboy_core::engine::temp::cleanup_runtime_tmp(
+            true,
+            0,
+            Some("homeboy-snapshot-stage"),
+            10,
+        )
+        .expect("clean abandoned runtime stage");
+        assert!(reclaimed.removed_count >= 1);
+        assert!(
+            !abandoned.exists(),
+            "killed owner stage must be reclaimable"
+        );
+        assert_eq!(
+            fs::read_to_string(&input).expect("read source"),
+            "source bytes"
+        );
+    });
+}
+
+#[test]
 fn snapshot_transport_archives_only_the_admitted_scratch_stage() {
     let source = tempfile::tempdir().expect("source");
     let scratch = tempfile::tempdir().expect("admitted scratch");

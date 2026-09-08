@@ -172,6 +172,19 @@ fn retry_availability(
     }) {
         return unavailable("acceptance rejection repair budget is exhausted for this lineage");
     }
+    if super::is_unmaterialized_cook_admission(record) {
+        if !record.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]
+            .as_object()
+            .is_some_and(|intent| intent.get("argv").is_some_and(serde_json::Value::is_array))
+        {
+            return unavailable(
+                "terminal unmaterialized Cook admission lacks its durable replay intent",
+            );
+        }
+        return available(
+            "terminal unmaterialized Cook admission retains its immutable replay binding; retry will reserve a new admission and revalidate runner readiness",
+        );
+    }
     if record.metadata["cook_id"].is_string() {
         match crate::agent_task_service::retry_admission_for_projection(&record.run_id) {
             Ok(crate::agent_task_service::RetryProjectionAdmission::DurableCook) => {
@@ -313,5 +326,27 @@ mod tests {
         );
         assert!(resume.reason.contains("explicitly re-arms"));
         assert!(resume.reason.contains("recommended next action"));
+    }
+
+    #[test]
+    fn exhausted_unmaterialized_cook_retry_uses_its_replay_binding_not_plan_identity() {
+        let mut record = record(AgentTaskRunState::Failed, false);
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "exhausted",
+            "binding": {
+                "replay_intent": {
+                    "cook_id": "run",
+                    "argv": ["agent-task", "cook", "--run-id", "run"]
+                }
+            }
+        });
+
+        let report =
+            lifecycle_action_eligibility(&record, Some(&AgentTaskPlan::new("empty", vec![])));
+
+        assert_eq!(
+            decision(&report, ControlPlaneAction::Retry),
+            ControlPlaneActionAvailability::Available
+        );
     }
 }
