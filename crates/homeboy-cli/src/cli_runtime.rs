@@ -3505,8 +3505,7 @@ fn normalize_agent_task_runner_option(cli: &mut Cli, normalized_args: &[String])
         || !matches!(
             &cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command:
-                    crate::commands::agent_task::AgentTaskCommand::Cook(_)
+                command: crate::commands::agent_task::AgentTaskCommand::Cook(_)
                     | crate::commands::agent_task::AgentTaskCommand::Providers(_),
             })
         )

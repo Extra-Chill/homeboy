@@ -1240,7 +1240,10 @@ mod tests {
                 .expect("registered provider readiness parse retains runner");
 
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-            let normalized_args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            let normalized_args = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
             let preflight = crate::commands::utils::resource_policy::parsed_command_preflight_input(
                 &cli,
                 &normalized_args,
