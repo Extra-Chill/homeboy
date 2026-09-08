@@ -528,12 +528,7 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
             value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
         });
     }
-    let request = crate::agent_task_submission_service::prepared_submission_request(
-        record_run_id,
-        false,
-        "homeboy-loaded-plan",
-    )?;
-    let run_id = request.run.as_str();
+    let run_id = record_run_id.expect("record run id is present after ephemeral execution");
     // Prepare before persistence so the lifecycle record and scheduler use the
     // same materialized workspace contract. In particular, Cook's derived
     // baseline capability must bind the persisted task workspace.
@@ -544,7 +539,11 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
             prepared = prepared.with_lifecycle_store(store.clone());
         }
         crate::agent_task_submission_service::reject_prepared_plan(
-            &request,
+            &crate::agent_task_submission_service::prepared_submission_request(
+                Some(run_id),
+                false,
+                "homeboy-loaded-plan",
+            )?,
             prepared,
             "prepare_plan_for_execution",
             &error,
@@ -558,8 +557,11 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
     if let Some(harvest_context) = supplied_harvest_context {
         prepared = prepared.with_harvest_context(harvest_context);
     }
-    let outcome = crate::agent_task_submission_service::submit_prepared_plan_with_cook_baseline(
-        &request,
+    // Cook marks its durable attempt running before entering this loaded-plan
+    // execution path. Re-submitting it would reject that legitimate owner as a
+    // duplicate submission; execute the claim the Cook runtime already owns.
+    let outcome = crate::agent_task_submission_service::execute_claimed_plan(
+        run_id,
         prepared,
         executor,
         derived_cook_baseline,
@@ -2752,6 +2754,7 @@ fn run_claimed(
         crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
             .with_claimed_plan_enrichment(),
         executor,
+        None,
     )?;
     Ok(AgentTaskRunResult {
         exit_code: outcome.exit_code,

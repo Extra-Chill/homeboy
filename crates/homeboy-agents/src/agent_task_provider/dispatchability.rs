@@ -1766,7 +1766,7 @@ mod tests {
         let script = root.path().join("readiness.js");
         std::fs::write(
             &script,
-            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'provider_account_blocked',retryable:false,remediation:'switch account',reason:'provider_account_blocked: provider_account_blocked: account access rejected',cache_key:'blocked',identity:{}}));",
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'provider_account_blocked',retryable:false,remediation:'switch account',reason:'provider_account_blocked: provider_account_blocked: account access rejected',cache_key:'blocked',identity:{}}));",
         )
         .expect("readiness script");
 
@@ -2251,7 +2251,7 @@ mod tests {
             .expect("fallback credential");
         std::fs::write(
             &script,
-            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');const token=process.env.TEST_ACCOUNT_TOKEN||'';const ready=token==='fallback-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:token,reason:token,cache_key:token,identity:{account:token}}));",
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync(process.argv[2],'probe\\n');const token=process.env.TEST_ACCOUNT_TOKEN||'';const ready=token==='fallback-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:token,reason:token,cache_key:token,identity:{account:token}}));",
         )
         .expect("readiness script");
         let mut provider = provider(&script, &count);

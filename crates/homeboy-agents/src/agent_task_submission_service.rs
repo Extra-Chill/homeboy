@@ -183,6 +183,7 @@ pub(crate) fn execute_claimed_plan(
     run_id: &str,
     mut prepared: PreparedAgentTaskSubmission,
     executor: SharedAgentTaskExecutor,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
 ) -> Result<AgentTaskSubmissionOutcome> {
     let request = prepared_submission_request(Some(run_id), false, "homeboy-claimed-run")?;
     let lifecycle_store = prepared
@@ -246,7 +247,7 @@ pub(crate) fn execute_claimed_plan(
             prepared.plan.clone(),
             run_id,
             executor,
-            None,
+            derived_cook_baseline,
             harvest_context,
         )?;
         let record = lifecycle_store.record_run_aggregate(run_id, &prepared.plan, &aggregate)?;

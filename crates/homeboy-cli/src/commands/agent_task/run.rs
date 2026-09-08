@@ -1287,7 +1287,7 @@ mod preview_tests {
         std::fs::write(&credential, r#"{"token":"fallback-token"}"#).expect("credential");
         std::fs::write(
             &readiness,
-            "const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
         )
         .expect("readiness script");
         let catalog = provider::AgentTaskProviderCatalog {
