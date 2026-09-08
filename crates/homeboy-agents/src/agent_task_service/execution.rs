@@ -483,7 +483,6 @@ pub(crate) fn run_loaded_plan_with_derived_cook_baseline(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     plan: AgentTaskPlan,
