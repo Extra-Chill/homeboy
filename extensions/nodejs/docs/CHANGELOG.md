@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.7.4] - 2026-09-08
+
+### Fixed
+- retain bounded redacted failure context
+
 ## [3.7.3] - 2026-09-06
 
 ### Fixed
