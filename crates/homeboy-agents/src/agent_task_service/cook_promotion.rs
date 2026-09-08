@@ -1546,6 +1546,7 @@ pub fn verify_replacement_gates(
     cook_or_attempt_id: &str,
     gates: crate::agent_task_gate::VerifyGateOptions,
     external_authorization: String,
+    interrupted_rerun_authorization: Option<String>,
 ) -> Result<AgentTaskPromotionReport> {
     let run_id = super::cook_recipe::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
     let lifecycle_store =
@@ -1591,6 +1592,7 @@ pub fn verify_replacement_gates(
                 &run_id,
                 gates,
                 external_authorization,
+                interrupted_rerun_authorization,
             );
             match result {
                 Ok(report) => {
@@ -1623,6 +1625,7 @@ fn verify_replacement_gates_owned(
     run_id: &str,
     gates: crate::agent_task_gate::VerifyGateOptions,
     external_authorization: String,
+    interrupted_rerun_authorization: Option<String>,
 ) -> Result<AgentTaskPromotionReport> {
     let accept_inherited_failures = gates.accept_inherited_failures;
     let gate_timeout = gates.gate_timeout();
@@ -1648,8 +1651,17 @@ fn verify_replacement_gates_owned(
             None,
         ));
     }
-    if replacement_gate_execution_started(lifecycle_store, run_id)? {
+    let interrupted_rerun_authorization =
+        interrupted_rerun_authorization.filter(|authorization| !authorization.trim().is_empty());
+    let recovering_interrupted_execution =
+        replacement_gate_execution_started(lifecycle_store, run_id)?;
+    if recovering_interrupted_execution && interrupted_rerun_authorization.is_none() {
         return Err(interrupted_replacement_gate_execution_error(run_id));
+    }
+    if recovering_interrupted_execution
+        && replacement_gate_execution_is_live(lifecycle_store, run_id)?
+    {
+        return Err(live_replacement_gate_execution_error(run_id));
     }
     if !matches!(
         original.status,
@@ -1780,6 +1792,15 @@ fn verify_replacement_gates_owned(
                 },
             ),
     );
+    if recovering_interrupted_execution {
+        let authorization = interrupted_rerun_authorization
+            .expect("interrupted execution recovery requires explicit authorization");
+        replacement.provenance["replacement_gate_execution_recovery"] = serde_json::json!({
+            "schema": "homeboy/agent-task-replacement-gate-execution-recovery/v1",
+            "operator_authorization": authorization,
+            "automatic_rerun": false,
+        });
+    }
     record_replacement_gate_proof(
         &run_id,
         replacement,
@@ -1862,6 +1883,21 @@ pub(crate) fn replacement_gate_execution_started(
         .is_some())
 }
 
+fn replacement_gate_execution_is_live(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let record = lifecycle_store.read_record(run_id)?;
+    Ok(record
+        .metadata
+        .pointer(&format!(
+            "/{REPLACEMENT_GATE_EXECUTION_FENCES_KEY}/verify-replacement/owner_pid"
+        ))
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .is_some_and(homeboy_core::process::pid_is_running))
+}
+
 pub(crate) fn mark_replacement_gate_execution_started(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -1880,6 +1916,7 @@ pub(crate) fn mark_replacement_gate_execution_started(
         fences["verify-replacement"] = serde_json::json!({
             "schema": "homeboy/agent-task-replacement-gate-execution-fence/v1",
             "state": "started",
+            "owner_pid": std::process::id(),
         });
         true
     })?;
@@ -1899,8 +1936,26 @@ fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {
         "kind": "external_candidate_bound_proof_required",
         "run_id": run_id,
         "command": format!(
+            "homeboy agent-task verify-replacement {run_id} --authorize-external-proof <proof-authorization> --authorize-interrupted-rerun <rerun-authorization> --verify '<candidate-bound command>'"
+        ),
+        "external_proof_command": format!(
             "homeboy agent-task record-replacement-gate-proof {run_id} --promotion @replacement.json --authorize-external-proof <authorization>"
         ),
+    });
+    error
+}
+
+fn live_replacement_gate_execution_error(run_id: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "replacement_gate_proof",
+        "replacement gate execution still has a live owner; Homeboy will not rerun shell gates concurrently",
+        Some(run_id.to_string()),
+        Some(vec![format!("homeboy agent-task status {run_id}")]),
+    );
+    error.details["recovery"] = serde_json::json!({
+        "kind": "replacement_gate_execution_live",
+        "run_id": run_id,
+        "status_command": format!("homeboy agent-task status {run_id}"),
     });
     error
 }
@@ -3147,7 +3202,8 @@ pub fn persist_manual_finalization_retry_intent(
     )?;
     agent_task_lifecycle::record_manual_finalization_retry(run_id)?;
     let candidate = crate::agent_task_promotion::candidate_fingerprint(&report.path)?;
-    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { mut fingerprint } =
+        candidate
     else {
         return Err(Error::validation_invalid_argument(
             "path",
@@ -3156,6 +3212,9 @@ pub fn persist_manual_finalization_retry_intent(
             None,
         ));
     };
+    // A committed checkout is clean, but its preflight dossier has already
+    // authenticated the candidate's changed-file scope for receipt recovery.
+    fingerprint.changed_files = report.changed_files.clone();
     agent_task_lifecycle::record_manual_finalization_retry_candidate(
         run_id,
         serde_json::to_value(fingerprint).expect("candidate fingerprint serializes"),
@@ -4198,7 +4257,10 @@ fn valid_manual_finalization_receipt(
         && report.publication_proof.status == "review_ready"
         && report.finalization_outcome.schema
             == crate::agent_task_finalization::AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA
-        && matches!(report.pr_action.as_str(), "created" | "updated")
+        && matches!(
+            report.pr_action.as_str(),
+            "created" | "updated" | "already_merged"
+        )
         && report.publication_proof.adapter_action.as_deref() == Some(report.pr_action.as_str())
         && report.publication_proof.adapter_ref == report.pr_url
         && report.pr_number.is_some()
@@ -4278,7 +4340,13 @@ fn receipt_matches_manual_preflight(
             )
             .is_ok_and(|candidate| {
                 candidate.tree == binding.candidate_tree
-                    && candidate.changed_files == binding.changed_files
+                    && (candidate.changed_files == binding.changed_files
+                        // Older retryable manual finalizations fingerprinted a
+                        // clean committed checkout, which has no working-tree
+                        // changes. Their validated intent remains the durable
+                        // source of the preflight candidate scope.
+                        || (candidate.changed_files.is_empty()
+                            && intent.changed_files == binding.changed_files))
             })
         } else {
             intent_git_identity.commit_sha.is_some()
@@ -4330,7 +4398,13 @@ fn require_manual_retry_candidate(
     };
     // Hooks may stage the exact candidate before rejecting it. Bind semantic
     // content and paths, not the transient staged/unstaged representation.
-    if actual.tree != expected.tree || actual.changed_files != expected.changed_files {
+    let legacy_scope_matches = expected.changed_files.is_empty()
+        && manual_finalization_intent_for_run(record, &record.run_id)
+            .map(|intent| intent.changed_files == actual.changed_files)
+            .unwrap_or(false);
+    if actual.tree != expected.tree
+        || (actual.changed_files != expected.changed_files && !legacy_scope_matches)
+    {
         return Err(Error::validation_invalid_argument(
             "manual_finalization_retry_candidate",
             "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
@@ -5757,6 +5831,13 @@ pub fn cook_failure_context(
     let pre_execution_diagnostic = record.as_ref().and_then(|record| {
         let failure = record.metadata.get("pre_execution_failure")?;
         let details = failure.get("details")?;
+        if failure.get("error_code").and_then(Value::as_str) == Some("resource.capacity_reserve") {
+            return Some(serde_json::json!({
+                "code": "resource.capacity_reserve",
+                "message": failure.get("message"),
+                "details": details,
+            }));
+        }
         details
             .get("worktree_provider_failure")
             .cloned()
@@ -5871,26 +5952,33 @@ pub fn cook_failure_context(
             None,
         )
     };
-    let recovery_actions = dirty_candidate_adoption_recovery_actions(
-        &recipe,
-        record.as_ref(),
-        cook_id,
-        &chronological_latest_run_id,
-    )
-    .unwrap_or_else(|| {
-        cook_recovery_actions(
-            status,
-            &chronological_latest_run_id,
-            recovery_legal,
-            blocking_claim.is_some(),
-            record
-                .as_ref()
-                .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
-            exact_checkpoint_candidate_mismatch(&diagnostic),
-            ambiguous_promotion_artifact_ids(record_run_id, promotion_diagnostic.as_ref(), &recipe),
-            record.as_ref().and_then(lab_handoff_runtime_recovery),
-        )
-    });
+    let recovery_actions = capacity_reserve_recovery_actions(record.as_ref())
+        .or_else(|| {
+            dirty_candidate_adoption_recovery_actions(
+                &recipe,
+                record.as_ref(),
+                cook_id,
+                &chronological_latest_run_id,
+            )
+        })
+        .unwrap_or_else(|| {
+            cook_recovery_actions(
+                status,
+                &chronological_latest_run_id,
+                recovery_legal,
+                blocking_claim.is_some(),
+                record
+                    .as_ref()
+                    .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
+                exact_checkpoint_candidate_mismatch(&diagnostic),
+                ambiguous_promotion_artifact_ids(
+                    record_run_id,
+                    promotion_diagnostic.as_ref(),
+                    &recipe,
+                ),
+                record.as_ref().and_then(lab_handoff_runtime_recovery),
+            )
+        });
     let promotion_provenance = promotion.cloned();
     Some(super::AgentTaskCookFailureContext {
         cook_id: cook_id.to_string(),
@@ -5916,6 +6004,55 @@ pub fn cook_failure_context(
         recovery_reason: recovery_actions.reason,
         next_actions: recovery_actions.next_actions,
         legal_actions: recovery_actions.legal_actions,
+    })
+}
+
+/// A persisted failure is normally not trusted to manufacture shell commands.
+/// Reserve admission actions are core-owned, explicitly read-only, and retain
+/// their structured identifier, so the terminal Cook notification can safely
+/// forward only the inventory action. The confirmation-gated apply action stays
+/// in durable diagnostic evidence.
+fn capacity_reserve_recovery_actions(
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+) -> Option<CookRecoveryActions> {
+    let failure = record?.metadata.get("pre_execution_failure")?;
+    if failure.get("error_code").and_then(Value::as_str) != Some("resource.capacity_reserve") {
+        return None;
+    }
+    let actions = failure
+        .pointer("/details/_homeboy_actions")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|action| {
+            action
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("capacity.reserve."))
+                && action.get("program").and_then(Value::as_str) == Some("homeboy")
+                && action.get("safety").and_then(Value::as_str) == Some("read_only")
+        })
+        .filter_map(|action| {
+            let label = action.get("label")?.as_str()?;
+            let args = action
+                .get("args")?
+                .as_array()?
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            Some(super::AgentTaskCookRecoveryAction {
+                action: label.to_string(),
+                command: format!("homeboy {}", quote_args(&args)),
+            })
+        })
+        .take(1)
+        .collect::<Vec<_>>();
+    (!actions.is_empty()).then(|| CookRecoveryActions {
+        reason: "Filesystem reserve pressure blocked admission. Inspect the protected scoped inventory before approving any removal.".to_string(),
+        legal_actions: actions.clone(),
+        next_actions: actions,
     })
 }
 

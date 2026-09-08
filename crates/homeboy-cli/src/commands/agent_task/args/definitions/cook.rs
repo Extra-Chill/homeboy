@@ -756,13 +756,19 @@ mod tests {
             "--run-plan",
             "--placement <PLACEMENT>",
             "One repository per batch",
+            "multi-repository batch-cook manifest",
+            "homeboy agent-task fanout run-plan --input @multi-repo-plan.json",
             "Two phases:",
             "Verification is required:",
             "--placement lab",
-            "https://github.com/Extra-Chill/homeboy/issues/11088",
         ] {
             assert!(compact.contains(expected), "missing {expected}:\n{compact}");
         }
+
+        assert!(
+            !compact.contains("https://github.com/Extra-Chill/homeboy/issues/11088"),
+            "compact help must not direct operators to the closed multi-repository tracker:\n{compact}"
+        );
 
         for advanced in [
             "--provider-config <JSON>",

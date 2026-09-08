@@ -1,4 +1,7 @@
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
 
 use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy_core::extension::bench::artifact::BenchArtifact;
@@ -112,6 +115,97 @@ fn bench_observation_reports_missing_and_blocked_artifacts() {
                 .is_none()
         );
     });
+}
+
+#[test]
+fn bench_observation_keeps_retained_artifact_when_public_alias_returns_404() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let public_alias = serve_public_alias(404);
+        let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
+        std::env::set_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL", &public_alias);
+        let run_dir = RunDir::create().expect("run dir");
+        fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
+        fs::write(run_dir.path().join("retained.json"), b"{}").expect("retained artifact");
+        let mut results = bench_results("homeboy", "cold", 42.0);
+        results.scenarios[0].artifacts.insert(
+            "retained".to_string(),
+            BenchArtifact {
+                path: Some("retained.json".to_string()),
+                required_durable: true,
+                ..BenchArtifact::default()
+            },
+        );
+        let mut workflow = BenchRunWorkflowResult {
+            status: "passed".to_string(),
+            component: "homeboy".to_string(),
+            exit_code: 0,
+            iterations: 1,
+            results: Some(results),
+            gate_results: Vec::new(),
+            gate_failures: Vec::new(),
+            baseline_comparison: None,
+            hints: None,
+            failure: None,
+            diagnostics: Vec::new(),
+        };
+        let args = bench_args();
+        let observation = start(BenchObservationStart {
+            component_id: "homeboy",
+            component_label: "homeboy",
+            source_path: home.path(),
+            args: &args,
+            selected_scenarios: &["cold".to_string()],
+            rig_id: None,
+            rig_snapshot: None,
+            run_dir: &run_dir,
+        })
+        .expect("start observation");
+
+        finish_success(Some(observation), &mut workflow, &run_dir).expect("observation summary");
+
+        assert_eq!(workflow.status, "passed");
+        assert!(workflow.diagnostics.is_empty());
+        let artifact_id = workflow.results.as_ref().unwrap().scenarios[0].artifacts["retained"]
+            .observation_artifact_id
+            .as_ref()
+            .expect("retained artifact id");
+        let store =
+            homeboy::core::observation::ObservationStore::open_initialized().expect("store");
+        let artifact = store
+            .get_artifact(artifact_id)
+            .expect("artifact lookup")
+            .expect("retained artifact");
+        assert_eq!(
+            artifact.metadata_json["public_url_validation"]["reachable"],
+            false
+        );
+        assert_eq!(
+            artifact.metadata_json["public_url_validation"]["status_code"],
+            404
+        );
+
+        match prior_public_base {
+            Some(value) => std::env::set_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL", value),
+            None => std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"),
+        }
+    });
+}
+
+fn serve_public_alias(status: u16) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind public alias");
+    let address = listener.local_addr().expect("public alias address");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept public alias probe");
+        let mut buffer = [0; 1024];
+        let _ = stream.read(&mut buffer);
+        write!(
+            stream,
+            "HTTP/1.1 {status} Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write public alias response");
+    });
+    format!("http://{address}/artifact")
 }
 
 #[test]

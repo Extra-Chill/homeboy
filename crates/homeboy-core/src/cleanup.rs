@@ -9,7 +9,7 @@ use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::StorageExhaustedDetails;
+use crate::error::{ActionSafety, CapacityReserveDetails, ExecutableAction};
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
 use crate::{git, Error, Result};
@@ -238,7 +238,6 @@ pub fn admit_reconstructable_artifact_work_in_root(
             return Err(reconstructable_admission_error(
                 root,
                 budget.available_bytes,
-                budget.available_inodes,
                 reserve_bytes,
             ));
         }
@@ -320,18 +319,81 @@ fn below_reconstructable_reserve(root: &Path, reserve_bytes: u64) -> bool {
 fn reconstructable_admission_error(
     root: &Path,
     available_bytes: Option<u64>,
-    available_inodes: Option<u64>,
     reserve_bytes: u64,
 ) -> Error {
-    Error::storage_exhausted_detailed(StorageExhaustedDetails {
-        error: "managed worktree filesystem remains below the reconstructable-artifact reserve after bounded retention".to_string(),
-        context: Some("admission before managed work".to_string()),
-        path: Some(root.display().to_string()),
+    let available_bytes = available_bytes.expect("measured reserve breach has available bytes");
+    let path = root.display().to_string();
+    let (inspect_action, apply_action) = if let Ok(repository_root) = git_root(root) {
+        let repository_root = repository_root.display().to_string();
+        (
+            ExecutableAction::new(
+                "capacity.reserve.inspect_repository_artifacts",
+                "inspect reclaimable artifacts across repository worktrees",
+                "homeboy",
+                [
+                    "cleanup",
+                    "artifacts",
+                    "--path",
+                    repository_root.as_str(),
+                    "--all-worktrees",
+                    "--merged-only",
+                    "--sort",
+                    "size",
+                    "--limit",
+                    "100",
+                ],
+                ActionSafety::ReadOnly,
+            ),
+            ExecutableAction::new(
+                "capacity.reserve.apply_repository_artifacts",
+                "remove approved artifacts from merged repository worktrees",
+                "homeboy",
+                [
+                    "cleanup",
+                    "artifacts",
+                    "--path",
+                    repository_root.as_str(),
+                    "--all-worktrees",
+                    "--merged-only",
+                    "--sort",
+                    "size",
+                    "--limit",
+                    "100",
+                    "--apply",
+                ],
+                ActionSafety::Mutating,
+            ),
+        )
+    } else {
+        (
+            ExecutableAction::new(
+                "capacity.reserve.inspect_registered_repository_artifacts",
+                "inspect reclaimable artifacts in registered repositories",
+                "homeboy",
+                ["cleanup", "--include", "repo-artifacts"],
+                ActionSafety::ReadOnly,
+            ),
+            ExecutableAction::new(
+                "capacity.reserve.apply_registered_repository_artifacts",
+                "remove approved artifacts in registered repositories",
+                "homeboy",
+                ["cleanup", "--include", "repo-artifacts", "--apply"],
+                ActionSafety::Mutating,
+            ),
+        )
+    };
+    Error::capacity_reserve(CapacityReserveDetails {
+        filesystem: path.clone(),
         available_bytes,
-        available_inodes,
-        reserve_bytes: Some(reserve_bytes),
-        reserve_inodes: None,
+        reserve_bytes,
+        shortfall_bytes: reserve_bytes.saturating_sub(available_bytes),
     })
+    .with_action(inspect_action)
+    .with_action(
+        apply_action
+        .requiring_confirmation("approve scoped rebuildable artifact removal"),
+    )
+    .with_hint("Inspect scoped rebuildable artifacts, then explicitly approve their removal if appropriate.")
 }
 
 fn run_automatic_artifact_retention_in(
@@ -1118,15 +1180,17 @@ fn collect_worktree_candidates(
             USAGE_MEASURED
         };
         let age_seconds = usage.age_seconds();
-        let effective_min_age_days = automatic_policy
+        let declaration_min_age_days = automatic_policy
             .map(|policy| {
                 declaration
                     .min_age_days
                     .unwrap_or(0)
                     .max(policy.min_age_days)
             })
-            .or_else(|| effective_min_age_days(options, &declaration));
-        if let Some(min_age_days) = effective_min_age_days {
+            .or(declaration.min_age_days);
+        if let Some(min_age_days) =
+            effective_min_age_days(options.min_age_days, declaration_min_age_days)
+        {
             if !pressure_eligible && !meets_age_gate(age_seconds, min_age_days) {
                 skipped.push(skip_row(
                     worktree,
@@ -1166,17 +1230,58 @@ fn collect_worktree_candidates(
     })
 }
 
-/// The strictest age floor in play: the caller's gate and the declaration
-/// owner's gate both have to pass.
+/// The caller's age gate can only make a declaration stricter; neither source
+/// may relax the other.
 fn effective_min_age_days(
-    options: &ArtifactCleanupOptions,
-    declaration: &ArtifactDeclaration,
+    caller_min_age_days: Option<u64>,
+    declaration_min_age_days: Option<u64>,
 ) -> Option<u64> {
-    match (options.min_age_days, declaration.min_age_days) {
+    match (caller_min_age_days, declaration_min_age_days) {
         (Some(left), Some(right)) => Some(left.max(right)),
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     }
+}
+
+/// Apply the invocation's common eligibility rules after every candidate source
+/// has contributed. Temp artifacts are discovered outside a Git worktree scan,
+/// so filtering only during that scan left them outside the caller's age gate.
+fn retain_commonly_eligible_candidates(
+    candidates: &mut Vec<ArtifactCleanupCandidate>,
+    skipped: &mut Vec<ArtifactCleanupSkipped>,
+    options: &ArtifactCleanupOptions,
+    active: &ActiveWorktrees,
+) {
+    candidates.retain(|candidate| {
+        let liveness = active.liveness(Path::new(&candidate.worktree));
+        if candidate.declared_by == "self_temp_root"
+            && (candidate.liveness != LIVENESS_IDLE || liveness != LIVENESS_IDLE)
+        {
+            let reason = if liveness == LIVENESS_ACTIVE_BUILD
+                || candidate.liveness == LIVENESS_ACTIVE_BUILD
+            {
+                format!(
+                    "active_build: a Cargo build holds the target lock in {}",
+                    candidate.worktree
+                )
+            } else {
+                "checkout is active or its liveness could not be determined".to_string()
+            };
+            skipped.push(candidate_skip_row(candidate, reason));
+            return false;
+        }
+        if let Some(min_age_days) = options.min_age_days {
+            if candidate.pressure_eligible || meets_age_gate(candidate.age_seconds, min_age_days) {
+                return true;
+            }
+            skipped.push(candidate_skip_row(
+                candidate,
+                format!("artifact was modified within the {min_age_days}-day age gate"),
+            ));
+            return false;
+        }
+        true
+    });
 }
 
 /// An artifact whose age cannot be read fails the gate. An unreadable timestamp
@@ -1284,6 +1389,7 @@ fn cleanup_artifacts_in_worktrees(
             candidates.push(candidate);
         }
     }
+    retain_commonly_eligible_candidates(&mut candidates, &mut skipped, options, &active);
 
     // Several workspace roots can resolve to the same linked worktree. Count
     // each canonical artifact once before the global largest-first cap.
@@ -1728,15 +1834,26 @@ fn apply_artifact_candidate_with_before_remove(
         .then(|| filesystem_available_bytes(path.parent().unwrap_or(path)))
         .flatten();
     before_remove();
-    // Git and controller probes above can take long enough for a Cargo build to
-    // start after the initial liveness check.
-    if candidate.kind == "rust_target"
-        && active.liveness(Path::new(&candidate.worktree)) == LIVENESS_ACTIVE_BUILD
-    {
-        return ArtifactCleanupCandidateApplyOutcome::Skipped(format!(
-            "active_build: a Cargo build holds the target lock in {} — deleting it now would be regenerated immediately",
-            candidate.worktree
-        ));
+    // Git and controller probes above can take long enough for a checkout to
+    // become active. Recheck every candidate that was idle at discovery: temp
+    // Homeboy targets are not `rust_target` declarations but use Cargo's lock
+    // protocol just the same.
+    if candidate.kind == "rust_target" || candidate.liveness == LIVENESS_IDLE {
+        match active.liveness(Path::new(&candidate.worktree)) {
+            LIVENESS_IDLE => {}
+            LIVENESS_ACTIVE_BUILD => {
+                return ArtifactCleanupCandidateApplyOutcome::Skipped(format!(
+                    "active_build: a Cargo build holds the target lock in {} — deleting it now would be regenerated immediately",
+                    candidate.worktree
+                ));
+            }
+            _ => {
+                return ArtifactCleanupCandidateApplyOutcome::Skipped(
+                    "checkout became active or its liveness became unknown before removal"
+                        .to_string(),
+                );
+            }
+        }
     }
     match remove_artifact_path(path) {
         Ok(()) => ArtifactCleanupCandidateApplyOutcome::Applied(Box::new(applied_row(
@@ -3166,6 +3283,51 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn apply_rechecks_active_build_for_an_opted_in_active_rust_target() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let lock = repo.path().join("target/debug/.cargo-lock");
+            write_file(&repo.path().join("target/debug/app"), "artifact");
+            write_file(&lock, "");
+            let scan = collect_worktree_candidates(
+                &WorktreeInfo {
+                    path: repo.path().to_path_buf(),
+                },
+                &ArtifactCleanupOptions {
+                    include_active_worktrees: true,
+                    ..Default::default()
+                },
+                &ActiveWorktrees::default(),
+                &ProtectedControllerExecutables::default(),
+                None,
+                None,
+                None,
+            )
+            .expect("candidate discovery");
+            let mut candidate = scan
+                .candidates
+                .into_iter()
+                .find(|candidate| candidate.relative_path == "target")
+                .expect("target candidate");
+            // The candidate was admitted with active-worktree cleanup opted in.
+            // A build beginning afterward must still veto the final removal.
+            candidate.liveness = LIVENESS_ACTIVE.to_string();
+            let _held = active_build_lock_tests::hold(&lock);
+
+            let outcome =
+                apply_artifact_candidate(&candidate, &ActiveWorktrees::default(), "test-run");
+
+            assert!(matches!(
+                outcome,
+                ArtifactCleanupCandidateApplyOutcome::Skipped(reason)
+                    if reason.starts_with("active_build:")
+            ));
+            assert!(repo.path().join("target").exists());
+        });
+    }
+
     #[test]
     fn apply_fails_closed_when_git_can_no_longer_be_inspected() {
         crate::test_support::with_isolated_home(|_| {
@@ -3266,8 +3428,30 @@ mod tests {
             let error = admit_reconstructable_artifact_work(vec![repo.path().to_path_buf()])
                 .expect_err("a measured reserve breach must refuse new managed work");
 
-            assert!(error.is_storage_exhausted());
+            assert_eq!(error.code.as_str(), "resource.capacity_reserve");
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
+            assert_eq!(
+                error.details["shortfall_bytes"],
+                u64::MAX - error.details["available_bytes"].as_u64().unwrap()
+            );
+            assert_eq!(
+                error.details["filesystem"],
+                repo.path().display().to_string()
+            );
+            assert_eq!(error.details["_homeboy_actions"][0]["safety"], "read_only");
+            assert_eq!(error.details["_homeboy_actions"][1]["safety"], "mutating");
+            assert_eq!(
+                error.details["_homeboy_actions"][1]["required_confirmations"][0],
+                "approve scoped rebuildable artifact removal"
+            );
+            assert_eq!(
+                error.details["_homeboy_actions"][0]["args"][4],
+                "--all-worktrees"
+            );
+            assert_eq!(
+                error.details["_homeboy_actions"][0]["args"][5],
+                "--merged-only"
+            );
             assert!(repo.path().join("target/debug/app").exists());
         });
     }
@@ -3288,8 +3472,12 @@ mod tests {
             let error = admit_reconstructable_artifact_work(vec![build_root.path().to_path_buf()])
                 .expect_err("a measured reserve breach must still refuse non-repository work");
 
-            assert!(error.is_storage_exhausted());
+            assert_eq!(error.code.as_str(), "resource.capacity_reserve");
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
+            assert_eq!(
+                error.details["_homeboy_actions"][0]["args"],
+                json!(["cleanup", "--include", "repo-artifacts"])
+            );
         });
     }
 
@@ -3613,6 +3801,129 @@ mod tests {
             fs::read_to_string(checkout.join("src/lib.rs")).expect("read source"),
             "changed source"
         );
+    }
+
+    #[test]
+    fn temp_homeboy_checkout_target_honors_the_caller_age_gate() {
+        let repo = git_repo();
+        let temp_root = TempDir::new().expect("temp root");
+        let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-14394-age-gate");
+        let target = checkout.join("target/debug/homeboy");
+        write_file(&target, "binary");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+            min_age_days: Some(1),
+            ..Default::default()
+        })
+        .expect("apply cleanup");
+
+        assert!(target.exists(), "a recent temp target must be retained");
+        assert!(output
+            .candidates
+            .iter()
+            .all(|candidate| candidate.path != checkout.join("target").to_string_lossy()));
+        assert!(output.skipped.iter().any(|row| {
+            row.path == checkout.join("target").to_string_lossy()
+                && row.reason.contains("1-day age gate")
+        }));
+    }
+
+    #[test]
+    fn aged_idle_temp_homeboy_checkout_target_is_removed_after_the_caller_age_gate() {
+        let repo = git_repo();
+        let temp_root = TempDir::new().expect("temp root");
+        let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-14394-aged-target");
+        let target = checkout.join("target");
+        let binary = target.join("debug/homeboy");
+        let debug = target.join("debug");
+        write_file(&binary, "binary");
+        let old = SystemTime::now() - Duration::from_secs(2 * SECONDS_PER_DAY);
+        for path in [&target, &debug, &binary] {
+            fs::File::open(path)
+                .expect("open target entry")
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .expect("age target entry");
+        }
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+            min_age_days: Some(1),
+            ..Default::default()
+        })
+        .expect("apply cleanup");
+
+        assert!(!target.exists(), "an aged idle temp target must be removed");
+        assert!(output
+            .applied
+            .iter()
+            .any(|row| row.path == target.to_string_lossy()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_homeboy_checkout_target_with_a_held_lock_is_not_eligible_or_removed() {
+        let repo = git_repo();
+        let temp_root = TempDir::new().expect("temp root");
+        let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-14394-held-lock");
+        let target = checkout.join("target");
+        let lock = target.join("debug/.cargo-lock");
+        write_file(&target.join("debug/homeboy"), "binary");
+        write_file(&lock, "");
+        let _held = active_build_lock_tests::hold(&lock);
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+            ..Default::default()
+        })
+        .expect("apply cleanup");
+
+        assert!(target.exists(), "a locked temp target must survive cleanup");
+        assert!(output
+            .skipped
+            .iter()
+            .any(|row| row.path == target.to_string_lossy()
+                && row.reason.starts_with("active_build:")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_rechecks_a_late_cargo_lock_for_temp_homeboy_checkout_target() {
+        let temp_root = TempDir::new().expect("temp root");
+        let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-14394-late-lock");
+        let target = checkout.join("target");
+        let lock = target.join("debug/.cargo-lock");
+        write_file(&target.join("debug/homeboy"), "binary");
+        write_file(&lock, "");
+        let candidate = self_temp_artifact_candidates(&ArtifactCleanupOptions {
+            temp_roots: vec![temp_root.path().to_path_buf()],
+            ..Default::default()
+        })
+        .expect("candidate discovery")
+        .into_iter()
+        .find(|candidate| candidate.kind == "temp_homeboy_checkout_target")
+        .expect("temp target candidate");
+        let mut held = None;
+
+        let outcome = apply_artifact_candidate_with_before_remove(
+            &candidate,
+            &ActiveWorktrees::default(),
+            "test-run",
+            || held = Some(active_build_lock_tests::hold(&lock)),
+        );
+
+        assert!(matches!(
+            outcome,
+            ArtifactCleanupCandidateApplyOutcome::Skipped(reason) if reason.starts_with("active_build:")
+        ));
+        assert!(target.exists(), "a late lock must veto deletion");
+        drop(held);
     }
 
     #[test]
@@ -4792,52 +5103,18 @@ mod tests {
     }
 
     #[test]
-    fn declaration_age_floor_composes_with_the_caller_gate() {
-        let declaration = ArtifactDeclaration {
-            relative_path: "deps".to_string(),
-            kind: "dependency-tree".to_string(),
-            declared_by: "extension:fixture".to_string(),
-            category: "dependencies".to_string(),
-            reconstructable: true,
-            rehydrate_command: None,
-            min_age_days: Some(3),
-            liveness_protected: true,
-        };
-
-        assert_eq!(
-            effective_min_age_days(&ArtifactCleanupOptions::default(), &declaration),
-            Some(3)
-        );
-        assert_eq!(
-            effective_min_age_days(
-                &ArtifactCleanupOptions {
-                    min_age_days: Some(9),
-                    ..Default::default()
-                },
-                &declaration,
-            ),
-            Some(9),
-            "the stricter of the two gates wins"
-        );
-        assert_eq!(
-            effective_min_age_days(
-                &ArtifactCleanupOptions {
-                    min_age_days: Some(1),
-                    ..Default::default()
-                },
-                &declaration,
-            ),
-            Some(3),
-            "a looser caller gate cannot relax a declared floor"
-        );
-    }
-
-    #[test]
     fn unreadable_artifact_age_fails_the_gate() {
         assert!(!meets_age_gate(None, 1));
         assert!(!meets_age_gate(Some(SECONDS_PER_DAY - 1), 1));
         assert!(meets_age_gate(Some(SECONDS_PER_DAY), 1));
         assert!(meets_age_gate(Some(0), 0));
+    }
+
+    #[test]
+    fn declaration_age_floor_composes_with_the_caller_gate() {
+        assert_eq!(effective_min_age_days(None, Some(3)), Some(3));
+        assert_eq!(effective_min_age_days(Some(9), Some(3)), Some(9));
+        assert_eq!(effective_min_age_days(Some(1), Some(3)), Some(3));
     }
 
     #[test]
@@ -5047,6 +5324,32 @@ mod tests {
 
             assert!(output.applied.iter().any(|row| row.relative_path == "deps"));
             assert!(!repo.path().join("deps").exists());
+        });
+    }
+
+    #[test]
+    fn opted_in_active_worktree_still_preserves_rust_target() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            let target = repo.path().join("target");
+            write_file(&target.join("debug/app"), "artifact");
+            register_active_task_worktree(repo.path());
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                path: Some(repo.path().to_path_buf()),
+                apply: true,
+                include_active_worktrees: true,
+                ..Default::default()
+            })
+            .expect("apply cleanup");
+
+            assert!(
+                target.exists(),
+                "an active worktree's Rust target must survive"
+            );
+            assert!(output.skipped.iter().any(|row| {
+                row.relative_path == "target" && row.reason.contains("active task worktree")
+            }));
         });
     }
 
