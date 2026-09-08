@@ -308,11 +308,25 @@ fn parse_daemon_process_candidate_with_digest(
 ) -> Option<DaemonProcessCandidate> {
     let mut fields = line.split_whitespace();
     let pid = fields.next()?.parse().ok()?;
-    let executable = fields.next()?.to_string();
+    let _comm_executable = fields.next()?.to_string();
     let cmdline = fields.collect::<Vec<_>>().join(" ");
     if !command_has_daemon_serve(&cmdline) {
         return None;
     }
+    // macOS `ps comm` silently truncates executable paths. The command column
+    // preserves the argv token for daemon serve, so prefer that exact coordinate
+    // rather than treating a fragment as ownership evidence. If argv is not
+    // parseable, label the platform limitation and leave attribution fail-closed.
+    let executable = daemon_executable_from_cmdline(&cmdline).unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        {
+            "unavailable: macOS ps comm may be truncated".to_string()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            _comm_executable
+        }
+    });
     let bind_endpoint = cmdline
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -363,6 +377,15 @@ fn parse_daemon_process_candidate_with_digest(
         candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
     }
     Some(candidate)
+}
+
+fn daemon_executable_from_cmdline(cmdline: &str) -> Option<String> {
+    let arguments = cmdline.split_whitespace().collect::<Vec<_>>();
+    arguments
+        .windows(3)
+        .find_map(|window| (window[1] == "daemon" && window[2] == "serve").then(|| window[0]))
+        .filter(|executable| !executable.is_empty() && !executable.contains(['\'', '"', '\\']))
+        .map(str::to_string)
 }
 
 /// Re-read every identity coordinate immediately before signaling. The initial
@@ -547,6 +570,27 @@ mod command_state_dir_tests {
             Some("/tmp/conventional/jobs.json")
         );
         assert_eq!(candidate.ownership, DaemonProcessOwnership::Unrelated);
+    }
+}
+
+#[cfg(test)]
+mod process_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn parser_uses_the_full_command_executable_when_comm_is_truncated() {
+        let candidate = parse_daemon_process_candidate(
+            "42 /Users/chubes/.c /Users/chubes/.config/homeboy/bin/homeboy daemon serve --addr 127.0.0.1:0 --state-dir /tmp/daemon",
+            Path::new("/tmp/daemon/jobs.json"),
+            None,
+        )
+        .expect("daemon candidate");
+
+        assert_eq!(
+            candidate.executable,
+            "/Users/chubes/.config/homeboy/bin/homeboy"
+        );
+        assert_eq!(candidate.ownership, DaemonProcessOwnership::Ambiguous);
     }
 }
 
