@@ -279,6 +279,35 @@ fn declared_agent_task_cook_provider_defaults_include_controller_sources() {
 }
 
 #[test]
+fn lab_dispatch_model_route_does_not_require_an_unrelated_sole_provider_default() {
+    let provider = fixture_provider_with_example_defaults();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--backend".to_string(),
+        "sample-runtime".to_string(),
+        "--model".to_string(),
+        "xai/grok-4.6".to_string(),
+    ];
+
+    let names = declared_agent_task_controller_secret_env_with_providers(
+        &args,
+        std::slice::from_ref(&provider),
+    )
+    .expect("model route secret discovery");
+    let sources = declared_agent_task_controller_secret_sources_with_providers(
+        &args,
+        1,
+        std::slice::from_ref(&provider),
+    )
+    .expect("model route source discovery");
+
+    assert!(names.is_empty());
+    assert!(sources.is_empty());
+}
+
+#[test]
 fn declared_agent_task_providers_still_include_provider_default_sources() {
     let provider = fixture_provider_with_example_defaults();
     let args = vec![
