@@ -131,6 +131,14 @@ A useful headless UI can be built from this read/query surface:
   after its payload ages out of the retained read window; conflicting reuse of
   a key is rejected. Synthesized `agent-task logs` remain a separate legacy
   projection rather than being frozen into this forward-only ledger.
+  Control-plane actions append one `action.accepted` event before invoking the
+  delegated effect and one terminal `action.succeeded`,
+  `action.already_satisfied`, or `action.failed` event after persisting the
+  immutable acknowledgement. Matching action replays return that acknowledgement
+  without appending duplicate events; conflicting intent is rejected before an
+  event or effect. Internal action event identities are reserved from caller-owned
+  append requests. Compact receipts suppress the redacted legacy action-log
+  projection even after event payload retention expires.
   Event pages reject non-monotonic, duplicate, or cross-run streams. Their
   opaque cursors are bound to one run; the adjacent `/events/retention` resource
   reports the earliest and latest retained sequence without changing the strict

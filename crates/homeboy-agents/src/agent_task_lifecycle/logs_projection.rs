@@ -109,7 +109,6 @@ fn event_stream_in_store(
     } else {
         normalize_runner_job_events(&raw_events, &record, &artifact_refs)?
     };
-    let events = append_control_plane_action_events(&record, events)?;
     let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
         Error::validation_invalid_argument(
             "run_id",
@@ -118,6 +117,12 @@ fn event_stream_in_store(
             None,
         )
     })?;
+    let action_receipts = lifecycle_store
+        .open_observation_readonly()?
+        .control_plane_event_receipt_digests(&run)?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let events = append_control_plane_action_events(&record, events, &action_receipts)?;
     Ok((run, events))
 }
 
@@ -136,6 +141,7 @@ fn control_plane_event_read_error(
 fn append_control_plane_action_events(
     record: &AgentTaskRunRecord,
     mut events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
+    action_receipts: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<homeboy_control_plane_contract::ControlPlaneEvent>> {
     let task_id = record
         .tasks
@@ -154,6 +160,14 @@ fn append_control_plane_action_events(
                 .is_some_and(|key| key.starts_with("control-plane-action:"))
         });
     for claim in claims {
+        let operation_key = claim["operation_key"].as_str().expect("filtered claim key");
+        let accepted_key =
+            crate::orchestration::action_event_idempotency_key(operation_key, "action.accepted");
+        if action_receipts.contains(&homeboy_engine_primitives::content_hash::sha256_hex(
+            accepted_key.as_bytes(),
+        )) {
+            continue;
+        }
         let mut accepted = control_plane_event(
             record,
             events.len() as u64 + 1,
@@ -161,10 +175,10 @@ fn append_control_plane_action_events(
             "action.accepted",
             claim["leased_at"].as_str().map(str::to_string),
             "control-plane",
-            json!({
+            homeboy_core::redaction::redact_json(&json!({
                 "operation_key": claim["operation_key"],
                 "request": claim["intent"],
-            }),
+            })),
             std::iter::empty(),
         )?;
         accepted.task = None;
@@ -184,7 +198,7 @@ fn append_control_plane_action_events(
             kind,
             claim["completed_at"].as_str().map(str::to_string),
             "control-plane",
-            result.clone(),
+            homeboy_core::redaction::redact_json(result),
             std::iter::empty(),
         )?;
         terminal.task = None;

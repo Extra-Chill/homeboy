@@ -15,10 +15,11 @@ use homeboy_control_plane_contract::{
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
     ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEvidenceRef,
-    ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation,
-    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
-    ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEventSource,
+    ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
+    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
@@ -29,13 +30,14 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
     CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
     CONTROL_PLANE_CANCEL_RESULT_SCHEMA, CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
-    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
-    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
-    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-    CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
+    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+    CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
+    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -71,6 +73,7 @@ const MISSION_CURSOR_SCHEMA: &str = "homeboy/control-plane-mission-cursor/v1";
 const TASK_CURSOR_SCHEMA: &str = "homeboy/control-plane-task-cursor/v1";
 const ATTEMPT_CURSOR_SCHEMA: &str = "homeboy/control-plane-attempt-cursor/v1";
 const EVENT_CURSOR_SCHEMA: &str = "homeboy/control-plane-event-cursor/v1";
+const INTERNAL_ACTION_EVENT_KEY_PREFIX: &str = "homeboy-internal-action:";
 const RUN_CURSOR_BOUND: usize = 1024;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -1617,9 +1620,17 @@ impl OrchestrationService<LifecycleStoreLookup> {
         .map_err(map_lifecycle_error)?
         {
             ClaimOutcome::AlreadyCompleted(result) => {
-                serde_json::from_value(result).map_err(|error| {
+                let acknowledgement = serde_json::from_value(result).map_err(|error| {
                     ControlPlaneError::unavailable(format!("stored action result: {error}"))
-                })
+                })?;
+                ensure_action_events_in_store(
+                    &self.lookup.store,
+                    &record,
+                    request,
+                    &operation_key,
+                    &acknowledgement,
+                )?;
+                Ok(acknowledgement)
             }
             ClaimOutcome::LeaseHeld => Err(ControlPlaneError::unavailable(
                 "this idempotent action is already in progress",
@@ -1632,6 +1643,23 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     action_name(request.action),
                     request.idempotency_key
                 );
+                append_action_event_in_store(
+                    &self.lookup.store,
+                    &record,
+                    request,
+                    &operation_key,
+                    "action.accepted",
+                    &accepted_at,
+                    serde_json::json!({
+                        "operation_digest": action_operation_digest(&operation_key),
+                        "action": request.action,
+                        "acknowledgement": acknowledgement,
+                        "actor": request.actor,
+                        "expected_updated_at": request.expected_updated_at,
+                        "confirmed": request.confirmed,
+                        "parameters": request.parameters,
+                    }),
+                )?;
                 let (outcome, resource, result, message) = if request
                     .expected_updated_at
                     .as_ref()
@@ -1955,10 +1983,133 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     })?,
                 )
                 .map_err(map_lifecycle_error)?;
+                ensure_action_events_in_store(
+                    &self.lookup.store,
+                    &record,
+                    request,
+                    &operation_key,
+                    &result,
+                )?;
                 Ok(result)
             }
         }
     }
+}
+
+/// Action receipts live in migration 19, separate from the lifecycle record
+/// that owns effect claims. The accepted receipt is committed before the effect;
+/// the terminal receipt is retried from the immutable acknowledgement. A crash
+/// after an external effect but before `complete_cook_operation_in_store` still
+/// has the operation-claim recovery semantics documented by `operation_claims`;
+/// filesystem projections and SQLite cannot form one atomic transaction.
+fn ensure_action_events_in_store(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    request: &ControlPlaneActionRequest,
+    operation_key: &str,
+    acknowledgement: &ControlPlaneActionAcknowledgement,
+) -> Result<(), ControlPlaneError> {
+    append_action_event_in_store(
+        store,
+        record,
+        request,
+        operation_key,
+        "action.accepted",
+        &acknowledgement.accepted_at,
+        serde_json::json!({
+            "operation_digest": action_operation_digest(operation_key),
+            "action": acknowledgement.action,
+            "acknowledgement": acknowledgement.acknowledgement,
+            "actor": acknowledgement.actor,
+            "expected_updated_at": request.expected_updated_at,
+            "confirmed": request.confirmed,
+            "parameters": request.parameters,
+        }),
+    )?;
+    let kind = match acknowledgement.outcome {
+        ControlPlaneActionOutcome::Succeeded => "action.succeeded",
+        ControlPlaneActionOutcome::AlreadySatisfied => "action.already_satisfied",
+        ControlPlaneActionOutcome::Failed => "action.failed",
+    };
+    append_action_event_in_store(
+        store,
+        record,
+        request,
+        operation_key,
+        kind,
+        &acknowledgement.completed_at,
+        serde_json::json!({
+            "operation_digest": action_operation_digest(operation_key),
+            "action": acknowledgement.action,
+            "acknowledgement": acknowledgement.acknowledgement,
+            "actor": acknowledgement.actor,
+            "outcome": acknowledgement.outcome,
+            "resource_state": acknowledgement.resource.state,
+            "resource_updated_at": acknowledgement.resource.updated_at,
+            "message": acknowledgement.message,
+        }),
+    )
+}
+
+fn append_action_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    request: &ControlPlaneActionRequest,
+    operation_key: &str,
+    kind: &str,
+    occurred_at: &str,
+    data: Value,
+) -> Result<(), ControlPlaneError> {
+    append_event_in_store(
+        store,
+        &RunId::new(&record.run_id)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+        &ControlPlaneEventAppendRequest {
+            schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
+            idempotency_key: action_event_idempotency_key(operation_key, kind),
+            actor: request.actor.clone(),
+            kind: kind.to_string(),
+            source: ControlPlaneEventSource {
+                component: "control-plane".to_string(),
+                instance: None,
+            },
+            occurred_at: Some(occurred_at.to_string()),
+            task: None,
+            attempt: None,
+            execution: None,
+            data,
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+        },
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn action_event_idempotency_key(operation_key: &str, kind: &str) -> String {
+    format!(
+        "{INTERNAL_ACTION_EVENT_KEY_PREFIX}{kind}:{}",
+        action_operation_digest(operation_key)
+    )
+}
+
+fn validate_external_event_append_request(
+    request: &ControlPlaneEventAppendRequest,
+) -> Result<(), ControlPlaneError> {
+    if request
+        .idempotency_key
+        .starts_with(INTERNAL_ACTION_EVENT_KEY_PREFIX)
+        || request.kind.starts_with("action.")
+        || request.source.component == "control-plane"
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane action event identities are reserved for the controller",
+        ));
+    }
+    Ok(())
+}
+
+fn action_operation_digest(operation_key: &str) -> String {
+    homeboy_engine_primitives::content_hash::sha256_hex(operation_key.as_bytes())
 }
 
 fn review_cook_contract(
@@ -3933,6 +4084,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         requested_id: &RunId,
         request: &ControlPlaneEventAppendRequest,
     ) -> Result<homeboy_control_plane_contract::ControlPlaneEvent, ControlPlaneError> {
+        validate_external_event_append_request(request)?;
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         append_event_in_store(&store, requested_id, request)
@@ -3971,8 +4123,9 @@ mod tests {
         encode_mission_cursor, event_page, live_provider_liveness, normalize_event_references,
         observed_file_timestamp, phase, project_record, references_for_record,
         register_reference_in_store, review_failure_reasons, validate_event_scope,
-        LifecycleStoreLookup, OrchestrationService, RegisteredProvider, RunListLookup, RunLookup,
-        RunPagePosition, RunSnapshot, RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
+        validate_external_event_append_request, LifecycleStoreLookup, OrchestrationService,
+        RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
+        RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskArtifactRef, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -4409,6 +4562,25 @@ mod tests {
         assert!(!encoded.contains("secret-value"));
         assert!(!encoded.contains("inline-secret"));
         assert_eq!(request.data["access_token"], "[REDACTED]");
+    }
+
+    #[test]
+    fn external_event_append_cannot_claim_controller_action_namespaces() {
+        let mut reserved_key = event_append_request();
+        reserved_key.idempotency_key = "homeboy-internal-action:action.accepted:digest".to_string();
+        let mut reserved_kind = event_append_request();
+        reserved_kind.kind = "action.accepted".to_string();
+        let mut reserved_source = event_append_request();
+        reserved_source.source.component = "control-plane".to_string();
+
+        for request in [reserved_key, reserved_kind, reserved_source] {
+            assert_eq!(
+                validate_external_event_append_request(&request)
+                    .expect_err("reserved namespace")
+                    .class,
+                ControlPlaneErrorClass::InvalidArgument
+            );
+        }
     }
 
     #[test]
@@ -5227,11 +5399,25 @@ mod tests {
                 service.execute_action(&run, &request).expect("replay"),
                 first
             );
-            assert!(service
-                .events(&run, None)
-                .expect("durable appended events")
-                .events
-                .is_empty());
+            let durable_events = service.events(&run, None).expect("durable action events");
+            assert_eq!(
+                durable_events
+                    .events
+                    .iter()
+                    .map(|event| event.kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["action.accepted", "action.already_satisfied"]
+            );
+            assert_eq!(durable_events.events[0].data["actor"], "test");
+            assert_eq!(durable_events.events[0].data["confirmed"], true);
+            assert_eq!(
+                durable_events.events[0].data["expected_updated_at"],
+                "2026-01-01T00:01:00Z"
+            );
+            assert_eq!(
+                durable_events.events[0].data["acknowledgement"],
+                first.acknowledgement
+            );
             let legacy_logs =
                 crate::agent_task_lifecycle::logs_in_store(&service.lookup.store, run.as_str())
                     .expect("legacy synthesized logs");
@@ -5241,17 +5427,24 @@ mod tests {
                 .filter(|event| event.kind.starts_with("action."))
                 .map(|event| event.kind.as_str())
                 .collect();
-            assert_eq!(
-                action_kinds,
-                vec!["action.accepted", "action.already_satisfied"]
+            assert!(
+                action_kinds.is_empty(),
+                "ledger-backed claims are not synthesized"
             );
-
             let mut conflicting = request;
             conflicting.parameters.data = json!({ "reason": "different reason" });
             let error = service
                 .execute_action(&run, &conflicting)
                 .expect_err("conflicting key");
             assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+            assert_eq!(
+                service
+                    .events(&run, None)
+                    .expect("conflict does not append events")
+                    .events
+                    .len(),
+                2
+            );
 
             let stale = ControlPlaneActionRequest {
                 idempotency_key: "cancel-request-stale".to_string(),
@@ -5266,6 +5459,16 @@ mod tests {
                 .message
                 .as_deref()
                 .is_some_and(|message| message.contains("precondition")));
+            assert_eq!(
+                service
+                    .events(&run, None)
+                    .expect("failed action events")
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == "action.failed")
+                    .count(),
+                1
+            );
 
             let reconcile = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
@@ -5284,6 +5487,32 @@ mod tests {
             assert_eq!(
                 service.execute_action(&run, &reconcile).expect("replay"),
                 first
+            );
+            assert_eq!(
+                service
+                    .events(&run, None)
+                    .expect("reconcile action events")
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == "action.already_satisfied")
+                    .count(),
+                2,
+                "the terminal cancel and reconcile each have one terminal receipt"
+            );
+            for index in 0..100 {
+                let mut filler = event_append_request();
+                filler.idempotency_key = format!("retention-filler-{index}");
+                filler.kind = "run.progress".to_string();
+                super::append_event_in_store(&service.lookup.store, &run, &filler)
+                    .expect("append retention filler");
+            }
+            assert!(
+                crate::agent_task_lifecycle::logs_in_store(&service.lookup.store, run.as_str(),)
+                    .expect("logs after retention")
+                    .events
+                    .iter()
+                    .all(|event| !event.kind.starts_with("action.")),
+                "compact receipts suppress legacy action synthesis after payload retention"
             );
         });
     }
@@ -5379,6 +5608,32 @@ mod tests {
                 service.execute_action(&run, &request).expect("replay"),
                 first
             );
+        });
+    }
+
+    #[test]
+    fn action_audit_supports_the_maximum_action_idempotency_key() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Reconcile,
+                idempotency_key: "k".repeat(super::ACTION_INPUT_BOUND),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+
+            let acknowledgement = service.execute_action(&run, &request).expect("action");
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
+                acknowledgement
+            );
+            assert_eq!(service.events(&run, None).expect("events").events.len(), 2);
         });
     }
 

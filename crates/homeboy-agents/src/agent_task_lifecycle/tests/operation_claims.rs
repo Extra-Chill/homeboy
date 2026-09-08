@@ -158,6 +158,44 @@ fn action_intent_replays_completed_result_without_reacquiring() {
 }
 
 #[test]
+fn historical_action_claims_remain_in_the_synthesized_log_projection() {
+    with_isolated_home(|_| {
+        let run_id = "op-claim-historical-action-log";
+        seed_run(run_id);
+        let key = "control-plane-action:reconcile:historical-1";
+        claim_operation_with_intent_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            key,
+            LEASE,
+            &json!({"action":"reconcile", "access_token":"historical-secret"}),
+        )
+        .expect("historical claim");
+        complete_cook_operation_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            key,
+            json!({"outcome":"succeeded"}),
+        )
+        .expect("historical completion");
+
+        let logs = crate::agent_task_lifecycle::logs_in_store(&test_lifecycle_store(), run_id)
+            .expect("historical logs");
+        assert_eq!(
+            logs.events
+                .iter()
+                .filter(|event| event.kind.starts_with("action."))
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["action.accepted", "action.succeeded"]
+        );
+        assert!(!serde_json::to_string(&logs)
+            .expect("logs JSON")
+            .contains("historical-secret"));
+    });
+}
+
+#[test]
 fn action_key_reuse_with_different_intent_is_rejected() {
     with_isolated_home(|_| {
         seed_run("op-claim-action-conflict");
