@@ -1,3 +1,4 @@
+use homeboy_control_plane_contract::{AttemptId, ExecutionId, MissionId, RunId, TaskId};
 use serde::{Deserialize, Serialize};
 
 use super::{ExtensionApiOperationFailure, ExtensionApiVersion};
@@ -48,6 +49,18 @@ pub struct ExtensionApiExecuteOutput {
     pub stderr: String,
 }
 
+/// Canonical orchestration identity attached by a control-plane caller.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionApiControlPlaneIdentity {
+    pub mission: MissionId,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub attempt_number: u32,
+    pub execution: ExecutionId,
+}
+
 /// Invoke the advertised `execute` capability without cwd, command, or secret authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +73,8 @@ pub struct ExtensionApiExecuteRequest {
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<ExtensionApiControlPlaneIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<ExtensionApiExecuteInput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -79,6 +94,8 @@ pub struct ExtensionApiExecuteResponse {
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<ExtensionApiControlPlaneIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +119,14 @@ mod tests {
             capability_id: EXECUTE_CAPABILITY_ID.to_string(),
             project_id: Some("site".to_string()),
             component_id: Some("app".to_string()),
+            control_plane: Some(ExtensionApiControlPlaneIdentity {
+                mission: MissionId::new("mission-1").unwrap(),
+                run: RunId::new("run-1").unwrap(),
+                task: TaskId::new("task-1").unwrap(),
+                attempt: AttemptId::new("attempt-1").unwrap(),
+                attempt_number: 1,
+                execution: ExecutionId::new("execution-1").unwrap(),
+            }),
             inputs: vec![ExtensionApiExecuteInput {
                 id: "target".to_string(),
                 value: "prod".to_string(),
@@ -127,6 +152,14 @@ mod tests {
                 "capability_id": "execute",
                 "project_id": "site",
                 "component_id": "app",
+                "control_plane": {
+                    "mission": "mission-1",
+                    "run": "run-1",
+                    "task": "task-1",
+                    "attempt": "attempt-1",
+                    "attempt_number": 1,
+                    "execution": "execution-1"
+                },
                 "inputs": [{ "id": "target", "value": "prod" }],
                 "argv": ["--flag"],
                 "mode": "captured",
@@ -143,6 +176,7 @@ mod tests {
             api_version: EXTENSION_API_V1,
             extension_id: Some("fixture".to_string()),
             project_id: Some("site".to_string()),
+            control_plane: sample_request().control_plane,
             exit_code: Some(0),
             output: Some(ExtensionApiExecuteOutput {
                 stdout: "ok".to_string(),
@@ -159,6 +193,14 @@ mod tests {
                 "api_version": { "major": 1 },
                 "extension_id": "fixture",
                 "project_id": "site",
+                "control_plane": {
+                    "mission": "mission-1",
+                    "run": "run-1",
+                    "task": "task-1",
+                    "attempt": "attempt-1",
+                    "attempt_number": 1,
+                    "execution": "execution-1"
+                },
                 "exit_code": 0,
                 "output": { "stdout": "ok" },
                 "state": "completed"
@@ -204,6 +246,7 @@ mod tests {
                 api_version: EXTENSION_API_V1,
                 extension_id: Some("fixture".to_string()),
                 project_id: None,
+                control_plane: None,
                 exit_code: None,
                 output: None,
                 state: Some(state),

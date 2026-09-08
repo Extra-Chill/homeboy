@@ -1004,6 +1004,7 @@ name = "homeboy-extension-contract"
 version = "0.1.0"
 dependencies = [
  "homeboy-audit-contract",
+ "homeboy-control-plane-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-finding",

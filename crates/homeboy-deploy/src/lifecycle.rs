@@ -71,6 +71,39 @@ impl DeployObservation {
         )
     }
 
+    pub(crate) fn resume_with_control_plane_in_roots(
+        roots: &homeboy_core::paths::PathRoots,
+        run_id: &str,
+    ) -> Result<Self> {
+        let store = ObservationStore::open_initialized_in_roots(roots)?;
+        let current = store.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                "deploy observation run not found",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        if current.kind != "deploy" {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "deploy observation run has a different kind",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let mut metadata = current.metadata_json;
+        metadata["phase"] = json!("resuming");
+        metadata["control_plane"]["phase"] = json!("resuming");
+        store.resume_run(run_id, "deploy", metadata.clone())?;
+        Ok(Self {
+            store,
+            run_id: run_id.to_string(),
+            metadata,
+            finished: false,
+        })
+    }
+
     fn start_with_control_plane_in_store(
         store: ObservationStore,
         requested_id: Option<&str>,
@@ -95,6 +128,8 @@ impl DeployObservation {
                 "kind": "deploy",
                 "phase": "admitted",
                 "parent_run": lineage.map(|lineage| lineage.release_run_id.as_str()),
+                "recovery_component_id": lineage.and_then(|lineage| lineage.recovery_component_id.as_deref()),
+                "actions": [],
                 "tasks": [],
                 "artifacts": artifact_sha256.map(|sha256| vec![json!({
                     "id": format!("sha256-{sha256}"),
@@ -177,6 +212,22 @@ impl DeployObservation {
         } else {
             "failed"
         });
+        self.metadata["control_plane"]["actions"] = if status != RunStatus::Pass
+            && self.metadata["control_plane"]["recovery_component_id"].is_string()
+        {
+            json!([{
+                "action": "resume",
+                "availability": "available",
+                "reason": "release deployment has a durable recovery checkpoint",
+                "confirmation": "none",
+                "required_inputs": [],
+                "idempotent": true,
+                "requires_revalidation": true,
+                "result_resource_type": "run"
+            }])
+        } else {
+            json!([])
+        };
         if let Some(error) = error {
             self.metadata["error"] = json!(error);
         }
@@ -191,13 +242,6 @@ impl DeployObservation {
             .as_object_mut()
             .expect("deploy target metadata object");
         targets.insert(project_id.to_string(), json!(run_id));
-        self.store
-            .update_run_metadata(&self.run_id, self.metadata.clone())
-            .map(|_| ())
-    }
-
-    pub(crate) fn link_resume(&mut self, prior_checkpoint_id: &str) -> Result<()> {
-        self.metadata["resumes_run_id"] = json!(prior_checkpoint_id);
         self.store
             .update_run_metadata(&self.run_id, self.metadata.clone())
             .map(|_| ())
@@ -566,6 +610,7 @@ mod tests {
             let lineage = crate::types::DeployControlPlaneLineage {
                 mission_id: "release-mission-13697".to_string(),
                 release_run_id: "release-run-13697".to_string(),
+                recovery_component_id: Some("fixture".to_string()),
             };
             let mut observation = DeployObservation::start_with_control_plane(
                 Some("deploy-run-13697"),
@@ -689,26 +734,6 @@ mod tests {
             let activity = homeboy_core::activity::show_activity("aggregate-run")
                 .expect("aggregate deploy run resolves through activity");
             assert_eq!(activity.items[0].id, "aggregate-run");
-        });
-    }
-
-    #[test]
-    fn resumed_aggregate_is_a_new_activity_run_linked_to_its_checkpoint() {
-        with_isolated_home(|_| {
-            let mut resumed = DeployObservation::start("multi", "HEAD").expect("admit resume");
-            let activity_run_id = resumed.run_id().to_string();
-            resumed
-                .link_resume("checkpoint-run")
-                .expect("link prior checkpoint");
-            let run = ObservationStore::open_initialized()
-                .expect("store")
-                .get_run(&activity_run_id)
-                .expect("read run")
-                .expect("run");
-
-            assert_ne!(activity_run_id, "checkpoint-run");
-            assert_eq!(run.metadata_json["resumes_run_id"], "checkpoint-run");
-            assert!(homeboy_core::activity::show_activity(&activity_run_id).is_ok());
         });
     }
 

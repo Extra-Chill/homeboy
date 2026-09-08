@@ -4,24 +4,280 @@
 //! assembles [`ControlPlaneRun`] lives in the agent-task layer and registers
 //! here so core stays agent-task-agnostic.
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
+
 use homeboy_control_plane_contract::{
-    ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneAttempt,
-    ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
-    ControlPlaneError, ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventPage,
-    ControlPlaneEventRetention, ControlPlaneExecution, ControlPlaneExecutionPage,
-    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
-    ControlPlaneOperation, ControlPlaneReference, ControlPlaneReferencePage,
-    ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneRun,
-    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+    ControlPlaneActionRequest, ControlPlaneAttempt, ControlPlaneAttemptListRequest,
+    ControlPlaneAttemptPage, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneEvent,
+    ControlPlaneEventAppendRequest, ControlPlaneEventPage, ControlPlaneEventRetention,
+    ControlPlaneEventSource, ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneReference, ControlPlaneReferencePage, ControlPlaneReferenceRegistration,
+    ControlPlaneReferenceType, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
+    ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
     ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
     ControlPlaneTaskPage, EventCursor, ExecutionId, MissionId, ReferenceId, RunId, TaskId,
+    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
 };
+
+use crate::observation::{ControlPlaneActionClaim, ObservationStore, RunRecord};
+
+/// Runtime-neutral result returned by a domain-owned action implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPlaneActionDelegateResult {
+    pub outcome: ControlPlaneActionOutcome,
+    pub result: ControlPlaneActionPayload,
+    pub message: Option<String>,
+}
+
+/// Executes and reconciles actions for one opaque observation run kind.
+///
+/// Core owns action claims and acknowledgements. Implementations own only the
+/// domain effect and the authoritative reconciliation needed after a crash.
+pub trait ControlPlaneActionDelegate: Send + Sync {
+    fn run_kind(&self) -> &'static str;
+
+    fn execute(
+        &self,
+        run: &RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError>;
+
+    fn recover(
+        &self,
+        run: &RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError>;
+}
+
+static ACTION_DELEGATES: OnceLock<
+    RwLock<BTreeMap<&'static str, Arc<dyn ControlPlaneActionDelegate>>>,
+> = OnceLock::new();
+
+/// Register the domain implementation for one durable observation run kind.
+pub fn register_control_plane_action_delegate(delegate: Arc<dyn ControlPlaneActionDelegate>) {
+    ACTION_DELEGATES
+        .get_or_init(|| RwLock::new(BTreeMap::new()))
+        .write()
+        .expect("control-plane action delegate registry poisoned")
+        .insert(delegate.run_kind(), delegate);
+}
+
+/// Execute a registered domain action through the kernel-owned claim ledger.
+///
+/// `None` means no delegate owns this run kind. A completed claim always
+/// returns its immutable stored acknowledgement without invoking the domain.
+pub fn execute_delegated_action(
+    store: &ObservationStore,
+    run: &RunRecord,
+    request: &ControlPlaneActionRequest,
+    project: impl FnOnce() -> Result<ControlPlaneRun, ControlPlaneError>,
+) -> Result<Option<ControlPlaneActionAcknowledgement>, ControlPlaneError> {
+    let delegate = ACTION_DELEGATES
+        .get_or_init(|| RwLock::new(BTreeMap::new()))
+        .read()
+        .expect("control-plane action delegate registry poisoned")
+        .get(run.kind.as_str())
+        .cloned();
+    let Some(delegate) = delegate else {
+        return Ok(None);
+    };
+    let requested_id = RunId::new(&run.id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let request_json = serde_json::to_vec(request)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let action = serde_json::to_value(request.action)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .ok_or_else(|| ControlPlaneError::invalid_argument("action has no wire identity"))?;
+    let idempotency_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        format!("{}\0{}", action, request.idempotency_key).as_bytes(),
+    );
+    let request_digest =
+        homeboy_engine_primitives::content_hash::sha256_hex(request_json.as_slice());
+    let claim = store
+        .claim_control_plane_action(&requested_id, &idempotency_digest, &request_digest)
+        .map_err(map_store_error)?;
+    let precondition_failed = request
+        .expected_updated_at
+        .as_deref()
+        .is_some_and(|expected| {
+            Some(expected) != run.finished_at.as_deref().or(Some(run.started_at.as_str()))
+        });
+    let precondition_result = || ControlPlaneActionDelegateResult {
+        outcome: ControlPlaneActionOutcome::Failed,
+        result: ControlPlaneActionPayload::empty(),
+        message: Some("run changed since the supplied precondition".to_string()),
+    };
+    let (accepted_at, domain) = match claim {
+        ControlPlaneActionClaim::Completed(acknowledgement) => {
+            ensure_delegated_action_events(store, request, &acknowledgement)?;
+            return Ok(Some(acknowledgement));
+        }
+        ControlPlaneActionClaim::InProgress => {
+            return Err(ControlPlaneError::unavailable(
+                "this idempotent action is already in progress",
+            ));
+        }
+        ControlPlaneActionClaim::Acquired { accepted_at } => {
+            append_delegated_action_event(
+                store,
+                &requested_id,
+                request,
+                "action.accepted",
+                &accepted_at,
+                serde_json::json!({ "action": request.action }),
+            )?;
+            let result = if precondition_failed {
+                Ok(precondition_result())
+            } else {
+                delegate.execute(run, request)
+            };
+            (accepted_at, result)
+        }
+        ControlPlaneActionClaim::Recover { accepted_at } => {
+            append_delegated_action_event(
+                store,
+                &requested_id,
+                request,
+                "action.accepted",
+                &accepted_at,
+                serde_json::json!({ "action": request.action }),
+            )?;
+            let result = if precondition_failed {
+                Ok(precondition_result())
+            } else {
+                delegate.recover(run, request)
+            };
+            (accepted_at, result)
+        }
+    };
+    let domain = domain.unwrap_or_else(|error| ControlPlaneActionDelegateResult {
+        outcome: ControlPlaneActionOutcome::Failed,
+        result: ControlPlaneActionPayload::empty(),
+        message: Some(error.message),
+    });
+    let acknowledgement = ControlPlaneActionAcknowledgement {
+        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+            .to_string(),
+        acknowledgement: format!("{}:action:{}:{}", run.id, action, request.idempotency_key),
+        run: requested_id.clone(),
+        action: request.action,
+        idempotency_key: request.idempotency_key.clone(),
+        actor: request.actor.clone(),
+        accepted_at,
+        completed_at: chrono::Utc::now().to_rfc3339(),
+        outcome: domain.outcome,
+        resource: project()?,
+        result: domain.result,
+        message: domain.message,
+    };
+    let acknowledgement = store
+        .complete_control_plane_action(&requested_id, &idempotency_digest, &acknowledgement)
+        .map_err(map_store_error)?;
+    ensure_delegated_action_events(store, request, &acknowledgement)?;
+    Ok(Some(acknowledgement))
+}
+
+fn ensure_delegated_action_events(
+    store: &ObservationStore,
+    request: &ControlPlaneActionRequest,
+    acknowledgement: &ControlPlaneActionAcknowledgement,
+) -> Result<(), ControlPlaneError> {
+    append_delegated_action_event(
+        store,
+        &acknowledgement.run,
+        request,
+        "action.accepted",
+        &acknowledgement.accepted_at,
+        serde_json::json!({ "action": request.action }),
+    )?;
+    append_delegated_action_event(
+        store,
+        &acknowledgement.run,
+        request,
+        match acknowledgement.outcome {
+            ControlPlaneActionOutcome::Succeeded => "action.succeeded",
+            ControlPlaneActionOutcome::AlreadySatisfied => "action.already_satisfied",
+            ControlPlaneActionOutcome::Failed => "action.failed",
+        },
+        &acknowledgement.completed_at,
+        serde_json::json!({
+            "action": request.action,
+            "acknowledgement": acknowledgement.acknowledgement,
+            "outcome": acknowledgement.outcome,
+        }),
+    )
+}
+
+fn append_delegated_action_event(
+    store: &ObservationStore,
+    run: &RunId,
+    action: &ControlPlaneActionRequest,
+    kind: &str,
+    occurred_at: &str,
+    data: serde_json::Value,
+) -> Result<(), ControlPlaneError> {
+    let identity = homeboy_engine_primitives::content_hash::sha256_hex(
+        format!(
+            "{}\0{:?}\0{}\0{}",
+            run, action.action, action.idempotency_key, kind
+        )
+        .as_bytes(),
+    );
+    let request = ControlPlaneEventAppendRequest {
+        schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
+        idempotency_key: format!("control-plane-action:{identity}"),
+        actor: action.actor.clone(),
+        kind: kind.to_string(),
+        source: ControlPlaneEventSource {
+            component: "control-plane".to_string(),
+            instance: None,
+        },
+        occurred_at: Some(occurred_at.to_string()),
+        task: None,
+        attempt: None,
+        execution: None,
+        data,
+        artifacts: Vec::new(),
+        evidence: Vec::new(),
+    };
+    let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        serde_json::to_vec(&request)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?
+            .as_slice(),
+    );
+    store
+        .append_control_plane_event(run, &request, &identity, &request_digest)
+        .map(|_| ())
+        .map_err(map_store_error)
+}
+
+fn map_store_error(error: crate::Error) -> ControlPlaneError {
+    if error.code == crate::ErrorCode::ValidationInvalidArgument {
+        ControlPlaneError::invalid_argument(error.message)
+    } else {
+        ControlPlaneError::unavailable(error.message)
+    }
+}
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
 pub trait ControlPlaneProvider: Send + Sync {
     fn capabilities(&self) -> ControlPlaneCapabilities {
         ControlPlaneCapabilities::new(Vec::new(), vec![ControlPlaneOperation::GetCapabilities])
+    }
+
+    /// Bind an installed extension to the canonical task whose domain plan
+    /// selected it. Identity coherence alone does not grant execution authority.
+    fn authorize_extension_execution(
+        &self,
+        _extension_id: &str,
+        _run: &RunId,
+        _task: &TaskId,
+    ) -> Result<bool, ControlPlaneError> {
+        Ok(false)
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
@@ -225,6 +481,14 @@ pub fn capabilities() -> ControlPlaneCapabilities {
     with_provider(|provider| provider.capabilities())
 }
 
+pub fn authorize_extension_execution(
+    extension_id: &str,
+    run: &RunId,
+    task: &TaskId,
+) -> Result<bool, ControlPlaneError> {
+    with_provider(|provider| provider.authorize_extension_execution(extension_id, run, task))
+}
+
 pub fn run(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
     with_provider(|provider| provider.run(requested_id))
 }
@@ -357,13 +621,17 @@ pub fn execute_action(
     requested_id: &RunId,
     request: &ControlPlaneActionRequest,
 ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+    request.validate()?;
     with_provider(|provider| provider.execute_action(requested_id, request))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlPlaneProvider, NoopProvider};
-    use homeboy_control_plane_contract::ControlPlaneOperation;
+    use super::{append_delegated_action_event, ControlPlaneProvider, NoopProvider};
+    use homeboy_control_plane_contract::{
+        ControlPlaneAction, ControlPlaneActionPayload, ControlPlaneActionRequest,
+        ControlPlaneOperation, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    };
 
     #[test]
     fn noop_provider_advertises_discovery_without_run_reads() {
@@ -372,6 +640,49 @@ mod tests {
         assert_eq!(
             capabilities.operations,
             vec![ControlPlaneOperation::GetCapabilities]
+        );
+    }
+
+    #[test]
+    fn distinct_actions_may_share_a_caller_idempotency_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::observation::ObservationStore::open_initialized_at(
+            directory.path().join("store.sqlite"),
+        )
+        .unwrap();
+        store
+            .start_run_with_id(
+                crate::observation::NewRunRecord::builder("test").build(),
+                "run-1".to_string(),
+            )
+            .unwrap();
+        let run = RunId::new("run-1").unwrap();
+        for action in [ControlPlaneAction::Resume, ControlPlaneAction::Reconcile] {
+            append_delegated_action_event(
+                &store,
+                &run,
+                &ControlPlaneActionRequest {
+                    schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                    action,
+                    idempotency_key: "same-key".to_string(),
+                    actor: "test".to_string(),
+                    expected_updated_at: None,
+                    parameters: ControlPlaneActionPayload::empty(),
+                    confirmed: false,
+                },
+                "action.accepted",
+                "now",
+                serde_json::json!({ "action": action }),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .control_plane_event_stream(&run)
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
         );
     }
 }

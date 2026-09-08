@@ -30,6 +30,8 @@ pub struct PreparedDeployProjection {
 pub struct DeployControlPlaneLineage {
     pub mission_id: String,
     pub release_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_component_id: Option<String>,
 }
 
 /// Parse bulk component IDs from a JSON spec.

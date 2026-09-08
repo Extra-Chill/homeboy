@@ -10,16 +10,16 @@ use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
     AttemptCursor, AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement,
-    ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
-    ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition, ControlPlaneAttempt,
-    ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
-    ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
-    ControlPlaneCapabilities, ControlPlaneCompatibilityWindow, ControlPlaneError,
-    ControlPlaneErrorClass, ControlPlaneEventAppendRequest, ControlPlaneEventRetention,
-    ControlPlaneEventSource, ControlPlaneEvidenceRef, ControlPlaneExecution,
-    ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
-    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneActionAvailability, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+    ControlPlaneActionRequest, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
+    ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
+    ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
+    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneCompatibilityWindow,
+    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEventAppendRequest,
+    ControlPlaneEventRetention, ControlPlaneEventSource, ControlPlaneEvidenceRef,
+    ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation,
+    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
+    ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
@@ -28,17 +28,15 @@ use homeboy_control_plane_contract::{
     ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
     ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, ExecutionId, MissionCursor,
     MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
-    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
-    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
+    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
     CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-    CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -63,8 +61,6 @@ pub(crate) const REF_BOUND: usize = 32;
 const REGISTERED_REFERENCE_BOUND: usize = 100;
 const URI_BOUND: usize = 512;
 const EVENT_PAGE_BOUND: usize = 100;
-const ACTION_INPUT_BOUND: usize = 128;
-const ACTION_REASON_BOUND: usize = 1_024;
 const REVIEW_EVIDENCE_BOUND: usize = 1024 * 1024;
 const REVIEW_EVIDENCE_FIELD_BOUND: usize = 256 * 1024;
 const ACTION_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -3021,55 +3017,7 @@ fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionRep
 }
 
 fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), ControlPlaneError> {
-    if request.schema != CONTROL_PLANE_ACTION_REQUEST_SCHEMA {
-        return Err(ControlPlaneError::invalid_argument(
-            "unsupported control-plane action request schema",
-        ));
-    }
-    for (name, value) in [
-        ("idempotency_key", request.idempotency_key.as_str()),
-        ("actor", request.actor.as_str()),
-    ] {
-        if value.trim().is_empty() || value.len() > ACTION_INPUT_BOUND {
-            return Err(ControlPlaneError::invalid_argument(format!(
-                "{name} must contain 1 to {ACTION_INPUT_BOUND} bytes"
-            )));
-        }
-    }
-    let expected_parameters_schema = match request.action {
-        ControlPlaneAction::Cancel => CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        ControlPlaneAction::Promote => CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-        ControlPlaneAction::Reconcile => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
-        ControlPlaneAction::Resume => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
-        ControlPlaneAction::Retry => CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
-    };
-    if request.parameters.schema != expected_parameters_schema {
-        return Err(ControlPlaneError::invalid_argument(format!(
-            "{} requires parameters schema {expected_parameters_schema}",
-            action_name(request.action)
-        )));
-    }
-    if request.action == ControlPlaneAction::Cancel {
-        let parameters: ControlPlaneCancelParameters =
-            serde_json::from_value(request.parameters.data.clone()).map_err(|error| {
-                ControlPlaneError::invalid_argument(format!("cancel parameters: {error}"))
-            })?;
-        if parameters
-            .reason
-            .as_ref()
-            .is_some_and(|reason| reason.len() > ACTION_REASON_BOUND)
-        {
-            return Err(ControlPlaneError::invalid_argument(format!(
-                "reason exceeds {ACTION_REASON_BOUND} bytes"
-            )));
-        }
-    }
-    if request.action == ControlPlaneAction::Retry {
-        serde_json::from_value::<ControlPlaneRetryParameters>(request.parameters.data.clone())
-            .map_err(|error| {
-                ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
-            })?;
-    }
+    request.validate()?;
     if request.action == ControlPlaneAction::Promote {
         serde_json::from_value::<crate::agent_task_service::AgentTaskPromotionRequest>(
             request.parameters.data.clone(),
@@ -3077,16 +3025,6 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
         .map_err(|error| {
             ControlPlaneError::invalid_argument(format!("promote parameters: {error}"))
         })?;
-    }
-    if matches!(
-        request.action,
-        ControlPlaneAction::Cancel | ControlPlaneAction::Promote | ControlPlaneAction::Retry
-    ) && !request.confirmed
-    {
-        return Err(ControlPlaneError::invalid_argument(format!(
-            "{} requires explicit confirmation",
-            action_name(request.action)
-        )));
     }
     Ok(())
 }
@@ -4291,7 +4229,52 @@ fn generic_observation_run(
             retry: None,
         });
     resource.artifacts = generic_observation_artifacts(record);
+    resource.action_eligibility = record
+        .metadata_json
+        .pointer("/control_plane/actions")
+        .cloned()
+        .map(|actions| {
+            serde_json::from_value(actions).map(|actions| {
+                let mut report =
+                    homeboy_control_plane_contract::ControlPlaneActionEligibilityReport::new(
+                        resource.run.clone(),
+                    );
+                report.actions = actions;
+                report
+            })
+        })
+        .transpose()
+        .map_err(|error| {
+            ControlPlaneError::invalid_argument(format!(
+                "generic control-plane action eligibility is invalid: {error}"
+            ))
+        })?;
     Ok(resource)
+}
+
+fn bind_extension_owners(
+    plan: &mut crate::agent_task_scheduler::AgentTaskPlan,
+    providers: &[crate::agent_task_provider::AgentTaskExecutorProvider],
+) {
+    let owners = plan
+        .tasks
+        .iter()
+        .filter_map(|request| {
+            crate::agent_task_provider::resolve_provider_for_backend(
+                providers,
+                &request.executor.backend,
+                request.executor.selector.as_deref(),
+            )
+            .resolved()
+            .and_then(|provider| provider.extension_id.as_ref())
+            .map(|extension_id| (request.task_id.clone(), Value::String(extension_id.clone())))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    if !plan.metadata.is_object() {
+        plan.metadata = serde_json::json!({});
+    }
+    plan.metadata["control_plane"]["extension_owners"] = Value::Object(owners);
+    plan.rebuild_homeboy_plan();
 }
 
 fn generic_observation_state(status: &str) -> ControlPlaneRunState {
@@ -4452,6 +4435,36 @@ struct RegisteredProvider;
 impl ControlPlaneProvider for RegisteredProvider {
     fn capabilities(&self) -> ControlPlaneCapabilities {
         OrchestrationService::<LifecycleStoreLookup>::capabilities()
+    }
+
+    fn authorize_extension_execution(
+        &self,
+        extension_id: &str,
+        run: &RunId,
+        task: &TaskId,
+    ) -> Result<bool, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let plan = store
+            .read_controller_plan(run.as_str())
+            .map_err(map_lifecycle_error)?;
+        let request = plan
+            .tasks
+            .iter()
+            .find(|request| request.task_id == task.as_str())
+            .ok_or_else(|| {
+                ControlPlaneError::not_found(format!(
+                    "control-plane task not found in run {run}: {task}"
+                ))
+            })?;
+        Ok(plan
+            .metadata
+            .pointer(&format!(
+                "/control_plane/extension_owners/{}",
+                request.task_id.replace('~', "~0").replace('/', "~1")
+            ))
+            .and_then(Value::as_str)
+            == Some(extension_id))
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
@@ -4838,9 +4851,21 @@ impl ControlPlaneProvider for RegisteredProvider {
             }
             Err(error) => return Err(ControlPlaneError::unavailable(error.to_string())),
         }
-        let plan = store
+        let mut plan = store
             .read_controller_plan(request.run.as_str())
             .map_err(map_lifecycle_error)?;
+        let executor = crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover();
+        let already_admitted = store
+            .open_observation_readonly()
+            .and_then(|observation| observation.get_run(request.run.as_str()))
+            .map_err(map_lifecycle_error)?
+            .is_some();
+        if !already_admitted {
+            bind_extension_owners(&mut plan, executor.providers());
+            store
+                .write_controller_plan(request.run.as_str(), &plan)
+                .map_err(map_lifecycle_error)?;
+        }
         let prepared = crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
             .with_lifecycle_store(store);
         let outcome = if request.queue_only {
@@ -4849,9 +4874,7 @@ impl ControlPlaneProvider for RegisteredProvider {
             crate::agent_task_submission_service::submit_prepared_plan(
                 request,
                 prepared,
-                std::sync::Arc::new(
-                    crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-                ),
+                std::sync::Arc::new(executor),
             )
         }
         .map_err(map_lifecycle_error)?;
@@ -4903,8 +4926,58 @@ impl ControlPlaneProvider for RegisteredProvider {
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        validate_action_request(request)?;
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_initialized()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(requested_id.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                let resource = generic_observation_run(&observation, &record)?;
+                if resource.mission.is_none() {
+                    return Err(ControlPlaneError::not_found(format!(
+                        "control-plane run not found: {requested_id}"
+                    )));
+                }
+                let available = resource.action_eligibility.as_ref().is_some_and(|report| {
+                    report.actions.iter().any(|eligibility| {
+                        eligibility.action == request.action
+                            && eligibility.availability == ControlPlaneActionAvailability::Available
+                    })
+                });
+                if !available {
+                    return Err(ControlPlaneError::invalid_argument(format!(
+                        "control-plane action is unavailable for run {requested_id}"
+                    )));
+                }
+                return homeboy_core::control_plane::execute_delegated_action(
+                    &observation,
+                    &record,
+                    request,
+                    || {
+                        let current = observation
+                            .get_run(requested_id.as_str())
+                            .map_err(map_lifecycle_error)?
+                            .ok_or_else(|| {
+                                ControlPlaneError::not_found(format!(
+                                    "control-plane run not found: {requested_id}"
+                                ))
+                            })?;
+                        generic_observation_run(&observation, &current)
+                    },
+                )?
+                .ok_or_else(|| {
+                    ControlPlaneError::invalid_argument(format!(
+                        "control-plane actions are unavailable for run kind '{}'",
+                        record.kind
+                    ))
+                });
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store))
             .execute_action(requested_id, request)
     }
@@ -6846,7 +6919,7 @@ mod tests {
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
                 action: ControlPlaneAction::Reconcile,
-                idempotency_key: "k".repeat(super::ACTION_INPUT_BOUND),
+                idempotency_key: "k".repeat(128),
                 actor: "test".to_string(),
                 expected_updated_at: None,
                 parameters: ControlPlaneActionPayload::empty(),

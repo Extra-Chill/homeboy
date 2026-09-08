@@ -346,6 +346,32 @@ const MIGRATIONS: &[Migration] = &[
         version: 20,
         sql: "",
     },
+    Migration {
+        // The kernel owns action acceptance and replay even when a domain
+        // extension owns the effect. A durable claim lets a replacement
+        // controller reconcile an interrupted effect instead of repeating it.
+        version: 21,
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS control_plane_action_claims (
+            run_id TEXT NOT NULL,
+            idempotency_digest TEXT NOT NULL,
+            request_digest TEXT NOT NULL,
+            state TEXT NOT NULL,
+            owner_pid INTEGER NOT NULL,
+            owner_start_identity_json TEXT,
+            accepted_at TEXT NOT NULL,
+            acknowledgement_json TEXT,
+            completed_at TEXT,
+            PRIMARY KEY(run_id, idempotency_digest),
+            FOREIGN KEY(run_id) REFERENCES runs(id),
+            CHECK(length(idempotency_digest) = 64),
+            CHECK(length(request_digest) = 64),
+            CHECK(state IN ('running', 'completed'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_plane_action_claims_run_state
+            ON control_plane_action_claims(run_id, state);
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

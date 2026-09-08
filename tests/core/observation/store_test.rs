@@ -144,7 +144,7 @@ mod store_init_tests {
         assert!(status.exists);
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 11);
+        assert_eq!(status.table_count, 12);
     }
 
     #[test]
@@ -158,7 +158,7 @@ mod store_init_tests {
 
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 11);
+        assert_eq!(status.table_count, 12);
     }
 
     #[test]

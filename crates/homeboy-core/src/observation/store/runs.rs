@@ -745,6 +745,38 @@ impl ObservationStore {
         })
     }
 
+    /// Reopen one domain-owned terminal run for an explicit resume action.
+    /// The expected kind prevents a domain delegate from adopting another
+    /// subsystem's canonical identity.
+    pub fn resume_run(
+        &self,
+        run_id: &str,
+        expected_kind: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<RunRecord> {
+        validate_required("run_id", run_id)?;
+        validate_required("expected_kind", expected_kind)?;
+        let metadata_json = serialize_metadata(&metadata_json)?;
+        let rows = execute_with_retry("resume run record", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = NULL, status = 'running', metadata_json = ?1 \
+                 WHERE id = ?2 AND kind = ?3 AND status != 'running'",
+                params![metadata_json, run_id, expected_kind],
+            )
+        })?;
+        if rows != 1 {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "run does not exist with the expected kind or is already running",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        self.get_run(run_id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!("Resumed run record {run_id} but could not read it"))
+        })
+    }
+
     /// Finish a run only while it is still active. This prevents concurrent
     /// lifecycle owners from replacing an already-recorded terminal outcome.
     pub fn finish_running_run(

@@ -48,7 +48,10 @@ pub use environment_api::{
     declared_environment_secret_names as declared_secret_names, resolve_environment_api,
     EnvironmentResolutionContext,
 };
-pub use execute_api::{execute_api, execute_response_result, execute_run_request};
+pub use execute_api::{
+    execute_api, execute_response_result, execute_run_request,
+    execute_run_request_with_control_plane,
+};
 pub(crate) use runner::{read_extension_phase_timings, tail_lines};
 pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub(crate) use runtime_helper::WRITE_TEST_RESULTS_ENV;

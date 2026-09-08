@@ -1,10 +1,134 @@
-use homeboy_control_plane_contract::{MissionId, RunId};
+use std::fs::OpenOptions;
+use std::sync::Arc;
+
+use homeboy_control_plane_contract::{
+    ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+    ControlPlaneActionRequest, ControlPlaneError, MissionId, RunId,
+};
+use homeboy_core::control_plane::{
+    register_control_plane_action_delegate, ControlPlaneActionDelegate,
+    ControlPlaneActionDelegateResult,
+};
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy_core::{Error, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::types::{ReleaseControlPlaneContext, ReleaseRun, ReleaseStepStatus};
+
+const DEPLOY_RESUME_RESULT_SCHEMA: &str = "homeboy/deploy-resume-result/v1";
+
+struct DeployActionDelegate;
+
+impl ControlPlaneActionDelegate for DeployActionDelegate {
+    fn run_kind(&self) -> &'static str {
+        "deploy"
+    }
+
+    fn execute(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        resume_deploy_action(run, request)
+    }
+
+    fn recover(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        resume_deploy_action(run, request)
+    }
+}
+
+pub fn register_action_delegate() {
+    register_control_plane_action_delegate(Arc::new(DeployActionDelegate));
+}
+
+pub(super) fn resume_deploy_action(
+    run: &homeboy_core::observation::RunRecord,
+    request: &ControlPlaneActionRequest,
+) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+    if request.action != ControlPlaneAction::Resume {
+        return Err(ControlPlaneError::invalid_argument(
+            "deploy runs currently support only the resume action",
+        ));
+    }
+    if run.status == RunStatus::Running.as_str() {
+        return Ok(ControlPlaneActionDelegateResult {
+            outcome: ControlPlaneActionOutcome::AlreadySatisfied,
+            result: ControlPlaneActionPayload {
+                schema: DEPLOY_RESUME_RESULT_SCHEMA.to_string(),
+                data: json!({ "run_id": run.id, "status": "running" }),
+            },
+            message: Some("deploy run is already active".to_string()),
+        });
+    }
+    let component_id = run
+        .metadata_json
+        .pointer("/control_plane/recovery_component_id")
+        .and_then(Value::as_str)
+        .or(run.component_id.as_deref())
+        .ok_or_else(|| {
+            ControlPlaneError::invalid_argument("deploy run has no recovery component")
+        })?;
+    let roots = homeboy_core::paths::PathRoots::from_environment()
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let lock_path = roots
+        .data()
+        .join("release-deploy-runs")
+        .join(format!("{}.lock", component_id.replace('/', "_")));
+    std::fs::create_dir_all(lock_path.parent().expect("deploy recovery lock parent"))
+        .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+    homeboy_core::config::lock_exclusive_bounded(&lock, &lock_path, "lock deploy recovery")
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let deployment = super::deployment::resume_deployment_for_run(&roots, component_id, &run.id)
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let Some(deployment) = deployment else {
+        let current = ObservationStore::open_readonly_in_roots(&roots)
+            .and_then(|store| store.get_run(&run.id))
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let current_succeeded = current
+            .as_ref()
+            .is_some_and(|current| current.status == RunStatus::Pass.as_str());
+        return Ok(ControlPlaneActionDelegateResult {
+            outcome: if current_succeeded || run.status == RunStatus::Pass.as_str() {
+                ControlPlaneActionOutcome::AlreadySatisfied
+            } else {
+                ControlPlaneActionOutcome::Failed
+            },
+            result: ControlPlaneActionPayload {
+                schema: DEPLOY_RESUME_RESULT_SCHEMA.to_string(),
+                data: json!({ "run_id": run.id, "recovery_checkpoint": false }),
+            },
+            message: Some(if current_succeeded {
+                "recovered from the durable successful deploy run".to_string()
+            } else {
+                "deploy recovery checkpoint is no longer present".to_string()
+            }),
+        });
+    };
+    Ok(ControlPlaneActionDelegateResult {
+        outcome: if deployment.summary.failed == 0 {
+            ControlPlaneActionOutcome::Succeeded
+        } else {
+            ControlPlaneActionOutcome::Failed
+        },
+        result: ControlPlaneActionPayload {
+            schema: DEPLOY_RESUME_RESULT_SCHEMA.to_string(),
+            data: serde_json::to_value(&deployment).unwrap_or(Value::Null),
+        },
+        message: (deployment.summary.failed > 0)
+            .then(|| "one or more deploy targets remain failed".to_string()),
+    })
+}
 
 pub(super) struct ReleaseControlPlaneObservation {
     store: ObservationStore,

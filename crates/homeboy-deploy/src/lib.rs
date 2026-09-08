@@ -624,14 +624,7 @@ pub fn run_multi(
         .as_deref()
         .map(|id| {
             if config.resume_run_id.is_some() {
-                lifecycle::DeployObservation::start_with_control_plane_in_roots(
-                    &roots,
-                    None,
-                    "multi",
-                    &identity.source,
-                    control_plane_lineage,
-                    artifact_sha256,
-                )
+                lifecycle::DeployObservation::resume_with_control_plane_in_roots(&roots, id)
             } else {
                 lifecycle::DeployObservation::start_with_control_plane_in_roots(
                     &roots,
@@ -644,12 +637,6 @@ pub fn run_multi(
             }
         })
         .transpose()?;
-    if let (Some(aggregate), Some(prior_checkpoint)) = (
-        aggregate_observation.as_mut(),
-        config.resume_run_id.as_deref(),
-    ) {
-        aggregate.link_resume(prior_checkpoint)?;
-    }
     let deploy_run_id = aggregate_observation
         .as_ref()
         .map(|run| run.run_id().to_string());
