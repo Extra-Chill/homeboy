@@ -987,7 +987,7 @@ fn project_execution_placement(finalization: &mut Value, metadata: &Value) {
 }
 
 fn applied_adoption_promotion_candidate_sha(promotion: &AgentTaskPromotionReport) -> Option<&str> {
-    [
+    let candidate_ref = [
         "/adoption/candidate_ref",
         "/resume_contract/inputs/candidate_ref",
         "/resume_inputs/candidate_ref",
@@ -999,7 +999,12 @@ fn applied_adoption_promotion_candidate_sha(promotion: &AgentTaskPromotionReport
             .pointer(pointer)
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-    })
+    })?;
+    let fingerprint_head = promotion
+        .provenance
+        .pointer("/candidate/fingerprint/head")
+        .and_then(Value::as_str)?;
+    (candidate_ref == fingerprint_head).then_some(candidate_ref)
 }
 
 fn reusable_applied_adoption_promotion(
@@ -1667,7 +1672,11 @@ mod reuse_tests {
                 "gate_feedback_baseline": {"current_diff": ""},
                 "adoption": {"candidate_ref": candidate_sha},
                 "resume_contract": {"inputs": {"candidate_ref": candidate_sha}},
-                "resume_inputs": {"candidate_ref": candidate_sha}
+                "resume_inputs": {"candidate_ref": candidate_sha},
+                "candidate": {
+                    "kind": "git",
+                    "fingerprint": {"head": candidate_sha}
+                }
             }
         })
     }
@@ -1734,6 +1743,11 @@ mod reuse_tests {
                 .candidate_sha,
             replacement
         );
+        let mut stale_promotion = applied_promotion(run_id, original, Path::new("/tmp"));
+        stale_promotion["provenance"]["adoption"]["candidate_ref"] = json!(replacement);
+        lifecycle_store
+            .record_promotion(run_id, stale_promotion)
+            .expect("persist stale fingerprint with replacement annotation");
         assert!(
             reusable_applied_adoption_promotion(&lifecycle_store, &replaced, replacement).is_none()
         );
