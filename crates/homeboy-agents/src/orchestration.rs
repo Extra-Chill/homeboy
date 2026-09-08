@@ -14,10 +14,10 @@ use homeboy_control_plane_contract::{
     ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
     ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEventSource,
-    ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
-    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneCapabilities, ControlPlaneCompatibilityWindow, ControlPlaneError,
+    ControlPlaneErrorClass, ControlPlaneEventAppendRequest, ControlPlaneEventRetention,
+    ControlPlaneEventSource, ControlPlaneEvidenceRef, ControlPlaneExecution,
+    ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
     ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
@@ -1481,6 +1481,19 @@ impl OrchestrationService<LifecycleStoreLookup> {
         capabilities
             .operations
             .push(ControlPlaneOperation::ExecuteRunAction);
+        capabilities.compatibility_windows = vec![
+            ControlPlaneCompatibilityWindow {
+                projection: "homeboy/agent-task-cook-report/v1#lifecycle_status,terminal,retryable"
+                    .to_string(),
+                replacement_schema: "homeboy/control-plane-run/v1".to_string(),
+                remove_in: "0.370.0".to_string(),
+            },
+            ControlPlaneCompatibilityWindow {
+                projection: "homeboy/runner-execution-record/v1#agent_task_run_id".to_string(),
+                replacement_schema: "homeboy/control-plane-run/v1#run".to_string(),
+                remove_in: "0.370.0".to_string(),
+            },
+        ];
         capabilities
     }
 
@@ -5573,6 +5586,20 @@ mod tests {
             ]
         );
         assert!(!capabilities.operations.is_empty());
+        assert_eq!(capabilities.compatibility_windows.len(), 2);
+        assert!(capabilities
+            .compatibility_windows
+            .iter()
+            .all(|window| window.remove_in == "0.370.0"));
+        assert!(capabilities.compatibility_windows.iter().any(|window| {
+            window.projection
+                == "homeboy/agent-task-cook-report/v1#lifecycle_status,terminal,retryable"
+                && window.replacement_schema == "homeboy/control-plane-run/v1"
+        }));
+        assert!(capabilities.compatibility_windows.iter().any(|window| {
+            window.projection == "homeboy/runner-execution-record/v1#agent_task_run_id"
+                && window.replacement_schema == "homeboy/control-plane-run/v1#run"
+        }));
     }
 
     #[test]

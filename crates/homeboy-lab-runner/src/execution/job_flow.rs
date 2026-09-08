@@ -181,7 +181,11 @@ where
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
         if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
-            observed_agent_task_terminal_job_status(run_id, flow.run_id_owns_generic_exec)
+            observed_agent_task_terminal_job_status(
+                run_id,
+                flow.run_id_owns_generic_exec,
+                flow.handoff_endpoint,
+            )
         }) {
             // The agent-task lifecycle owns provider terminality. A stale runner
             // job projection must not hold Cook in dispatch after its aggregate
@@ -462,11 +466,25 @@ pub(super) fn terminal_notification_run_id<'a>(
 fn observed_agent_task_terminal_job_status(
     run_id: &str,
     run_id_owns_generic_exec: bool,
+    control_plane_endpoint: Option<&str>,
 ) -> Option<JobStatus> {
     if run_id_owns_generic_exec {
         return None;
     }
     let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
+    if let Some(endpoint) = control_plane_endpoint {
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            if let Ok(run) = crate::daemon_http_get::control_plane_run(&client, endpoint, &run_id) {
+                if let Some(status) = control_plane_terminal_job_status(run.state) {
+                    return Some(status);
+                }
+            }
+        }
+    }
     let store =
         homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
             .ok()?;

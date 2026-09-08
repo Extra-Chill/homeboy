@@ -28,8 +28,8 @@ pub use action::{
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
 };
 pub use capabilities::{
-    ControlPlaneCapabilities, ControlPlaneOperation, ControlPlaneResource,
-    CONTROL_PLANE_CAPABILITIES_SCHEMA,
+    ControlPlaneCapabilities, ControlPlaneCompatibilityWindow, ControlPlaneOperation,
+    ControlPlaneResource, CONTROL_PLANE_CAPABILITIES_SCHEMA,
 };
 pub use control_plane_ref::{ControlPlaneRef, ControlPlaneRefError};
 pub use event::{
