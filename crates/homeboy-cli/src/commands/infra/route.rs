@@ -2557,22 +2557,6 @@ fn decode_cook_dispatch_field<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn cook_attempt_source_path<'a>(
-    derived_cook_baseline: Option<&'a DerivedCookBaselineCapability>,
-    plan: &'a homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
-    controller_source_path: Option<&'a Path>,
-) -> Option<&'a Path> {
-    derived_cook_baseline
-        .map(|capability| capability.canonical_path())
-        .or_else(|| {
-            plan.tasks
-                .first()
-                .and_then(|task| task.workspace.root.as_deref())
-                .map(Path::new)
-        })
-        .or(controller_source_path)
-}
-
 impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
     for LabCookAttemptDispatcher
 {
@@ -2611,9 +2595,16 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // Preserve the controller's canonical decision across ordinary retry,
         // continuation, and fanout replay. A derived baseline is the declared
         // pre-staging transition where a changed candidate may replace it.
-        let source_path =
-            cook_attempt_source_path(derived_cook_baseline, &plan, self.source_path.as_deref())
-                .map(PathBuf::from);
+        let source_path = derived_cook_baseline
+            .map(|capability| capability.canonical_path())
+            .or_else(|| {
+                plan.tasks
+                    .first()
+                    .and_then(|task| task.workspace.root.as_deref())
+                    .map(Path::new)
+            })
+            .or(self.source_path.as_deref())
+            .map(PathBuf::from);
         let task = plan
             .tasks
             .first()
