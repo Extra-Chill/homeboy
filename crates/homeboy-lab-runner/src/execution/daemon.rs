@@ -120,6 +120,7 @@ pub(super) fn exec_via_daemon(
         cwd: cwd.clone(),
         env: env.clone(),
         secret_env_names: secret_env_names.clone(),
+        secret_env_plan: None,
         capture_patch,
         source_snapshot: source_snapshot.clone(),
         path_materialization_plan: path_materialization_plan.clone(),
