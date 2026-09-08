@@ -3715,7 +3715,8 @@ mod tests {
     use crate::agent_tasks::AgentTaskState;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
-        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttemptListRequest,
+        ControlPlaneActionPayload, ControlPlaneActionRequest,
+        ControlPlaneAdmissionRetryDisposition, ControlPlaneAttemptListRequest,
         ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneErrorClass,
         ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneMissionListRequest,
         ControlPlaneOperation, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
