@@ -271,9 +271,18 @@ fn repair_extension_parity(
     report.checks.retain(|check| check.id != "extension.parity");
     report.checks.extend(parity_checks);
     if parity_ready {
+        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+        let selected_provider_ids = probes::eligible_provider_ids(
+            catalog.providers(),
+            options.agent_backend.as_deref(),
+            options.agent_selector.as_deref(),
+        );
         report.checks.extend(probes::provider_readiness_checks(
             client,
-            &homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
+            &probes::selected_provider_readiness_contracts(
+                homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
+                &selected_provider_ids,
+            ),
         ));
     }
     report.repairs.push(RunnerRepair {

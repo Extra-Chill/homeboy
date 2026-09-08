@@ -1,6 +1,7 @@
 use super::super::*;
 use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
+    AgentTaskProviderRunnerReadinessContract,
 };
 use homeboy::core::command_invocation::CommandInvocation;
 use serde_json::json;
@@ -191,6 +192,41 @@ fn local_provider_executor_resolution_check_filters_to_selected_provider() {
         checks[0].details.get("provider_id").map(String::as_str),
         Some("selected.provider")
     );
+}
+
+#[test]
+fn selected_provider_readiness_contracts_do_not_probe_unselected_providers() {
+    let contracts = ["selected.provider", "unselected.provider"]
+        .into_iter()
+        .map(|provider_id| AgentTaskProviderRunnerReadinessContract {
+            provider_id: provider_id.to_string(),
+            backend: "test".to_string(),
+            runtime_id: Some("test-runtime".to_string()),
+            runtime_path: Some("/runtime".to_string()),
+            readiness: AgentTaskProviderRunnerReadiness {
+                id: format!("agent_task.provider_auth.{provider_id}"),
+                label: "Provider live authentication".to_string(),
+                required_extensions: Vec::new(),
+                invocation: Some(CommandInvocation {
+                    argv: vec!["node".to_string(), "readiness.cjs".to_string()],
+                    ..CommandInvocation::default()
+                }),
+                secret_env: Vec::new(),
+                env_path: None,
+                executable: None,
+                remediation: None,
+                extra: BTreeMap::new(),
+            },
+        })
+        .collect();
+
+    let selected = probes::selected_provider_readiness_contracts(
+        contracts,
+        &["selected.provider".to_string()],
+    );
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].provider_id, "selected.provider");
 }
 
 #[test]

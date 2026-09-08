@@ -80,6 +80,80 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
 }
 
 #[test]
+fn compact_doctor_projection_retains_provider_readiness() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
+        ready_for: vec!["ready.provider".to_string()],
+        blocked_for: vec!["blocked.provider".to_string()],
+        unverified_for: vec!["unverified.provider".to_string()],
+        unverified_remediation: Some("Authentication has not been verified.".to_string()),
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(
+        compact["provider_readiness"]["ready_for"],
+        serde_json::json!(["ready.provider"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["blocked_for"],
+        serde_json::json!(["blocked.provider"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["unverified_for"],
+        serde_json::json!(["unverified.provider"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["guidance"],
+        "Authentication has not been verified."
+    );
+}
+
+#[test]
+fn compact_doctor_projection_retains_all_unverified_provider_readiness() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
+        ready_for: Vec::new(),
+        blocked_for: Vec::new(),
+        unverified_for: vec!["opencode.agent-task-executor".to_string()],
+        unverified_remediation: Some(
+            "Provider authentication is unverified because runner doctor cannot select a model."
+                .to_string(),
+        ),
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(
+        compact["provider_readiness"]["unverified_for"],
+        serde_json::json!(["opencode.agent-task-executor"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["guidance"],
+        "Provider authentication is unverified because runner doctor cannot select a model."
+    );
+    assert_eq!(compact["truncation"]["provider_readiness"]["shown"], 1);
+}
+
+#[test]
+fn full_doctor_projection_retains_nonsecret_unverified_provider_ids() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
+        ready_for: Vec::new(),
+        blocked_for: Vec::new(),
+        unverified_for: vec!["opencode.agent-task-executor".to_string()],
+        unverified_remediation: None,
+    });
+
+    let full = output_projection(report, true);
+
+    assert_eq!(
+        full["provider_readiness"]["unverified_for"],
+        serde_json::json!(["opencode.agent-task-executor"])
+    );
+}
+
+#[test]
 fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.checks = (0..COMPACT_CHECK_LIMIT)
@@ -320,7 +394,7 @@ fn overall_status_promotes_errors_over_warnings() {
 #[test]
 fn lab_offload_readiness_keeps_a_healthy_eligible_provider_ready() {
     let checks = vec![
-        provider_check("selected.provider", RunnerDoctorStatus::Ok),
+        live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
         provider_check("optional.provider", RunnerDoctorStatus::Error),
     ];
     let eligible = vec![
@@ -333,12 +407,13 @@ fn lab_offload_readiness_keeps_a_healthy_eligible_provider_ready() {
     assert_eq!(status, RunnerDoctorStatus::Ok);
     assert_eq!(readiness.ready_for, vec!["selected.provider"]);
     assert_eq!(readiness.blocked_for, vec!["optional.provider"]);
+    assert!(readiness.unverified_for.is_empty());
 }
 
 #[test]
 fn lab_offload_readiness_blocks_a_failed_selected_provider() {
     let checks = vec![
-        provider_check("selected.provider", RunnerDoctorStatus::Error),
+        live_auth_provider_check("selected.provider", RunnerDoctorStatus::Error),
         provider_check("optional.provider", RunnerDoctorStatus::Ok),
     ];
     let eligible = vec!["selected.provider".to_string()];
@@ -348,6 +423,45 @@ fn lab_offload_readiness_blocks_a_failed_selected_provider() {
     assert_eq!(status, RunnerDoctorStatus::Error);
     assert!(readiness.ready_for.is_empty());
     assert_eq!(readiness.blocked_for, vec!["selected.provider"]);
+    assert!(readiness.unverified_for.is_empty());
+}
+
+#[test]
+fn lab_offload_readiness_error_dominates_live_auth_in_any_order() {
+    let eligible = vec!["selected.provider".to_string()];
+    for checks in [
+        vec![
+            provider_check("selected.provider", RunnerDoctorStatus::Error),
+            live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
+        ],
+        vec![
+            live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
+            provider_check("selected.provider", RunnerDoctorStatus::Error),
+            live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
+        ],
+    ] {
+        let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+        assert_eq!(status, RunnerDoctorStatus::Error);
+        assert!(readiness.ready_for.is_empty());
+        assert_eq!(readiness.blocked_for, eligible);
+    }
+}
+
+#[test]
+fn lab_offload_readiness_does_not_treat_a_resolved_require_graph_as_live_auth() {
+    let checks = vec![provider_check("selected.provider", RunnerDoctorStatus::Ok)];
+    let eligible = vec!["selected.provider".to_string()];
+
+    let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+
+    assert_eq!(status, RunnerDoctorStatus::Warning);
+    assert!(readiness.ready_for.is_empty());
+    assert!(readiness.blocked_for.is_empty());
+    assert_eq!(readiness.unverified_for, eligible);
+    assert_eq!(
+        readiness.unverified_remediation.as_deref(),
+        Some("Provider authentication is unverified because runner doctor cannot select a model. Run the selected task's normal preflight; doctor never changes credentials.")
+    );
 }
 
 #[test]
@@ -368,6 +482,7 @@ fn lab_offload_readiness_blocks_all_providers_on_a_runner_prerequisite_error() {
     assert_eq!(status, RunnerDoctorStatus::Error);
     assert!(readiness.ready_for.is_empty());
     assert_eq!(readiness.blocked_for, eligible);
+    assert!(readiness.unverified_for.is_empty());
 }
 
 fn provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::RunnerCheck {
@@ -379,6 +494,14 @@ fn provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::Runne
         remediation_action: None,
         details: BTreeMap::from([("provider_id".to_string(), provider_id.to_string())]),
     }
+}
+
+fn live_auth_provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::RunnerCheck {
+    let mut check = provider_check(provider_id, status);
+    check
+        .details
+        .insert("readiness_scope".to_string(), "live_auth".to_string());
+    check
 }
 
 #[test]
