@@ -49,7 +49,8 @@ use std::time::{Duration, Instant};
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, claim_operation_with_intent_in_store,
     complete_cook_operation_in_store, lifecycle_action_eligibility, now_timestamp,
-    resolve_run_id_in_store, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+    operation_claim_in_store, operation_lease_is_active_in_store, resolve_run_id_in_store,
+    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
     CanonicalControlPlaneIdentities, ClaimOutcome,
 };
 use crate::agent_task_schedule::AgentTaskPlan;
@@ -1633,11 +1634,64 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 )?;
                 Ok(acknowledgement)
             }
-            ClaimOutcome::LeaseHeld => Err(ControlPlaneError::unavailable(
-                "this idempotent action is already in progress",
-            )),
+            ClaimOutcome::LeaseHeld => {
+                if operation_lease_is_active_in_store(&self.lookup.store, &resolved, &operation_key)
+                    .map_err(map_lifecycle_error)?
+                {
+                    return Err(ControlPlaneError::unavailable(
+                        "this idempotent action is already in progress",
+                    ));
+                }
+                let recovered = recover_interrupted_action_acknowledgement(
+                    &self.lookup.store,
+                    &record,
+                    request,
+                    &operation_key,
+                )?;
+                complete_cook_operation_in_store(
+                    &self.lookup.store,
+                    &resolved,
+                    &operation_key,
+                    serde_json::to_value(&recovered).map_err(|error| {
+                        ControlPlaneError::unavailable(format!(
+                            "serialize recovered action result: {error}"
+                        ))
+                    })?,
+                )
+                .map_err(map_lifecycle_error)?;
+                let stored =
+                    operation_claim_in_store(&self.lookup.store, &resolved, &operation_key)
+                        .map_err(map_lifecycle_error)?
+                        .and_then(|claim| claim.result)
+                        .ok_or_else(|| {
+                            ControlPlaneError::unavailable(
+                                "recovered action acknowledgement was not persisted",
+                            )
+                        })?;
+                let acknowledgement = serde_json::from_value(stored).map_err(|error| {
+                    ControlPlaneError::unavailable(format!(
+                        "stored recovered action result: {error}"
+                    ))
+                })?;
+                ensure_action_events_in_store(
+                    &self.lookup.store,
+                    &record,
+                    request,
+                    &operation_key,
+                    &acknowledgement,
+                )?;
+                Ok(acknowledgement)
+            }
             ClaimOutcome::Acquired => {
-                let accepted_at = now_timestamp();
+                let accepted_at =
+                    operation_claim_in_store(&self.lookup.store, &resolved, &operation_key)
+                        .map_err(map_lifecycle_error)?
+                        .and_then(|claim| claim.accepted_at)
+                        .ok_or_else(|| {
+                            ControlPlaneError::unavailable(
+                                "action claim has no durable acceptance timestamp",
+                            )
+                        })?;
                 let acknowledgement = format!(
                     "{}:action:{}:{}",
                     record.run_id,
@@ -1762,14 +1816,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                         ))
                                     },
                                 )?;
-                            if parameters.new_run_id.is_none() {
-                                let identity = uuid::Uuid::new_v5(
-                                    &uuid::Uuid::NAMESPACE_OID,
-                                    format!("{}:retry:{}", record.run_id, request.idempotency_key)
-                                        .as_bytes(),
-                                );
-                                parameters.new_run_id = Some(format!("retry-{identity}"));
-                            }
+                            parameters.new_run_id =
+                                Some(retry_action_run_id(&record, request, &parameters));
                             match retry(&parameters) {
                                 Ok(retry) => {
                                     let outcome = if retry.created {
@@ -1997,6 +2045,239 @@ impl OrchestrationService<LifecycleStoreLookup> {
     }
 }
 
+fn retry_action_run_id(
+    record: &AgentTaskRunRecord,
+    request: &ControlPlaneActionRequest,
+    parameters: &ControlPlaneRetryParameters,
+) -> String {
+    parameters.new_run_id.clone().unwrap_or_else(|| {
+        let identity = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("{}:retry:{}", record.run_id, request.idempotency_key).as_bytes(),
+        );
+        format!("retry-{identity}")
+    })
+}
+
+fn recover_interrupted_action_acknowledgement(
+    store: &AgentTaskLifecycleStore,
+    original: &AgentTaskRunRecord,
+    request: &ControlPlaneActionRequest,
+    operation_key: &str,
+) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+    let current = store
+        .read_record(&original.run_id)
+        .map_err(map_lifecycle_error)?;
+    let claim = operation_claim_in_store(store, &original.run_id, operation_key)
+        .map_err(map_lifecycle_error)?
+        .ok_or_else(|| ControlPlaneError::unavailable("interrupted action claim is missing"))?;
+    let accepted_at = claim
+        .accepted_at
+        .or_else(|| {
+            action_accepted_at(store, &original.run_id, operation_key)
+                .ok()
+                .flatten()
+        })
+        .unwrap_or(claim.leased_at);
+    let failed = |message: &str| {
+        Ok((
+            ControlPlaneActionOutcome::Failed,
+            project_record(&current, None)?,
+            ControlPlaneActionPayload::empty(),
+            Some(message.to_string()),
+        ))
+    };
+    let (outcome, resource, result, message) = match request.action {
+        ControlPlaneAction::Cancel if current.state.is_terminal() => (
+            if current.state == AgentTaskRunState::Cancelled {
+                ControlPlaneActionOutcome::Succeeded
+            } else {
+                ControlPlaneActionOutcome::AlreadySatisfied
+            },
+            project_record(&current, None)?,
+            cancel_result_payload(cancel_result_for_record(
+                &current,
+                Duration::ZERO,
+                0,
+                None,
+            )),
+            Some("recovered from the durable terminal run state".to_string()),
+        ),
+        ControlPlaneAction::Cancel => failed(
+            "cancel was interrupted after acceptance and its external outcome is ambiguous; reconcile the run before issuing a new action",
+        )?,
+        ControlPlaneAction::Reconcile => failed(
+            "reconcile was interrupted after acceptance and its external outcome is ambiguous; inspect current state before issuing a new action",
+        )?,
+        ControlPlaneAction::Retry => {
+            let parameters: ControlPlaneRetryParameters =
+                serde_json::from_value(request.parameters.data.clone()).map_err(|error| {
+                    ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
+                })?;
+            let retry_run_id = retry_action_run_id(original, request, &parameters);
+            if store
+                .record_exists(&retry_run_id)
+                .map_err(map_lifecycle_error)?
+            {
+                let successor = store
+                    .read_record(&retry_run_id)
+                    .map_err(map_lifecycle_error)?;
+                if successor.metadata["retry_of"] == original.run_id {
+                    (
+                        ControlPlaneActionOutcome::AlreadySatisfied,
+                        project_record(&successor, None)?,
+                        ControlPlaneActionPayload {
+                            schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
+                            data: serde_json::json!({
+                                "record": successor,
+                                "runnable": false,
+                                "created": false,
+                                "recovered": true,
+                            }),
+                        },
+                        Some("recovered from the durable retry successor".to_string()),
+                    )
+                } else {
+                    failed(
+                        "retry was interrupted and the deterministic successor identity belongs to different lineage",
+                    )?
+                }
+            } else {
+                failed(
+                    "retry was interrupted after acceptance without an authoritative durable successor; no second dispatch was attempted",
+                )?
+            }
+        }
+        ControlPlaneAction::Resume
+            if current
+                .metadata
+                .get("unmaterialized_cook_admission")
+                .is_some_and(Value::is_object)
+                && current.state.is_terminal() =>
+        {
+            (
+                ControlPlaneActionOutcome::AlreadySatisfied,
+                project_record(&current, None)?,
+                ControlPlaneActionPayload {
+                    schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
+                    data: serde_json::json!({
+                        "schema": "homeboy/unmaterialized-cook-resume/v1",
+                        "status": current.metadata["unmaterialized_cook_admission"]["state"],
+                        "run_id": current.run_id,
+                        "idempotent": true,
+                        "terminal": true,
+                        "terminal_state": current.state,
+                        "recovered": true,
+                    }),
+                },
+                Some("recovered from the durable terminal admission state".to_string()),
+            )
+        }
+        ControlPlaneAction::Resume if current.state.is_terminal() => {
+            match crate::agent_task_lifecycle::read_aggregate_in_store(store, &current.run_id) {
+                Ok(aggregate) => {
+                    let exit_code = crate::agent_task_service::aggregate_exit_code(&aggregate);
+                    let aggregate =
+                        crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate);
+                    (
+                        ControlPlaneActionOutcome::AlreadySatisfied,
+                        project_record(&current, None)?,
+                        ControlPlaneActionPayload {
+                            schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                            data: serde_json::json!({
+                                "aggregate": aggregate,
+                                "exit_code": exit_code,
+                                "recovered": true,
+                            }),
+                        },
+                        Some("recovered from the durable terminal aggregate".to_string()),
+                    )
+                }
+                Err(_) => failed(
+                    "resume was interrupted and the terminal run has no authoritative aggregate; no second execution was attempted",
+                )?,
+            }
+        }
+        ControlPlaneAction::Resume => failed(
+            "resume was interrupted after acceptance without authoritative terminal evidence; no second execution was attempted",
+        )?,
+        ControlPlaneAction::Promote => {
+            let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
+                serde_json::from_value(request.parameters.data.clone()).map_err(|error| {
+                    ControlPlaneError::invalid_argument(format!("promote parameters: {error}"))
+                })?;
+            let request_fingerprint =
+                crate::agent_task_service::promotion_request_fingerprint(&parameters)
+                    .map_err(map_lifecycle_error)?;
+            let report = current
+                .metadata
+                .get("latest_promotion")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .filter(
+                    |report: &crate::agent_task_promotion::AgentTaskPromotionReport| {
+                        report.source.run_id.as_deref() == Some(original.run_id.as_str())
+                            && report.to_worktree == parameters.to_worktree
+                            && parameters
+                                .task_id
+                                .as_deref()
+                                .is_none_or(|task| report.source.task_id == task)
+                            && parameters
+                                .artifact_id
+                                .as_deref()
+                                .is_none_or(|artifact| report.patch_artifact.id == artifact)
+                            && report.provenance["promotion_request_fingerprint"]
+                                == request_fingerprint
+                            && report.status
+                                != crate::agent_task_promotion::AgentTaskPromotionStatus::VerificationPending
+                    },
+                );
+            if let Some(report) = report {
+                let mut data = serde_json::to_value(&report).unwrap_or_default();
+                data["handoff"] = promotion_handoff(&report);
+                data["recorded_on_run"] = serde_json::json!({
+                    "run_id": current.run_id,
+                    "metadata_key": "latest_promotion",
+                });
+                (
+                    ControlPlaneActionOutcome::Succeeded,
+                    project_record(&current, None)?,
+                    ControlPlaneActionPayload {
+                        schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
+                        data,
+                    },
+                    Some("recovered from the durable promotion report".to_string()),
+                )
+            } else {
+                failed(
+                    "promote was interrupted without a matching terminal promotion report; no second mutation was attempted",
+                )?
+            }
+        }
+    };
+
+    Ok(ControlPlaneActionAcknowledgement {
+        schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
+        acknowledgement: format!(
+            "{}:action:{}:{}",
+            original.run_id,
+            action_name(request.action),
+            request.idempotency_key
+        ),
+        run: RunId::new(&original.run_id)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+        action: request.action,
+        idempotency_key: request.idempotency_key.clone(),
+        actor: request.actor.clone(),
+        accepted_at,
+        completed_at: now_timestamp(),
+        outcome,
+        resource,
+        result,
+        message,
+    })
+}
+
 /// Action receipts live in migration 19, separate from the lifecycle record
 /// that owns effect claims. The accepted receipt is committed before the effect;
 /// the terminal receipt is retried from the immutable acknowledgement. A crash
@@ -2010,46 +2291,93 @@ fn ensure_action_events_in_store(
     operation_key: &str,
     acknowledgement: &ControlPlaneActionAcknowledgement,
 ) -> Result<(), ControlPlaneError> {
-    append_action_event_in_store(
-        store,
-        record,
-        request,
-        operation_key,
-        "action.accepted",
-        &acknowledgement.accepted_at,
-        serde_json::json!({
-            "operation_digest": action_operation_digest(operation_key),
-            "action": acknowledgement.action,
-            "acknowledgement": acknowledgement.acknowledgement,
-            "actor": acknowledgement.actor,
-            "expected_updated_at": request.expected_updated_at,
-            "confirmed": request.confirmed,
-            "parameters": request.parameters,
-        }),
-    )?;
+    if !action_event_receipt_exists(store, record, operation_key, "action.accepted")? {
+        append_action_event_in_store(
+            store,
+            record,
+            request,
+            operation_key,
+            "action.accepted",
+            &acknowledgement.accepted_at,
+            serde_json::json!({
+                "operation_digest": action_operation_digest(operation_key),
+                "action": acknowledgement.action,
+                "acknowledgement": acknowledgement.acknowledgement,
+                "actor": acknowledgement.actor,
+                "expected_updated_at": request.expected_updated_at,
+                "confirmed": request.confirmed,
+                "parameters": request.parameters,
+            }),
+        )?;
+    }
     let kind = match acknowledgement.outcome {
         ControlPlaneActionOutcome::Succeeded => "action.succeeded",
         ControlPlaneActionOutcome::AlreadySatisfied => "action.already_satisfied",
         ControlPlaneActionOutcome::Failed => "action.failed",
     };
-    append_action_event_in_store(
-        store,
-        record,
-        request,
-        operation_key,
-        kind,
-        &acknowledgement.completed_at,
-        serde_json::json!({
-            "operation_digest": action_operation_digest(operation_key),
-            "action": acknowledgement.action,
-            "acknowledgement": acknowledgement.acknowledgement,
-            "actor": acknowledgement.actor,
-            "outcome": acknowledgement.outcome,
-            "resource_state": acknowledgement.resource.state,
-            "resource_updated_at": acknowledgement.resource.updated_at,
-            "message": acknowledgement.message,
-        }),
-    )
+    if !action_event_receipt_exists(store, record, operation_key, kind)? {
+        append_action_event_in_store(
+            store,
+            record,
+            request,
+            operation_key,
+            kind,
+            &acknowledgement.completed_at,
+            serde_json::json!({
+                "operation_digest": action_operation_digest(operation_key),
+                "action": acknowledgement.action,
+                "acknowledgement": acknowledgement.acknowledgement,
+                "actor": acknowledgement.actor,
+                "outcome": acknowledgement.outcome,
+                "resource_state": acknowledgement.resource.state,
+                "resource_updated_at": acknowledgement.resource.updated_at,
+                "message": acknowledgement.message,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+fn action_event_receipt_exists(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    operation_key: &str,
+    kind: &str,
+) -> Result<bool, ControlPlaneError> {
+    let run = RunId::new(&record.run_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        action_event_idempotency_key(operation_key, kind).as_bytes(),
+    );
+    store
+        .open_observation_initialized()
+        .and_then(|observation| observation.control_plane_event_receipt_exists(&run, &digest))
+        .map_err(map_lifecycle_error)
+}
+
+fn action_accepted_at(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+) -> Result<Option<String>, ControlPlaneError> {
+    let run = RunId::new(run_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let operation_digest = action_operation_digest(operation_key);
+    store
+        .open_observation_initialized()
+        .and_then(|observation| observation.control_plane_event_stream(&run))
+        .map(|events| {
+            events.and_then(|events| {
+                events
+                    .into_iter()
+                    .find(|event| {
+                        event.kind == "action.accepted"
+                            && event.data["operation_digest"] == operation_digest
+                    })
+                    .and_then(|event| event.occurred_at)
+            })
+        })
+        .map_err(map_lifecycle_error)
 }
 
 fn append_action_event_in_store(
@@ -4178,8 +4506,9 @@ mod tests {
         RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
-        AgentTaskArtifactRef, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
-        AgentTaskRunTask,
+        claim_operation_with_intent_in_store, operation_claim_in_store, AgentTaskArtifactRef,
+        AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
+        ClaimOutcome, ClaimState,
     };
     use crate::agent_task_schedule::AgentTaskPlan;
     use crate::agent_tasks::AgentTaskState;
@@ -4198,18 +4527,96 @@ mod tests {
         CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
         CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
         CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
         CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::{json, Value};
+    use std::cell::Cell;
     use std::collections::BTreeMap;
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
         "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+
+    fn interrupt_action_after_effect(
+        service: &OrchestrationService<LifecycleStoreLookup>,
+        run: &RunId,
+        request: &ControlPlaneActionRequest,
+        effect: impl FnOnce(),
+    ) -> String {
+        let record = service
+            .lookup
+            .store
+            .read_record(run.as_str())
+            .expect("action record");
+        let operation_key = format!(
+            "control-plane-action:{}:{}",
+            super::action_name(request.action),
+            request.idempotency_key
+        );
+        let intent = serde_json::to_value(request).expect("action intent");
+        assert_eq!(
+            claim_operation_with_intent_in_store(
+                &service.lookup.store,
+                run.as_str(),
+                &operation_key,
+                super::ACTION_LEASE,
+                &intent,
+            )
+            .expect("action claim"),
+            ClaimOutcome::Acquired
+        );
+        let accepted_at =
+            operation_claim_in_store(&service.lookup.store, run.as_str(), &operation_key)
+                .expect("read action claim")
+                .and_then(|claim| claim.accepted_at)
+                .expect("durable accepted timestamp");
+        super::append_action_event_in_store(
+            &service.lookup.store,
+            &record,
+            request,
+            &operation_key,
+            "action.accepted",
+            &accepted_at,
+            json!({
+                "operation_digest": super::action_operation_digest(&operation_key),
+                "action": request.action,
+                "acknowledgement": format!(
+                    "{}:action:{}:{}",
+                    record.run_id,
+                    super::action_name(request.action),
+                    request.idempotency_key
+                ),
+                "actor": request.actor,
+                "expected_updated_at": request.expected_updated_at,
+                "confirmed": request.confirmed,
+                "parameters": request.parameters,
+            }),
+        )
+        .expect("accepted receipt");
+        effect();
+        service
+            .lookup
+            .store
+            .mutate_record(run.as_str(), |record| {
+                let claim = record.metadata["cook_operation_claims"]
+                    .as_array_mut()
+                    .and_then(|claims| {
+                        claims
+                            .iter_mut()
+                            .find(|claim| claim["operation_key"] == json!(operation_key.as_str()))
+                    })
+                    .expect("action claim");
+                claim["owner_pid"] = json!(u32::MAX);
+                true
+            })
+            .expect("simulate dead action owner");
+        operation_key
+    }
 
     #[derive(Clone)]
     struct MapLookup {
@@ -5646,6 +6053,297 @@ mod tests {
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
                 first
+            );
+        });
+    }
+
+    #[test]
+    fn interrupted_cancel_recovers_terminal_evidence_without_repeating_effects() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("interrupted-cancel", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("queued record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "interrupted-cancel-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "stop" }),
+                },
+                confirmed: true,
+            };
+            let operation_key = interrupt_action_after_effect(&service, &run, &request, || {
+                crate::agent_task_lifecycle::cancel_run_in_store(
+                    &store,
+                    run.as_str(),
+                    Some("stop"),
+                )
+                .expect("cancel effect");
+            });
+
+            let recovered = service
+                .execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    || panic!("resume delegate must not run"),
+                    |_| panic!("promote delegate must not run"),
+                )
+                .expect("recover interrupted cancel");
+            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(recovered.resource.state, ControlPlaneRunState::Cancelled);
+            assert_eq!(
+                operation_claim_in_store(&store, run.as_str(), &operation_key)
+                    .expect("claim")
+                    .expect("claim exists")
+                    .state,
+                ClaimState::Completed
+            );
+            assert_eq!(
+                service
+                    .events(&run, None)
+                    .expect("action receipts")
+                    .events
+                    .iter()
+                    .map(|event| event.kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["action.accepted", "action.succeeded"]
+            );
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
+                recovered
+            );
+        });
+    }
+
+    #[test]
+    fn interrupted_ambiguous_resume_terminalizes_without_redispatch() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("interrupted-resume", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("queued record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "interrupted-resume-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: false,
+            };
+            let effect_count = Cell::new(0);
+            let operation_key = interrupt_action_after_effect(&service, &run, &request, || {
+                effect_count.set(effect_count.get() + 1);
+            });
+            let accepted_at = operation_claim_in_store(&store, run.as_str(), &operation_key)
+                .expect("claim")
+                .expect("claim exists")
+                .accepted_at
+                .expect("accepted timestamp");
+            for index in 0..100 {
+                let mut filler = event_append_request();
+                filler.idempotency_key = format!("interrupted-resume-filler-{index}");
+                filler.kind = "run.progress".to_string();
+                super::append_event_in_store(&store, &run, &filler).expect("retention filler");
+            }
+            assert!(service
+                .events(&run, None)
+                .expect("compacted events")
+                .events
+                .iter()
+                .all(|event| event.kind != "action.accepted"));
+
+            let recovered = service
+                .execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    || {
+                        effect_count.set(effect_count.get() + 1);
+                        panic!("resume delegate must not run")
+                    },
+                    |_| panic!("promote delegate must not run"),
+                )
+                .expect("terminal interrupted resume acknowledgement");
+            assert_eq!(effect_count.get(), 1);
+            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
+            assert_eq!(recovered.accepted_at, accepted_at);
+            assert!(recovered
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("no second execution")));
+            assert_eq!(
+                operation_claim_in_store(&store, run.as_str(), &operation_key)
+                    .expect("claim")
+                    .expect("claim exists")
+                    .state,
+                ClaimState::Completed
+            );
+            assert_eq!(
+                service
+                    .events(&run, None)
+                    .expect("action receipts")
+                    .events
+                    .iter()
+                    .filter(|event| event.kind.starts_with("action."))
+                    .map(|event| event.kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["action.failed"]
+            );
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
+                recovered
+            );
+        });
+    }
+
+    #[test]
+    fn interrupted_retry_recovers_its_deterministic_successor_without_redispatch() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("interrupted-retry", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("source record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let retry_run_id = "interrupted-retry-successor";
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Retry,
+                idempotency_key: "interrupted-retry-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({
+                        "new_run_id": retry_run_id,
+                        "force": false,
+                    }),
+                },
+                confirmed: true,
+            };
+            let operation_key = interrupt_action_after_effect(&service, &run, &request, || {
+                let mut successor = record(retry_run_id);
+                successor.metadata["retry_of"] = json!(AGENT_TASK_RUN);
+                store.write_record(&successor).expect("durable successor");
+            });
+
+            let recovered = service
+                .execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    || panic!("resume delegate must not run"),
+                    |_| panic!("promote delegate must not run"),
+                )
+                .expect("recover interrupted retry");
+            assert_eq!(
+                recovered.outcome,
+                ControlPlaneActionOutcome::AlreadySatisfied
+            );
+            assert_eq!(recovered.result.schema, CONTROL_PLANE_RETRY_RESULT_SCHEMA);
+            assert_eq!(recovered.result.data["record"]["run_id"], retry_run_id);
+            assert_eq!(recovered.result.data["recovered"], true);
+            assert_eq!(
+                operation_claim_in_store(&store, run.as_str(), &operation_key)
+                    .expect("claim")
+                    .expect("claim exists")
+                    .state,
+                ClaimState::Completed
+            );
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
+                recovered
+            );
+        });
+    }
+
+    #[test]
+    fn interrupted_promotion_recovers_only_its_exact_request_report() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Promote,
+                idempotency_key: "interrupted-promote-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({
+                        "source": "{}",
+                        "source_run_id": AGENT_TASK_RUN,
+                        "to_worktree": "homeboy@candidate",
+                        "artifact_id": "patch-1",
+                        "dry_run": false,
+                    }),
+                },
+                confirmed: true,
+            };
+            let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
+                serde_json::from_value(request.parameters.data.clone()).expect("parameters");
+            let fingerprint = crate::agent_task_service::promotion_request_fingerprint(&parameters)
+                .expect("request fingerprint");
+            let mut report: crate::agent_task_promotion::AgentTaskPromotionReport =
+                serde_json::from_value(json!({
+                    "schema": "homeboy/agent-task-promotion-report/v1",
+                    "status": "applied",
+                    "source": { "kind": "aggregate", "run_id": AGENT_TASK_RUN, "task_id": "task" },
+                    "to_worktree": "homeboy@candidate",
+                    "target": { "worktree": "homeboy@candidate" },
+                    "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                    "operator_notification": { "status": "completed", "message": "complete" }
+                }))
+                .expect("promotion report");
+            report.provenance["promotion_request_fingerprint"] = json!(fingerprint);
+            interrupt_action_after_effect(&service, &run, &request, || {
+                store
+                    .record_promotion(
+                        run.as_str(),
+                        serde_json::to_value(report).expect("report value"),
+                    )
+                    .expect("durable promotion report");
+            });
+
+            let recovered = service
+                .execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    || panic!("resume delegate must not run"),
+                    |_| panic!("promote delegate must not run"),
+                )
+                .expect("recover interrupted promotion");
+            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(recovered.result.schema, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA);
+            assert_eq!(
+                recovered.result.data["handoff"]["states"]["target_applied"],
+                true
+            );
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
+                recovered
             );
         });
     }

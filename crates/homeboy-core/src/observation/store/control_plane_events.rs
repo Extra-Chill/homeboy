@@ -9,6 +9,20 @@ use super::*;
 pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
 
 impl ObservationStore {
+    pub fn control_plane_event_receipt_exists(
+        &self,
+        run: &RunId,
+        idempotency_digest: &str,
+    ) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM control_plane_event_appends WHERE run_id = ?1 AND idempotency_digest = ?2)",
+                params![run.as_str(), idempotency_digest],
+                |row| row.get(0),
+            )
+            .map_err(|error| self.read_error("read control-plane event receipt", error))
+    }
+
     pub fn control_plane_event_receipt_digests(&self, run: &RunId) -> Result<Vec<String>> {
         let has_ledger: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'control_plane_event_appends')", [], |row| row.get(0)).map_err(|error| self.read_error("inspect control-plane event ledger", error))?;
         if !has_ledger {

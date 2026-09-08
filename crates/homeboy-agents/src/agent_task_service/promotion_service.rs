@@ -156,6 +156,13 @@ fn promotion_job_idempotency_key(
     artifact_id: &str,
     request: &AgentTaskPromotionRequest,
 ) -> Result<String> {
+    Ok(format!(
+        "promotion:{source_run_id}:{artifact_id}:{}",
+        promotion_request_fingerprint(request)?
+    ))
+}
+
+pub fn promotion_request_fingerprint(request: &AgentTaskPromotionRequest) -> Result<String> {
     let serialized = serde_json::to_vec(request).map_err(|error| {
         homeboy_core::Error::internal_json(
             error.to_string(),
@@ -164,10 +171,7 @@ fn promotion_job_idempotency_key(
     })?;
     // The digest makes every immutable execution input part of the identity
     // without exposing aggregate content, paths, or gate configuration.
-    Ok(format!(
-        "promotion:{source_run_id}:{artifact_id}:{}",
-        content_hash::sha256_hex(&serialized)
-    ))
+    Ok(content_hash::sha256_hex(&serialized))
 }
 
 fn required_job_field<'a>(value: &'a Option<String>, name: &str) -> Result<&'a str> {
@@ -410,6 +414,7 @@ pub fn execute_promotion_with_progress_and_cancellation(
 }
 
 fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
+    let request_fingerprint = promotion_request_fingerprint(&request)?;
     let previous = request.source_run_id.as_ref().and_then(|run_id| {
         agent_task_lifecycle::reconcile_status(run_id)
             .ok()
@@ -437,6 +442,8 @@ fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTa
             .flatten();
         promote_with_checkpoint(options, |checkpoint| {
             if let Some(run_id) = checkpoint_run_id.as_deref() {
+                let mut checkpoint = checkpoint.clone();
+                bind_promotion_request_fingerprint(&mut checkpoint, &request_fingerprint);
                 agent_task_lifecycle::record_promotion(
                     run_id,
                     serde_json::to_value(checkpoint).map_err(|error| {
@@ -450,6 +457,8 @@ fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTa
             Ok(())
         })?
     };
+    let mut report = report;
+    bind_promotion_request_fingerprint(&mut report, &request_fingerprint);
     crate::agent_task_promotion::emit_promotion_progress(
         "finalization",
         None,
@@ -472,6 +481,17 @@ fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTa
         Some("promotion complete".to_string()),
     );
     Ok(report)
+}
+
+fn bind_promotion_request_fingerprint(
+    report: &mut AgentTaskPromotionReport,
+    request_fingerprint: &str,
+) {
+    if !report.provenance.is_object() {
+        report.provenance = serde_json::json!({});
+    }
+    report.provenance["promotion_request_fingerprint"] =
+        Value::String(request_fingerprint.to_string());
 }
 
 pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
@@ -536,6 +556,35 @@ mod tests {
         assert_ne!(job.idempotency_key, different_job.idempotency_key);
         assert!(!job.idempotency_key.contains("private aggregate content"));
         assert!(!job.idempotency_key.contains("base-sha"));
+    }
+
+    #[test]
+    fn promotion_report_binds_the_complete_request_fingerprint() {
+        let request = request();
+        let fingerprint = promotion_request_fingerprint(&request).expect("fingerprint");
+        let mut report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": { "kind": "aggregate", "run_id": "run-1", "task_id": "task" },
+            "to_worktree": "repo@candidate",
+            "target": { "worktree": "repo@candidate" },
+            "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+            "operator_notification": { "status": "completed", "message": "complete" }
+        }))
+        .expect("report");
+
+        bind_promotion_request_fingerprint(&mut report, &fingerprint);
+
+        assert_eq!(
+            report.provenance["promotion_request_fingerprint"],
+            fingerprint
+        );
+        let mut changed = request;
+        changed.gates.rerun_completed_gates = true;
+        assert_ne!(
+            report.provenance["promotion_request_fingerprint"],
+            promotion_request_fingerprint(&changed).expect("changed fingerprint")
+        );
     }
 
     #[test]

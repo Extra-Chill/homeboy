@@ -427,6 +427,86 @@ fn dead_owner_claim_is_reclaimed_without_waiting_for_lease_expiry() {
     });
 }
 
+#[test]
+fn dead_owner_action_claim_is_held_for_evidence_recovery() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-dead-action-owner");
+        let key = "control-plane-action:retry:dead";
+        let intent = json!({"action":"retry","actor":"cli"});
+        claim_operation_with_intent_in_store(
+            &test_lifecycle_store(),
+            "op-claim-dead-action-owner",
+            key,
+            LEASE,
+            &intent,
+        )
+        .expect("claim");
+        rewrite_record_for_test("op-claim-dead-action-owner", |record| {
+            record.metadata["cook_operation_claims"][0]["owner_pid"] = json!(u32::MAX);
+        })
+        .expect("write dead owner");
+
+        assert_eq!(
+            claim_operation_with_intent_in_store(
+                &test_lifecycle_store(),
+                "op-claim-dead-action-owner",
+                key,
+                LEASE,
+                &intent,
+            )
+            .expect("recover action claim"),
+            ClaimOutcome::LeaseHeld
+        );
+        assert!(!operation_lease_is_active_in_store(
+            &test_lifecycle_store(),
+            "op-claim-dead-action-owner",
+            key,
+        )
+        .expect("dead action owner"));
+    });
+}
+
+#[test]
+fn action_owner_on_another_host_is_not_declared_dead_from_a_local_pid_probe() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-remote-action-owner");
+        let key = "control-plane-action:promote:remote";
+        let intent = json!({"action":"promote","actor":"cli"});
+        claim_operation_with_intent_in_store(
+            &test_lifecycle_store(),
+            "op-claim-remote-action-owner",
+            key,
+            LEASE,
+            &intent,
+        )
+        .expect("claim");
+        rewrite_record_for_test("op-claim-remote-action-owner", |record| {
+            record.metadata["cook_operation_claims"][0]["owner_host_digest"] =
+                json!("different-host");
+            record.metadata["cook_operation_claims"][0]["owner_pid"] = json!(u32::MAX);
+        })
+        .expect("write remote owner");
+
+        assert_eq!(
+            claim_operation_with_intent_in_store(
+                &test_lifecycle_store(),
+                "op-claim-remote-action-owner",
+                key,
+                LEASE,
+                &intent,
+            )
+            .expect("observe remote action claim"),
+            ClaimOutcome::LeaseHeld
+        );
+        assert!(operation_lease_is_active_in_store(
+            &test_lifecycle_store(),
+            "op-claim-remote-action-owner",
+            key,
+        )
+        .expect("remote owner remains authoritative"));
+    });
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_accepts_the_full_process_id_range() {
