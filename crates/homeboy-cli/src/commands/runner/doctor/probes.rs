@@ -439,6 +439,18 @@ pub(crate) fn provider_readiness_checks(
         .collect()
 }
 
+pub(crate) fn selected_provider_readiness_contracts(
+    contracts: Vec<
+        homeboy::agents::agent_tasks::provider::AgentTaskProviderRunnerReadinessContract,
+    >,
+    provider_ids: &[String],
+) -> Vec<homeboy::agents::agent_tasks::provider::AgentTaskProviderRunnerReadinessContract> {
+    contracts
+        .into_iter()
+        .filter(|contract| provider_ids.contains(&contract.provider_id))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct LabOffloadExtensionDependency {
     pub extension_id: String,
