@@ -110,10 +110,6 @@ A useful headless UI can be built from this read/query surface:
   run-local; task pagination cursors are likewise bound to the run.
   Provider attempts use their durable `{run}:{task}:{attempt}` owner identity;
   attempt cursors bind to both parent identities.
-  `GET /v1/control-plane/runs/:id/executions` and
-  `GET /v1/control-plane/runs/:id/executions/:execution_id` expose only an
-  accepted durable runner-job binding. Local process IDs and provider session
-  IDs remain runtime references rather than synthetic execution identities.
   The mission index is forward-only:
   canonical mission ownership is indexed transactionally with each new run
   projection after the index schema is installed. HTTP submission requires broker `submit` scope,

@@ -7,12 +7,11 @@
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
-    ControlPlaneError, ControlPlaneEventPage, ControlPlaneExecution, ControlPlaneExecutionPage,
-    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
-    ControlPlaneOperation, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
-    ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
-    ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
-    ControlPlaneTaskPage, EventCursor, ExecutionId, MissionId, RunId, TaskId,
+    ControlPlaneError, ControlPlaneEventPage, ControlPlaneMission, ControlPlaneMissionListRequest,
+    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, MissionId, RunId, TaskId,
 };
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
@@ -86,22 +85,6 @@ pub trait ControlPlaneProvider: Send + Sync {
     ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
         Err(ControlPlaneError::unavailable(
             "control-plane attempt discovery is unavailable",
-        ))
-    }
-
-    fn execution(
-        &self,
-        run: &RunId,
-        execution: &ExecutionId,
-    ) -> Result<ControlPlaneExecution, ControlPlaneError> {
-        Err(ControlPlaneError::not_found(format!(
-            "control-plane execution not found in run {run}: {execution}"
-        )))
-    }
-
-    fn executions(&self, _run: &RunId) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
-        Err(ControlPlaneError::unavailable(
-            "control-plane execution discovery is unavailable",
         ))
     }
 
@@ -213,17 +196,6 @@ pub fn attempts(
 ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
     request.validate()?;
     with_provider(|provider| provider.attempts(run, task, request))
-}
-
-pub fn execution(
-    run: &RunId,
-    execution: &ExecutionId,
-) -> Result<ControlPlaneExecution, ControlPlaneError> {
-    with_provider(|provider| provider.execution(run, execution))
-}
-
-pub fn executions(run: &RunId) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
-    with_provider(|provider| provider.executions(run))
 }
 
 pub fn submit(
