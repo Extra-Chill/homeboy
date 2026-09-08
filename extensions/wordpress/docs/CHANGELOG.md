@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.9] - 2026-09-08
+
+### Fixed
+- rank runtime service provisioning failures above the ledger
+
 ## [3.45.8] - 2026-09-08
 
 ### Fixed
