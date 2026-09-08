@@ -12,26 +12,26 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
-    ControlPlaneEventSource, ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneMission,
-    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneReference, ControlPlaneReferencePage, ControlPlaneReferenceRegistration,
-    ControlPlaneReferenceType, ControlPlaneResource, ControlPlaneResult, ControlPlaneRun,
-    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
-    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId, ExecutionId,
-    MissionCursor, MissionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+    ControlPlaneEventRetention, ControlPlaneEventSource, ControlPlaneExecution,
+    ControlPlaneExecutionPage, ControlPlaneMission, ControlPlaneMissionListRequest,
+    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneReference,
+    ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
+    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+    ControlPlaneState, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
+    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId,
+    ExecutionId, MissionCursor, MissionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
-    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
-    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
-    CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
-    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_REVIEW_SCHEMA,
-    CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_resource_topology_contract::{
     ResourceTopologyResourceKind, ResourceTopologyResourceRef,
@@ -471,6 +471,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneOperation::GetRunExternalReference,
                 ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
+                ControlPlaneOperation::GetRunEventRetention,
                 ControlPlaneOperation::ExecuteRunAction,
             ],
         )
@@ -716,12 +717,32 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 "agent-task run not found: {requested_id}"
             )));
         }
+        if cursor.is_some_and(|cursor| cursor.as_str() == "expired") {
+            return Err(ControlPlaneError::cursor_expired(
+                "control-plane event cursor has expired",
+            ));
+        }
         if cursor.is_some_and(|cursor| cursor.as_str().parse::<u64>().is_err()) {
             return Err(ControlPlaneError::invalid_argument(
                 "control-plane event cursor is invalid",
             ));
         }
         Ok(fixture_control_plane_events(cursor))
+    }
+
+    fn event_retention(
+        &self,
+        requested_id: &RunId,
+    ) -> Result<ControlPlaneEventRetention, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("run not found"));
+        }
+        Ok(ControlPlaneEventRetention {
+            schema: CONTROL_PLANE_EVENT_RETENTION_SCHEMA.to_string(),
+            run: requested_id.clone(),
+            earliest_sequence: Some(1),
+            latest_sequence: Some(2),
+        })
     }
 
     fn review(
@@ -953,6 +974,16 @@ fn routes_versioned_control_plane_endpoints() {
         }
     );
     assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/events/retention",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRunEventRetention {
+            id: "run-abc".to_string(),
+        }
+    );
+    assert_eq!(
         http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc/actions").expect("route"),
         HttpEndpoint::ControlPlaneRunActions {
             id: "run-abc".to_string()
@@ -1072,6 +1103,7 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
             ControlPlaneOperation::GetRunExternalReference,
             ControlPlaneOperation::RegisterRunExternalReference,
             ControlPlaneOperation::GetRunEvents,
+            ControlPlaneOperation::GetRunEventRetention,
             ControlPlaneOperation::ExecuteRunAction,
         ]
     );
@@ -1469,6 +1501,27 @@ fn control_plane_http_events_resume_from_an_opaque_typed_cursor() {
 }
 
 #[test]
+fn control_plane_http_exposes_event_retention_without_changing_v1_pages() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/events/retention"),
+        body: None,
+    })
+    .expect("event retention");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.events.retention");
+    let result: ControlPlaneResult<ControlPlaneEventRetention> =
+        serde_json::from_value(response.body).expect("result");
+    let retention = result.resource.expect("retention");
+    assert_eq!(retention.earliest_sequence, Some(1));
+    assert_eq!(retention.latest_sequence, Some(2));
+
+    let page = serde_json::to_value(fixture_control_plane_events(None)).expect("event page");
+    assert!(page.get("retention").is_none());
+}
+
+#[test]
 fn control_plane_event_errors_are_typed() {
     register_fixture_control_plane_provider();
     for (path, status, class) in [
@@ -1481,6 +1534,11 @@ fn control_plane_event_errors_are_typed() {
             "/v1/control-plane/runs/agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751/events?cursor=invalid",
             400,
             ControlPlaneErrorClass::InvalidArgument,
+        ),
+        (
+            "/v1/control-plane/runs/agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751/events?cursor=expired",
+            410,
+            ControlPlaneErrorClass::CursorExpired,
         ),
     ] {
         let response = http_api::handle(HttpApiRequest {

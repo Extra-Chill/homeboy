@@ -8,6 +8,7 @@ use crate::{AttemptId, EventCursor, EventId, ExecutionId, MissionId, RunId, Task
 
 pub const CONTROL_PLANE_EVENT_SCHEMA: &str = "homeboy/control-plane-event/v1";
 pub const CONTROL_PLANE_EVENT_PAGE_SCHEMA: &str = "homeboy/control-plane-event-page/v1";
+pub const CONTROL_PLANE_EVENT_RETENTION_SCHEMA: &str = "homeboy/control-plane-event-retention/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +54,17 @@ pub struct ControlPlaneEventPage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<EventCursor>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEventRetention {
+    pub schema: String,
+    pub run: RunId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub earliest_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_sequence: Option<u64>,
 }
 
 impl ControlPlaneEventPage {
@@ -107,5 +119,19 @@ mod tests {
         assert_eq!(value["next_cursor"], "1");
         let decoded: ControlPlaneEventPage = serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, page);
+
+        let retention = ControlPlaneEventRetention {
+            schema: CONTROL_PLANE_EVENT_RETENTION_SCHEMA.to_string(),
+            run: RunId::new("run-1").expect("run"),
+            earliest_sequence: Some(1),
+            latest_sequence: Some(10),
+        };
+        let value = serde_json::to_value(&retention).expect("serialize retention");
+        assert_eq!(value["schema"], CONTROL_PLANE_EVENT_RETENTION_SCHEMA);
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneEventRetention>(value)
+                .expect("deserialize retention"),
+            retention
+        );
     }
 }

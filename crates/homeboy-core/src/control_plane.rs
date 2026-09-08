@@ -7,11 +7,11 @@
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
-    ControlPlaneError, ControlPlaneEventPage, ControlPlaneExecution, ControlPlaneExecutionPage,
-    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
-    ControlPlaneOperation, ControlPlaneReference, ControlPlaneReferencePage,
-    ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneRun,
-    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneError, ControlPlaneEventPage, ControlPlaneEventRetention, ControlPlaneExecution,
+    ControlPlaneExecutionPage, ControlPlaneMission, ControlPlaneMissionListRequest,
+    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneReference,
+    ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
+    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
     ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
     ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
     ControlPlaneTaskPage, EventCursor, ExecutionId, MissionId, ReferenceId, RunId, TaskId,
@@ -165,6 +165,15 @@ pub trait ControlPlaneProvider: Send + Sync {
         )))
     }
 
+    fn event_retention(
+        &self,
+        requested_id: &RunId,
+    ) -> Result<ControlPlaneEventRetention, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane run not found: {requested_id}"
+        )))
+    }
+
     fn review(
         &self,
         requested_id: &RunId,
@@ -309,6 +318,12 @@ pub fn events(
     cursor: Option<&EventCursor>,
 ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
     with_provider(|provider| provider.events(requested_id, cursor))
+}
+
+pub fn event_retention(
+    requested_id: &RunId,
+) -> Result<ControlPlaneEventRetention, ControlPlaneError> {
+    with_provider(|provider| provider.event_retention(requested_id))
 }
 
 pub fn review(

@@ -244,6 +244,11 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 cursor,
             })
         }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "events", "retention"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunEventRetention {
+                id: (*id).to_string(),
+            })
+        }
         (HttpMethod::Post, ["v1", "control-plane", "runs", id, "actions"]) => {
             Ok(HttpEndpoint::ControlPlaneRunActions {
                 id: (*id).to_string(),
@@ -449,6 +454,9 @@ where
         HttpEndpoint::ControlPlaneRunEvents { id, cursor } => {
             return control_plane_events_response(endpoint.clone(), id, cursor.as_ref());
         }
+        HttpEndpoint::ControlPlaneRunEventRetention { id } => {
+            return control_plane_event_retention_response(endpoint.clone(), id);
+        }
         HttpEndpoint::ControlPlaneCapabilities => {
             return control_plane_capabilities_response();
         }
@@ -634,6 +642,7 @@ where
         | HttpEndpoint::ControlPlaneAttemptExecution { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
+        | HttpEndpoint::ControlPlaneRunEventRetention { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
         | HttpEndpoint::ControlPlaneCapabilities => {
             unreachable!("returned before store open")
@@ -1116,6 +1125,18 @@ fn control_plane_events_response(
 ) -> Result<HttpApiResponse> {
     match control_plane_events(run_id, cursor) {
         Ok(events) => control_plane_ok(endpoint, events),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_event_retention_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+) -> Result<HttpApiResponse> {
+    let result = control_plane_run_id(run_id)
+        .and_then(|run_id| crate::control_plane::event_retention(&run_id));
+    match result {
+        Ok(retention) => control_plane_ok(endpoint, retention),
         Err(error) => control_plane_err(endpoint, error),
     }
 }

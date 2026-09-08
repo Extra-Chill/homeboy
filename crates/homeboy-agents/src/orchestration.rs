@@ -14,27 +14,28 @@ use homeboy_control_plane_contract::{
     ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
     ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef,
-    ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation,
-    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
-    ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneEventRetention, ControlPlaneEvidenceRef, ControlPlaneExecution,
+    ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
     ControlPlaneState, ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement,
     ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
-    ControlPlaneTaskPage, ExecutionId, MissionCursor, MissionId, ProviderSessionId, ReferenceId,
-    RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    ControlPlaneTaskPage, EventCursor, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
+    ReferenceId, RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
     CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
     CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
     CONTROL_PLANE_CANCEL_RESULT_SCHEMA, CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
-    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
-    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-    CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
-    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,7 @@ const RUN_CURSOR_SCHEMA: &str = "homeboy/control-plane-run-cursor/v1";
 const MISSION_CURSOR_SCHEMA: &str = "homeboy/control-plane-mission-cursor/v1";
 const TASK_CURSOR_SCHEMA: &str = "homeboy/control-plane-task-cursor/v1";
 const ATTEMPT_CURSOR_SCHEMA: &str = "homeboy/control-plane-attempt-cursor/v1";
+const EVENT_CURSOR_SCHEMA: &str = "homeboy/control-plane-event-cursor/v1";
 const RUN_CURSOR_BOUND: usize = 1024;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -123,6 +125,14 @@ struct AttemptCursorPayload {
     attempt_number: u32,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventCursorPayload {
+    schema: String,
+    run_id: String,
+    sequence: u64,
+}
+
 /// Lookup used by [`OrchestrationService`]. Callers inject stores or test
 /// doubles; the service never opens an environment-rooted store itself.
 pub trait RunLookup {
@@ -156,6 +166,10 @@ pub trait EventLookup {
         id: &RunId,
         cursor: Option<&homeboy_control_plane_contract::EventCursor>,
     ) -> Result<Option<homeboy_control_plane_contract::ControlPlaneEventPage>, ControlPlaneError>;
+    fn event_retention(
+        &self,
+        id: &RunId,
+    ) -> Result<Option<ControlPlaneEventRetention>, ControlPlaneError>;
 }
 
 /// Durable lifecycle-store lookup. Bounded, non-reconciling, non-writing.
@@ -265,8 +279,22 @@ impl EventLookup for LifecycleStoreLookup {
             cursor,
         ) {
             Ok(events) => Ok(Some(events)),
-            Err(error) if is_run_not_found(&error) => Ok(None),
-            Err(error) => Err(ControlPlaneError::unavailable(error.message)),
+            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn event_retention(
+        &self,
+        id: &RunId,
+    ) -> Result<Option<ControlPlaneEventRetention>, ControlPlaneError> {
+        match crate::agent_task_lifecycle::control_plane_event_retention_in_store(
+            &self.store,
+            id.as_str(),
+        ) {
+            Ok(retention) => Ok(Some(retention)),
+            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
     }
 }
@@ -321,6 +349,7 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneOperation::GetRunExternalReference,
                 ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
+                ControlPlaneOperation::GetRunEventRetention,
             ],
         )
     }
@@ -2595,12 +2624,16 @@ impl<L: EventLookup> OrchestrationService<L> {
         requested_id: &RunId,
         cursor: Option<&homeboy_control_plane_contract::EventCursor>,
     ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
-        if cursor.is_some_and(|cursor| cursor.as_str().parse::<u64>().is_err()) {
-            return Err(ControlPlaneError::invalid_argument(
-                "control-plane event cursor is invalid",
-            ));
-        }
         self.lookup.events(requested_id, cursor)?.ok_or_else(|| {
+            ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
+        })
+    }
+
+    pub fn event_retention(
+        &self,
+        requested_id: &RunId,
+    ) -> Result<ControlPlaneEventRetention, ControlPlaneError> {
+        self.lookup.event_retention(requested_id)?.ok_or_else(|| {
             ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
         })
     }
@@ -2620,7 +2653,9 @@ pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<Contro
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .run(&requested_id)
         .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+            ControlPlaneErrorClass::NotFound
+            | ControlPlaneErrorClass::InvalidArgument
+            | ControlPlaneErrorClass::CursorExpired => {
                 homeboy_core::Error::validation_invalid_argument(
                     "run_id",
                     error.message,
@@ -2629,6 +2664,9 @@ pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<Contro
                 )
             }
             ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
+            ControlPlaneErrorClass::Unknown => {
                 homeboy_core::Error::internal_unexpected(error.message)
             }
         })
@@ -2650,7 +2688,9 @@ pub fn review_from_current_environment(
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .review(&requested_id, request)
         .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+            ControlPlaneErrorClass::NotFound
+            | ControlPlaneErrorClass::InvalidArgument
+            | ControlPlaneErrorClass::CursorExpired => {
                 homeboy_core::Error::validation_invalid_argument(
                     "run_id",
                     error.message,
@@ -2659,6 +2699,9 @@ pub fn review_from_current_environment(
                 )
             }
             ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
+            ControlPlaneErrorClass::Unknown => {
                 homeboy_core::Error::internal_unexpected(error.message)
             }
         })
@@ -2764,7 +2807,9 @@ where
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .execute_action_with_delegates(&requested_id, request, retry, resume, promote)
         .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+            ControlPlaneErrorClass::NotFound
+            | ControlPlaneErrorClass::InvalidArgument
+            | ControlPlaneErrorClass::CursorExpired => {
                 homeboy_core::Error::validation_invalid_argument(
                     "action",
                     error.message,
@@ -2773,6 +2818,9 @@ where
                 )
             }
             ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
+            ControlPlaneErrorClass::Unknown => {
                 homeboy_core::Error::internal_unexpected(error.message)
             }
         })
@@ -2860,28 +2908,38 @@ pub fn event_page(
     events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
-    use homeboy_control_plane_contract::{
-        ControlPlaneEventPage, EventCursor, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
-    };
+    use homeboy_control_plane_contract::{ControlPlaneEventPage, CONTROL_PLANE_EVENT_PAGE_SCHEMA};
 
+    let (earliest_sequence, latest_sequence) = validate_event_stream(&run, &events)?;
     let after = cursor
-        .map(|cursor| {
-            cursor.as_str().parse::<u64>().map_err(|_| {
-                ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
-            })
-        })
+        .map(|cursor| decode_event_cursor(cursor, &run))
         .transpose()?
         .unwrap_or(0);
+    if cursor.is_some() && events.is_empty() {
+        return Err(ControlPlaneError::cursor_expired(
+            "control-plane event cursor has expired; the retained stream is empty",
+        ));
+    }
+    if let Some(earliest) = earliest_sequence {
+        if cursor.is_some() && after < earliest.saturating_sub(1) {
+            return Err(ControlPlaneError::cursor_expired(format!(
+                "control-plane event cursor has expired; earliest retained sequence is {earliest}"
+            )));
+        }
+    }
+    if latest_sequence.is_some_and(|latest| after > latest) {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane event cursor is ahead of the retained stream",
+        ));
+    }
     let mut remaining = events.into_iter().filter(|event| event.sequence > after);
     let page_events: Vec<_> = remaining.by_ref().take(EVENT_PAGE_BOUND).collect();
     let has_more = remaining.next().is_some();
     let next_cursor = page_events
         .last()
-        .map(|event| event.sequence.to_string())
-        .or_else(|| cursor.map(|cursor| cursor.as_str().to_string()))
-        .map(EventCursor::new)
-        .transpose()
-        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+        .map(|event| encode_event_cursor(&run, event.sequence))
+        .or_else(|| cursor.cloned().map(Ok))
+        .transpose()?;
 
     Ok(ControlPlaneEventPage {
         schema: CONTROL_PLANE_EVENT_PAGE_SCHEMA.to_string(),
@@ -2890,6 +2948,84 @@ pub fn event_page(
         next_cursor,
         has_more,
     })
+}
+
+pub fn event_retention(
+    run: RunId,
+    events: &[homeboy_control_plane_contract::ControlPlaneEvent],
+) -> Result<ControlPlaneEventRetention, ControlPlaneError> {
+    let (earliest_sequence, latest_sequence) = validate_event_stream(&run, events)?;
+    Ok(ControlPlaneEventRetention {
+        schema: CONTROL_PLANE_EVENT_RETENTION_SCHEMA.to_string(),
+        run,
+        earliest_sequence,
+        latest_sequence,
+    })
+}
+
+fn validate_event_stream(
+    run: &RunId,
+    events: &[homeboy_control_plane_contract::ControlPlaneEvent],
+) -> Result<(Option<u64>, Option<u64>), ControlPlaneError> {
+    let mut previous_sequence = None;
+    let mut event_ids = std::collections::BTreeSet::new();
+    for event in events {
+        if event.run != *run
+            || event.sequence == 0
+            || previous_sequence.is_some_and(|previous| event.sequence <= previous)
+            || !event_ids.insert(event.event.clone())
+        {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event stream is not strictly ordered and unique for this run",
+            ));
+        }
+        previous_sequence = Some(event.sequence);
+    }
+    Ok((
+        events.first().map(|event| event.sequence),
+        events.last().map(|event| event.sequence),
+    ))
+}
+
+fn encode_event_cursor(run: &RunId, sequence: u64) -> Result<EventCursor, ControlPlaneError> {
+    let bytes = serde_json::to_vec(&EventCursorPayload {
+        schema: EVENT_CURSOR_SCHEMA.to_string(),
+        run_id: run.as_str().to_string(),
+        sequence,
+    })
+    .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+    EventCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
+}
+
+fn decode_event_cursor(cursor: &EventCursor, run: &RunId) -> Result<u64, ControlPlaneError> {
+    if let Ok(sequence) = cursor.as_str().parse::<u64>() {
+        return (sequence > 0).then_some(sequence).ok_or_else(|| {
+            ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
+        });
+    }
+    if cursor.as_str().len() > RUN_CURSOR_BOUND {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane event cursor exceeds the size bound",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.as_str())
+        .map_err(|_| {
+            ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
+        })?;
+    let payload: EventCursorPayload = serde_json::from_slice(&bytes).map_err(|_| {
+        ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
+    })?;
+    if payload.schema != EVENT_CURSOR_SCHEMA
+        || payload.run_id != run.as_str()
+        || payload.sequence == 0
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane event cursor is invalid for this run",
+        ));
+    }
+    Ok(payload.sequence)
 }
 
 fn identities_for_record(
@@ -3681,6 +3817,15 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).events(requested_id, cursor)
     }
 
+    fn event_retention(
+        &self,
+        requested_id: &RunId,
+    ) -> Result<ControlPlaneEventRetention, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).event_retention(requested_id)
+    }
+
     fn execute_action(
         &self,
         requested_id: &RunId,
@@ -3701,9 +3846,9 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_review_evidence, decode_mission_cursor, encode_mission_cursor, event_page,
-        live_provider_liveness, observed_file_timestamp, phase, project_record,
-        references_for_record, register_reference_in_store, review_failure_reasons,
+        bounded_review_evidence, decode_event_cursor, decode_mission_cursor, encode_event_cursor,
+        encode_mission_cursor, event_page, live_provider_liveness, observed_file_timestamp, phase,
+        project_record, references_for_record, register_reference_in_store, review_failure_reasons,
         LifecycleStoreLookup, OrchestrationService, RegisteredProvider, RunListLookup, RunLookup,
         RunPagePosition, RunSnapshot, RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
     };
@@ -3999,10 +4144,9 @@ mod tests {
         let first = event_page(run.clone(), events, None).expect("first page");
         assert_eq!(first.events.len(), 100);
         assert!(first.has_more);
-        assert_eq!(
-            first.next_cursor.as_ref().map(EventCursor::as_str),
-            Some("100")
-        );
+        let cursor = first.next_cursor.as_ref().expect("next cursor");
+        assert_ne!(cursor.as_str(), "100");
+        assert_eq!(decode_event_cursor(cursor, &run).expect("cursor"), 100);
 
         let second = event_page(
             run,
@@ -4013,6 +4157,48 @@ mod tests {
         assert_eq!(second.events.len(), 1);
         assert_eq!(second.events[0].sequence, 101);
         assert!(!second.has_more);
+    }
+
+    #[test]
+    fn event_cursors_are_run_bound_and_expire_before_retention() {
+        let run = RunId::new("run-events").expect("run");
+        let other = RunId::new("other-run").expect("other run");
+        let wrong_run = encode_event_cursor(&other, 4).expect("cursor");
+        let error = event_page(run.clone(), vec![event(&run, 5)], Some(&wrong_run))
+            .expect_err("run-bound cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+
+        let expired = encode_event_cursor(&run, 2).expect("expired cursor");
+        let error = event_page(run.clone(), vec![event(&run, 5)], Some(&expired))
+            .expect_err("expired cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::CursorExpired);
+        assert_eq!(error.http_status(), 410);
+
+        let retained_boundary = encode_event_cursor(&run, 4).expect("retained boundary");
+        let page = event_page(run.clone(), vec![event(&run, 5)], Some(&retained_boundary))
+            .expect("retained cursor boundary");
+        assert_eq!(page.events[0].sequence, 5);
+
+        let legacy = EventCursor::new("4").expect("legacy cursor");
+        let page =
+            event_page(run.clone(), vec![event(&run, 5)], Some(&legacy)).expect("legacy v1 cursor");
+        assert_eq!(page.events[0].sequence, 5);
+
+        let error = event_page(run, Vec::new(), Some(&retained_boundary))
+            .expect_err("fully evicted stream");
+        assert_eq!(error.class, ControlPlaneErrorClass::CursorExpired);
+    }
+
+    #[test]
+    fn event_pages_reject_non_monotonic_or_foreign_streams() {
+        let run = RunId::new("run-events").expect("run");
+        let error = event_page(run.clone(), vec![event(&run, 2), event(&run, 1)], None)
+            .expect_err("non-monotonic stream");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+
+        let foreign = RunId::new("foreign-run").expect("foreign run");
+        let error = event_page(run, vec![event(&foreign, 1)], None).expect_err("foreign stream");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
     }
 
     #[test]
@@ -4079,6 +4265,7 @@ mod tests {
                 ControlPlaneOperation::GetRunExternalReference,
                 ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
+                ControlPlaneOperation::GetRunEventRetention,
                 ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
             ]

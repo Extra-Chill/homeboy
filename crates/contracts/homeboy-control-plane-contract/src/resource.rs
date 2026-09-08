@@ -95,11 +95,21 @@ impl ControlPlaneError {
         }
     }
 
+    pub fn cursor_expired(message: impl Into<String>) -> Self {
+        Self {
+            class: ControlPlaneErrorClass::CursorExpired,
+            retryable: false,
+            message: message.into(),
+        }
+    }
+
     pub fn http_status(&self) -> u16 {
         match self.class {
             ControlPlaneErrorClass::NotFound => 404,
             ControlPlaneErrorClass::InvalidArgument => 400,
+            ControlPlaneErrorClass::CursorExpired => 410,
             ControlPlaneErrorClass::Unavailable => 503,
+            ControlPlaneErrorClass::Unknown => 500,
         }
     }
 }
@@ -117,7 +127,10 @@ impl std::error::Error for ControlPlaneError {}
 pub enum ControlPlaneErrorClass {
     NotFound,
     InvalidArgument,
+    CursorExpired,
     Unavailable,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Canonical run resource. Pure, redacted, and non-reconciling.

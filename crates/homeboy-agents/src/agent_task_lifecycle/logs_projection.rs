@@ -32,8 +32,25 @@ pub fn control_plane_events_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
-) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
-    event_page_in_store(lifecycle_store, run_id, cursor)
+) -> std::result::Result<
+    homeboy_control_plane_contract::ControlPlaneEventPage,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let (run, events) =
+        event_stream_in_store(lifecycle_store, run_id).map_err(control_plane_event_read_error)?;
+    crate::orchestration::event_page(run, events, cursor)
+}
+
+pub fn control_plane_event_retention_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ControlPlaneEventRetention,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let (run, events) =
+        event_stream_in_store(lifecycle_store, run_id).map_err(control_plane_event_read_error)?;
+    crate::orchestration::event_retention(run, &events)
 }
 
 /// One non-reconciling read from the durable record and aggregate. Raw runner
@@ -43,6 +60,23 @@ fn event_page_in_store(
     run_id: &str,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    control_plane_events_in_store(lifecycle_store, run_id, cursor).map_err(|error| {
+        match error.class {
+            homeboy_control_plane_contract::ControlPlaneErrorClass::Unavailable => {
+                Error::internal_unexpected(error.message)
+            }
+            _ => Error::validation_invalid_argument("cursor", error.message, None, None),
+        }
+    })
+}
+
+fn event_stream_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<(
+    homeboy_control_plane_contract::RunId,
+    Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
+)> {
     // Logs are terminal inspection, not runner reconciliation. The durable
     // record remains readable when a runner is unavailable or wedged.
     let record = status_in_store(lifecycle_store, run_id)?;
@@ -76,7 +110,27 @@ fn event_page_in_store(
         normalize_runner_job_events(&raw_events, &record, &artifact_refs)?
     };
     let events = append_control_plane_action_events(&record, events)?;
-    control_plane_event_page(&record, events, cursor)
+    let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    Ok((run, events))
+}
+
+fn control_plane_event_read_error(
+    error: Error,
+) -> homeboy_control_plane_contract::ControlPlaneError {
+    if error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
+        && error.message.contains("not found")
+    {
+        homeboy_control_plane_contract::ControlPlaneError::not_found(error.message)
+    } else {
+        homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+    }
 }
 
 fn append_control_plane_action_events(

@@ -33,8 +33,9 @@ pub use capabilities::{
 };
 pub use control_plane_ref::{ControlPlaneRef, ControlPlaneRefError};
 pub use event::{
-    ControlPlaneEvent, ControlPlaneEventPage, ControlPlaneEventSource,
-    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+    ControlPlaneEvent, ControlPlaneEventPage, ControlPlaneEventRetention, ControlPlaneEventSource,
+    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
+    CONTROL_PLANE_EVENT_SCHEMA,
 };
 pub use identity::{
     AttemptCursor, AttemptId, EventCursor, EventId, ExecutionId, IdentityError, MissionCursor,

@@ -138,6 +138,9 @@ pub enum HttpEndpoint {
         id: String,
         cursor: Option<homeboy_control_plane_contract::EventCursor>,
     },
+    ControlPlaneRunEventRetention {
+        id: String,
+    },
     ControlPlaneRunActions {
         id: String,
     },
@@ -276,6 +279,7 @@ impl HttpEndpoint {
             },
             Self::ControlPlaneRunReview { .. } => "control_plane.runs.review",
             Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",
+            Self::ControlPlaneRunEventRetention { .. } => "control_plane.runs.events.retention",
             Self::ControlPlaneRunActions { .. } => "control_plane.runs.actions",
             Self::Jobs => "jobs.list",
             Self::Job { .. } => "jobs.show",
