@@ -7,6 +7,7 @@ use homeboy_core::runner_execution_envelope::{
     PathMaterializationPlan, RunnerExecutionDispatch, RunnerExecutionEnvelope,
     RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
 };
+use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_lab_contract::lab::execution_envelope::runner_execution_envelope_from_workload;
 
@@ -19,6 +20,11 @@ pub(super) struct RunnerApiExecutionInput {
     pub cwd: String,
     pub env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
+    /// Controller-resolved secret references for the dispatch. The plan carries
+    /// names, requirements, and provider credential provenance — never values —
+    /// so a durable worker can rehydrate credentials from runner-owned sources
+    /// after replay (Extra-Chill/homeboy#14382).
+    pub secret_env_plan: Option<SecretEnvPlan>,
     pub capture_patch: bool,
     pub source_snapshot: SourceSnapshot,
     pub path_materialization_plan: Option<PathMaterializationPlan>,
@@ -32,11 +38,23 @@ pub(super) struct RunnerApiExecutionInput {
 pub(super) fn runner_api_execution_envelope(
     input: RunnerApiExecutionInput,
 ) -> Result<RunnerExecutionEnvelope> {
-    let base_secret_env_plan = input
+    let mut base_secret_env_plan = input
         .workload
         .as_ref()
         .map(|workload| workload.required_secrets.secret_env_plan.clone())
         .filter(|plan| *plan != Default::default());
+    // Merge the dispatch plan (names, requirements, provider credential
+    // provenance) so the durable envelope carries the full reference set even
+    // when no workload-level plan exists (Extra-Chill/homeboy#14382).
+    if let Some(dispatch_plan) = input.secret_env_plan {
+        if dispatch_plan != SecretEnvPlan::default() {
+            if let Some(base_plan) = base_secret_env_plan.as_mut() {
+                base_plan.merge_from(dispatch_plan);
+            } else {
+                base_secret_env_plan = Some(dispatch_plan);
+            }
+        }
+    }
     let secret_env_plan = runner_exec_secret_env_plan(
         &input.command,
         None,
@@ -208,6 +226,7 @@ mod tests {
             cwd: "/runner/workspace".to_string(),
             env,
             secret_env_names: vec!["RUNNER_TOKEN".to_string()],
+            secret_env_plan: None,
             capture_patch: true,
             source_snapshot,
             path_materialization_plan: None,
@@ -220,5 +239,111 @@ mod tests {
         .expect("canonical envelope");
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn reverse_broker_envelope_carries_provider_credential_plan_without_inline_values() {
+        // Extra-Chill/homeboy#14382: the durable reverse-runner envelope must
+        // persist provider credentials as SecretEnvPlan references — names,
+        // requirements, and provider credential provenance, never values.
+        let mut plan = SecretEnvPlan::from_secret_env_names([
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+        ]);
+        plan.provider_credentials.insert(
+            "test.opencode-provider".to_string(),
+            homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
+                secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+                sources: Default::default(),
+            },
+        );
+        // The controller already stripped every planned secret value from the
+        // dispatch env before building the envelope.
+        let env = HashMap::from([("PUBLIC_FLAG".to_string(), "1".to_string())]);
+
+        let envelope = runner_api_execution_envelope(RunnerApiExecutionInput {
+            runner_id: "homeboy-lab".to_string(),
+            project_id: None,
+            command: vec!["homeboy".to_string(), "status".to_string()],
+            cwd: "/runner/workspace".to_string(),
+            env,
+            secret_env_names: plan.secret_env_names(),
+            secret_env_plan: Some(plan.clone()),
+            capture_patch: false,
+            source_snapshot: homeboy_core::source_snapshot::existing_remote(
+                "homeboy-lab",
+                "/runner/workspace",
+                Some("/runner"),
+            ),
+            path_materialization_plan: None,
+            require_paths: Vec::new(),
+            extension_env_providers: Vec::new(),
+            workload: None,
+            lifecycle: RunnerJobLifecycleMetadata {
+                source: Some("reverse-broker".to_string()),
+                kind: Some("runner.exec".to_string()),
+                durable_run_id: Some("run-plan-17".to_string()),
+                ..Default::default()
+            },
+            metadata: serde_json::json!({}),
+        })
+        .expect("reference-only envelope");
+
+        let carried_plan = envelope
+            .secret_env
+            .as_ref()
+            .expect("durable envelope carries the secret plan");
+        assert!(carried_plan
+            .secret_env_names()
+            .contains(&"AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()));
+        assert!(carried_plan
+            .provider_credentials
+            .contains_key("test.opencode-provider"));
+        let dispatch = envelope.dispatch.as_ref().expect("envelope dispatch");
+        assert!(!dispatch
+            .env
+            .contains_key("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"));
+        // The serialized durable payload records credential provenance without
+        // any secret value.
+        let durable = serde_json::to_string(&envelope).expect("envelope json");
+        assert!(!durable.contains("access-secret-value"));
+        assert!(durable.contains("test.opencode-provider"));
+    }
+
+    #[test]
+    fn reverse_broker_envelope_rejects_inline_values_for_plan_names() {
+        let plan = SecretEnvPlan::from_secret_env_names([
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()
+        ]);
+        let env = HashMap::from([(
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "inline-secret-value".to_string(),
+        )]);
+
+        let error = runner_api_execution_envelope(RunnerApiExecutionInput {
+            runner_id: "homeboy-lab".to_string(),
+            project_id: None,
+            command: vec!["homeboy".to_string(), "status".to_string()],
+            cwd: "/runner/workspace".to_string(),
+            env,
+            secret_env_names: plan.secret_env_names(),
+            secret_env_plan: Some(plan),
+            capture_patch: false,
+            source_snapshot: homeboy_core::source_snapshot::existing_remote(
+                "homeboy-lab",
+                "/runner/workspace",
+                Some("/runner"),
+            ),
+            path_materialization_plan: None,
+            require_paths: Vec::new(),
+            extension_env_providers: Vec::new(),
+            workload: None,
+            lifecycle: RunnerJobLifecycleMetadata::default(),
+            metadata: serde_json::json!({}),
+        })
+        .expect_err("inline provider credential values stay rejected");
+
+        assert!(error
+            .message
+            .contains("cannot accept inline secret env values"));
     }
 }

@@ -1253,6 +1253,7 @@ fn exec_with_status_snapshot_attempt(
                 options.command,
                 request_env,
                 secret_env_names,
+                secret_env_plan,
                 options.capture_patch,
                 Some(plan.source_snapshot),
                 options.path_materialization_plan,

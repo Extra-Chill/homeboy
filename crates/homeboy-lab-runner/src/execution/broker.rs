@@ -7,6 +7,7 @@ use base64::Engine;
 use homeboy_core::api_jobs::{Job, RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
+use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_runner_contract::{
     RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse, WorkspaceOwnerLease,
@@ -34,6 +35,7 @@ pub(super) fn exec_via_reverse_broker(
     command: Vec<String>,
     env: HashMap<String, String>,
     secret_env_names: Vec<String>,
+    secret_env_plan: SecretEnvPlan,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     path_materialization_plan: Option<PathMaterializationPlan>,
@@ -59,7 +61,12 @@ pub(super) fn exec_via_reverse_broker(
     });
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
-    let mut env = env;
+    // Durable reverse-runner jobs cannot persist inline secret values
+    // (`reject_inline_durable_secret_env`). Strip every planned secret name —
+    // including provider credential requirements and env-name aliases — so the
+    // stored envelope carries references only, and the worker rehydrates the
+    // values from runner-owned sources after replay (Extra-Chill/homeboy#14382).
+    let mut env = strip_durable_secret_env_values(env, &secret_env_plan);
     // Snapshot the configured command binary into the durable job. A later
     // daemon refresh must not redirect work that has already been accepted.
     if !env.contains_key("HOMEBOY_COMMAND") {
@@ -88,6 +95,7 @@ pub(super) fn exec_via_reverse_broker(
         cwd: cwd.clone(),
         env,
         secret_env_names,
+        secret_env_plan: Some(secret_env_plan),
         capture_patch,
         source_snapshot: source_snapshot.clone(),
         path_materialization_plan: path_materialization_plan.clone(),
