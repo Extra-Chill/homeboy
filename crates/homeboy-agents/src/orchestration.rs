@@ -22,22 +22,23 @@ use homeboy_control_plane_contract::{
     ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
-    ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
-    ControlPlaneState, ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement,
-    ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
-    ControlPlaneTaskPage, EventCursor, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
-    ReferenceId, RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_CANCEL_RESULT_SCHEMA, CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
-    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
-    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
-    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-    CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
-    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
+    ControlPlaneRunPlacementSelected, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
+    ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary,
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, ExecutionId, MissionCursor,
+    MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -3136,6 +3137,7 @@ pub fn project_record(
     }
     resource.state = run_state(record);
     resource.location = location(record);
+    resource.placement = placement(record);
     resource.phase = phase(record);
     resource.blocker = blocker(record);
     resource.owner = Some(owner(record));
@@ -3333,6 +3335,54 @@ fn location(record: &AgentTaskRunRecord) -> Option<ControlPlaneLocation> {
         runner_id,
         remote_run_id: transport,
     })
+}
+
+fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
+    use homeboy_lab_runner_contract::{EffectiveExecutionPlacement, Placement};
+
+    let decision =
+        serde_json::from_value::<homeboy_lab_runner_contract::ExecutionPlacementDecision>(
+            record.metadata.get("execution_placement_decision")?.clone(),
+        )
+        .ok()?;
+    if !decision.is_valid() {
+        return None;
+    }
+    let selected = match decision.selected {
+        EffectiveExecutionPlacement::Local if decision.runner.is_none() => {
+            ControlPlaneRunPlacementSelected::Controller
+        }
+        EffectiveExecutionPlacement::Lab if decision.runner.is_some() => {
+            ControlPlaneRunPlacementSelected::Runner
+        }
+        _ => return None,
+    };
+    let outcome = record
+        .metadata
+        .get("execution_placement_outcome")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .filter(
+            |outcome: &homeboy_lab_runner_contract::ExecutionPlacementOutcome| {
+                outcome.decision_id == decision.decision_id
+                    && decision.outcome(outcome.effective, outcome.runner_id.clone())
+                        == Some(outcome.clone())
+            },
+        );
+    ControlPlaneRunPlacement::new(
+        decision.decision_id,
+        match decision.requested {
+            Placement::Auto => ControlPlaneRunPlacementRequested::Automatic,
+            Placement::Local => ControlPlaneRunPlacementRequested::Controller,
+            Placement::Lab | Placement::LabOrLocal => ControlPlaneRunPlacementRequested::Runner,
+        },
+        selected,
+        outcome.map(|outcome| match outcome.effective {
+            EffectiveExecutionPlacement::Local => ControlPlaneRunPlacementEffective::Controller,
+            EffectiveExecutionPlacement::Lab => ControlPlaneRunPlacementEffective::Runner,
+        }),
+        decision.runner.map(|runner| runner.runner_id),
+    )
+    .ok()
 }
 
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
@@ -4278,6 +4328,48 @@ mod tests {
             stale_after_seconds: None,
         });
         record
+    }
+
+    fn runner_placement_decision(
+        requested: homeboy_lab_runner_contract::Placement,
+        fallback: bool,
+    ) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+        use homeboy_lab_runner_contract::{
+            EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+            ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+            ExecutionPlacementRunnerSelection, RunnerSelectionSource,
+        };
+
+        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            "route",
+            "1",
+            ExecutionPlacementIdentity {
+                repository: "repo".to_string(),
+                workspace: "workspace".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            },
+            requested,
+            if fallback {
+                ExecutionPlacementRequirement::Either
+            } else {
+                ExecutionPlacementRequirement::Lab
+            },
+            EffectiveExecutionPlacement::Lab,
+            Some(ExecutionPlacementRunnerSelection {
+                runner_id: "runner-1".to_string(),
+                source: RunnerSelectionSource::Policy,
+            }),
+            ExecutionPlacementFallback {
+                local_allowed: fallback,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        )
     }
 
     fn event(run: &RunId, sequence: u64) -> ControlPlaneEvent {
@@ -5913,6 +6005,118 @@ mod tests {
         let decoded: homeboy_control_plane_contract::ControlPlaneRun =
             serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, resource);
+    }
+
+    #[test]
+    fn placement_projects_a_controller_decision_without_runner_inference() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+            "route",
+            "1",
+            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "repo".to_string(),
+                workspace: "workspace".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            },
+            homeboy_lab_runner_contract::Placement::Local,
+        );
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert_eq!(value["placement"]["requested"], "controller");
+        assert_eq!(value["placement"]["selected"], "controller");
+        assert!(value["placement"].get("runner_id").is_none());
+        assert!(value["placement"].get("effective").is_none());
+    }
+
+    #[test]
+    fn placement_projects_a_correlated_runner_outcome() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision =
+            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
+        let outcome = decision
+            .outcome(
+                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                Some("runner-1".to_string()),
+            )
+            .unwrap();
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+        record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert_eq!(value["placement"]["requested"], "runner");
+        assert_eq!(value["placement"]["selected"], "runner");
+        assert_eq!(value["placement"]["effective"], "runner");
+        assert_eq!(value["placement"]["runner_id"], "runner-1");
+    }
+
+    #[test]
+    fn placement_projects_a_verified_controller_fallback() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision =
+            runner_placement_decision(homeboy_lab_runner_contract::Placement::LabOrLocal, true);
+        let outcome = decision
+            .outcome(
+                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+                None,
+            )
+            .unwrap();
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+        record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert_eq!(value["placement"]["selected"], "runner");
+        assert_eq!(value["placement"]["effective"], "controller");
+    }
+
+    #[test]
+    fn placement_omits_an_outcome_with_a_mismatched_decision_id() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision =
+            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
+        let mut outcome = decision
+            .outcome(
+                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                Some("runner-1".to_string()),
+            )
+            .unwrap();
+        outcome.decision_id = "other-decision".to_string();
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+        record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert!(value["placement"].get("effective").is_none());
+    }
+
+    #[test]
+    fn placement_is_not_inferred_from_runner_id() {
+        let record = record(AGENT_TASK_RUN);
+        assert!(project_record(&record, None).unwrap().placement.is_none());
+    }
+
+    #[test]
+    fn placement_omits_a_decision_with_a_forged_content_identity() {
+        let mut record = record(AGENT_TASK_RUN);
+        let mut decision =
+            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
+        decision.decision_id = "forged-decision".to_string();
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+
+        assert!(project_record(&record, None).unwrap().placement.is_none());
+    }
+
+    #[test]
+    fn placement_omits_an_invalid_local_decision() {
+        let mut record = record(AGENT_TASK_RUN);
+        let mut decision =
+            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
+        decision.selected = homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local;
+        decision.runner = None;
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+
+        assert!(project_record(&record, None).unwrap().placement.is_none());
     }
 
     #[test]

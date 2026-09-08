@@ -102,6 +102,38 @@ pub struct ExecutionPlacementOutcome {
 pub const CONTROLLER_LOCAL_SUBMISSION_POLICY_ID: &str = "controller-local-submission";
 
 impl ExecutionPlacementDecision {
+    /// Verifies the content identity and structural routing invariants before a
+    /// persisted decision is trusted by another projection or execution path.
+    pub fn is_valid(&self) -> bool {
+        let expected_id = stable_id(
+            &self.policy_id,
+            &self.policy_revision,
+            &self.identity,
+            self.requested,
+            self.required,
+            self.selected,
+            self.runner.as_ref(),
+            &self.fallback,
+            &self.override_authorization,
+        );
+        if self.decision_id != expected_id {
+            return false;
+        }
+        match self.selected {
+            EffectiveExecutionPlacement::Local => {
+                self.runner.is_none() && self.permits_local_execution()
+            }
+            EffectiveExecutionPlacement::Lab => {
+                self.required != ExecutionPlacementRequirement::Local
+                    && self.requested != Placement::Local
+                    && self
+                        .runner
+                        .as_ref()
+                        .is_some_and(|runner| !runner.runner_id.trim().is_empty())
+            }
+        }
+    }
+
     /// Whether this decision was derived by a submission in the absence of
     /// routing. See [`CONTROLLER_LOCAL_SUBMISSION_POLICY_ID`].
     pub fn is_submission_stamp(&self) -> bool {
@@ -345,6 +377,58 @@ mod tests {
             decision(Some("a"), "1").decision_id,
             decision(Some("a"), "2").decision_id
         );
+    }
+
+    #[test]
+    fn validation_rejects_a_forged_content_identity() {
+        let mut decision = decision(None, "1");
+        assert!(decision.is_valid());
+
+        decision.decision_id = "forged".to_string();
+        assert!(!decision.is_valid());
+    }
+
+    #[test]
+    fn validation_rejects_impossible_local_and_lab_decisions() {
+        let local = ExecutionPlacementDecision::new(
+            "lab-route",
+            "1",
+            ExecutionPlacementIdentity {
+                repository: "repo".to_string(),
+                workspace: "workspace".to_string(),
+                task: "test".to_string(),
+                candidate: None,
+                base: None,
+            },
+            Placement::Lab,
+            ExecutionPlacementRequirement::Lab,
+            EffectiveExecutionPlacement::Local,
+            None,
+            ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        );
+        assert!(!local.is_valid());
+
+        let mut lab = decision(None, "1");
+        lab.runner = None;
+        let lab = ExecutionPlacementDecision::new(
+            lab.policy_id,
+            lab.policy_revision,
+            lab.identity,
+            lab.requested,
+            lab.required,
+            lab.selected,
+            lab.runner,
+            lab.fallback,
+            lab.override_authorization,
+        );
+        assert!(!lab.is_valid());
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub const CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA: &str =
     "homeboy/control-plane-reference-registration/v1";
 pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
     "homeboy/control-plane-action-eligibility/v1";
+pub const CONTROL_PLANE_RUN_PLACEMENT_ID_BOUND: usize = 128;
 
 /// Shared result envelope for every control-plane operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +146,8 @@ pub struct ControlPlaneRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ControlPlaneLocation>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ControlPlaneRunPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocker: Option<ControlPlaneBlocker>,
@@ -185,6 +188,7 @@ impl ControlPlaneRun {
             run: run.clone(),
             state: ControlPlaneRunState::Unknown,
             location: None,
+            placement: None,
             phase: None,
             blocker: None,
             owner: None,
@@ -203,6 +207,138 @@ impl ControlPlaneRun {
             artifacts: Vec::new(),
         }
     }
+}
+
+/// A runtime-neutral projection of an immutable execution-placement decision.
+/// Routing policy, capacity, workspace, and fallback authorization remain owned
+/// by the runtime that produced the durable decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "ControlPlaneRunPlacementWire")]
+pub struct ControlPlaneRunPlacement {
+    pub decision_id: String,
+    pub requested: ControlPlaneRunPlacementRequested,
+    pub selected: ControlPlaneRunPlacementSelected,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective: Option<ControlPlaneRunPlacementEffective>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+}
+
+impl ControlPlaneRunPlacement {
+    pub fn new(
+        decision_id: impl Into<String>,
+        requested: ControlPlaneRunPlacementRequested,
+        selected: ControlPlaneRunPlacementSelected,
+        effective: Option<ControlPlaneRunPlacementEffective>,
+        runner_id: Option<String>,
+    ) -> Result<Self, ControlPlaneError> {
+        let placement = Self {
+            decision_id: validate_placement_id(decision_id.into())?,
+            requested,
+            selected,
+            effective,
+            runner_id: runner_id.map(validate_placement_id).transpose()?,
+        };
+        placement.validate()?;
+        Ok(placement)
+    }
+
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        match self.selected {
+            ControlPlaneRunPlacementSelected::Controller => {
+                if self.runner_id.is_some()
+                    || self.effective == Some(ControlPlaneRunPlacementEffective::Runner)
+                {
+                    return Err(ControlPlaneError::invalid_argument(
+                        "controller placement cannot identify or execute on a runner",
+                    ));
+                }
+            }
+            ControlPlaneRunPlacementSelected::Runner => {
+                if self.runner_id.is_none() {
+                    return Err(ControlPlaneError::invalid_argument(
+                        "runner placement requires a runner identity",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlPlaneRunPlacementWire {
+    #[serde(deserialize_with = "deserialize_placement_id")]
+    decision_id: String,
+    requested: ControlPlaneRunPlacementRequested,
+    selected: ControlPlaneRunPlacementSelected,
+    #[serde(default)]
+    effective: Option<ControlPlaneRunPlacementEffective>,
+    #[serde(default, deserialize_with = "deserialize_optional_placement_id")]
+    runner_id: Option<String>,
+}
+
+impl TryFrom<ControlPlaneRunPlacementWire> for ControlPlaneRunPlacement {
+    type Error = ControlPlaneError;
+
+    fn try_from(value: ControlPlaneRunPlacementWire) -> Result<Self, Self::Error> {
+        Self::new(
+            value.decision_id,
+            value.requested,
+            value.selected,
+            value.effective,
+            value.runner_id,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneRunPlacementRequested {
+    Automatic,
+    Controller,
+    Runner,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneRunPlacementSelected {
+    Controller,
+    Runner,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneRunPlacementEffective {
+    Controller,
+    Runner,
+}
+
+fn deserialize_placement_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    validate_placement_id(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_placement_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(validate_placement_id)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn validate_placement_id(value: String) -> Result<String, ControlPlaneError> {
+    if value.trim().is_empty() || value.len() > CONTROL_PLANE_RUN_PLACEMENT_ID_BOUND {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "control-plane run placement identity must be nonempty and at most {CONTROL_PLANE_RUN_PLACEMENT_ID_BOUND} bytes"
+        )));
+    }
+    Ok(value)
 }
 
 /// Generic, bounded discovery parameters. Product-specific selectors remain
@@ -708,9 +844,11 @@ mod tests {
         ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
         ControlPlaneProviderSummary, ControlPlaneReference, ControlPlaneReferencePage,
         ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneResult,
-        ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
-        ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask,
-        ControlPlaneTaskListRequest, ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunPlacement,
+        ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
+        ControlPlaneRunPlacementSelected, ControlPlaneRunState, ControlPlaneRuntime,
+        ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest,
+        ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
         CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
         CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
         CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
@@ -838,6 +976,61 @@ mod tests {
     }
 
     #[test]
+    fn run_placement_rejects_unbounded_or_unknown_data() {
+        let valid = ControlPlaneRunPlacement::new(
+            "decision-1",
+            ControlPlaneRunPlacementRequested::Runner,
+            ControlPlaneRunPlacementSelected::Runner,
+            Some(ControlPlaneRunPlacementEffective::Runner),
+            Some("runner-1".to_string()),
+        )
+        .expect("valid placement");
+        assert_eq!(valid.decision_id, "decision-1");
+        assert!(ControlPlaneRunPlacement::new(
+            " ",
+            ControlPlaneRunPlacementRequested::Automatic,
+            ControlPlaneRunPlacementSelected::Controller,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<ControlPlaneRunPlacement>(serde_json::json!({
+                "decision_id": "decision-1",
+                "requested": "runner",
+                "selected": "runner",
+                "unexpected": true,
+            }))
+            .is_err()
+        );
+        assert!(ControlPlaneRunPlacement::new(
+            "decision-1",
+            ControlPlaneRunPlacementRequested::Automatic,
+            ControlPlaneRunPlacementSelected::Controller,
+            None,
+            Some("runner-1".to_string()),
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<ControlPlaneRunPlacement>(serde_json::json!({
+                "decision_id": "decision-1",
+                "requested": "runner",
+                "selected": "runner"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ControlPlaneRunPlacement>(serde_json::json!({
+                "decision_id": "decision-1",
+                "requested": "controller",
+                "selected": "controller",
+                "effective": "runner"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn run_page_round_trips_with_a_bounded_typed_cursor() {
         let page = ControlPlaneRunPage {
             schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
@@ -883,6 +1076,19 @@ mod tests {
         assert_eq!(page.runs[0].state, ControlPlaneRunState::Running);
         assert!(page.next_cursor.is_none());
         assert!(!page.has_more);
+    }
+
+    #[test]
+    fn run_page_placement_v1_golden_fixture_round_trips() {
+        let fixture = include_str!("../tests/fixtures/run-page-placement-v1.json");
+        let page: ControlPlaneRunPage = serde_json::from_str(fixture).expect("placement fixture");
+        let placement = page.runs[0].placement.as_ref().expect("placement");
+        assert_eq!(placement.decision_id, "epd-fixture-1");
+        assert_eq!(
+            placement.effective,
+            Some(ControlPlaneRunPlacementEffective::Controller)
+        );
+        assert_eq!(placement.runner_id.as_deref(), Some("runner-fixture-1"));
     }
 
     #[test]
