@@ -48,8 +48,8 @@ const ENSURE_RUNNING_STARTUP_WAIT: Duration = Duration::from_secs(15);
 
 /// Enumerate foreground daemon processes without inferring ownership from a
 /// command substring. A candidate is an owner only when its explicit state
-/// store resolves to this durable store and its executable is the active binary;
-/// absent evidence remains ambiguous.
+/// store resolves to this durable store; binary compatibility is a separate
+/// freshness concern. Absent store evidence remains ambiguous.
 pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonProcessCandidate>> {
     // Never request process environments here: candidates are serialized into
     // operator diagnostics. Linux recovers bounded store identity from procfs;
@@ -544,6 +544,21 @@ mod command_state_dir_tests {
         );
         assert_eq!(candidate.ownership, DaemonProcessOwnership::Unrelated);
     }
+
+    #[test]
+    fn same_store_daemon_is_owned_even_when_its_binary_differs_from_the_caller() {
+        let jobs_path = Path::new("/tmp/generation/jobs.json");
+        let candidate = parse_daemon_process_candidate(
+            "42 /opt/homeboy-previous /opt/homeboy-previous daemon serve --addr 127.0.0.1:0 --startup-token token --state-dir /tmp/generation",
+            jobs_path,
+            None,
+        )
+        .expect("daemon candidate");
+
+        assert_eq!(candidate.ownership, DaemonProcessOwnership::Owning);
+        assert!(candidate.build_identity.is_none());
+        assert!(candidate.executable_digest.is_none());
+    }
 }
 
 fn command_environment_value<'a>(
@@ -601,16 +616,14 @@ fn normalize_durable_store_path(store: &Path) -> PathBuf {
 }
 
 fn classify_candidate_store(
-    candidate: &DaemonProcessCandidate,
+    _candidate: &DaemonProcessCandidate,
     jobs_path: &Path,
     store: &Path,
 ) -> DaemonProcessOwnership {
     if normalize_durable_store_path(store) != normalize_durable_store_path(jobs_path) {
         DaemonProcessOwnership::Unrelated
-    } else if candidate.build_identity.is_some() {
-        DaemonProcessOwnership::Owning
     } else {
-        DaemonProcessOwnership::Ambiguous
+        DaemonProcessOwnership::Owning
     }
 }
 

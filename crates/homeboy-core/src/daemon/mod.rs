@@ -1305,7 +1305,8 @@ pub fn read_status() -> Result<DaemonStatus> {
     let jobs_path = paths::daemon_jobs_file()?;
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
     let active_job_recovery_evidence = job_store.active_daemon_job_recovery_evidence(
-        (validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead))
+        validation
+            .running
             .then(|| {
                 validation
                     .state
