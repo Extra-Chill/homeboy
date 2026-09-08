@@ -163,6 +163,8 @@ enum DaemonCommand {
         addr: String,
         #[arg(long)]
         startup_token: String,
+        #[arg(long, hide = true)]
+        state_dir: Option<PathBuf>,
     },
     /// Stop the background daemon recorded in the state file
     Stop {
@@ -402,8 +404,9 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::Supervise {
             addr,
             startup_token,
+            state_dir,
         } => {
-            daemon::supervise(&addr, &startup_token)?;
+            daemon::supervise(&addr, &startup_token, state_dir.as_deref())?;
             Ok((
                 DaemonOutput::Serve(DaemonStartResult {
                     pid: std::process::id(),

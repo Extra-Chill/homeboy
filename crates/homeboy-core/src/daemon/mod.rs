@@ -37,6 +37,7 @@ mod completion_tracker;
 mod control;
 pub mod controller_job_driver;
 mod daemon_lease;
+mod generation_store;
 pub mod orchestration;
 mod patch_capture;
 pub mod recovery_actions;
@@ -166,6 +167,7 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 /// rather than carrying daemon HTTP or controller-job semantics themselves.
 pub struct LocalControllerJobClient {
     endpoint: String,
+    lease_id: String,
     client: reqwest::blocking::Client,
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
@@ -207,41 +209,40 @@ impl LocalControllerJobClient {
     /// before submission instead of handing new lifecycle records to it.
     pub fn connect_current_build() -> Result<Self> {
         let admission_guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
-        let status = read_status()?;
-        if status.reachable && !status.fresh {
-            let daemon_identity = status
-                .state
-                .as_ref()
-                .map(|state| state.build_identity.display.clone());
-            let recovery_command = (status.freshness.restartable
-                && status.freshness.active_jobs == 0)
-                .then_some("homeboy daemon recover --yes");
-            let mut error = Error::validation_invalid_argument(
-                "daemon_build_identity",
-                "controller jobs require the resident daemon to match the invoking Homeboy build",
-                daemon_identity.clone(),
-                Some(vec![
-                    "Preserve active daemon jobs, then restart or upgrade the daemon through its lease-bound recovery plan before retrying detached work."
-                        .to_string(),
-                    "Attached callers may continue with foreground ownership when the command supports it."
-                        .to_string(),
-                ]),
-            );
-            if let Some(recovery_command) = recovery_command {
-                error = error.with_hint(format!("Next: {recovery_command}"));
+        let prior = read_status()?;
+        match Self::connect_with_admission_guard(Some(admission_guard)) {
+            Ok(client) => Ok(client),
+            Err(error) if prior.reachable && !prior.fresh => {
+                let daemon_identity = prior
+                    .state
+                    .as_ref()
+                    .map(|state| state.build_identity.display.clone());
+                let recovery_command = (prior.freshness.restartable
+                    && prior.freshness.active_jobs == 0)
+                    .then_some("homeboy daemon recover --yes");
+                let mut mismatch = Error::validation_invalid_argument(
+                    "daemon_build_identity",
+                    "controller jobs require a current daemon generation",
+                    daemon_identity.clone(),
+                    None,
+                );
+                if let Some(recovery_command) = recovery_command {
+                    mismatch = mismatch.with_hint(format!("Next: {recovery_command}"));
+                }
+                mismatch.details = json!({
+                    "classification": "controller_job_daemon_build_mismatch",
+                    "daemon_build_identity": daemon_identity,
+                    "invoking_build_identity": build_identity::current().display,
+                    "stale_reason": prior.stale_reason,
+                    "stale_reason_code": prior.freshness.stale_reason_code,
+                    "active_jobs": prior.freshness.active_jobs,
+                    "recovery_command": recovery_command,
+                    "rotation_error": error.message,
+                });
+                Err(mismatch)
             }
-            error.details = json!({
-                "classification": "controller_job_daemon_build_mismatch",
-                "daemon_build_identity": daemon_identity,
-                "invoking_build_identity": build_identity::current().display,
-                "stale_reason": status.stale_reason,
-                "stale_reason_code": status.freshness.stale_reason_code,
-                "active_jobs": status.freshness.active_jobs,
-                "recovery_command": recovery_command,
-            });
-            return Err(error);
+            Err(error) => Err(error),
         }
-        Self::connect_with_admission_guard(Some(admission_guard))
     }
 
     /// Connect to the current daemon build, first applying its canonical idle
@@ -271,17 +272,35 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
+            lease_id: daemon.lease_id,
             client,
             _admission_guard: admission_guard,
         })
     }
 
+    fn endpoint_for_job(&self, job_id: &str) -> Result<String> {
+        Ok(generation_store::endpoint_for_job(job_id)?
+            .map(|endpoint| format!("http://{}", endpoint.address))
+            .unwrap_or_else(|| self.endpoint.clone()))
+    }
+
+    fn retire_if_drained(&self, job: &crate::api_jobs::Job) -> Result<()> {
+        if !job.status.is_terminal() {
+            return Ok(());
+        }
+        if let Some(endpoint) = generation_store::complete_job(&job.id.to_string())? {
+            control::stop_drained_generation(&endpoint)?;
+        }
+        Ok(())
+    }
+
     /// Persist a cancellation request and return the daemon's current job
     /// projection. The controller continues provider shutdown asynchronously.
     pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
+        let endpoint = self.endpoint_for_job(job_id)?;
         let response = self
             .client
-            .post(format!("{}/controller/jobs/{job_id}/cancel", self.endpoint))
+            .post(format!("{endpoint}/controller/jobs/{job_id}/cancel"))
             .json(&json!({ "reason": reason }))
             .send()
             .map_err(|error| {
@@ -360,6 +379,9 @@ impl LocalControllerJobClient {
                     Some("parse local controller job".to_string()),
                 )
             })?;
+        // The accepted durable record must be pinned before any later start or
+        // response boundary can expose a rotation to the caller.
+        generation_store::record_job(&job.id.to_string(), &self.lease_id)?;
         let disposition = match daemon_endpoint_payload(&value)
             .and_then(|payload| payload.pointer("/submission/disposition"))
             .and_then(serde_json::Value::as_str)
@@ -400,7 +422,7 @@ impl LocalControllerJobClient {
                 "local controller job start failed: {value}"
             )));
         }
-        let job =
+        let job: crate::api_jobs::Job =
             serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
                 Error::internal_unexpected("local controller-job start response has no job")
             })?)
@@ -414,9 +436,10 @@ impl LocalControllerJobClient {
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        let endpoint = self.endpoint_for_job(job_id)?;
         let response = self
             .client
-            .get(format!("{}/jobs/{job_id}", self.endpoint))
+            .get(format!("{endpoint}/jobs/{job_id}"))
             .send()
             .map_err(|error| {
                 Error::internal_unexpected(format!("read local controller job `{job_id}`: {error}"))
@@ -435,21 +458,25 @@ impl LocalControllerJobClient {
                 "local controller job status failed: {value}"
             )));
         }
-        serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-            Error::internal_unexpected("local controller-job status response has no job")
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller job".to_string()),
-            )
-        })
+        let job: crate::api_jobs::Job =
+            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
+                Error::internal_unexpected("local controller-job status response has no job")
+            })?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse local controller job".to_string()),
+                )
+            })?;
+        self.retire_if_drained(&job)?;
+        Ok(job)
     }
 
     pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        let endpoint = self.endpoint_for_job(job_id)?;
         let response = self
             .client
-            .post(format!("{}/controller/jobs/{job_id}/start", self.endpoint))
+            .post(format!("{endpoint}/controller/jobs/{job_id}/start"))
             .send()
             .map_err(|error| {
                 Error::internal_unexpected(format!(
@@ -1298,11 +1325,18 @@ fn legacy_lease_repair_error(path: &Path, problem: impl Into<String>) -> Error {
 }
 
 pub fn read_status() -> Result<DaemonStatus> {
-    let path = state_path()?;
+    // The stable registry is the admission authority after a blue-green
+    // handoff. Status reports B while retaining A's route in the registry.
+    let path = (!generation_store::bypassed())
+        .then(generation_store::admitting)
+        .transpose()?
+        .flatten()
+        .map(|endpoint| PathBuf::from(endpoint.state_dir).join("state.json"))
+        .unwrap_or(state_path()?);
     let state_path = path.display().to_string();
-    let state_identity = daemon_state_identity(&path, &paths::daemon_jobs_file()?)?;
+    let jobs_path = path.with_file_name("jobs.json");
+    let state_identity = daemon_state_identity(&path, &jobs_path)?;
     let validation = validate_lease_file(&path)?;
-    let jobs_path = paths::daemon_jobs_file()?;
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
     let active_job_recovery_evidence = job_store.active_daemon_job_recovery_evidence(
         validation
@@ -1525,6 +1559,7 @@ where
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
     let state = write_state(local_addr)?;
+    generation_store::seed(&state)?;
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
     // A restart cannot resume the thread that owned a pre-spawn reservation.
@@ -3269,7 +3304,7 @@ fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
     let legacy: LegacyExecRequest = serde_json::from_value(body).map_err(|err| {
         Error::validation_invalid_argument(
             "body",
-            format!("invalid legacy exec request body: {err}"),
+            format!("invalid exec request body (legacy transport): {err}"),
             None,
             None,
         )
