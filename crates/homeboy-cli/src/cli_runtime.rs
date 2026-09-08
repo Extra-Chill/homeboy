@@ -1344,17 +1344,30 @@ impl CliRuntime {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
         if crate::core::parsed_command_preflight::captured_result().is_none() {
-            let lab_readiness = matches!(
+            let lab_readiness = if matches!(
+                preflight_input.lab_route,
+                crate::core::parsed_command_preflight::LabRouteIntent::Supported { .. }
+            ) {
+                cli.runner
+                    .as_deref()
+                    .map(crate::runner::lab_runner_readiness_for_admission)
+                    .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+                    .ok()
+            } else {
+                None
+            };
+            let selected_runner_id = matches!(
                 preflight_input.lab_route,
                 crate::core::parsed_command_preflight::LabRouteIntent::Supported { .. }
             )
-            .then(|| crate::runner::lab_runner_readiness().ok())
+            .then(|| {
+                cli.runner.clone().or_else(|| {
+                    lab_readiness
+                        .as_ref()
+                        .and_then(|readiness| readiness.selected_runner_id.clone())
+                })
+            })
             .flatten();
-            let selected_runner_id = cli.runner.clone().or_else(|| {
-                lab_readiness
-                    .as_ref()
-                    .and_then(|readiness| readiness.selected_runner_id.clone())
-            });
             let result = match crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
                 normalized.clone(),
                 preflight_input.clone(),
@@ -1368,7 +1381,13 @@ impl CliRuntime {
                     selected_runner_id: selected_runner_id.clone(),
                     generic_route: generic_route_policy_snapshot(&cli, selected_runner_id.clone()),
                     deferred_pressure_refusal: false,
-                    runner_admitted: selected_runner_id.is_some() && lab_readiness.as_ref().is_some_and(|readiness| readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady),
+                    runner_admitted: selected_runner_id.as_ref().is_some_and(|runner_id| {
+                        lab_readiness.as_ref().is_some_and(|readiness| {
+                            readiness.state
+                                == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                                && readiness.available_runner_ids.contains(runner_id)
+                        })
+                    }),
                     runner_incompatible: false,
                     auto_local_capacity_fallback: false,
                 },
@@ -2720,10 +2739,15 @@ fn preflight_composed_lab_route(
     let Ok((resources, _)) = crate::commands::resources::run_preflight() else {
         return None;
     };
-    let mut readiness = hot_command
-        .lab_offload_supported
-        .then(|| crate::runner::lab_runner_readiness().ok())
-        .flatten();
+    let mut readiness = if hot_command.lab_offload_supported {
+        options
+            .runner
+            .map(crate::runner::lab_runner_readiness_for_admission)
+            .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+            .ok()
+    } else {
+        None
+    };
     let observed_at_ms = unix_timestamp_ms();
     if hot_command.lab_offload_supported
         && options.runner.is_none()
@@ -2742,11 +2766,13 @@ fn preflight_composed_lab_route(
     let warning =
         resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref());
     let runner_hosted = resource_policy::is_runner_hosted_exec();
-    let runner_admits_offload = options.runner.is_some()
-        || readiness.as_ref().is_some_and(|readiness| {
-            readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-                && readiness.selected_runner_id.is_some()
-        });
+    let runner_admits_offload = readiness.as_ref().is_some_and(|readiness| {
+        readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+            && readiness
+                .selected_runner_id
+                .as_ref()
+                .is_some_and(|runner| readiness.available_runner_ids.contains(runner))
+    });
     let auto_local_capacity_fallback = resource_policy::admits_auto_local_capacity_fallback(
         hot_command,
         &resources,
@@ -2927,7 +2953,11 @@ fn preflight_hot_command_with_input(
     if let Some(hot_command) = resource_policy::hot_command_for_cli(cli) {
         if let Ok((resources, _)) = preflight() {
             let mut lab_readiness = if hot_command.lab_offload_supported {
-                crate::runner::lab_runner_readiness().ok()
+                cli.runner
+                    .as_deref()
+                    .map(crate::runner::lab_runner_readiness_for_admission)
+                    .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+                    .ok()
             } else {
                 None
             };
@@ -2958,9 +2988,8 @@ fn preflight_hot_command_with_input(
                     lab_inventory_diagnostic = Some(diagnostic);
                 }
             }
-            // An explicit runner is a routing decision, not a default-runner
-            // fallback. Let Lab offload report any runner-specific readiness or
-            // capability failure rather than blocking it at controller preflight.
+            // An explicit runner is a routing decision, so its targeted snapshot
+            // is the sole readiness evidence used for controller admission.
             let selected_lab_runner = resource_policy_runner_hint(
                 cli,
                 lab_readiness

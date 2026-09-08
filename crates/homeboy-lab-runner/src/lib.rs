@@ -959,6 +959,33 @@ pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness
     lab_runner_readiness_from_refresh_observations(preferred.as_deref(), observations)
 }
 
+/// Read one explicitly selected runner for immediate workload admission. Unlike
+/// the bounded inventory refresh, this never substitutes another runner.
+pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerReadiness> {
+    let runner = load(runner_id)?;
+    runner_probe_gate::invalidate_runner_probes(runner_id);
+    let status = runner_admission_snapshot(runner_id)?.status;
+    let capabilities_ready = !runner_capability_inventory(runner_id)?
+        .runtime_ids
+        .is_empty();
+    let mode = status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+    let candidate = lab_runner_admission_candidate(
+        runner_id,
+        mode,
+        runner.settings.concurrency_limit,
+        &status,
+        capabilities_ready,
+        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    );
+    Ok(lab_runner_readiness_from_candidates(
+        Some(runner_id),
+        vec![candidate],
+    ))
+}
+
 fn observe_lab_runner_admission_candidate(
     runner_id: &str,
     deadline: std::time::Instant,
@@ -966,9 +993,9 @@ fn observe_lab_runner_admission_candidate(
     let runner = load(runner_id)?;
     runner_probe_gate::invalidate_runner_probes(runner_id);
     let status = runner_admission_snapshot_until(runner_id, deadline)?.status;
-    let capabilities_ready = runner_capability_inventory_until(runner_id, deadline)?
+    let capabilities_ready = !runner_capability_inventory_until(runner_id, deadline)?
         .runtime_ids
-        .contains("homeboy");
+        .is_empty();
     let mode = status
         .session
         .as_ref()
