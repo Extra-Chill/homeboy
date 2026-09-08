@@ -1325,7 +1325,16 @@ pub fn read_status() -> Result<DaemonStatus> {
                 != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
         })
         .count();
-    let process_candidates = control::daemon_process_candidates(&jobs_path)?;
+    let mut process_candidates = control::daemon_process_candidates(&jobs_path)?;
+    if validation.running {
+        if let Some(state) = validation.state.as_ref() {
+            for candidate in &mut process_candidates {
+                if candidate_matches_live_lease(candidate, state, &jobs_path) {
+                    candidate.ownership = DaemonProcessOwnership::Owning;
+                }
+            }
+        }
+    }
     let mut freshness = freshness_report_from_validation(&validation, blocking_active_jobs);
     // A dead lease proves only its recorded PID is gone. It cannot authorize a
     // replacement while another foreground candidate might still own this store.
@@ -1404,6 +1413,22 @@ pub fn read_status() -> Result<DaemonStatus> {
     };
     status.summary = status.render_summary();
     Ok(status)
+}
+
+/// A stale binary can still own the recorded live lease. Promote only the
+/// complete persisted process coordinates; incomplete process inspection stays
+/// ambiguous and therefore cannot authorize mutation.
+fn candidate_matches_live_lease(
+    candidate: &DaemonProcessCandidate,
+    state: &DaemonState,
+    jobs_path: &Path,
+) -> bool {
+    candidate.ownership == DaemonProcessOwnership::Ambiguous
+        && candidate.pid == state.pid
+        && candidate.durable_store_path.as_deref() == jobs_path.to_str()
+        && candidate.bind_endpoint.as_deref() == Some(state.address.as_str())
+        && !state.startup_token.is_empty()
+        && candidate.startup_token.as_deref() == Some(state.startup_token.as_str())
 }
 
 fn has_conflicting_process_candidates(candidates: &[DaemonProcessCandidate]) -> bool {
