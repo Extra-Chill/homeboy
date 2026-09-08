@@ -991,6 +991,71 @@ homeboy_wordpress_is_declared_standalone_php_test_file() {
     return 1
 }
 
+# The test manifest is the runner's environment source of truth for changed
+# scopes and shard replay, so the full-suite selector reads it as a second
+# standalone declaration beside standalone_php_test_paths. Entries whose
+# resolved environment is standalone-php (per-file environment or
+# default_environment fallback, validated against homeboy/test-manifest/v1)
+# belong to the standalone suite. The manifest parses once per run and caches
+# like the glob declaration above; per-file membership is a plain comparison
+# against component-relative manifest keys.
+homeboy_wordpress_manifest_standalone_php_test_paths() {
+    if [ -n "${HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
+        printf '%s\n' "$HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS"
+        return 0
+    fi
+
+    local manifest_path="${HOMEBOY_WORDPRESS_TEST_MANIFEST:-${PLUGIN_PATH}/homeboy-test-manifest.json}"
+    local declared_paths
+
+    if [ ! -e "$manifest_path" ]; then
+        HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS=""
+        HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED=1
+        return 0
+    fi
+
+    declared_paths="$(jq -r '
+        if type != "object" or .schema != "homeboy/test-manifest/v1" then
+            error("expected schema homeboy/test-manifest/v1")
+        elif (.tests | type) != "object" then
+            error("expected tests object")
+        else
+            (.default_environment // "wordpress") as $defaultEnvironment
+            | .tests
+            | to_entries[]
+            | (.value.environment // $defaultEnvironment) as $environment
+            | if $environment == "wordpress" or $environment == "standalone-php" then
+                (select($environment == "standalone-php") | .key)
+              else
+                error("unsupported environment " + ($environment | tostring))
+              end
+        end
+    ' "$manifest_path" 2>/dev/null)" || {
+        echo "ERROR: invalid WordPress test manifest: ${manifest_path}" >&2
+        return 2
+    }
+
+    HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS="$declared_paths"
+    HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED=1
+    printf '%s\n' "$declared_paths"
+}
+
+homeboy_wordpress_is_manifest_standalone_php_test_file() {
+    local test_file="$1"
+    local declared_path
+
+    if [ -z "${HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS_LOADED+x}" ]; then
+        homeboy_wordpress_manifest_standalone_php_test_paths >/dev/null || return 2
+    fi
+    while IFS= read -r declared_path; do
+        [ -n "$declared_path" ] || continue
+        if [ "$test_file" = "$declared_path" ]; then
+            return 0
+        fi
+    done <<< "$HOMEBOY_WORDPRESS_MANIFEST_STANDALONE_PHP_TEST_PATHS"
+    return 1
+}
+
 homeboy_wordpress_load_test_shard_manifest() {
     local manifest_path="${HOMEBOY_TEST_SHARD_MANIFEST:-}"
     local shard_id shard_tests test_file test_rel selected_count
@@ -1185,6 +1250,12 @@ homeboy_wordpress_collect_full_suite_standalone_php_files() {
     FULL_SUITE_STANDALONE_PHP_ROUTED=0
     FULL_SUITE_STANDALONE_PHP_EXCLUDED=0
 
+    # Both declaration sources load once per run, so per-file classification
+    # below is a plain shell comparison. The suite is the union of the glob
+    # declaration and the manifest's standalone-php entries; a file both
+    # sources declare is selected once.
+    homeboy_wordpress_manifest_standalone_php_test_paths >/dev/null || return $?
+
     while IFS= read -r test_file; do
         [ -n "$test_file" ] || continue
         test_rel="${test_file#"${PLUGIN_PATH}/"}"
@@ -1196,9 +1267,19 @@ homeboy_wordpress_collect_full_suite_standalone_php_files() {
         else
             declared_status=$?
             [ "$declared_status" -eq 1 ] || return "$declared_status"
-            # Only declared files belong to this standalone suite. Everything
-            # else retains its existing PHPUnit/support-file classification.
-            excluded=$((excluded + 1))
+            if homeboy_wordpress_is_manifest_standalone_php_test_file "$test_rel"; then
+                selected=$((selected + 1))
+                FULL_SUITE_STANDALONE_PHP_FILES+="${FULL_SUITE_STANDALONE_PHP_FILES:+$'\n'}${test_rel}"
+                routed=$((routed + 1))
+                echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
+            else
+                declared_status=$?
+                [ "$declared_status" -eq 1 ] || return "$declared_status"
+                # Only declared files belong to this standalone suite.
+                # Everything else retains its existing PHPUnit/support-file
+                # classification.
+                excluded=$((excluded + 1))
+            fi
         fi
     done < <(find "$PLUGIN_PATH" -type f -name '*.php' -print | sort)
 

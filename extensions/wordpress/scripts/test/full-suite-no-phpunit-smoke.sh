@@ -68,6 +68,76 @@ if grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/standalone.out"; then
 fi
 jq -e '.total == 1 and .passed == 1 and .failed == 0 and .skipped == 0 and .source == "full-suite-host-php"' "${TMPDIR}/standalone-results.json" >/dev/null
 
+# The test manifest is a second declaration source beside
+# standalone_php_test_paths: entries resolving to standalone-php are selected
+# with no glob declaration at all, and the manifest-declared standalone-only
+# suite satisfies the no-PHPUnit contract exactly like the glob case above.
+cat > "${component}/homeboy-test-manifest.json" <<'JSON'
+{
+    "schema": "homeboy/test-manifest/v1",
+    "tests": {
+        "tests/contract-smoke.php": {"environment": "standalone-php"}
+    }
+}
+JSON
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail"}' \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/manifest-results.json" \
+run_router > "${TMPDIR}/manifest.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=2 selected=1 routed=1 excluded=1 passed=1 failed=0" "${TMPDIR}/manifest.out"
+if grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/manifest.out"; then
+    echo "Manifest-declared standalone full suite must not invoke PHPUnit when no PHPUnit tests exist." >&2
+    exit 1
+fi
+jq -e '.total == 1 and .passed == 1 and .failed == 0 and .skipped == 0 and .source == "full-suite-host-php"' "${TMPDIR}/manifest-results.json" >/dev/null
+
+# The sources union per file: a file both the manifest and the glob
+# declaration claim is selected and executed exactly once.
+printf '%s\n' '<?php // Standalone smoke, declared by both sources.' > "${component}/tests/overlapping-smoke.php"
+cat > "${component}/homeboy-test-manifest.json" <<'JSON'
+{
+    "schema": "homeboy/test-manifest/v1",
+    "tests": {
+        "tests/contract-smoke.php": {"environment": "standalone-php"},
+        "tests/overlapping-smoke.php": {"environment": "standalone-php"}
+    }
+}
+JSON
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","standalone_php_test_paths":["tests/overlapping-smoke.php"]}' \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/overlap-results.json" \
+run_router > "${TMPDIR}/overlap.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=3 selected=2 routed=2 excluded=1 passed=2 failed=0" "${TMPDIR}/overlap.out"
+overlap_routes="$(grep -cF "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/overlapping-smoke.php:" "${TMPDIR}/overlap.out" || true)"
+[ "$overlap_routes" -eq 1 ] || { echo "Expected exactly one route for the overlapping standalone file, got ${overlap_routes}." >&2; exit 1; }
+contract_routes="$(grep -cF "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/contract-smoke.php:" "${TMPDIR}/overlap.out" || true)"
+[ "$contract_routes" -eq 1 ] || { echo "Expected exactly one route for the manifest-declared file, got ${contract_routes}." >&2; exit 1; }
+jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/overlap-results.json" >/dev/null
+
+# default_environment makes listed entries standalone unless a per-file
+# environment overrides it; the override is excluded from the standalone suite.
+cat > "${component}/homeboy-test-manifest.json" <<'JSON'
+{
+    "schema": "homeboy/test-manifest/v1",
+    "default_environment": "standalone-php",
+    "tests": {
+        "tests/contract-smoke.php": {},
+        "tests/overlapping-smoke.php": {"environment": "wordpress"},
+        "tests/_stub-wp-and-rest.php": {"environment": "wordpress"}
+    }
+}
+JSON
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail"}' \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/default-env-results.json" \
+run_router > "${TMPDIR}/default-env.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=3 selected=1 routed=1 excluded=2 passed=1 failed=0" "${TMPDIR}/default-env.out"
+if grep -Fq "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/overlapping-smoke.php:" "${TMPDIR}/default-env.out"; then
+    echo "A per-file wordpress override must be excluded from the standalone suite." >&2
+    exit 1
+fi
+jq -e '.total == 1 and .passed == 1 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/default-env-results.json" >/dev/null
+
 HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"skip","wp_codebox_phpunit_test_root":"/unresolved/tests"}' run_router > "${TMPDIR}/explicit.out"
 grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/explicit.out"
 
