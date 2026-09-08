@@ -10,8 +10,8 @@ use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::observation::ObservationStore;
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy::core::resource_lifecycle_index::{
-    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleRecord,
-    ResourceLifecycleResourceStatus,
+    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleIndex,
+    ResourceLifecycleRecord, ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
 use homeboy::core::Error;
 use homeboy::runner::artifact_attach::{
@@ -135,9 +135,13 @@ fn metadata_with_resource_lifecycle(
             artifact.run_id
         )),
         status: ResourceLifecycleResourceStatus::Retained,
+        migration_provenance: None,
     };
-    metadata["resource_lifecycle"] =
-        serde_json::to_value(resource).expect("resource lifecycle records are serializable");
+    metadata["resource_lifecycle_index"] = serde_json::to_value(ResourceLifecycleIndex {
+        schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+        resources: vec![resource],
+    })
+    .expect("resource lifecycle indexes are serializable");
     metadata
 }
 
@@ -607,15 +611,17 @@ mod tests {
                 source.display().to_string()
             );
             assert_eq!(
-                output.artifact.metadata_json["resource_lifecycle"]["cleanup_policy"],
+                output.artifact.metadata_json["resource_lifecycle_index"]["resources"][0]
+                    ["cleanup_policy"],
                 "delete_after_ttl"
             );
             assert_eq!(
-                output.artifact.metadata_json["resource_lifecycle"]["evidence_retention"],
+                output.artifact.metadata_json["resource_lifecycle_index"]["resources"][0]
+                    ["evidence_retention"],
                 "full"
             );
             assert_eq!(
-                output.artifact.metadata_json["resource_lifecycle"]["path"],
+                output.artifact.metadata_json["resource_lifecycle_index"]["resources"][0]["path"],
                 output.artifact.path
             );
             assert!(PathBuf::from(&output.artifact.path).exists());
