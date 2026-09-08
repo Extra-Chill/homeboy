@@ -9,11 +9,12 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
-    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneBlocker,
-    ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef,
-    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    AttemptCursor, AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement,
+    ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
+    ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
+    ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
+    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneEvidenceRef, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
     ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
     ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
@@ -22,6 +23,7 @@ use homeboy_control_plane_contract::{
     ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, ExecutionId,
     MissionCursor, MissionId, ProviderSessionId, RunCursor, RunId, TaskCursor, TaskId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
@@ -60,6 +62,7 @@ const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RUN_CURSOR_SCHEMA: &str = "homeboy/control-plane-run-cursor/v1";
 const MISSION_CURSOR_SCHEMA: &str = "homeboy/control-plane-mission-cursor/v1";
 const TASK_CURSOR_SCHEMA: &str = "homeboy/control-plane-task-cursor/v1";
+const ATTEMPT_CURSOR_SCHEMA: &str = "homeboy/control-plane-attempt-cursor/v1";
 const RUN_CURSOR_BOUND: usize = 1024;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -103,6 +106,15 @@ struct TaskCursorPayload {
     schema: String,
     run_id: String,
     task_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttemptCursorPayload {
+    schema: String,
+    run_id: String,
+    task_id: String,
+    attempt_number: u32,
 }
 
 /// Lookup used by [`OrchestrationService`]. Callers inject stores or test
@@ -273,6 +285,7 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneResource::Mission,
                 ControlPlaneResource::Run,
                 ControlPlaneResource::Task,
+                ControlPlaneResource::Attempt,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -284,6 +297,8 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::ListRunTasks,
                 ControlPlaneOperation::GetRunTask,
+                ControlPlaneOperation::ListTaskAttempts,
+                ControlPlaneOperation::GetTaskAttempt,
                 ControlPlaneOperation::GetRunEvents,
             ],
         )
@@ -370,6 +385,204 @@ impl<L: RunLookup> OrchestrationService<L> {
             has_more,
         })
     }
+
+    pub fn attempt(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+    ) -> Result<ControlPlaneAttempt, ControlPlaneError> {
+        let snapshot = self
+            .lookup
+            .get(run)?
+            .ok_or_else(|| ControlPlaneError::not_found(format!("run not found: {run}")))?;
+        provider_attempts(&snapshot.record, task)?
+            .into_iter()
+            .find(|attempt| attempt.attempt_number == attempt_number)
+            .ok_or_else(|| {
+                ControlPlaneError::not_found(format!(
+                    "attempt not found for run {run}, task {task}: {attempt_number}"
+                ))
+            })
+    }
+
+    pub fn attempts(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        request: &ControlPlaneAttemptListRequest,
+    ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
+        request.validate()?;
+        let after = request
+            .cursor
+            .as_ref()
+            .map(|cursor| decode_attempt_cursor(cursor, run, task))
+            .transpose()?;
+        let snapshot = self
+            .lookup
+            .get(run)?
+            .ok_or_else(|| ControlPlaneError::not_found(format!("run not found: {run}")))?;
+        let mut attempts = provider_attempts(&snapshot.record, task)?;
+        if let Some(after) = after {
+            attempts.retain(|attempt| attempt.attempt_number > after);
+        }
+        let has_more = attempts.len() > request.limit as usize;
+        attempts.truncate(request.limit as usize);
+        let next_cursor = has_more
+            .then(|| {
+                attempts
+                    .last()
+                    .expect("nonempty truncated attempt page")
+                    .attempt_number
+            })
+            .map(|number| encode_attempt_cursor(run, task, number))
+            .transpose()?;
+        Ok(ControlPlaneAttemptPage {
+            schema: CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            task: task.clone(),
+            attempts,
+            next_cursor,
+            has_more,
+        })
+    }
+}
+
+fn provider_attempts(
+    record: &AgentTaskRunRecord,
+    task: &TaskId,
+) -> Result<Vec<ControlPlaneAttempt>, ControlPlaneError> {
+    let run = RunId::new(&record.run_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let executions = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut attempts = executions
+        .iter()
+        .filter(|execution| execution["task_id"].as_str() == Some(task.as_str()))
+        .map(|execution| project_provider_attempt(&run, task, execution))
+        .collect::<Result<Vec<_>, _>>()?;
+    attempts.sort_by_key(|attempt| attempt.attempt_number);
+    if attempts
+        .windows(2)
+        .any(|pair| pair[0].attempt_number == pair[1].attempt_number)
+    {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "run {run}, task {task} contains duplicate provider attempt numbers"
+        )));
+    }
+    Ok(attempts)
+}
+
+fn project_provider_attempt(
+    run: &RunId,
+    task: &TaskId,
+    execution: &Value,
+) -> Result<ControlPlaneAttempt, ControlPlaneError> {
+    let number = execution["attempt"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| ControlPlaneError::invalid_argument("provider attempt number is invalid"))?;
+    let expected_id = format!("{run}:{task}:{number}");
+    let id = execution["owner_identity"].as_str().ok_or_else(|| {
+        ControlPlaneError::invalid_argument("provider attempt owner identity is missing")
+    })?;
+    if id != expected_id {
+        return Err(ControlPlaneError::invalid_argument(
+            "provider attempt owner identity does not match its run, task, and number",
+        ));
+    }
+    let state = execution["state"]
+        .as_str()
+        .and_then(provider_attempt_state)
+        .ok_or_else(|| ControlPlaneError::invalid_argument("provider attempt state is invalid"))?;
+    let started_at = execution["started_at"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ControlPlaneError::invalid_argument("provider attempt start is missing"))?;
+    let finished_at = execution["finished_at"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    if state.is_terminal() != finished_at.is_some() {
+        return Err(ControlPlaneError::invalid_argument(
+            "provider attempt terminal state and finish timestamp disagree",
+        ));
+    }
+    Ok(ControlPlaneAttempt {
+        schema: CONTROL_PLANE_ATTEMPT_SCHEMA.to_string(),
+        run: run.clone(),
+        task: task.clone(),
+        attempt: AttemptId::new(id)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+        attempt_number: number,
+        state,
+        started_at: started_at.to_string(),
+        finished_at,
+        execution: None,
+    })
+}
+
+fn provider_attempt_state(state: &str) -> Option<ControlPlaneState> {
+    match state {
+        "running" => Some(ControlPlaneState::Running),
+        "succeeded" => Some(ControlPlaneState::Succeeded),
+        "candidate_recoverable" => Some(ControlPlaneState::CandidateRecoverable),
+        "failed" => Some(ControlPlaneState::Failed),
+        "cancelled" => Some(ControlPlaneState::Cancelled),
+        "timed_out" => Some(ControlPlaneState::TimedOut),
+        _ => None,
+    }
+}
+
+fn encode_attempt_cursor(
+    run: &RunId,
+    task: &TaskId,
+    attempt_number: u32,
+) -> Result<AttemptCursor, ControlPlaneError> {
+    let bytes = serde_json::to_vec(&AttemptCursorPayload {
+        schema: ATTEMPT_CURSOR_SCHEMA.to_string(),
+        run_id: run.as_str().to_string(),
+        task_id: task.as_str().to_string(),
+        attempt_number,
+    })
+    .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+    AttemptCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
+}
+
+fn decode_attempt_cursor(
+    cursor: &AttemptCursor,
+    run: &RunId,
+    task: &TaskId,
+) -> Result<u32, ControlPlaneError> {
+    if cursor.as_str().len() > RUN_CURSOR_BOUND {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane attempt cursor exceeds the size bound",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.as_str())
+        .map_err(|_| {
+            ControlPlaneError::invalid_argument("control-plane attempt cursor is invalid")
+        })?;
+    let payload: AttemptCursorPayload = serde_json::from_slice(&bytes).map_err(|_| {
+        ControlPlaneError::invalid_argument("control-plane attempt cursor is invalid")
+    })?;
+    if payload.schema != ATTEMPT_CURSOR_SCHEMA
+        || payload.run_id != run.as_str()
+        || payload.task_id != task.as_str()
+        || payload.attempt_number == 0
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane attempt cursor is invalid for this task",
+        ));
+    }
+    Ok(payload.attempt_number)
 }
 
 fn project_task(
@@ -2788,6 +3001,32 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).tasks(run, request)
     }
 
+    fn attempt(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+    ) -> Result<ControlPlaneAttempt, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).attempt(
+            run,
+            task,
+            attempt_number,
+        )
+    }
+
+    fn attempts(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        request: &ControlPlaneAttemptListRequest,
+    ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).attempts(run, task, request)
+    }
+
     fn submit(
         &self,
         request: &ControlPlaneSubmissionRequest,
@@ -2886,16 +3125,17 @@ mod tests {
     use crate::agent_tasks::AgentTaskState;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
-        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCancelDisposition,
-        ControlPlaneCancelResult, ControlPlaneErrorClass, ControlPlaneEvent,
-        ControlPlaneEventSource, ControlPlaneMissionListRequest, ControlPlaneOperation,
-        ControlPlaneRunListRequest, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-        ControlPlaneState, ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EventCursor,
-        EventId, MissionId, RunCursor, RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttemptListRequest,
+        ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneErrorClass,
+        ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneMissionListRequest,
+        ControlPlaneOperation, ControlPlaneRunListRequest, ControlPlaneRunReviewRequest,
+        ControlPlaneRunState, ControlPlaneState, ControlPlaneSubmissionRequest,
+        ControlPlaneTaskListRequest, EventCursor, EventId, MissionId, RunCursor, RunId, TaskId,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -3233,6 +3473,8 @@ mod tests {
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::ListRunTasks,
                 ControlPlaneOperation::GetRunTask,
+                ControlPlaneOperation::ListTaskAttempts,
+                ControlPlaneOperation::GetTaskAttempt,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
@@ -3321,6 +3563,25 @@ mod tests {
             provider_ref: None,
         })
         .collect();
+        run_snapshot.record.metadata["provider_executions"] = json!([
+            {
+                "key": "m-task:1",
+                "task_id": "m-task",
+                "attempt": 1,
+                "state": "failed",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:01:00Z",
+                "owner_identity": "run-with-tasks:m-task:1"
+            },
+            {
+                "key": "m-task:2",
+                "task_id": "m-task",
+                "attempt": 2,
+                "state": "running",
+                "started_at": "2026-01-01T00:02:00Z",
+                "owner_identity": "run-with-tasks:m-task:2"
+            }
+        ]);
         let service = OrchestrationService::new(MapLookup {
             snapshots: BTreeMap::from([("run-with-tasks".to_string(), run_snapshot)]),
         });
@@ -3358,6 +3619,22 @@ mod tests {
             .expect("second task page");
         assert_eq!(second.tasks[0].task.as_str(), "z-task");
         assert!(!second.has_more);
+        let attempts = service
+            .attempts(
+                &run,
+                &TaskId::new("m-task").expect("task"),
+                &ControlPlaneAttemptListRequest {
+                    limit: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("attempt page");
+        assert_eq!(attempts.attempts[0].attempt_number, 1);
+        assert!(attempts.has_more);
+        let active = service
+            .attempt(&run, &TaskId::new("m-task").expect("task"), 2)
+            .expect("active attempt");
+        assert_eq!(active.state, ControlPlaneState::Running);
         let error = service
             .tasks(
                 &RunId::new("another-run").expect("run"),

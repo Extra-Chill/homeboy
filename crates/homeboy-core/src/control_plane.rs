@@ -5,7 +5,8 @@
 //! here so core stays agent-task-agnostic.
 
 use homeboy_control_plane_contract::{
-    ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneCapabilities,
+    ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneAttempt,
+    ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneEventPage, ControlPlaneMission, ControlPlaneMissionListRequest,
     ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneRun, ControlPlaneRunListRequest,
     ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
@@ -62,6 +63,28 @@ pub trait ControlPlaneProvider: Send + Sync {
     ) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
         Err(ControlPlaneError::unavailable(
             "control-plane task discovery is unavailable",
+        ))
+    }
+
+    fn attempt(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+    ) -> Result<ControlPlaneAttempt, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane attempt not found for run {run}, task {task}: {attempt_number}"
+        )))
+    }
+
+    fn attempts(
+        &self,
+        _run: &RunId,
+        _task: &TaskId,
+        _request: &ControlPlaneAttemptListRequest,
+    ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
+        Err(ControlPlaneError::unavailable(
+            "control-plane attempt discovery is unavailable",
         ))
     }
 
@@ -156,6 +179,23 @@ pub fn tasks(
 ) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
     request.validate()?;
     with_provider(|provider| provider.tasks(run, request))
+}
+
+pub fn attempt(
+    run: &RunId,
+    task: &TaskId,
+    attempt_number: u32,
+) -> Result<ControlPlaneAttempt, ControlPlaneError> {
+    with_provider(|provider| provider.attempt(run, task, attempt_number))
+}
+
+pub fn attempts(
+    run: &RunId,
+    task: &TaskId,
+    request: &ControlPlaneAttemptListRequest,
+) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
+    request.validate()?;
+    with_provider(|provider| provider.attempts(run, task, request))
 }
 
 pub fn submit(

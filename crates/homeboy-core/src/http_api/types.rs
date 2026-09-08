@@ -96,6 +96,16 @@ pub enum HttpEndpoint {
         id: String,
         task_id: String,
     },
+    ControlPlaneTaskAttempts {
+        id: String,
+        task_id: String,
+        request: homeboy_control_plane_contract::ControlPlaneAttemptListRequest,
+    },
+    ControlPlaneTaskAttempt {
+        id: String,
+        task_id: String,
+        attempt_number: u32,
+    },
     ControlPlaneRunReview {
         id: String,
         request: homeboy_control_plane_contract::ControlPlaneRunReviewRequest,
@@ -199,6 +209,8 @@ impl HttpEndpoint {
             Self::ControlPlaneRun { .. } => "control_plane.runs.show",
             Self::ControlPlaneRunTasks { .. } => "control_plane.runs.tasks.list",
             Self::ControlPlaneRunTask { .. } => "control_plane.runs.tasks.show",
+            Self::ControlPlaneTaskAttempts { .. } => "control_plane.runs.tasks.attempts.list",
+            Self::ControlPlaneTaskAttempt { .. } => "control_plane.runs.tasks.attempts.show",
             Self::ControlPlaneRunReview { .. } => "control_plane.runs.review",
             Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",
             Self::ControlPlaneRunActions { .. } => "control_plane.runs.actions",

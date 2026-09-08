@@ -101,12 +101,15 @@ A useful headless UI can be built from this read/query surface:
   `GET /v1/control-plane/missions/:id`, `GET /v1/control-plane/runs`,
   `POST /v1/control-plane/runs`, `GET /v1/control-plane/runs/:id`,
   `GET /v1/control-plane/runs/:id/tasks`, and
-  `GET /v1/control-plane/runs/:id/tasks/:task_id` for the
+  `GET /v1/control-plane/runs/:id/tasks/:task_id`, plus nested attempt list and
+  detail routes below each task, for the
   typed orchestration service. Mission and run discovery accept bounded
   `limit` values and opaque keyset cursors. Run discovery accepts an optional
   typed `mission` filter, and continuation cursors are bound to that filter.
   Tasks are addressed within their parent run because persisted task names are
   run-local; task pagination cursors are likewise bound to the run.
+  Provider attempts use their durable `{run}:{task}:{attempt}` owner identity;
+  attempt cursors bind to both parent identities.
   The mission index is forward-only:
   canonical mission ownership is indexed transactionally with each new run
   projection after the index schema is installed. HTTP submission requires broker `submit` scope,

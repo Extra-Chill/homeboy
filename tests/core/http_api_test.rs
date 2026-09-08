@@ -8,8 +8,9 @@ use crate::observation::{
     ArtifactRecord, NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 use homeboy_control_plane_contract::{
-    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCapabilities,
+    AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttempt,
+    ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
     ControlPlaneEventSource, ControlPlaneMission, ControlPlaneMissionListRequest,
     ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
@@ -18,7 +19,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
     ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId, MissionCursor,
     MissionId, RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
     CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
     CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
@@ -321,6 +323,20 @@ fn fixture_control_plane_task() -> ControlPlaneTask {
     }
 }
 
+fn fixture_control_plane_attempt() -> ControlPlaneAttempt {
+    ControlPlaneAttempt {
+        schema: CONTROL_PLANE_ATTEMPT_SCHEMA.to_string(),
+        run: RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run"),
+        task: TaskId::new("review").expect("task"),
+        attempt: AttemptId::new(format!("{CONTROL_PLANE_FIXTURE_RUN}:review:1")).expect("attempt"),
+        attempt_number: 1,
+        state: ControlPlaneState::Running,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        finished_at: None,
+        execution: None,
+    }
+}
+
 fn fixture_control_plane_events(cursor: Option<&EventCursor>) -> ControlPlaneEventPage {
     let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
     let after = cursor
@@ -376,6 +392,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneResource::Mission,
                 ControlPlaneResource::Run,
                 ControlPlaneResource::Task,
+                ControlPlaneResource::Attempt,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -387,6 +404,8 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::ListRunTasks,
                 ControlPlaneOperation::GetRunTask,
+                ControlPlaneOperation::ListTaskAttempts,
+                ControlPlaneOperation::GetTaskAttempt,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::ExecuteRunAction,
             ],
@@ -460,6 +479,45 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 .cursor
                 .is_none()
                 .then(fixture_control_plane_task)
+                .into_iter()
+                .collect(),
+            next_cursor: None,
+            has_more: false,
+        })
+    }
+
+    fn attempt(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+    ) -> Result<ControlPlaneAttempt, ControlPlaneError> {
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN
+            || task.as_str() != "review"
+            || attempt_number != 1
+        {
+            return Err(ControlPlaneError::not_found("attempt not found"));
+        }
+        Ok(fixture_control_plane_attempt())
+    }
+
+    fn attempts(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        request: &ControlPlaneAttemptListRequest,
+    ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN || task.as_str() != "review" {
+            return Err(ControlPlaneError::not_found("task not found"));
+        }
+        Ok(ControlPlaneAttemptPage {
+            schema: CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            task: task.clone(),
+            attempts: request
+                .cursor
+                .is_none()
+                .then(fixture_control_plane_attempt)
                 .into_iter()
                 .collect(),
             next_cursor: None,
@@ -635,6 +693,33 @@ fn routes_versioned_control_plane_endpoints() {
     assert_eq!(
         http_api::route(
             HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/tasks/task-1/attempts?limit=10",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneTaskAttempts {
+            id: "run-abc".to_string(),
+            task_id: "task-1".to_string(),
+            request: ControlPlaneAttemptListRequest {
+                cursor: None,
+                limit: 10,
+            },
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/tasks/task-1/attempts/2",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneTaskAttempt {
+            id: "run-abc".to_string(),
+            task_id: "task-1".to_string(),
+            attempt_number: 2,
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
             "/v1/control-plane/runs/run-abc/review?to_worktree=homeboy%40candidate&provider_argv=homeboy&provider_argv=--config%3Dpath+with+spaces",
         )
         .expect("route"),
@@ -680,6 +765,8 @@ fn routes_versioned_control_plane_endpoints() {
         "/v1/control-plane/runs?mission=",
         "/v1/control-plane/runs/run-abc/tasks?limit=0",
         "/v1/control-plane/runs/run-abc/tasks?cursor=",
+        "/v1/control-plane/runs/run-abc/tasks/task-1/attempts?limit=0",
+        "/v1/control-plane/runs/run-abc/tasks/task-1/attempts?cursor=",
     ] {
         http_api::route(HttpMethod::Get, path).expect_err("ambiguous or empty page parameter");
     }
@@ -762,6 +849,8 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
             ControlPlaneOperation::GetRun,
             ControlPlaneOperation::ListRunTasks,
             ControlPlaneOperation::GetRunTask,
+            ControlPlaneOperation::ListTaskAttempts,
+            ControlPlaneOperation::GetTaskAttempt,
             ControlPlaneOperation::GetRunEvents,
             ControlPlaneOperation::ExecuteRunAction,
         ]
@@ -877,6 +966,39 @@ fn control_plane_http_lists_and_gets_run_scoped_tasks() {
     let result: ControlPlaneResult<ControlPlaneTask> =
         serde_json::from_value(response.body).expect("result");
     assert_eq!(result.resource, Some(fixture_control_plane_task()));
+}
+
+#[test]
+fn control_plane_http_lists_and_gets_task_scoped_attempts() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!(
+            "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/tasks/review/attempts?limit=1"
+        ),
+        body: None,
+    })
+    .expect("attempt page");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.tasks.attempts.list");
+    let result: ControlPlaneResult<ControlPlaneAttemptPage> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.resource.expect("page").attempts,
+        vec![fixture_control_plane_attempt()]
+    );
+
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/tasks/review/attempts/1"),
+        body: None,
+    })
+    .expect("attempt detail");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.tasks.attempts.show");
+    let result: ControlPlaneResult<ControlPlaneAttempt> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(result.resource, Some(fixture_control_plane_attempt()));
 }
 
 #[test]
