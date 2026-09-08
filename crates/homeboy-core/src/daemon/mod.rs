@@ -3278,7 +3278,7 @@ fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
     let legacy: LegacyExecRequest = serde_json::from_value(body).map_err(|err| {
         Error::validation_invalid_argument(
             "body",
-            format!("invalid legacy exec request body: {err}"),
+            format!("invalid exec request body (legacy transport): {err}"),
             None,
             None,
         )
