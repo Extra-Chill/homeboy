@@ -2741,8 +2741,16 @@ fn reconstruct_recipe_options(
                 .map_err(recipe_value_error("to_worktree"))?,
             source_worktree_path: serde_json::from_value(field("source_worktree_path")?)
                 .map_err(recipe_value_error("source_worktree_path"))?,
-            task_base_sha: serde_json::from_value(field("task_base_sha")?)
-                .map_err(recipe_value_error("task_base_sha"))?,
+            task_base_sha: serde_json::from_value::<Option<String>>(field("task_base_sha")?)
+                .map_err(recipe_value_error("task_base_sha"))?
+                .or_else(|| {
+                    initial
+                        .plan
+                        .metadata
+                        .pointer("/cook_workspace_base/sha")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                }),
             source_refs: recipe.source_refs.clone(),
         },
         provider_transport: CookProviderTransport {
@@ -3591,6 +3599,29 @@ mod tests {
         assert_eq!(
             error.details["problem"],
             "missing finalization field `to_worktree`"
+        );
+    }
+
+    #[test]
+    fn adoption_reconstruction_hydrates_a_legacy_plan_task_base() {
+        let mut historical = recipe();
+        historical.finalization["task_base_sha"] = Value::Null;
+        historical.attempts[0].plan.metadata["cook_workspace_base"] =
+            serde_json::json!({"sha": "immutable-plan-base"});
+
+        let adoption =
+            reconstruct_adoption_options(&historical).expect("reconstruct historical adoption");
+        assert_eq!(
+            adoption.workspace.task_base_sha.as_deref(),
+            Some("immutable-plan-base")
+        );
+
+        historical.finalization["task_base_sha"] = serde_json::json!("recipe-base");
+        let adoption =
+            reconstruct_adoption_options(&historical).expect("reconstruct current adoption");
+        assert_eq!(
+            adoption.workspace.task_base_sha.as_deref(),
+            Some("recipe-base")
         );
     }
 
