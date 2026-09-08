@@ -490,6 +490,15 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(blocker) = string_value(payload, &["blocker", "message"]) {
         lines.push(format!("Blocker: {blocker}"));
     }
+    if string_value(payload, &["blocker", "retry", "disposition"])
+        == Some("automatic_reconciliation_scheduled")
+    {
+        let next_attempt_at = string_value(payload, &["blocker", "retry", "next_attempt_at"])
+            .unwrap_or("the recorded retry time");
+        lines.push(format!(
+            "Retry: automatic reconciliation scheduled for {next_attempt_at}; waiting is recommended"
+        ));
+    }
     lines.push(format!(
         "Artifacts: {}",
         array_len(payload, &["artifacts"]).unwrap_or(0)
@@ -507,6 +516,11 @@ fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
     {
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
         return format!("homeboy agent-task cook-continue {cook_id}");
+    }
+    if string_value(payload, &["blocker", "retry", "disposition"])
+        == Some("automatic_reconciliation_scheduled")
+    {
+        return format!("homeboy agent-task status {run_id} --watch");
     }
     const PREFERRED: [&str; 5] = ["reconcile", "resume", "retry", "review", "promote"];
     let Some(actions) = payload
@@ -1713,6 +1727,45 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
         assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
+    }
+
+    #[test]
+    fn status_summary_waits_for_a_scheduled_unmaterialized_admission_retry() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "unmaterialized-cook",
+            "state": "queued",
+            "blocker": {
+                "code": "queued",
+                "state": "queued",
+                "message": "Lab admission is waiting for runner reconciliation",
+                "reason": "Lab admission is waiting for runner reconciliation",
+                "retry": {
+                    "policy": "bounded_exponential",
+                    "attempts": 3,
+                    "max_attempts": 20,
+                    "next_attempt_at": "2099-01-01T00:00:00+00:00",
+                    "disposition": "automatic_reconciliation_scheduled"
+                }
+            },
+            "action_eligibility": {
+                "actions": [{
+                    "action": "resume",
+                    "availability": "available",
+                    "reason": "resume is legal but explicitly re-arms this admission",
+                    "confirmation": "none",
+                    "idempotent": true,
+                    "requires_revalidation": true,
+                    "result_resource_type": "agent_task_run"
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Retry: automatic reconciliation scheduled"));
+        assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
+        assert!(!summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
     }
 
     #[test]
