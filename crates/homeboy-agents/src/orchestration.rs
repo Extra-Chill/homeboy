@@ -4122,7 +4122,13 @@ mod tests {
         });
         let completed = project_record(&completed, None).expect("project completed");
         assert!(completed.admission.is_none());
-        assert!(completed.blocker.is_none());
+        assert_eq!(
+            completed
+                .blocker
+                .as_ref()
+                .and_then(|blocker| blocker.code.as_deref()),
+            Some("controller_failure")
+        );
     }
 
     #[test]
