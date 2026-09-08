@@ -42,13 +42,26 @@ const CREDENTIAL_DELIVERY_TTL_MS: u64 = 60_000;
 
 /// Plaintext is accepted only over the authenticated submission transport and
 /// retained in process memory until the matching live claim consumes it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct EphemeralCredentialDelivery {
     id: String,
     env: std::collections::BTreeMap<String, String>,
     claim_id: Option<String>,
     expires_at_ms: u64,
     consumed: bool,
+}
+
+impl std::fmt::Debug for EphemeralCredentialDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EphemeralCredentialDelivery")
+            .field("id", &self.id)
+            .field("env_names", &self.env.keys().collect::<Vec<_>>())
+            .field("claim_id", &self.claim_id)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("consumed", &self.consumed)
+            .finish()
+    }
 }
 
 pub use homeboy_api_jobs_contract::metadata::{JobArtifactMetadata, RunnerJobLifecycleMetadata};

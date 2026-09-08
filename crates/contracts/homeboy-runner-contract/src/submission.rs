@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,10 +15,19 @@ pub const RUNNER_API_SUBMIT_RESPONSE_SCHEMA: &str = "homeboy/runner-api-submit-r
 /// claimed execution. This is deliberately not part of the durable envelope.
 /// The broker must retain it only in memory and make it available once to the
 /// runner that owns the live claim.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerCredentialDelivery {
     pub env: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for RunnerCredentialDelivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunnerCredentialDelivery")
+            .field("env_names", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// The transport-neutral admission request for one canonical runner execution.
@@ -131,6 +141,17 @@ mod tests {
             encoded["workspace_owner_lease"]["protocol"],
             serde_json::json!({ "capability": "workspace-owner-lease", "version": 2 })
         );
+    }
+
+    #[test]
+    fn credential_delivery_debug_redacts_values() {
+        let delivery = RunnerCredentialDelivery {
+            env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), "secret-value".to_string())]),
+        };
+
+        let debug = format!("{delivery:?}");
+        assert!(debug.contains("PROVIDER_TOKEN"));
+        assert!(!debug.contains("secret-value"));
     }
 
     #[test]
