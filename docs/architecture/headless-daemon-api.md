@@ -123,6 +123,11 @@ A useful headless UI can be built from this read/query surface:
   idempotency key. Reference URLs are query-redacted and stripped of fragments
   before persistence and projection; replay keys are not exposed by reads.
   Network writes require the same paired broker `submit` scope as run submission.
+  Event pages reject non-monotonic, duplicate, or cross-run streams. Their
+  opaque cursors are bound to one run; the adjacent `/events/retention` resource
+  reports the earliest and latest retained sequence without changing the strict
+  v1 page shape. A cursor older than that window returns the typed
+  `cursor_expired` error with HTTP `410 Gone`.
   The mission index is forward-only:
   canonical mission ownership is indexed transactionally with each new run
   projection after the index schema is installed. HTTP submission requires broker `submit` scope,
