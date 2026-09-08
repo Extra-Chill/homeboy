@@ -11,6 +11,7 @@ use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
     AttemptCursor, AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement,
     ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
+    ControlPlaneAdmission, ControlPlaneAdmissionRetry,
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
     ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
     ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
@@ -2828,6 +2829,7 @@ pub fn project_record(
     resource.location = location(record);
     resource.phase = phase(record);
     resource.blocker = blocker(record);
+    resource.admission = admission(record);
     resource.owner = Some(owner(record));
     resource.runtime = runtime(record);
     resource.provider = assigned_provider(record);
@@ -3089,15 +3091,10 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
             message: redacted_bounded(reason, MESSAGE_BOUND),
         });
     }
-    if let Some(state) = record
-        .metadata
-        .pointer("/unmaterialized_cook_admission/state")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(admission) = unmaterialized_admission(record) {
         return Some(ControlPlaneBlocker {
-            code: Some("unmaterialized".to_string()),
-            message: redacted_bounded(state, MESSAGE_BOUND),
+            code: Some(bounded(admission.state, STATE_BOUND)),
+            message: redacted_bounded(admission.reason, MESSAGE_BOUND),
         });
     }
     if let Some(message) = record
@@ -3121,6 +3118,76 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
             code: Some("adoption".to_string()),
             message: redacted_bounded(message, MESSAGE_BOUND),
         })
+}
+
+fn admission(record: &AgentTaskRunRecord) -> Option<ControlPlaneAdmission> {
+    let admission = unmaterialized_admission(record)?;
+    let next_attempt_at = admission
+        .value
+        .pointer("/retry/next_attempt_at")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| bounded(value, MESSAGE_BOUND));
+    let retry = admission
+        .value
+        .get("retry")
+        .filter(|value| value.is_object())
+        .map(|retry| ControlPlaneAdmissionRetry {
+            policy: retry
+                .get("policy")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| bounded(value, STATE_BOUND))
+                .unwrap_or_else(|| "bounded".to_string()),
+            attempts: admission
+                .value
+                .get("admission_attempts")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            max_attempts: retry
+                .get("max_attempts")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            next_attempt_at,
+        });
+    let disposition = if matches!(
+        admission.state,
+        "blocked_runner_unavailable" | "blocked_runner_stale" | "queued"
+    ) && retry
+        .as_ref()
+        .and_then(|retry| retry.next_attempt_at.as_ref())
+        .is_some()
+    {
+        "scheduled_automatic_retry"
+    } else {
+        "explicit_rearm_after_remediation"
+    };
+    Some(ControlPlaneAdmission {
+        state: bounded(admission.state, STATE_BOUND),
+        reason: redacted_bounded(admission.reason, MESSAGE_BOUND),
+        retry,
+        disposition: disposition.to_string(),
+    })
+}
+
+struct UnmaterializedAdmission<'a> {
+    value: &'a Value,
+    state: &'a str,
+    reason: &'a str,
+}
+
+fn unmaterialized_admission(record: &AgentTaskRunRecord) -> Option<UnmaterializedAdmission<'_>> {
+    let value = record.metadata.get("unmaterialized_cook_admission")?;
+    let state = value.get("state")?.as_str()?.trim();
+    (!state.is_empty()).then(|| UnmaterializedAdmission {
+        value,
+        state,
+        reason: value
+            .get("reason")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Cook admission is awaiting reconciliation"),
+    })
 }
 
 fn owner(record: &AgentTaskRunRecord) -> ControlPlaneOwner {
@@ -3978,6 +4045,43 @@ mod tests {
             .find(|candidate| candidate.action == action)
             .expect("action")
             .availability
+    }
+
+    #[test]
+    fn status_preserves_blocked_admission_retry_and_rearm_disposition() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.state = AgentTaskRunState::Queued;
+        record.metadata["unmaterialized_cook_admission"] = json!({
+            "state": "blocked_runner_stale",
+            "reason": "controller 0.369.3 differs from runner 0.367.13 token=secret",
+            "admission_attempts": 2,
+            "retry": {
+                "policy": "bounded_exponential",
+                "max_attempts": 20,
+                "next_attempt_at": "2026-09-07T12:00:00Z"
+            }
+        });
+
+        let resource = project_record(&record, None).expect("project admission");
+        let blocker = resource.blocker.expect("typed blocker");
+        let admission = resource.admission.expect("admission projection");
+        let resume = resource
+            .action_eligibility
+            .expect("action eligibility")
+            .actions
+            .into_iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume");
+
+        assert_eq!(blocker.code.as_deref(), Some("blocked_runner_stale"));
+        assert!(blocker.message.contains("controller 0.369.3"));
+        assert!(!blocker.message.contains("secret"));
+        assert_eq!(admission.state, "blocked_runner_stale");
+        assert_eq!(admission.disposition, "scheduled_automatic_retry");
+        assert_eq!(admission.retry.expect("retry").attempts, 2);
+        assert!(resume
+            .reason
+            .contains("automatic admission retry is scheduled"));
     }
 
     #[test]

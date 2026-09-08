@@ -135,6 +135,10 @@ pub struct ControlPlaneRun {
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocker: Option<ControlPlaneBlocker>,
+    /// Durable admission facts for work that has not yet materialized into an
+    /// execution. This is a read-only projection; execution revalidates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ControlPlaneAdmission>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<ControlPlaneOwner>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +178,7 @@ impl ControlPlaneRun {
             location: None,
             phase: None,
             blocker: None,
+            admission: None,
             owner: None,
             runtime: None,
             provider: None,
@@ -511,6 +516,29 @@ pub struct ControlPlaneBlocker {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub message: String,
+}
+
+/// Bounded, redacted admission state retained before a run can execute.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneAdmission {
+    pub state: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ControlPlaneAdmissionRetry>,
+    /// Whether the durable reconciler will retry or an operator must explicitly
+    /// rearm after addressing the blocker.
+    pub disposition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneAdmissionRetry {
+    pub policy: String,
+    pub attempts: u64,
+    pub max_attempts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

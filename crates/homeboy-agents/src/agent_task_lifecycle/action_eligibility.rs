@@ -121,6 +121,21 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
     }
+    if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
+        let state = admission["state"].as_str().unwrap_or("queued");
+        if matches!(
+            state,
+            "blocked_runner_unavailable" | "blocked_runner_stale" | "queued"
+        ) && admission["retry"]["next_attempt_at"].as_str().is_some()
+        {
+            return available(
+                "a bounded automatic admission retry is scheduled; resume is an explicit rearm after runner remediation and revalidates eligibility",
+            );
+        }
+        return available(
+            "unmaterialized Cook admission can be explicitly rearmed after remediation and revalidates runner eligibility",
+        );
+    }
     match record.state {
         AgentTaskRunState::Queued => available("queued run can re-enter execution"),
         AgentTaskRunState::Running => match record.local_owner_liveness() {
@@ -260,8 +275,10 @@ mod tests {
     #[test]
     fn unmaterialized_cook_resume_is_projected_as_idempotent() {
         let mut record = record(AgentTaskRunState::Queued, false);
-        record.metadata["unmaterialized_cook_admission"] =
-            serde_json::json!({"state": "blocked_runner_unavailable"});
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_unavailable",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
         let report = lifecycle_action_eligibility(&record, None);
         let resume = report
             .actions
@@ -273,5 +290,8 @@ mod tests {
             resume.availability,
             ControlPlaneActionAvailability::Available
         );
+        assert!(resume
+            .reason
+            .contains("automatic admission retry is scheduled"));
     }
 }

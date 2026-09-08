@@ -43,10 +43,11 @@ pub use identity::{
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{
     ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
-    ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneAttempt,
-    ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
-    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneExecution,
-    ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneAdmission,
+    ControlPlaneAdmissionRetry, ControlPlaneAttempt, ControlPlaneAttemptListRequest,
+    ControlPlaneAttemptPage, ControlPlaneBlocker, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
+    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
     ControlPlaneProviderSummary, ControlPlaneReference, ControlPlaneReferencePage,
     ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneResult,

@@ -1,6 +1,6 @@
 use super::super::*;
 use std::collections::BTreeMap;
-use types::RunnerDoctorStatus;
+use types::{RunnerDoctorStatus, RunnerRepairAction};
 
 #[test]
 fn local_alias_report_has_stable_top_level_shape() {
@@ -108,6 +108,37 @@ fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
         "homeboy runner doctor local --repair"
     );
     assert_eq!(compact["truncation"]["checks"]["omitted"], 1);
+}
+
+#[test]
+fn compact_doctor_retains_safe_typed_runner_convergence_action() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.checks = vec![types::RunnerCheck {
+        id: "homeboy.version_skew".to_string(),
+        status: RunnerDoctorStatus::Warning,
+        message: "controller is ahead".to_string(),
+        remediation: Some("refresh runner".to_string()),
+        remediation_action: Some(RunnerRepairAction::RefreshHomeboy {
+            git_ref: Some("abc1234".to_string()),
+            allow_downgrade: false,
+        }),
+        details: BTreeMap::new(),
+    }];
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(
+        compact["checks"][0]["remediation_action"]["action"],
+        "refresh_homeboy"
+    );
+    assert_eq!(
+        compact["checks"][0]["remediation_action"]["git_ref"],
+        "abc1234"
+    );
+    assert_eq!(
+        compact["checks"][0]["remediation_action"]["allow_downgrade"],
+        false
+    );
 }
 
 #[test]

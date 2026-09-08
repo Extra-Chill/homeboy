@@ -757,6 +757,10 @@ fn finalize_cook_preview_replay(
                 .to_string(),
         );
     }
+    replay.requires.push(
+        "runner placement admission is deferred; replay revalidates connected runner readiness before execution"
+            .to_string(),
+    );
     replay
 }
 
@@ -1061,6 +1065,7 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
         "revalidate_before_execution": true,
         "blockers": [],
         "deferred_to": "execution_placement_admission",
+        "replay_prerequisite": "connected runner readiness is revalidated before execution",
     });
     policy
 }
@@ -1211,6 +1216,10 @@ mod preview_tests {
             !replay.argv.iter().any(|part| part == "--preview"),
             "{replay:?}"
         );
+        assert!(replay
+            .requires
+            .iter()
+            .any(|requirement| requirement.contains("runner placement admission is deferred")));
         Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
     }
 
