@@ -244,14 +244,8 @@ fn reverse_worker_receives_controller_credential_over_authenticated_broker_witho
         assert_eq!(exit_code, 0);
         assert_eq!(output.job.as_ref().expect("finished job").id, job.id);
         assert_eq!(
-            output
-                .job
-                .as_ref()
-                .expect("finished job")
-                .result
-                .as_ref()
-                .and_then(|result| result.stdout.as_deref()),
-            Some("controller-credential-ok")
+            result_event_data(&broker.store, job.id)["stdout"],
+            serde_json::json!("controller-credential-ok")
         );
         for value in [
             serde_json::to_string(&output).expect("serialize worker output"),
