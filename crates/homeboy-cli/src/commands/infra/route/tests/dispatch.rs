@@ -826,12 +826,14 @@ fn lab_cook_child_invocation_consumes_controller_runner_placement() {
 #[test]
 fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
     crate::test_support::with_isolated_home(|_| {
+        let materialized_workspace = tempfile::tempdir().expect("materialized workspace");
         let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "cook-preacceptance-order",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
                 "executor": { "backend": "fixture" },
-                "instructions": "exercise controller handoff staging"
+                "instructions": "exercise controller handoff staging",
+                "workspace": { "root": materialized_workspace.path() }
             }))
             .expect("task")],
         );
@@ -885,13 +887,21 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
             record.metadata["pre_execution_failure"]["provider_executions_consumed"],
             0
         );
-        assert!(record
-            .metadata
-            .get("execution_placement_invalidated")
-            .is_none());
+        assert!(
+            record.metadata["execution_placement_invalidated"]["reasons"]
+                .as_array()
+                .expect("placement invalidation reasons")
+                .contains(&serde_json::json!("workspace_changed")),
+            "materializing the planned destination replaces the pre-admission placement identity"
+        );
         assert_eq!(
             record.metadata["execution_placement_decision"]["identity"]["task"],
             "task"
+        );
+        assert_eq!(
+            record.metadata["execution_placement_decision"]["identity"]["workspace"],
+            materialized_workspace.path().display().to_string(),
+            "the dispatch plan's post-admission workspace is the ordinary Lab staging source"
         );
     });
 }
@@ -1840,9 +1850,10 @@ fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() 
         "task",
         Some(serde_json::json!({"workspace_snapshot_identity": "snapshot:parent"})),
     );
+    let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("cook-retry", vec![]);
 
     assert_eq!(
-        super::cook_attempt_source_path(Some(&capability), Some(controller.path())),
+        super::cook_attempt_source_path(Some(&capability), &plan, Some(controller.path())),
         Some(capability.canonical_path())
     );
     assert_eq!(
