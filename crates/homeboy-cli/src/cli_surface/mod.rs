@@ -1208,6 +1208,53 @@ mod tests {
     }
 
     #[test]
+    fn registered_provider_readiness_parse_preserves_runner_from_both_positions() {
+        for args in [
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "providers",
+                "--backend",
+                "opencode",
+                "--validate-readiness",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "providers",
+                "--runner",
+                "homeboy-lab",
+                "--backend",
+                "opencode",
+                "--validate-readiness",
+            ]
+            .as_slice(),
+        ] {
+            let matches = Cli::command_with_scoped_lab_args()
+                .try_get_matches_from(args)
+                .expect("provider readiness accepts an explicit runner");
+            let (cli, _) = Cli::from_registered_arg_matches(&matches)
+                .expect("registered provider readiness parse retains runner");
+
+            assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+            let normalized_args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            let preflight = crate::commands::utils::resource_policy::parsed_command_preflight_input(
+                &cli,
+                &normalized_args,
+            );
+            assert_eq!(
+                preflight.runner,
+                crate::core::parsed_command_preflight::RunnerIntent::Explicit(
+                    "homeboy-lab".to_string()
+                )
+            );
+        }
+    }
+
+    #[test]
     fn registered_cleanup_artifacts_parse_preserves_global_placement() {
         let matches = Cli::command_with_scoped_lab_args()
             .try_get_matches_from([
