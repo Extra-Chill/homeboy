@@ -573,7 +573,10 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .and_then(|_| usize_value(payload, &["aggregate_review", "summary", "failed"]))
         .unwrap_or(0);
     let metrics = code_production_metrics(payload);
-    let promotable = metrics.candidate_state == CandidateState::PatchAvailable;
+    let promotable = matches!(
+        metrics.candidate_state,
+        CandidateState::ApplyReady | CandidateState::PatchAvailable
+    );
     let patch = promotable
         .then(|| string_value(payload, &["promotion_candidates", "0", "artifact_id"]))
         .flatten();
@@ -1299,11 +1302,17 @@ mod tests {
                 "state": "apply_ready",
                 "counts": { "patch_available": 1 }, "scan": { "degraded": false }
             },
-            "selected_candidate": { "status": "verification_pending" },
+            "selected_candidate": {
+                "status": "verification_pending",
+                "artifact": { "id": "candidate", "kind": "patch" },
+                "size_bytes": 7635,
+                "changed_files": ["a.rs", "b.rs", "c.rs"]
+            },
             "execution_states": {
                 "promotion": {
                     "state": "verification_pending",
                     "patch_promoted": false,
+                    "verified": false,
                     "verification_phase": "pre_apply",
                     "target": { "state": "not_applied", "worktree": "fixture@clean-target", "candidate_fingerprint_matches": false }
                 }
