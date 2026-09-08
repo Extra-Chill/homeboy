@@ -3150,17 +3150,18 @@ fn admission(record: &AgentTaskRunRecord) -> Option<ControlPlaneAdmission> {
                 .unwrap_or(0),
             next_attempt_at,
         });
-    let disposition = if matches!(
-        admission.state,
+    let disposition = match admission.state {
+        "materializing" | "replaying" | "preparing_inputs" => "reconciliation_in_progress",
+        "exhausted" => "retry_budget_exhausted",
         "blocked_runner_unavailable" | "blocked_runner_stale" | "queued"
-    ) && retry
-        .as_ref()
-        .and_then(|retry| retry.next_attempt_at.as_ref())
-        .is_some()
-    {
-        "scheduled_automatic_retry"
-    } else {
-        "explicit_rearm_after_remediation"
+            if retry
+                .as_ref()
+                .and_then(|retry| retry.next_attempt_at.as_ref())
+                .is_some() =>
+        {
+            "scheduled_automatic_retry"
+        }
+        _ => "explicit_rearm_after_remediation",
     };
     Some(ControlPlaneAdmission {
         state: bounded(admission.state, STATE_BOUND),
@@ -3177,6 +3178,9 @@ struct UnmaterializedAdmission<'a> {
 }
 
 fn unmaterialized_admission(record: &AgentTaskRunRecord) -> Option<UnmaterializedAdmission<'_>> {
+    if record.state != AgentTaskRunState::Queued {
+        return None;
+    }
     let value = record.metadata.get("unmaterialized_cook_admission")?;
     let state = value.get("state")?.as_str()?.trim();
     (!state.is_empty()).then(|| UnmaterializedAdmission {
@@ -4082,6 +4086,43 @@ mod tests {
         assert!(resume
             .reason
             .contains("automatic admission retry is scheduled"));
+    }
+
+    #[test]
+    fn admission_projection_distinguishes_exhausted_and_in_progress_from_scheduled_retry() {
+        let mut exhausted = record(AGENT_TASK_RUN);
+        exhausted.state = AgentTaskRunState::Queued;
+        exhausted.metadata["unmaterialized_cook_admission"] = json!({
+            "state": "exhausted", "reason": "retry budget exhausted",
+            "retry": {"next_attempt_at": "2026-09-07T12:00:00Z"}
+        });
+        let exhausted = project_record(&exhausted, None)
+            .expect("project exhausted")
+            .admission
+            .expect("exhausted admission");
+        assert_eq!(exhausted.disposition, "retry_budget_exhausted");
+
+        let mut materializing = record(AGENT_TASK_RUN);
+        materializing.state = AgentTaskRunState::Queued;
+        materializing.metadata["unmaterialized_cook_admission"] = json!({
+            "state": "materializing", "reason": "replay worker owns materialization",
+            "retry": {"next_attempt_at": "2026-09-07T12:00:00Z"},
+            "lease": {"state": "materializing"}
+        });
+        let materializing = project_record(&materializing, None)
+            .expect("project materializing")
+            .admission
+            .expect("materializing admission");
+        assert_eq!(materializing.disposition, "reconciliation_in_progress");
+
+        let mut completed = record(AGENT_TASK_RUN);
+        completed.metadata["unmaterialized_cook_admission"] = json!({
+            "state": "blocked_runner_stale",
+            "retry": {"next_attempt_at": "2026-09-07T12:00:00Z"}
+        });
+        let completed = project_record(&completed, None).expect("project completed");
+        assert!(completed.admission.is_none());
+        assert!(completed.blocker.is_none());
     }
 
     #[test]

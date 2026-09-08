@@ -121,23 +121,38 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
     }
-    if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
-        let state = admission["state"].as_str().unwrap_or("queued");
-        if matches!(
-            state,
-            "blocked_runner_unavailable" | "blocked_runner_stale" | "queued"
-        ) && admission["retry"]["next_attempt_at"].as_str().is_some()
-        {
-            return available(
-                "a bounded automatic admission retry is scheduled; resume is an explicit rearm after runner remediation and revalidates eligibility",
-            );
-        }
-        return available(
-            "unmaterialized Cook admission can be explicitly rearmed after remediation and revalidates runner eligibility",
-        );
-    }
     match record.state {
-        AgentTaskRunState::Queued => available("queued run can re-enter execution"),
+        AgentTaskRunState::Queued => {
+            if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
+                let state = admission["state"].as_str().unwrap_or("queued");
+                if state == "exhausted" {
+                    return unavailable(
+                        "bounded admission retry budget is exhausted; create a new retry after remediation",
+                    );
+                }
+                if matches!(
+                    admission["lease"]["state"].as_str(),
+                    Some("claimed" | "consumed" | "materializing")
+                ) {
+                    return unavailable(
+                        "unmaterialized Cook admission is owned by an active replay or materialization",
+                    );
+                }
+                if matches!(
+                    state,
+                    "blocked_runner_unavailable" | "blocked_runner_stale" | "queued"
+                ) && admission["retry"]["next_attempt_at"].as_str().is_some()
+                {
+                    return available(
+                        "a bounded automatic admission retry is scheduled; resume is an explicit rearm after runner remediation and revalidates eligibility",
+                    );
+                }
+                return available(
+                    "unmaterialized Cook admission can be explicitly rearmed after remediation and revalidates runner eligibility",
+                );
+            }
+            available("queued run can re-enter execution")
+        }
         AgentTaskRunState::Running => match record.local_owner_liveness() {
             LocalOwnerLiveness::Live => unavailable("run has an authoritative live local owner"),
             LocalOwnerLiveness::Unverifiable => {
@@ -293,5 +308,66 @@ mod tests {
         assert!(resume
             .reason
             .contains("automatic admission retry is scheduled"));
+    }
+
+    #[test]
+    fn unmaterialized_metadata_does_not_bypass_resume_safety_preconditions() {
+        for state in [AgentTaskRunState::Cancelled, AgentTaskRunState::Succeeded] {
+            let mut record = record(state, false);
+            record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+                "state": "blocked_runner_stale",
+                "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+            });
+            assert_eq!(
+                decision(
+                    &lifecycle_action_eligibility(&record, None),
+                    ControlPlaneAction::Resume
+                ),
+                ControlPlaneActionAvailability::Unavailable
+            );
+        }
+
+        let mut running = record(AgentTaskRunState::Running, false);
+        running.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_stale",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
+        running.metadata["provider_executions"] = serde_json::json!([{
+            "state": "running", "owner_pid": std::process::id()
+        }]);
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&running, None),
+                ControlPlaneAction::Resume
+            ),
+            ControlPlaneActionAvailability::Unavailable
+        );
+
+        let mut quarantined = record(AgentTaskRunState::Queued, false);
+        quarantined.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_stale",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
+        quarantined.metadata["queue_quarantine"] = serde_json::json!({"reason": "fixture"});
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&quarantined, None),
+                ControlPlaneAction::Resume
+            ),
+            ControlPlaneActionAvailability::Unavailable
+        );
+
+        let mut exhausted = record(AgentTaskRunState::Queued, false);
+        exhausted.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "exhausted",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&exhausted, None),
+                ControlPlaneAction::Resume
+            ),
+            ControlPlaneActionAvailability::Unavailable
+        );
     }
 }

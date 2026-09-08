@@ -490,6 +490,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(blocker) = string_value(payload, &["blocker", "message"]) {
         lines.push(format!("Blocker: {blocker}"));
     }
+    if string_value(payload, &["admission", "disposition"]) == Some("scheduled_automatic_retry") {
+        lines.push("Admission: bounded automatic retry is scheduled".to_string());
+    }
     lines.push(format!(
         "Artifacts: {}",
         array_len(payload, &["artifacts"]).unwrap_or(0)
@@ -502,6 +505,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 }
 
 fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
+    if string_value(payload, &["admission", "disposition"]) == Some("scheduled_automatic_retry") {
+        return format!("homeboy agent-task status {run_id} --watch");
+    }
     if string_value(payload, &["blocker", "code"]) == Some("controller_failure")
         && string_value(payload, &["candidate", "state"]) == Some("verification_pending")
     {
@@ -1713,6 +1719,25 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
         assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
+    }
+
+    #[test]
+    fn status_summary_watches_scheduled_admission_retry_instead_of_resuming() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "scheduled-cook",
+            "state": "queued",
+            "artifacts": [],
+            "admission": {"disposition": "scheduled_automatic_retry"},
+            "action_eligibility": {"actions": [{
+                "action": "resume", "availability": "available"
+            }]}
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(summary.contains("Admission: bounded automatic retry is scheduled\n"));
+        assert!(summary.contains("Next: homeboy agent-task status scheduled-cook --watch\n"));
+        assert!(!summary.contains("resume scheduled-cook"));
     }
 
     #[test]
