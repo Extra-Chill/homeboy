@@ -14,20 +14,24 @@ use homeboy_control_plane_contract::{
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
     ControlPlaneEventSource, ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest,
-    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-    ControlPlaneState, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
-    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId,
-    ExecutionId, MissionCursor, MissionId, RunCursor, RunId, TaskCursor, TaskId,
+    ControlPlaneReference, ControlPlaneReferencePage, ControlPlaneReferenceRegistration,
+    ControlPlaneReferenceType, ControlPlaneResource, ControlPlaneResult, ControlPlaneRun,
+    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId, ExecutionId,
+    MissionCursor, MissionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
     CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
     CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-    CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-    CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
-    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
+    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_REVIEW_SCHEMA,
+    CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_resource_topology_contract::{
     ResourceTopologyResourceKind, ResourceTopologyResourceRef,
@@ -356,6 +360,32 @@ fn fixture_control_plane_execution() -> ControlPlaneExecution {
     }
 }
 
+fn fixture_control_plane_reference(
+    reference_type: ControlPlaneReferenceType,
+) -> ControlPlaneReference {
+    let (id, kind, uri) = match reference_type {
+        ControlPlaneReferenceType::Artifact => ("patch-1", "patch", "homeboy://artifact/patch-1"),
+        ControlPlaneReferenceType::Evidence => (
+            "transcript-1",
+            "transcript",
+            "homeboy://evidence/transcript-1",
+        ),
+        ControlPlaneReferenceType::ExternalReference => {
+            ("runner-job-1", "runner_job", "homeboy://runner/jobs/1")
+        }
+    };
+    ControlPlaneReference {
+        schema: CONTROL_PLANE_REFERENCE_SCHEMA.to_string(),
+        run: RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run"),
+        reference_type,
+        reference: ReferenceId::new(id).expect("reference"),
+        kind: kind.to_string(),
+        uri: uri.to_string(),
+        registered_at: Some("2026-01-01T00:00:00Z".to_string()),
+        actor: Some("broker:controller".to_string()),
+    }
+}
+
 fn fixture_control_plane_events(cursor: Option<&EventCursor>) -> ControlPlaneEventPage {
     let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
     let after = cursor
@@ -413,6 +443,9 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneResource::Task,
                 ControlPlaneResource::Attempt,
                 ControlPlaneResource::Execution,
+                ControlPlaneResource::Artifact,
+                ControlPlaneResource::Evidence,
+                ControlPlaneResource::ExternalReference,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -428,6 +461,15 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneOperation::GetTaskAttempt,
                 ControlPlaneOperation::ListAttemptExecutions,
                 ControlPlaneOperation::GetAttemptExecution,
+                ControlPlaneOperation::ListRunArtifacts,
+                ControlPlaneOperation::GetRunArtifact,
+                ControlPlaneOperation::RegisterRunArtifact,
+                ControlPlaneOperation::ListRunEvidence,
+                ControlPlaneOperation::GetRunEvidence,
+                ControlPlaneOperation::RegisterRunEvidence,
+                ControlPlaneOperation::ListRunExternalReferences,
+                ControlPlaneOperation::GetRunExternalReference,
+                ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::ExecuteRunAction,
             ],
@@ -586,6 +628,56 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
         })
     }
 
+    fn reference(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+        reference: &ReferenceId,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        let fixture = fixture_control_plane_reference(reference_type);
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN || reference != &fixture.reference {
+            return Err(ControlPlaneError::not_found("reference not found"));
+        }
+        Ok(fixture)
+    }
+
+    fn references(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+    ) -> Result<ControlPlaneReferencePage, ControlPlaneError> {
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("run not found"));
+        }
+        Ok(ControlPlaneReferencePage {
+            schema: CONTROL_PLANE_REFERENCE_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            reference_type,
+            references: vec![fixture_control_plane_reference(reference_type)],
+        })
+    }
+
+    fn register_reference(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+        request: &ControlPlaneReferenceRegistration,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("run not found"));
+        }
+        Ok(ControlPlaneReference {
+            schema: CONTROL_PLANE_REFERENCE_SCHEMA.to_string(),
+            run: run.clone(),
+            reference_type,
+            reference: request.reference.clone(),
+            kind: request.kind.clone(),
+            uri: request.uri.clone(),
+            registered_at: Some("2026-01-01T00:00:00Z".to_string()),
+            actor: Some(request.actor.clone()),
+        })
+    }
+
     fn submit(
         &self,
         request: &ControlPlaneSubmissionRequest,
@@ -724,6 +816,37 @@ fn routes_versioned_control_plane_endpoints() {
         http_api::route(HttpMethod::Get, "/v1/control-plane/runs/run-abc").expect("route"),
         HttpEndpoint::ControlPlaneRun {
             id: "run-abc".to_string()
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/artifacts/patch%2D1"
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRunReference {
+            id: "run-abc".to_string(),
+            reference_type: ControlPlaneReferenceType::Artifact,
+            reference_id: "patch%2D1".to_string(),
+        }
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc/evidence")
+            .expect("route"),
+        HttpEndpoint::ControlPlaneRunReferenceRegister {
+            id: "run-abc".to_string(),
+            reference_type: ControlPlaneReferenceType::Evidence,
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/external-references"
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRunReferences {
+            id: "run-abc".to_string(),
+            reference_type: ControlPlaneReferenceType::ExternalReference,
         }
     );
     assert_eq!(
@@ -939,6 +1062,15 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
             ControlPlaneOperation::GetTaskAttempt,
             ControlPlaneOperation::ListAttemptExecutions,
             ControlPlaneOperation::GetAttemptExecution,
+            ControlPlaneOperation::ListRunArtifacts,
+            ControlPlaneOperation::GetRunArtifact,
+            ControlPlaneOperation::RegisterRunArtifact,
+            ControlPlaneOperation::ListRunEvidence,
+            ControlPlaneOperation::GetRunEvidence,
+            ControlPlaneOperation::RegisterRunEvidence,
+            ControlPlaneOperation::ListRunExternalReferences,
+            ControlPlaneOperation::GetRunExternalReference,
+            ControlPlaneOperation::RegisterRunExternalReference,
             ControlPlaneOperation::GetRunEvents,
             ControlPlaneOperation::ExecuteRunAction,
         ]
@@ -1128,6 +1260,72 @@ fn control_plane_http_lists_and_gets_attempt_scoped_executions() {
     let result: ControlPlaneResult<ControlPlaneExecution> =
         serde_json::from_value(response.body).expect("result");
     assert_eq!(result.resource, Some(fixture_control_plane_execution()));
+}
+
+#[test]
+fn control_plane_http_reads_and_registers_run_references() {
+    register_fixture_control_plane_provider();
+    let base = format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/artifacts");
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: base.clone(),
+        body: None,
+    })
+    .expect("artifact page");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.artifacts.list");
+    let result: ControlPlaneResult<ControlPlaneReferencePage> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.resource.expect("page").references,
+        vec![fixture_control_plane_reference(
+            ControlPlaneReferenceType::Artifact
+        )]
+    );
+
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("{base}/patch%2D1"),
+        body: None,
+    })
+    .expect("artifact detail");
+    assert_eq!(response.status, 200);
+    let result: ControlPlaneResult<ControlPlaneReference> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.resource,
+        Some(fixture_control_plane_reference(
+            ControlPlaneReferenceType::Artifact
+        ))
+    );
+
+    let request = ControlPlaneReferenceRegistration {
+        schema: CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA.to_string(),
+        idempotency_key: "register-issue-1".to_string(),
+        actor: "local-controller".to_string(),
+        reference: ReferenceId::new("issue-1").expect("reference"),
+        kind: "issue".to_string(),
+        uri: "https://example.invalid/issues/1".to_string(),
+    };
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Post,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/external-references"),
+        body: Some(serde_json::to_value(&request).expect("request")),
+    })
+    .expect("registration");
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.endpoint,
+        "control_plane.runs.external_references.register"
+    );
+    let result: ControlPlaneResult<ControlPlaneReference> =
+        serde_json::from_value(response.body).expect("result");
+    let reference = result.resource.expect("reference");
+    assert_eq!(reference.reference, request.reference);
+    assert_eq!(
+        reference.reference_type,
+        ControlPlaneReferenceType::ExternalReference
+    );
 }
 
 #[test]

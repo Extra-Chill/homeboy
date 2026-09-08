@@ -32,6 +32,15 @@ pub enum ControlPlaneOperation {
     GetTaskAttempt,
     ListAttemptExecutions,
     GetAttemptExecution,
+    ListRunArtifacts,
+    GetRunArtifact,
+    RegisterRunArtifact,
+    ListRunEvidence,
+    GetRunEvidence,
+    RegisterRunEvidence,
+    ListRunExternalReferences,
+    GetRunExternalReference,
+    RegisterRunExternalReference,
     GetRunReview,
     GetRunEvents,
     ExecuteRunAction,
@@ -49,6 +58,9 @@ pub enum ControlPlaneResource {
     Task,
     Attempt,
     Execution,
+    Artifact,
+    Evidence,
+    ExternalReference,
     ProviderSession,
     Event,
 }
@@ -106,6 +118,15 @@ mod tests {
                     | ControlPlaneOperation::GetTaskAttempt
                     | ControlPlaneOperation::ListAttemptExecutions
                     | ControlPlaneOperation::GetAttemptExecution
+                    | ControlPlaneOperation::ListRunArtifacts
+                    | ControlPlaneOperation::GetRunArtifact
+                    | ControlPlaneOperation::RegisterRunArtifact
+                    | ControlPlaneOperation::ListRunEvidence
+                    | ControlPlaneOperation::GetRunEvidence
+                    | ControlPlaneOperation::RegisterRunEvidence
+                    | ControlPlaneOperation::ListRunExternalReferences
+                    | ControlPlaneOperation::GetRunExternalReference
+                    | ControlPlaneOperation::RegisterRunExternalReference
                     | ControlPlaneOperation::GetRunReview
                     | ControlPlaneOperation::GetRunEvents
                     | ControlPlaneOperation::ExecuteRunAction

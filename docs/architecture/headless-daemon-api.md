@@ -115,6 +115,14 @@ A useful headless UI can be built from this read/query surface:
   Runner jobs, provider sessions, and process IDs remain external references;
   records predating the execution identity remain visible with no inferred
   execution resource.
+  Run-scoped `/artifacts`, `/evidence`, and `/external-references` routes expose
+  list, detail, and `POST` registration operations. Automatic lifecycle
+  artifact/evidence pointers and explicitly registered references share one
+  typed read model with content-derived automatic identities. Registrations are
+  bounded, actor-attributed, and exactly replayable by a persisted digest of the
+  idempotency key. Reference URLs are query-redacted and stripped of fragments
+  before persistence and projection; replay keys are not exposed by reads.
+  Network writes require the same paired broker `submit` scope as run submission.
   The mission index is forward-only:
   canonical mission ownership is indexed transactionally with each new run
   projection after the index schema is installed. HTTP submission requires broker `submit` scope,

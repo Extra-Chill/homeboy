@@ -17,21 +17,24 @@ use homeboy_control_plane_contract::{
     ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
     ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
-    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState,
-    ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
-    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, ExecutionId,
-    MissionCursor, MissionId, ProviderSessionId, RunCursor, RunId, TaskCursor, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
-    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-    CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
+    ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
+    ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
+    ControlPlaneState, ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
+    ControlPlaneTaskPage, ExecutionId, MissionCursor, MissionId, ProviderSessionId, ReferenceId,
+    RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_CANCEL_RESULT_SCHEMA, CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
+    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+    CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
+    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -52,6 +55,7 @@ const STATE_BOUND: usize = 64;
 const MESSAGE_BOUND: usize = 256;
 const GATE_BOUND: usize = 12;
 pub(crate) const REF_BOUND: usize = 32;
+const REGISTERED_REFERENCE_BOUND: usize = 100;
 const URI_BOUND: usize = 512;
 const EVENT_PAGE_BOUND: usize = 100;
 const ACTION_INPUT_BOUND: usize = 128;
@@ -289,6 +293,9 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneResource::Task,
                 ControlPlaneResource::Attempt,
                 ControlPlaneResource::Execution,
+                ControlPlaneResource::Artifact,
+                ControlPlaneResource::Evidence,
+                ControlPlaneResource::ExternalReference,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -304,6 +311,15 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneOperation::GetTaskAttempt,
                 ControlPlaneOperation::ListAttemptExecutions,
                 ControlPlaneOperation::GetAttemptExecution,
+                ControlPlaneOperation::ListRunArtifacts,
+                ControlPlaneOperation::GetRunArtifact,
+                ControlPlaneOperation::RegisterRunArtifact,
+                ControlPlaneOperation::ListRunEvidence,
+                ControlPlaneOperation::GetRunEvidence,
+                ControlPlaneOperation::RegisterRunEvidence,
+                ControlPlaneOperation::ListRunExternalReferences,
+                ControlPlaneOperation::GetRunExternalReference,
+                ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
             ],
         )
@@ -501,6 +517,346 @@ impl<L: RunLookup> OrchestrationService<L> {
             executions,
         })
     }
+
+    pub fn reference(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+        requested: &ReferenceId,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        self.references(run, reference_type)?
+            .references
+            .into_iter()
+            .find(|reference| reference.reference == *requested)
+            .ok_or_else(|| {
+                ControlPlaneError::not_found(format!(
+                    "{} reference not found in run {run}: {requested}",
+                    reference_type_name(reference_type)
+                ))
+            })
+    }
+
+    pub fn references(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+    ) -> Result<ControlPlaneReferencePage, ControlPlaneError> {
+        let snapshot = self
+            .lookup
+            .get(run)?
+            .ok_or_else(|| ControlPlaneError::not_found(format!("run not found: {run}")))?;
+        Ok(ControlPlaneReferencePage {
+            schema: CONTROL_PLANE_REFERENCE_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            reference_type,
+            references: references_for_record(&snapshot.record, reference_type)?,
+        })
+    }
+}
+
+impl OrchestrationService<LifecycleStoreLookup> {
+    pub fn register_reference(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+        request: &ControlPlaneReferenceRegistration,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        request.validate()?;
+        register_reference_in_store(&self.lookup.store, run, reference_type, request)
+    }
+}
+
+fn reference_type_name(reference_type: ControlPlaneReferenceType) -> &'static str {
+    match reference_type {
+        ControlPlaneReferenceType::Artifact => "artifact",
+        ControlPlaneReferenceType::Evidence => "evidence",
+        ControlPlaneReferenceType::ExternalReference => "external_reference",
+    }
+}
+
+fn references_for_record(
+    record: &AgentTaskRunRecord,
+    reference_type: ControlPlaneReferenceType,
+) -> Result<Vec<ControlPlaneReference>, ControlPlaneError> {
+    let run = RunId::new(&record.run_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let automatic = match reference_type {
+        ControlPlaneReferenceType::Artifact => artifact_refs(record),
+        ControlPlaneReferenceType::Evidence => evidence_refs(record),
+        ControlPlaneReferenceType::ExternalReference => Vec::new(),
+    };
+    let mut references = automatic
+        .into_iter()
+        .map(|reference| {
+            Ok(ControlPlaneReference {
+                schema: CONTROL_PLANE_REFERENCE_SCHEMA.to_string(),
+                run: run.clone(),
+                reference_type,
+                reference: ReferenceId::new(reference.id)
+                    .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+                kind: reference.kind,
+                uri: reference.uri,
+                registered_at: None,
+                actor: None,
+            })
+        })
+        .collect::<Result<Vec<_>, ControlPlaneError>>()?;
+    let registered = match record.metadata.get("control_plane_references") {
+        None => &[][..],
+        Some(Value::Array(references)) => references.as_slice(),
+        Some(_) => {
+            return Err(ControlPlaneError::invalid_argument(
+                "durable control-plane reference registry is not an array",
+            ))
+        }
+    };
+    if registered.len() > REGISTERED_REFERENCE_BOUND * 3 {
+        return Err(ControlPlaneError::invalid_argument(
+            "durable control-plane reference registry exceeds its bound",
+        ));
+    }
+    let mut registered_counts = [0usize; 3];
+    for value in registered {
+        let stored_type = stored_reference_type(value)?;
+        let count = &mut registered_counts[reference_type_index(stored_type)];
+        *count += 1;
+        if *count > REGISTERED_REFERENCE_BOUND {
+            return Err(ControlPlaneError::invalid_argument(format!(
+                "durable control-plane {} reference registry exceeds its bound",
+                reference_type_name(stored_type)
+            )));
+        }
+        let reference = project_registered_reference(&run, stored_type, value)?;
+        if stored_type == reference_type {
+            references.push(reference);
+        }
+    }
+    references.sort_by(|left, right| left.reference.cmp(&right.reference));
+    let mut unique: Vec<ControlPlaneReference> = Vec::with_capacity(references.len());
+    for reference in references {
+        if let Some(previous) = unique.last() {
+            if previous.reference == reference.reference {
+                if previous.registered_at.is_none()
+                    && reference.registered_at.is_none()
+                    && previous.kind == reference.kind
+                    && previous.uri == reference.uri
+                {
+                    continue;
+                }
+                return Err(ControlPlaneError::invalid_argument(format!(
+                    "run {run} contains duplicate {} reference identities",
+                    reference_type_name(reference_type)
+                )));
+            }
+        }
+        unique.push(reference);
+    }
+    Ok(unique)
+}
+
+fn reference_type_index(reference_type: ControlPlaneReferenceType) -> usize {
+    match reference_type {
+        ControlPlaneReferenceType::Artifact => 0,
+        ControlPlaneReferenceType::Evidence => 1,
+        ControlPlaneReferenceType::ExternalReference => 2,
+    }
+}
+
+fn stored_reference_type(value: &Value) -> Result<ControlPlaneReferenceType, ControlPlaneError> {
+    match value["reference_type"].as_str() {
+        Some("artifact") => Ok(ControlPlaneReferenceType::Artifact),
+        Some("evidence") => Ok(ControlPlaneReferenceType::Evidence),
+        Some("external_reference") => Ok(ControlPlaneReferenceType::ExternalReference),
+        _ => Err(ControlPlaneError::invalid_argument(
+            "registered reference type is missing or unsupported",
+        )),
+    }
+}
+
+fn project_registered_reference(
+    run: &RunId,
+    reference_type: ControlPlaneReferenceType,
+    value: &Value,
+) -> Result<ControlPlaneReference, ControlPlaneError> {
+    let string = |name: &str, limit: usize| {
+        value[name]
+            .as_str()
+            .filter(|value| !value.trim().is_empty() && value.len() <= limit)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ControlPlaneError::invalid_argument(format!(
+                    "registered reference {name} is missing"
+                ))
+            })
+    };
+    let registered_at = string("registered_at", 128)?;
+    if DateTime::parse_from_rfc3339(&registered_at).is_err() {
+        return Err(ControlPlaneError::invalid_argument(
+            "registered reference timestamp is invalid",
+        ));
+    }
+    let idempotency_digest = string("idempotency_digest", 64)?;
+    if idempotency_digest.len() != 64
+        || !idempotency_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "registered reference idempotency digest is invalid",
+        ));
+    }
+    Ok(ControlPlaneReference {
+        schema: CONTROL_PLANE_REFERENCE_SCHEMA.to_string(),
+        run: run.clone(),
+        reference_type,
+        reference: public_reference_id(&string("reference", 256)?)?,
+        kind: redacted_bounded(&string("kind", 128)?, 128),
+        uri: redacted_reference_uri(&string("uri", 2048)?, 2048),
+        registered_at: Some(registered_at),
+        actor: Some(redacted_bounded(&string("actor", 256)?, 256)),
+    })
+}
+
+fn public_reference_id(value: &str) -> Result<ReferenceId, ControlPlaneError> {
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        || homeboy_core::redaction::redact_string(value) != value
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "reference identity is not safe for public display",
+        ));
+    }
+    ReferenceId::new(value).map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
+}
+
+fn register_reference_in_store(
+    store: &AgentTaskLifecycleStore,
+    run: &RunId,
+    reference_type: ControlPlaneReferenceType,
+    request: &ControlPlaneReferenceRegistration,
+) -> Result<ControlPlaneReference, ControlPlaneError> {
+    public_reference_id(request.reference.as_str())?;
+    let type_name = reference_type_name(reference_type);
+    let kind = redacted_bounded(&request.kind, 128);
+    let uri = redacted_reference_uri(&request.uri, 2048);
+    let actor = redacted_bounded(&request.actor, 256);
+    let idempotency_digest =
+        homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
+    let registered_at = now_timestamp();
+    let mut conflict = None;
+    let updated = store
+        .mutate_record(run.as_str(), |record| {
+            let automatic_id_exists = match reference_type {
+                ControlPlaneReferenceType::Artifact => artifact_refs(record),
+                ControlPlaneReferenceType::Evidence => evidence_refs(record),
+                ControlPlaneReferenceType::ExternalReference => Vec::new(),
+            }
+            .iter()
+            .any(|reference| reference.id == request.reference.as_str());
+            if automatic_id_exists {
+                conflict = Some(ControlPlaneError::invalid_argument(format!(
+                    "{} reference identity is already owned by an automatic run reference",
+                    type_name
+                )));
+                return false;
+            }
+            let stored = record
+                .ensure_metadata_object()
+                .entry("control_plane_references".to_string())
+                .or_insert_with(|| serde_json::json!([]));
+            let Some(references) = stored.as_array_mut() else {
+                conflict = Some(ControlPlaneError::invalid_argument(
+                    "durable control-plane reference registry is not an array",
+                ));
+                return false;
+            };
+            if references.len() > REGISTERED_REFERENCE_BOUND * 3 {
+                conflict = Some(ControlPlaneError::invalid_argument(
+                    "durable control-plane reference registry exceeds its bound",
+                ));
+                return false;
+            }
+            let mut registered_counts = [0usize; 3];
+            for existing in references.iter() {
+                let validation = stored_reference_type(existing).and_then(|stored_type| {
+                    let count = &mut registered_counts[reference_type_index(stored_type)];
+                    *count += 1;
+                    if *count > REGISTERED_REFERENCE_BOUND {
+                        return Err(ControlPlaneError::invalid_argument(format!(
+                            "durable control-plane {} reference registry exceeds its bound",
+                            reference_type_name(stored_type)
+                        )));
+                    }
+                    project_registered_reference(run, stored_type, existing).map(|_| ())
+                });
+                if let Err(error) = validation {
+                    conflict = Some(error);
+                    return false;
+                }
+            }
+            if let Some(existing) = references.iter().find(|existing| {
+                existing["idempotency_digest"].as_str() == Some(idempotency_digest.as_str())
+            }) {
+                let matches = existing["reference_type"].as_str() == Some(type_name)
+                    && existing["reference"].as_str() == Some(request.reference.as_str())
+                    && existing["kind"].as_str() == Some(kind.as_str())
+                    && existing["uri"].as_str() == Some(uri.as_str())
+                    && existing["actor"].as_str() == Some(actor.as_str());
+                if !matches {
+                    conflict = Some(ControlPlaneError::invalid_argument(
+                        "reference idempotency key was already used for different inputs",
+                    ));
+                }
+                return false;
+            }
+            if references.iter().any(|existing| {
+                existing["reference_type"].as_str() == Some(type_name)
+                    && existing["reference"].as_str() == Some(request.reference.as_str())
+            }) {
+                conflict = Some(ControlPlaneError::invalid_argument(format!(
+                    "{type_name} reference identity is already registered with another idempotency key"
+                )));
+                return false;
+            }
+            if references
+                .iter()
+                .filter(|existing| {
+                    existing["reference_type"].as_str() == Some(type_name)
+                })
+                .count()
+                >= REGISTERED_REFERENCE_BOUND
+            {
+                conflict = Some(ControlPlaneError::invalid_argument(format!(
+                    "run has reached the {REGISTERED_REFERENCE_BOUND} registered {type_name} reference limit"
+                )));
+                return false;
+            }
+            references.push(serde_json::json!({
+                "reference_type": type_name,
+                "reference": request.reference,
+                "kind": kind,
+                "uri": uri,
+                "registered_at": registered_at,
+                "actor": actor,
+                "idempotency_digest": idempotency_digest,
+            }));
+            true
+        })
+        .map_err(map_lifecycle_error)?;
+    if let Some(error) = conflict {
+        return Err(error);
+    }
+    let record = match updated {
+        Some(record) => record,
+        None => store
+            .read_record(run.as_str())
+            .map_err(map_lifecycle_error)?,
+    };
+    references_for_record(&record, reference_type)?
+        .into_iter()
+        .find(|reference| reference.reference == request.reference)
+        .ok_or_else(|| ControlPlaneError::unavailable("registered reference was not persisted"))
 }
 
 fn provider_attempts(
@@ -509,6 +865,21 @@ fn provider_attempts(
 ) -> Result<Vec<ControlPlaneAttempt>, ControlPlaneError> {
     let run = RunId::new(&record.run_id)
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let task_count = record
+        .tasks
+        .iter()
+        .filter(|candidate| candidate.task_id == task.as_str())
+        .count();
+    if task_count == 0 {
+        return Err(ControlPlaneError::not_found(format!(
+            "task not found in run {run}: {task}"
+        )));
+    }
+    if task_count > 1 {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "run {run} contains duplicate task identity {task}"
+        )));
+    }
     let executions = record
         .metadata
         .get("provider_executions")
@@ -2942,16 +3313,14 @@ fn evidence_refs(record: &AgentTaskRunRecord) -> Vec<ControlPlaneEvidenceRef> {
         .latest_executor_evidence
         .iter()
         .flat_map(|evidence| evidence.refs())
-        .enumerate()
-        .map(|(index, evidence)| ControlPlaneEvidenceRef {
-            id: redacted_bounded(
-                &evidence
-                    .label
-                    .unwrap_or_else(|| format!("evidence-{}", index + 1)),
-                ID_BOUND,
-            ),
-            kind: redacted_bounded(&evidence.kind, STATE_BOUND),
-            uri: redacted_bounded(&evidence.uri, URI_BOUND),
+        .map(|evidence| {
+            let kind = redacted_bounded(&evidence.kind, STATE_BOUND);
+            let uri = redacted_reference_uri(&evidence.uri, URI_BOUND);
+            ControlPlaneEvidenceRef {
+                id: stable_reference_id("evidence", &[&kind, &uri]),
+                kind,
+                uri,
+            }
         })
         .take(REF_BOUND)
         .collect()
@@ -2961,16 +3330,25 @@ fn artifact_refs(record: &AgentTaskRunRecord) -> Vec<ControlPlaneEvidenceRef> {
     record
         .artifact_refs
         .iter()
-        .map(|artifact| ControlPlaneEvidenceRef {
-            id: redacted_bounded(
-                &artifact
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| artifact.task_id.clone()),
-                ID_BOUND,
-            ),
-            kind: redacted_bounded(&artifact.kind, STATE_BOUND),
-            uri: redacted_bounded(&artifact.uri, URI_BOUND),
+        .map(|artifact| {
+            let task_id = redacted_bounded(&artifact.task_id, ID_BOUND);
+            let kind = redacted_bounded(&artifact.kind, STATE_BOUND);
+            let uri = redacted_reference_uri(&artifact.uri, URI_BOUND);
+            let role = artifact
+                .role
+                .as_deref()
+                .map(|role| redacted_bounded(role, STATE_BOUND))
+                .unwrap_or_default();
+            let semantic_key = artifact
+                .semantic_key
+                .as_deref()
+                .map(|key| redacted_bounded(key, ID_BOUND))
+                .unwrap_or_default();
+            ControlPlaneEvidenceRef {
+                id: stable_reference_id("artifact", &[&task_id, &kind, &uri, &role, &semantic_key]),
+                kind,
+                uri,
+            }
         })
         .take(REF_BOUND)
         .collect()
@@ -2984,6 +3362,19 @@ fn bounded(value: &str, max: usize) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn stable_reference_id(prefix: &str, parts: &[&str]) -> String {
+    let digest = homeboy_engine_primitives::content_hash::sha256_hex(parts.join("\0").as_bytes());
+    format!("{prefix}-{}", &digest[..32])
+}
+
+fn redacted_reference_uri(value: &str, max: usize) -> String {
+    let without_fragment = value.split_once('#').map_or(value, |(uri, _)| uri);
+    bounded(
+        &homeboy_core::redaction::RedactionPolicy::default().redact_url(without_fragment),
+        max,
+    )
 }
 
 fn nonempty_bounded(value: &str, max: usize) -> Option<String> {
@@ -3115,6 +3506,46 @@ impl ControlPlaneProvider for RegisteredProvider {
         )
     }
 
+    fn reference(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+        reference: &ReferenceId,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).reference(
+            run,
+            reference_type,
+            reference,
+        )
+    }
+
+    fn references(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+    ) -> Result<ControlPlaneReferencePage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).references(run, reference_type)
+    }
+
+    fn register_reference(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+        request: &ControlPlaneReferenceRegistration,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).register_reference(
+            run,
+            reference_type,
+            request,
+        )
+    }
+
     fn submit(
         &self,
         request: &ControlPlaneSubmissionRequest,
@@ -3202,12 +3633,13 @@ mod tests {
     use super::{
         bounded_review_evidence, decode_mission_cursor, encode_mission_cursor, event_page,
         live_provider_liveness, observed_file_timestamp, phase, project_record,
-        review_failure_reasons, LifecycleStoreLookup, OrchestrationService, RegisteredProvider,
-        RunListLookup, RunLookup, RunPagePosition, RunSnapshot, RunSnapshotPage,
-        REVIEW_EVIDENCE_BOUND,
+        references_for_record, register_reference_in_store, review_failure_reasons,
+        LifecycleStoreLookup, OrchestrationService, RegisteredProvider, RunListLookup, RunLookup,
+        RunPagePosition, RunSnapshot, RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
-        AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
+        AgentTaskArtifactRef, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+        AgentTaskRunTask,
     };
     use crate::agent_task_schedule::AgentTaskPlan;
     use crate::agent_tasks::AgentTaskState;
@@ -3216,13 +3648,14 @@ mod tests {
         ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttemptListRequest,
         ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneErrorClass,
         ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneMissionListRequest,
-        ControlPlaneOperation, ControlPlaneRunListRequest, ControlPlaneRunReviewRequest,
-        ControlPlaneRunState, ControlPlaneState, ControlPlaneSubmissionRequest,
-        ControlPlaneTaskListRequest, EventCursor, EventId, ExecutionId, MissionId, RunCursor,
-        RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        ControlPlaneOperation, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
+        ControlPlaneRunListRequest, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+        ControlPlaneState, ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EventCursor,
+        EventId, ExecutionId, MissionId, ReferenceId, RunCursor, RunId, TaskId,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
         CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
@@ -3565,6 +3998,15 @@ mod tests {
                 ControlPlaneOperation::GetTaskAttempt,
                 ControlPlaneOperation::ListAttemptExecutions,
                 ControlPlaneOperation::GetAttemptExecution,
+                ControlPlaneOperation::ListRunArtifacts,
+                ControlPlaneOperation::GetRunArtifact,
+                ControlPlaneOperation::RegisterRunArtifact,
+                ControlPlaneOperation::ListRunEvidence,
+                ControlPlaneOperation::GetRunEvidence,
+                ControlPlaneOperation::RegisterRunEvidence,
+                ControlPlaneOperation::ListRunExternalReferences,
+                ControlPlaneOperation::GetRunExternalReference,
+                ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
@@ -3780,6 +4222,160 @@ mod tests {
         let error = duplicate_service
             .tasks(&duplicate_run, &ControlPlaneTaskListRequest::default())
             .expect_err("duplicate task identities fail closed");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+    }
+
+    #[test]
+    fn reference_registration_is_durable_idempotent_and_run_scoped() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneReferenceRegistration {
+                schema: CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA.to_string(),
+                idempotency_key: "external-runner-job-1".to_string(),
+                actor: "broker:controller".to_string(),
+                reference: ReferenceId::new("runner-job-1").expect("reference"),
+                kind: "runner_job".to_string(),
+                uri: "homeboy://runner/jobs/1?token=secret-token#fragment-secret".to_string(),
+            };
+            let first = register_reference_in_store(
+                &store,
+                &run,
+                ControlPlaneReferenceType::ExternalReference,
+                &request,
+            )
+            .expect("registration");
+            let replay = register_reference_in_store(
+                &store,
+                &run,
+                ControlPlaneReferenceType::ExternalReference,
+                &request,
+            )
+            .expect("idempotent replay");
+            assert_eq!(first, replay);
+            assert!(!first.uri.contains("secret-token"));
+            assert!(!first.uri.contains("fragment-secret"));
+            let persisted = serde_json::to_string(
+                &store.read_record(AGENT_TASK_RUN).expect("persisted record"),
+            )
+            .expect("serialize persisted record");
+            assert!(!persisted.contains("external-runner-job-1"));
+            assert!(!persisted.contains("secret-token"));
+            assert!(!persisted.contains("fragment-secret"));
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let page = service
+                .references(&run, ControlPlaneReferenceType::ExternalReference)
+                .expect("reference page");
+            assert_eq!(page.references, vec![first.clone()]);
+            assert_eq!(
+                service
+                    .reference(
+                        &run,
+                        ControlPlaneReferenceType::ExternalReference,
+                        &request.reference,
+                    )
+                    .expect("reference detail"),
+                first
+            );
+            let mut conflicting = request;
+            conflicting.uri = "homeboy://runner/jobs/2".to_string();
+            let error = service
+                .register_reference(
+                    &run,
+                    ControlPlaneReferenceType::ExternalReference,
+                    &conflicting,
+                )
+                .expect_err("conflicting idempotency key");
+            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+        });
+    }
+
+    #[test]
+    fn automatic_references_have_stable_unique_identities_and_safe_uris() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.artifact_refs = vec![
+            AgentTaskArtifactRef {
+                task_id: "task-with-unlabelled-artifacts".to_string(),
+                kind: "patch".to_string(),
+                uri: "https://example.test/first?token=secret#fragment".to_string(),
+                role: None,
+                label: None,
+                semantic_key: None,
+                size_bytes: None,
+            },
+            AgentTaskArtifactRef {
+                task_id: "task-with-unlabelled-artifacts".to_string(),
+                kind: "patch".to_string(),
+                uri: "https://example.test/second".to_string(),
+                role: None,
+                label: None,
+                semantic_key: None,
+                size_bytes: None,
+            },
+            AgentTaskArtifactRef {
+                task_id: "task-with-unlabelled-artifacts".to_string(),
+                kind: "patch".to_string(),
+                uri: "https://example.test/first?token=another-secret".to_string(),
+                role: None,
+                label: None,
+                semantic_key: None,
+                size_bytes: None,
+            },
+        ];
+
+        let references = references_for_record(&record, ControlPlaneReferenceType::Artifact)
+            .expect("automatic references");
+
+        assert_eq!(references.len(), 2);
+        assert_ne!(references[0].reference, references[1].reference);
+        assert!(references
+            .iter()
+            .all(|reference| !reference.uri.contains("secret")));
+        assert!(references
+            .iter()
+            .all(|reference| !reference.uri.contains('#')));
+    }
+
+    #[test]
+    fn malformed_durable_reference_registry_fails_closed() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.metadata["control_plane_references"] = json!({ "unexpected": true });
+
+        let error = references_for_record(&record, ControlPlaneReferenceType::ExternalReference)
+            .expect_err("malformed registry");
+
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+
+        record.metadata["control_plane_references"] = json!([{
+            "reference_type": "external_reference",
+            "reference": "runner?token=secret",
+            "kind": "runner_job",
+            "uri": "homeboy://runner/jobs/1",
+            "registered_at": "2026-01-01T00:00:00Z",
+            "actor": "broker:controller",
+            "idempotency_digest": "a".repeat(64),
+        }]);
+        references_for_record(&record, ControlPlaneReferenceType::ExternalReference)
+            .expect_err("unsafe persisted identity");
+
+        record.metadata["control_plane_references"] = Value::Array(
+            (0..=super::REGISTERED_REFERENCE_BOUND)
+                .map(|index| {
+                    json!({
+                        "reference_type": "artifact",
+                        "reference": format!("artifact-{index}"),
+                        "kind": "patch",
+                        "uri": format!("homeboy://artifact/{index}"),
+                        "registered_at": "2026-01-01T00:00:00Z",
+                        "actor": "broker:controller",
+                        "idempotency_digest": "a".repeat(64),
+                    })
+                })
+                .collect(),
+        );
+        let error = references_for_record(&record, ControlPlaneReferenceType::Artifact)
+            .expect_err("over-bound registry");
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
     }
 

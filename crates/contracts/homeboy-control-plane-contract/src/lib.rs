@@ -38,7 +38,7 @@ pub use event::{
 };
 pub use identity::{
     AttemptCursor, AttemptId, EventCursor, EventId, ExecutionId, IdentityError, MissionCursor,
-    MissionId, ProviderSessionId, RunCursor, RunId, TaskCursor, TaskId,
+    MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
 };
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{
@@ -48,13 +48,16 @@ pub use resource::{
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneExecution,
     ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
-    ControlPlaneProviderSummary, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest,
-    ControlPlaneRunPage, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState,
-    ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage,
-    CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
-    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    ControlPlaneProviderSummary, ControlPlaneReference, ControlPlaneReferencePage,
+    ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneResult,
+    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
+    ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
+    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
     CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 pub use review::{

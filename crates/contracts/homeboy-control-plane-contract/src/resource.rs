@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{
-    AttemptCursor, AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId, RunCursor,
-    RunId, TaskCursor, TaskId,
+    AttemptCursor, AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
+    ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
 };
 
 pub const CONTROL_PLANE_RESULT_SCHEMA: &str = "homeboy/control-plane-result/v1";
@@ -21,6 +21,10 @@ pub const CONTROL_PLANE_ATTEMPT_SCHEMA: &str = "homeboy/control-plane-attempt/v1
 pub const CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA: &str = "homeboy/control-plane-attempt-page/v1";
 pub const CONTROL_PLANE_EXECUTION_SCHEMA: &str = "homeboy/control-plane-execution/v1";
 pub const CONTROL_PLANE_EXECUTION_PAGE_SCHEMA: &str = "homeboy/control-plane-execution-page/v1";
+pub const CONTROL_PLANE_REFERENCE_SCHEMA: &str = "homeboy/control-plane-reference/v1";
+pub const CONTROL_PLANE_REFERENCE_PAGE_SCHEMA: &str = "homeboy/control-plane-reference-page/v1";
+pub const CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA: &str =
+    "homeboy/control-plane-reference-registration/v1";
 pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
     "homeboy/control-plane-action-eligibility/v1";
 
@@ -410,6 +414,83 @@ pub struct ControlPlaneExecutionPage {
     pub executions: Vec<ControlPlaneExecution>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneReferenceType {
+    Artifact,
+    Evidence,
+    ExternalReference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneReferenceRegistration {
+    pub schema: String,
+    pub idempotency_key: String,
+    pub actor: String,
+    pub reference: ReferenceId,
+    pub kind: String,
+    pub uri: String,
+}
+
+impl ControlPlaneReferenceRegistration {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if self.schema != CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA {
+            return Err(ControlPlaneError::invalid_argument(
+                "unsupported control-plane reference registration schema",
+            ));
+        }
+        for (name, value, limit) in [
+            ("idempotency_key", self.idempotency_key.as_str(), 256),
+            ("actor", self.actor.as_str(), 256),
+            ("reference", self.reference.as_str(), 256),
+            ("kind", self.kind.as_str(), 128),
+            ("uri", self.uri.as_str(), 2048),
+        ] {
+            if value.trim().is_empty() || value.len() > limit {
+                return Err(ControlPlaneError::invalid_argument(format!(
+                    "{name} must contain 1..={limit} bytes"
+                )));
+            }
+        }
+        if !self
+            .reference
+            .as_str()
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err(ControlPlaneError::invalid_argument(
+                "reference must use only ASCII letters, digits, '-', '_', '.', or ':'",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneReference {
+    pub schema: String,
+    pub run: RunId,
+    pub reference_type: ControlPlaneReferenceType,
+    pub reference: ReferenceId,
+    pub kind: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneReferencePage {
+    pub schema: String,
+    pub run: RunId,
+    pub reference_type: ControlPlaneReferenceType,
+    pub references: Vec<ControlPlaneReference>,
+}
+
 /// Bounded live provider evidence. This intentionally carries timestamps and a
 /// source name only; provider output and filesystem paths remain out of status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -584,19 +665,21 @@ mod tests {
         ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneExecution,
         ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
         ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
-        ControlPlaneProviderSummary, ControlPlaneResult, ControlPlaneRun,
-        ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState, ControlPlaneRuntime,
-        ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest,
-        ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        ControlPlaneProviderSummary, ControlPlaneReference, ControlPlaneReferencePage,
+        ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneResult,
+        ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
+        ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask,
+        ControlPlaneTaskListRequest, ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
         CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
         CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
         CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-        CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-        CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+        CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+        CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
     };
     use crate::{
         AttemptCursor, AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
-        RunCursor, RunId, TaskCursor, TaskId,
+        ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
     };
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
@@ -874,6 +957,46 @@ mod tests {
         let value = serde_json::to_value(&page).expect("serialize");
         assert_eq!(
             serde_json::from_value::<ControlPlaneExecutionPage>(value).expect("deserialize"),
+            page
+        );
+    }
+
+    #[test]
+    fn run_scoped_reference_registration_and_page_round_trip() {
+        let registration = ControlPlaneReferenceRegistration {
+            schema: CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA.to_string(),
+            idempotency_key: "register-patch-1".to_string(),
+            actor: "broker:controller".to_string(),
+            reference: ReferenceId::new("patch-1").expect("reference"),
+            kind: "patch".to_string(),
+            uri: "homeboy://artifact/patch-1".to_string(),
+        };
+        registration.validate().expect("registration");
+        let mut unsafe_registration = registration.clone();
+        unsafe_registration.reference =
+            ReferenceId::new("patch?token=secret").expect("non-empty reference");
+        unsafe_registration
+            .validate()
+            .expect_err("unsafe reference identity");
+        let reference = ControlPlaneReference {
+            schema: CONTROL_PLANE_REFERENCE_SCHEMA.to_string(),
+            run: RunId::new(AGENT_TASK_RUN).expect("run"),
+            reference_type: ControlPlaneReferenceType::Artifact,
+            reference: registration.reference.clone(),
+            kind: registration.kind.clone(),
+            uri: registration.uri.clone(),
+            registered_at: Some("2026-01-01T00:00:00Z".to_string()),
+            actor: Some(registration.actor.clone()),
+        };
+        let page = ControlPlaneReferencePage {
+            schema: CONTROL_PLANE_REFERENCE_PAGE_SCHEMA.to_string(),
+            run: reference.run.clone(),
+            reference_type: ControlPlaneReferenceType::Artifact,
+            references: vec![reference],
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneReferencePage>(value).expect("deserialize"),
             page
         );
     }

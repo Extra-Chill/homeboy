@@ -117,6 +117,67 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 id: (*id).to_string(),
             })
         }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "artifacts"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReferences {
+                id: (*id).to_string(),
+                reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType::Artifact,
+            })
+        }
+        (HttpMethod::Post, ["v1", "control-plane", "runs", id, "artifacts"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReferenceRegister {
+                id: (*id).to_string(),
+                reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType::Artifact,
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "artifacts", reference_id]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReference {
+                id: (*id).to_string(),
+                reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType::Artifact,
+                reference_id: (*reference_id).to_string(),
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "evidence"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReferences {
+                id: (*id).to_string(),
+                reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType::Evidence,
+            })
+        }
+        (HttpMethod::Post, ["v1", "control-plane", "runs", id, "evidence"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReferenceRegister {
+                id: (*id).to_string(),
+                reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType::Evidence,
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "evidence", reference_id]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReference {
+                id: (*id).to_string(),
+                reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType::Evidence,
+                reference_id: (*reference_id).to_string(),
+            })
+        }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "external-references"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReferences {
+                id: (*id).to_string(),
+                reference_type:
+                    homeboy_control_plane_contract::ControlPlaneReferenceType::ExternalReference,
+            })
+        }
+        (HttpMethod::Post, ["v1", "control-plane", "runs", id, "external-references"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunReferenceRegister {
+                id: (*id).to_string(),
+                reference_type:
+                    homeboy_control_plane_contract::ControlPlaneReferenceType::ExternalReference,
+            })
+        }
+        (
+            HttpMethod::Get,
+            ["v1", "control-plane", "runs", id, "external-references", reference_id],
+        ) => Ok(HttpEndpoint::ControlPlaneRunReference {
+            id: (*id).to_string(),
+            reference_type:
+                homeboy_control_plane_contract::ControlPlaneReferenceType::ExternalReference,
+            reference_id: (*reference_id).to_string(),
+        }),
         (HttpMethod::Get, ["v1", "control-plane", "runs", id, "tasks"]) => {
             Ok(HttpEndpoint::ControlPlaneRunTasks {
                 id: (*id).to_string(),
@@ -295,6 +356,29 @@ where
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRunReferences { id, reference_type } => {
+            return control_plane_references_response(endpoint.clone(), id, *reference_type);
+        }
+        HttpEndpoint::ControlPlaneRunReference {
+            id,
+            reference_type,
+            reference_id,
+        } => {
+            return control_plane_reference_response(
+                endpoint.clone(),
+                id,
+                *reference_type,
+                reference_id,
+            );
+        }
+        HttpEndpoint::ControlPlaneRunReferenceRegister { id, reference_type } => {
+            return control_plane_reference_registration_response(
+                endpoint.clone(),
+                id,
+                *reference_type,
+                request.body.as_ref(),
+            );
         }
         HttpEndpoint::ControlPlaneRunTasks { id, request } => {
             return control_plane_run_tasks_response(endpoint.clone(), id, request);
@@ -539,6 +623,9 @@ where
         | HttpEndpoint::ControlPlaneRuns { .. }
         | HttpEndpoint::ControlPlaneRunSubmit
         | HttpEndpoint::ControlPlaneRun { .. }
+        | HttpEndpoint::ControlPlaneRunReferences { .. }
+        | HttpEndpoint::ControlPlaneRunReference { .. }
+        | HttpEndpoint::ControlPlaneRunReferenceRegister { .. }
         | HttpEndpoint::ControlPlaneRunTasks { .. }
         | HttpEndpoint::ControlPlaneRunTask { .. }
         | HttpEndpoint::ControlPlaneTaskAttempts { .. }
@@ -678,6 +765,69 @@ fn control_plane_run_tasks_response(
         control_plane_run_id(run_id).and_then(|run| crate::control_plane::tasks(&run, request));
     match result {
         Ok(tasks) => control_plane_ok(endpoint, tasks),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_references_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType,
+) -> Result<HttpApiResponse> {
+    let result = control_plane_run_id(run_id)
+        .and_then(|run| crate::control_plane::references(&run, reference_type));
+    match result {
+        Ok(references) => control_plane_ok(endpoint, references),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_reference_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType,
+    reference_id: &str,
+) -> Result<HttpApiResponse> {
+    let result = control_plane_run_id(run_id).and_then(|run| {
+        control_plane_reference_id(reference_id)
+            .and_then(|reference| crate::control_plane::reference(&run, reference_type, &reference))
+    });
+    match result {
+        Ok(reference) => control_plane_ok(endpoint, reference),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_reference_registration_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType,
+    body: Option<&Value>,
+) -> Result<HttpApiResponse> {
+    let result = body
+        .cloned()
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "control-plane reference registration body is required",
+            )
+        })
+        .and_then(|body| {
+            serde_json::from_value::<
+                homeboy_control_plane_contract::ControlPlaneReferenceRegistration,
+            >(body)
+            .map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                    "invalid control-plane reference registration: {error}"
+                ))
+            })
+        })
+        .and_then(|request| {
+            control_plane_run_id(run_id).and_then(|run| {
+                crate::control_plane::register_reference(&run, reference_type, &request)
+            })
+        });
+    match result {
+        Ok(reference) => control_plane_ok(endpoint, reference),
         Err(error) => control_plane_err(endpoint, error),
     }
 }
@@ -873,6 +1023,30 @@ fn control_plane_execution_id(
         );
     }
     homeboy_control_plane_contract::ExecutionId::new(execution_id).map_err(|error| {
+        homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+    })
+}
+
+fn control_plane_reference_id(
+    reference_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ReferenceId,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let reference_id = crate::execution_contract::decode_uri_component_strict(reference_id)
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "reference id contains invalid percent encoding",
+            )
+        })?;
+    if reference_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
+        return Err(
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                "reference id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"
+            )),
+        );
+    }
+    homeboy_control_plane_contract::ReferenceId::new(reference_id).map_err(|error| {
         homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
     })
 }

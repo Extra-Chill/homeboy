@@ -9,10 +9,12 @@ use homeboy_control_plane_contract::{
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneEventPage, ControlPlaneExecution, ControlPlaneExecutionPage,
     ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
-    ControlPlaneOperation, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
-    ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneOperation, ControlPlaneReference, ControlPlaneReferencePage,
+    ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneRun,
+    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
     ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
-    ControlPlaneTaskPage, EventCursor, ExecutionId, MissionId, RunId, TaskId,
+    ControlPlaneTaskPage, EventCursor, ExecutionId, MissionId, ReferenceId, RunId, TaskId,
 };
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
@@ -109,6 +111,38 @@ pub trait ControlPlaneProvider: Send + Sync {
     ) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
         Err(ControlPlaneError::unavailable(
             "control-plane execution discovery is unavailable",
+        ))
+    }
+
+    fn reference(
+        &self,
+        run: &RunId,
+        reference_type: ControlPlaneReferenceType,
+        reference: &ReferenceId,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane {reference_type:?} reference not found in run {run}: {reference}"
+        )))
+    }
+
+    fn references(
+        &self,
+        _run: &RunId,
+        _reference_type: ControlPlaneReferenceType,
+    ) -> Result<ControlPlaneReferencePage, ControlPlaneError> {
+        Err(ControlPlaneError::unavailable(
+            "control-plane reference discovery is unavailable",
+        ))
+    }
+
+    fn register_reference(
+        &self,
+        _run: &RunId,
+        _reference_type: ControlPlaneReferenceType,
+        _request: &ControlPlaneReferenceRegistration,
+    ) -> Result<ControlPlaneReference, ControlPlaneError> {
+        Err(ControlPlaneError::unavailable(
+            "control-plane reference registration is unavailable",
         ))
     }
 
@@ -237,6 +271,30 @@ pub fn executions(
     attempt_number: u32,
 ) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
     with_provider(|provider| provider.executions(run, task, attempt_number))
+}
+
+pub fn reference(
+    run: &RunId,
+    reference_type: ControlPlaneReferenceType,
+    reference: &ReferenceId,
+) -> Result<ControlPlaneReference, ControlPlaneError> {
+    with_provider(|provider| provider.reference(run, reference_type, reference))
+}
+
+pub fn references(
+    run: &RunId,
+    reference_type: ControlPlaneReferenceType,
+) -> Result<ControlPlaneReferencePage, ControlPlaneError> {
+    with_provider(|provider| provider.references(run, reference_type))
+}
+
+pub fn register_reference(
+    run: &RunId,
+    reference_type: ControlPlaneReferenceType,
+    request: &ControlPlaneReferenceRegistration,
+) -> Result<ControlPlaneReference, ControlPlaneError> {
+    request.validate()?;
+    with_provider(|provider| provider.register_reference(run, reference_type, request))
 }
 
 pub fn submit(

@@ -2228,7 +2228,13 @@ where
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("POST", "/v1/control-plane/runs") => {
-            match authorize_control_plane_submission(body, &broker_auth) {
+            match authorize_control_plane_write(body, &broker_auth) {
+                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
+        ("POST", path) if is_control_plane_reference_registration(path) => {
+            match authorize_control_plane_write(body, &broker_auth) {
                 Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
                 Err(error) => remote_runner::auth_or_bad_request(error),
             }
@@ -2237,7 +2243,7 @@ where
     }
 }
 
-fn authorize_control_plane_submission(
+fn authorize_control_plane_write(
     body: Option<serde_json::Value>,
     broker_auth: &remote_runner::BrokerAuthContext,
 ) -> Result<Option<serde_json::Value>> {
@@ -2246,9 +2252,9 @@ fn authorize_control_plane_submission(
     };
     if grant.credential_id == "loopback-open" {
         return Err(Error::broker_auth_denied(
-            "control-plane submission requires a paired credential with submit scope",
+            "control-plane writes require a paired credential with submit scope",
             None,
-            vec!["Pair a controller credential before submitting durable work.".to_string()],
+            vec!["Pair a controller credential before mutating durable work.".to_string()],
         ));
     }
     let mut body = body.unwrap_or_else(|| json!({}));
@@ -2265,6 +2271,13 @@ fn authorize_control_plane_submission(
         serde_json::Value::String(format!("broker:{}", grant.credential_id)),
     );
     Ok(Some(body))
+}
+
+fn is_control_plane_reference_registration(path: &str) -> bool {
+    matches!(
+        http_api::route(HttpMethod::Post, path),
+        Ok(http_api::HttpEndpoint::ControlPlaneRunReferenceRegister { .. })
+    )
 }
 
 /// Read-only proof that a loopback endpoint is this daemon, bound to a fresh
@@ -4425,12 +4438,10 @@ mod tests {
                 loopback_bind: true,
                 trusted_local: false,
             };
-            let authorized = authorize_control_plane_submission(
-                Some(json!({ "actor": "spoofed" })),
-                &authenticated,
-            )
-            .expect("authorized")
-            .expect("body");
+            let authorized =
+                authorize_control_plane_write(Some(json!({ "actor": "spoofed" })), &authenticated)
+                    .expect("authorized")
+                    .expect("body");
             assert_eq!(authorized["actor"], "broker:controller-credential");
 
             let unauthenticated = remote_runner::BrokerAuthContext {
@@ -4438,15 +4449,34 @@ mod tests {
                 loopback_bind: true,
                 trusted_local: false,
             };
-            authorize_control_plane_submission(Some(json!({})), &unauthenticated)
+            authorize_control_plane_write(Some(json!({})), &unauthenticated)
                 .expect_err("missing bearer token");
 
             let mut smoke_store = crate::broker_auth::BrokerAuthStore::default();
             smoke_store.allow_unauthenticated_loopback = true;
             smoke_store.save().expect("smoke auth store");
-            authorize_control_plane_submission(Some(json!({})), &unauthenticated)
+            authorize_control_plane_write(Some(json!({})), &unauthenticated)
                 .expect_err("loopback smoke grant cannot submit durable work");
         });
+    }
+
+    #[test]
+    fn control_plane_reference_registration_paths_are_write_scoped() {
+        for path in [
+            "/v1/control-plane/runs/run-1/artifacts",
+            "/v1/control-plane/runs/run-1/artifacts/",
+            "/v1/control-plane/runs/run-1/evidence",
+            "/v1//control-plane/runs/run-1/evidence",
+            "/v1/control-plane/runs/run-1/external-references",
+        ] {
+            assert!(is_control_plane_reference_registration(path));
+        }
+        assert!(!is_control_plane_reference_registration(
+            "/v1/control-plane/runs/run-1/artifacts/patch-1"
+        ));
+        assert!(!is_control_plane_reference_registration(
+            "/v1/control-plane/runs/run-1/tasks"
+        ));
     }
 
     /// Round-trip the envelope through the exact functions that build it on the

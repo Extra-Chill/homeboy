@@ -77,6 +77,10 @@ opaque_identity!(
     ProviderSessionId
 );
 opaque_identity!(
+    /// One run-scoped artifact, evidence, or external-reference identity.
+    ReferenceId
+);
+opaque_identity!(
     /// Stable identity of one event in a run stream.
     EventId
 );
