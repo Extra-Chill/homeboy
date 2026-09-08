@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.8] - 2026-09-08
+
+### Fixed
+- partition full-repository lint by WordPress lint role
+
 ## [3.45.7] - 2026-09-08
 
 ### Fixed
