@@ -355,36 +355,42 @@ fn ssh_dev_sync_rejects_darwin_binary_before_upload() {
 
 #[test]
 fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
-    let source = tempfile::tempdir().expect("source");
-    std::fs::write(
-        source.path().join("Cargo.toml"),
-        "[package]\nname='fixture'\nversion='0.1.0'\n",
-    )
-    .expect("manifest");
-    std::fs::create_dir_all(source.path().join("target")).expect("target");
-    std::fs::write(source.path().join("target/local"), "controller binary").expect("target output");
-    let snapshot = build_runner_source_snapshot(source.path(), "/runner/ws").expect("snapshot");
-    let script = source_snapshot_build_script(&snapshot);
-    let archive = std::process::Command::new("tar")
-        .args(["-tf"])
-        .arg(snapshot.archive.path())
-        .output()
-        .expect("list snapshot archive");
-
-    assert!(snapshot
-        .remote_archive
-        .starts_with("/runner/ws/_homeboy_binaries/dev-source/"));
-    assert_eq!(
-        snapshot.build_slot,
-        format!(
-            "/runner/ws/_homeboy_binaries/dev/{}",
-            &snapshot.sha256[..16]
+    // `build_runner_source_snapshot` stages through `tempfile::tempdir()`, which
+    // honours the process-global `TMPDIR`. Hold the isolation guard so a
+    // neighbouring test cannot retire that root mid-archive (#14362).
+    test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(
+            source.path().join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.1.0'\n",
         )
-    );
-    assert!(script.contains("cargo build --release --bin homeboy"));
-    assert!(script.contains("runner_native_build_not_elf"));
-    assert!(!script.contains(source.path().to_str().expect("utf8 source")));
-    assert!(!String::from_utf8_lossy(&archive.stdout).contains("target/local"));
+        .expect("manifest");
+        std::fs::create_dir_all(source.path().join("target")).expect("target");
+        std::fs::write(source.path().join("target/local"), "controller binary")
+            .expect("target output");
+        let snapshot = build_runner_source_snapshot(source.path(), "/runner/ws").expect("snapshot");
+        let script = source_snapshot_build_script(&snapshot);
+        let archive = std::process::Command::new("tar")
+            .args(["-tf"])
+            .arg(snapshot.archive.path())
+            .output()
+            .expect("list snapshot archive");
+
+        assert!(snapshot
+            .remote_archive
+            .starts_with("/runner/ws/_homeboy_binaries/dev-source/"));
+        assert_eq!(
+            snapshot.build_slot,
+            format!(
+                "/runner/ws/_homeboy_binaries/dev/{}",
+                &snapshot.sha256[..16]
+            )
+        );
+        assert!(script.contains("cargo build --release --bin homeboy"));
+        assert!(script.contains("runner_native_build_not_elf"));
+        assert!(!script.contains(source.path().to_str().expect("utf8 source")));
+        assert!(!String::from_utf8_lossy(&archive.stdout).contains("target/local"));
+    });
 }
 
 #[test]
