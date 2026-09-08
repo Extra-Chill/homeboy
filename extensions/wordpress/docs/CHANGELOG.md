@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.45.6] - 2026-09-08
+
+### Fixed
+- select manifest-declared standalone PHP tests in full-suite runs
+
 ## [3.45.5] - 2026-09-07
 
 ### Fixed
