@@ -4,6 +4,18 @@
   "name": "OpenCode",
   "version": "1.4.8",
   "description": "OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.",
+  "external_storage_retention": {
+    "providers": [
+      {
+        "id": "opencode.external-storage-retention",
+        "command": [
+          "node",
+          "{{extension_path}}/scripts/agent/homeboy-opencode-external-storage-retention.cjs"
+        ],
+        "timeout_seconds": 30
+      }
+    ]
+  },
   "requires": {
     "homeboy": ">=0.345.0"
   },
