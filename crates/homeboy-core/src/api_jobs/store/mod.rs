@@ -1518,7 +1518,7 @@ impl JobStore {
         }
     }
 
-    pub(crate) fn list(&self) -> Vec<Job> {
+    pub fn list(&self) -> Vec<Job> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let mut jobs: Vec<Job> = inner
             .jobs
@@ -1527,6 +1527,54 @@ impl JobStore {
             .collect();
         jobs.sort_by_key(|job| (job.created_at_ms, job.id));
         jobs
+    }
+
+    /// Return a safe, non-reconciling projection for daemon-job inspection.
+    pub fn inspection(&self, job_id: Uuid) -> Result<super::DaemonJobInspection> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        let linked_durable_run_id = stored
+            .controller_job
+            .as_ref()
+            .and_then(|controller| controller.linked_durable_run_id.clone())
+            .or_else(|| {
+                stored.events.iter().find_map(|event| {
+                    event.data.as_ref().and_then(|data| {
+                        ["durable_run_id", "run_id", "agent_task_run_id"]
+                            .iter()
+                            .find_map(|key| data.get(*key)?.as_str().map(str::to_string))
+                    })
+                })
+            });
+        let child_identity = stored
+            .local_child
+            .as_ref()
+            .and_then(|child| child.process.as_ref())
+            .map(|process| super::DaemonJobChildIdentity {
+                pid: process.pid,
+                process_group_id: process.process_group_id,
+            });
+        let terminal_disposition = stored.job.status.is_terminal().then(|| {
+            stored
+                .job
+                .stale_reason
+                .clone()
+                .unwrap_or_else(|| stored.job.status.as_str().to_string())
+        });
+        let checkpoint = stored
+            .controller_job
+            .as_ref()
+            .and_then(|controller| controller.checkpoint.clone());
+        Ok(super::DaemonJobInspection {
+            job: stored.job.clone(),
+            linked_durable_run_id,
+            child_identity,
+            terminal_disposition,
+            checkpoint,
+        })
     }
 
     pub fn events(&self, job_id: Uuid) -> Result<Vec<JobEvent>> {
