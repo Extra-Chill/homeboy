@@ -9,10 +9,11 @@ use super::*;
 /// With `PRAGMA foreign_keys` on (#11129) that is enforced rather than merely
 /// intended, so a delete path that forgets a table now fails loudly instead of
 /// leaving orphans behind. The list is asserted against the live schema in
-/// `store_test`, so adding a sixth child table without adding it here breaks a
+/// `store_test`, so adding another child table without adding it here breaks a
 /// test rather than a database.
-pub(crate) const RUN_OWNED_CHILD_TABLES: [&str; 5] = [
+pub(crate) const RUN_OWNED_CHILD_TABLES: [&str; 6] = [
     "artifacts",
+    "control_plane_mission_runs",
     "findings",
     "triage_items",
     "trace_spans",

@@ -144,20 +144,12 @@ pub(crate) fn required_tool_version_args(command: &str) -> Vec<String> {
 }
 
 pub(crate) fn local_tool_probe(command: &str, version_args: &[String]) -> ToolProbe {
-    let path = common::local_command_line(
-        "sh",
-        &[
-            "-lc",
-            &format!("command -v {}", common::shell_word(command)),
-        ],
-    );
-    let Some(path) = path else {
-        return ToolProbe {
-            available: false,
-            path: None,
-            version: None,
-            error: Some("not found on PATH".to_string()),
-        };
+    let path = match common::resolve_on_path(command) {
+        common::PathLookup::Found(path) => path,
+        common::PathLookup::NotFound => return ToolProbe::not_found(),
+        common::PathLookup::Unavailable(reason) => {
+            return ToolProbe::probe_failed(format!("tool lookup could not run: {reason}"))
+        }
     };
     let version = if version_args.is_empty() {
         None
@@ -174,12 +166,7 @@ pub(crate) fn local_tool_probe(command: &str, version_args: &[String]) -> ToolPr
                 }
             })
     };
-    ToolProbe {
-        available: true,
-        path: Some(path),
-        version,
-        error: None,
-    }
+    ToolProbe::found(path, version)
 }
 
 pub(crate) fn remote_tool_probe(
@@ -187,17 +174,12 @@ pub(crate) fn remote_tool_probe(
     command: &str,
     version_args: &[String],
 ) -> ToolProbe {
-    let path = common::remote_line(
-        client,
-        &format!("command -v {}", common::shell_word(command)),
-    );
-    let Some(path) = path else {
-        return ToolProbe {
-            available: false,
-            path: None,
-            version: None,
-            error: Some("not found on PATH".to_string()),
-        };
+    let path = match common::remote_path_lookup(client, command) {
+        common::PathLookup::Found(path) => path,
+        common::PathLookup::NotFound => return ToolProbe::not_found(),
+        common::PathLookup::Unavailable(stderr) => {
+            return ToolProbe::probe_failed(format!("tool probe shell failed: {stderr}"))
+        }
     };
     let version = if version_args.is_empty() {
         None
@@ -216,12 +198,7 @@ pub(crate) fn remote_tool_probe(
             ),
         )
     };
-    ToolProbe {
-        available: true,
-        path: Some(path),
-        version,
-        error: None,
-    }
+    ToolProbe::found(path, version)
 }
 
 pub(crate) fn lab_homeboy_path_checks(

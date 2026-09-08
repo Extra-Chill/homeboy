@@ -163,6 +163,11 @@ pub struct DiskProbe {
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolProbe {
     pub available: bool,
+    /// True when the lookup itself could not run, so absence was never
+    /// established. `available: false` alone cannot carry this: reporting a
+    /// broken probe as "not found on PATH" is the readiness lie #14374 is about.
+    #[serde(skip_serializing_if = "is_false")]
+    pub probe_failed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +175,44 @@ pub struct ToolProbe {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl ToolProbe {
+    pub fn found(path: String, version: Option<String>) -> Self {
+        Self {
+            available: true,
+            probe_failed: false,
+            path: Some(path),
+            version,
+            error: None,
+        }
+    }
+
+    pub fn not_found() -> Self {
+        Self {
+            available: false,
+            probe_failed: false,
+            path: None,
+            version: None,
+            error: Some(TOOL_NOT_FOUND_ERROR.to_string()),
+        }
+    }
+
+    pub fn probe_failed(reason: String) -> Self {
+        Self {
+            available: false,
+            probe_failed: true,
+            path: None,
+            version: None,
+            error: Some(reason),
+        }
+    }
+}
+
+pub const TOOL_NOT_FOUND_ERROR: &str = "not found on PATH";
 
 #[derive(Debug, Serialize)]
 pub struct RunnerCheck {

@@ -508,6 +508,15 @@ pub trait AgentTaskPrFinalizationBackend {
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>>;
+    /// Finds a prior merged publication for this exact base/head tuple.
+    fn find_merged_pr(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Result<Option<AgentTaskPrRef>> {
+        Ok(None)
+    }
     /// Re-reads the live candidate branch immediately before a GitHub mutation.
     /// This is separate from post-mutation binding verification because a remote
     /// writer can advance the branch between Homeboy's push and PR mutation.

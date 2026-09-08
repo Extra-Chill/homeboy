@@ -625,6 +625,97 @@ fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
 }
 
 #[test]
+fn materialize_plan_checks_each_refresh_authority_individually() {
+    let script = materialize_script(
+        "https://example.test/homeboy.git",
+        "v0.295.0",
+        "/runner/ws/homeboy-clean",
+        "/runner/ws/homeboy-clean/target/release/homeboy",
+        false,
+        &["controller-authority", "daemon-authority"],
+    );
+
+    assert!(script.contains("for authority in 'controller-authority' 'daemon-authority'; do"));
+}
+
+#[test]
+fn materialization_preflight_resolves_abbreviated_reachable_authorities_and_refuses_downgrades() {
+    let (fixture, old, new) = linear_commit_fixture();
+    let remote = tempfile::tempdir().expect("bare remote");
+    let remote_path = remote.path().join("homeboy.git");
+    assert!(Command::new("git")
+        .args([
+            "init",
+            "--bare",
+            "--quiet",
+            remote_path.to_str().expect("remote path")
+        ])
+        .status()
+        .expect("initialize bare remote")
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            remote_path.to_str().expect("remote path")
+        ])
+        .current_dir(fixture.path())
+        .status()
+        .expect("configure remote")
+        .success());
+    assert!(Command::new("git")
+        .args(["push", "--quiet", "origin", "HEAD:main"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("push fixture history")
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "--git-dir",
+            remote_path.to_str().expect("remote path"),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ])
+        .status()
+        .expect("set remote default branch")
+        .success());
+
+    let preflight = |target: &str, authorities: &[&str]| {
+        let script = materialize_script(
+            remote_path.to_str().expect("remote path"),
+            target,
+            "/runner/ws/homeboy-clean",
+            "/runner/ws/homeboy-clean/target/release/homeboy",
+            false,
+            authorities,
+        );
+        let guard = script
+            .split_once("mkdir -p \"$(dirname \"$dir\")\"")
+            .expect("materialization script has a preflight boundary")
+            .0;
+        Command::new("bash")
+            .args(["-c", guard])
+            .output()
+            .expect("run materialization preflight")
+    };
+
+    let abbreviated_ancestor = preflight(&new, &[&old[..12]]);
+    assert!(
+        abbreviated_ancestor.status.success(),
+        "reachable abbreviated authority must resolve locally: {}",
+        String::from_utf8_lossy(&abbreviated_ancestor.stderr)
+    );
+
+    let downgrade = preflight(&old, &[&new]);
+    assert!(!downgrade.status.success());
+    assert!(
+        String::from_utf8_lossy(&downgrade.stderr).contains("Refusing Homeboy runner downgrade")
+    );
+}
+
+#[test]
 fn materialize_plan_allows_an_explicit_git_ancestry_downgrade() {
     let script = materialize_script(
         "https://example.test/homeboy.git",

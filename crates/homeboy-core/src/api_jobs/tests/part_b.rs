@@ -1347,6 +1347,86 @@ fn remote_runner_job_rejects_inline_secret_env_before_durable_persistence() {
     );
 }
 
+fn provider_credential_secret_env_plan() -> crate::secret_env_plan::SecretEnvPlan {
+    use crate::secret_env_plan::{
+        SecretEnvCredentialSource, SecretEnvPlan, SecretEnvProviderCredentialMapping,
+    };
+
+    const ACCESS_TOKEN: &str = "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN";
+    const REFRESH_TOKEN: &str = "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN";
+    let mut plan = SecretEnvPlan::default();
+    plan.extend_secret_env_names([ACCESS_TOKEN.to_string(), REFRESH_TOKEN.to_string()]);
+    plan.provider_credentials.insert(
+        "test.opencode-provider".to_string(),
+        SecretEnvProviderCredentialMapping {
+            secret_env: vec![ACCESS_TOKEN.to_string(), REFRESH_TOKEN.to_string()],
+            sources: std::collections::BTreeMap::from([(
+                ACCESS_TOKEN.to_string(),
+                SecretEnvCredentialSource {
+                    source: "json-file".to_string(),
+                    env_var: None,
+                    scope: None,
+                    name: Some("~/.codex/auth.json".to_string()),
+                    field: Some("tokens.access_token".to_string()),
+                },
+            )]),
+        },
+    );
+    plan
+}
+
+#[test]
+fn remote_runner_job_with_provider_credential_plan_accepts_value_free_env() {
+    // Regression for Extra-Chill/homeboy#14382: a Cook handoff that carries
+    // provider credentials as SecretEnvPlan references (names, requirements,
+    // and provider credential provenance — never values) must pass durable
+    // reverse-runner validation and persist as a queued job.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open(&path).expect("durable store opens");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.secret_env_names = vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()];
+    request.secret_env_plan = provider_credential_secret_env_plan();
+    // The dispatch env carries references only: no inline values for any name
+    // the plan declares, including names contributed by `provider_credentials`.
+    request
+        .env
+        .insert("PUBLIC_FLAG".to_string(), "1".to_string());
+
+    let job = store
+        .submit_runner_api_fixture(request)
+        .expect("reference-only provider credential plan is durable-safe");
+
+    assert_eq!(job.status, JobStatus::Queued);
+}
+
+#[test]
+fn remote_runner_job_rejects_inline_values_for_provider_credential_plan_names() {
+    let store = JobStore::default();
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.secret_env_plan = provider_credential_secret_env_plan();
+    request.env.insert(
+        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+        "inline-secret".to_string(),
+    );
+
+    let error = store
+        .submit_runner_api_fixture(request)
+        .expect_err("inline provider credential value must be rejected");
+
+    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert!(error
+        .message
+        .contains("cannot accept inline secret env values"));
+    assert!(error.details["tried"]
+        .as_array()
+        .expect("actionable alternatives")
+        .iter()
+        .any(|value| value
+            .as_str()
+            .is_some_and(|value| value.contains("SecretEnvPlan references"))));
+}
+
 #[test]
 fn remote_runner_submission_key_replays_one_redacted_durable_job() {
     let temp = tempfile::tempdir().expect("tempdir");

@@ -1986,6 +1986,10 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     status_with_admission_projection(runner_id).map(|(status, _, _)| status)
 }
 
+pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerStatusReport> {
+    status_with_admission_projection_until(runner_id, deadline).map(|(status, _, _)| status)
+}
+
 /// Capture status and the generation ledger together so callers that need an
 /// admission answer cannot observe a second, racing persisted generation state.
 pub(crate) fn status_with_admission_projection(

@@ -3755,6 +3755,28 @@ fn non_retryable_pre_execution_failure_remains_invalid_input() {
     assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
 }
 
+#[test]
+fn reserve_pressure_pre_execution_failure_is_classified_as_capacity() {
+    let plan = test_plan();
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-reserve-pressure",
+        &plan.tasks[0],
+        "worktree_capacity_admission",
+        &Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+            filesystem: "/worktrees/new-task".to_string(),
+            available_bytes: 90,
+            reserve_bytes: 100,
+            shortfall_bytes: 10,
+        }),
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Capacity)
+    );
+    assert_eq!(outcome.outputs["error_code"], "resource.capacity_reserve");
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The repair is a write: status rewrites `plan_path` back to the
 /// controller-owned file. Deciding that repair from one home and committing it

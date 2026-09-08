@@ -242,6 +242,64 @@ fn runner_secret_env_resolution_accepts_secret_env_plan_names() {
 }
 
 #[test]
+fn runner_secret_env_plan_resolution_fails_closed_before_provider_execution() {
+    // Extra-Chill/homeboy#14382: a durable reverse-runner job carries secret
+    // references only. When the runner cannot resolve a planned provider
+    // credential from its own sources, the worker must fail with a clear
+    // readiness error instead of crashing inside the provider.
+    let plan = homeboy_core::secret_env_plan::SecretEnvPlan::from_secret_env_names([
+        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+    ]);
+
+    let err = resolve_runner_secret_env_for_plan(&HashMap::new(), &plan, &HashMap::new())
+        .expect_err("missing runner credential must fail closed pre-provider");
+
+    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    assert_eq!(err.details["field"], "secret_env");
+    assert!(err
+        .message
+        .contains("missing runner secret env ref for AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"));
+    let rendered = format!("{} {:?} {:?}", err.message, err.details, err.hints);
+    assert!(!rendered.contains("access-secret-value"));
+}
+
+#[test]
+fn strip_durable_secret_env_values_removes_planned_names_and_keeps_public_env() {
+    // Extra-Chill/homeboy#14382: the reverse-runner dispatch env must persist
+    // no inline secret values. Planned names include provider credential
+    // requirements contributed through `provider_credentials` mappings.
+    let mut plan = homeboy_core::secret_env_plan::SecretEnvPlan::from_secret_env_names([
+        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+    ]);
+    plan.provider_credentials.insert(
+        "test.opencode-provider".to_string(),
+        homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
+            secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string()],
+            sources: Default::default(),
+        },
+    );
+
+    let env = HashMap::from([
+        (
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "access-secret-value".to_string(),
+        ),
+        (
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+            "refresh-secret-value".to_string(),
+        ),
+        ("PUBLIC_FLAG".to_string(), "1".to_string()),
+    ]);
+
+    let stripped = strip_durable_secret_env_values(env, &plan);
+
+    assert_eq!(
+        stripped,
+        HashMap::from([("PUBLIC_FLAG".to_string(), "1".to_string())])
+    );
+}
+
+#[test]
 fn provider_file_secret_source_error_is_early_clear_and_redacted() {
     let provision = ProviderFileSecretSourceProvision {
         path: "~/.provider/auth.json".to_string(),

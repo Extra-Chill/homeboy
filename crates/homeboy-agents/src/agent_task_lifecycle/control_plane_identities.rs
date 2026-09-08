@@ -50,6 +50,8 @@ pub fn canonical_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId
 /// A run id that does not encode an attempt is omitted rather than guessed.
 /// When the durable record already carries `cook_attempt`, a disagreement with
 /// the encoded attempt number is a typed error rather than a silent preference.
+/// Legacy retry-qualified run IDs encode their source attempt, so their durable
+/// successor attempt remains authoritative.
 pub fn canonical_control_plane_identities(
     record: &AgentTaskRunRecord,
 ) -> Result<Option<CanonicalControlPlaneIdentities>> {
@@ -77,8 +79,12 @@ pub fn canonical_control_plane_identities_for_run(
     else {
         return Ok(None);
     };
-    if let Some(recorded) = recorded_attempt {
-        if recorded != cook_attempt_number {
+    let legacy_retry = run_id
+        .trim_end_matches("-transport-retry")
+        .ends_with("-retry");
+    let cook_attempt_number = match recorded_attempt {
+        Some(recorded) if recorded > cook_attempt_number && legacy_retry => recorded,
+        Some(recorded) if recorded != cook_attempt_number => {
             return Err(Error::validation_invalid_argument(
                 "cook_attempt",
                 format!(
@@ -88,7 +94,8 @@ pub fn canonical_control_plane_identities_for_run(
                 None,
             ));
         }
-    }
+        _ => cook_attempt_number,
+    };
     Ok(Some(CanonicalControlPlaneIdentities {
         mission,
         run,
@@ -156,6 +163,37 @@ mod tests {
             .expect_err("disagreement");
         assert!(error.message.contains("encodes attempt 1"));
         assert!(error.message.contains("durable record carries attempt 2"));
+    }
+
+    #[test]
+    fn legacy_retry_qualifier_uses_the_durable_successor_attempt() {
+        let identities = canonical_control_plane_identities(&record(
+            "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-retry",
+            Some(2),
+        ))
+        .expect("resolve legacy retry")
+        .expect("canonical identities");
+        assert_eq!(identities.cook_attempt_number, 2);
+    }
+
+    #[test]
+    fn only_legacy_retry_successors_can_override_the_encoded_attempt() {
+        for (suffix, attempt) in [
+            ("-retryable", 2),
+            ("-retry-extra", 2),
+            ("-transport-retry", 2),
+            ("-retry", 0),
+        ] {
+            let run_id = format!("{AGENT_TASK_RUN}{suffix}");
+            assert!(canonical_control_plane_identities_for_run(&run_id, Some(attempt)).is_err());
+        }
+        for suffix in ["-retry-retry", "-retry-transport-retry"] {
+            let run_id = format!("{AGENT_TASK_RUN}{suffix}");
+            let identities = canonical_control_plane_identities_for_run(&run_id, Some(3))
+                .expect("resolve retry successor")
+                .expect("canonical identities");
+            assert_eq!(identities.cook_attempt_number, 3);
+        }
     }
 
     #[test]

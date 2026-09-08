@@ -443,6 +443,9 @@ pub struct WorktreeInventoryOutput {
     pub authorization: WorktreeInventoryAuthorization,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apply_refusal: Option<WorktreeInventoryApplyRefusal>,
+    /// Exact bounded retry command when apply authority time is exhausted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_continuation: Option<String>,
     /// The task-worktree page starts strictly after this sorted record ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -494,12 +497,28 @@ pub struct WorktreeInventoryRecord {
 }
 
 pub trait WorktreeReconciliationAuthority {
+    /// Refuse apply before any authority acquisition when this implementation
+    /// cannot complete the bounded reconciliation contract safely.
+    fn bounded_inventory_apply_refusal(&self) -> Option<WorktreeInventoryApplyRefusal> {
+        None
+    }
+
     /// Acquires an owner-issued admission fence before the registry write lease.
-    fn acquire(&self, record: &TaskWorktreeRecord) -> Result<WorktreeLivenessAuthority>;
+    /// Implementations must pass this deadline to every remote authority call.
+    fn acquire(
+        &self,
+        record: &TaskWorktreeRecord,
+        deadline: std::time::Instant,
+    ) -> Result<WorktreeLivenessAuthority>;
 
     /// Revalidates the opaque fence at the owner. This is intentionally outside
     /// the task-worktree registry lease because it can be a network operation.
-    fn validate(&self, _record: &TaskWorktreeRecord, _claim: &WorkspaceClaim) -> Result<bool> {
+    fn validate(
+        &self,
+        _record: &TaskWorktreeRecord,
+        _claim: &WorkspaceClaim,
+        _deadline: std::time::Instant,
+    ) -> Result<bool> {
         Ok(false)
     }
 
@@ -514,7 +533,7 @@ pub trait WorktreeReconciliationAuthority {
     }
 
     /// Releases the owner-issued fence after the conditional registry mutation.
-    fn release(&self, _claim: &WorkspaceClaim) -> Result<()> {
+    fn release(&self, _claim: &WorkspaceClaim, _deadline: std::time::Instant) -> Result<()> {
         Ok(())
     }
 }
@@ -603,6 +622,9 @@ pub struct WorktreeInventoryOptions {
     pub cursor: Option<String>,
     pub adopted_cursor: Option<String>,
     pub apply: bool,
+    /// Testable monotonic deadline for the complete apply page. Production
+    /// callers leave this unset and use the bounded default.
+    pub apply_deadline: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -626,6 +648,10 @@ pub struct WorktreeCleanupOutput {
     pub candidates: Vec<WorktreeCleanupCandidate>,
     pub removed: Vec<WorktreeRemoveOutput>,
     pub skipped: Vec<WorktreeCleanupSkipped>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
@@ -703,6 +729,14 @@ pub struct WorktreeCleanupOptions {
     pub dry_run: bool,
     pub cleanup_branches: bool,
     pub allow_unmerged_branches: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorktreeCleanupPageOptions {
+    pub cleanup: WorktreeCleanupOptions,
+    pub limit: usize,
+    pub cursor: Option<String>,
+    pub deadline: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]

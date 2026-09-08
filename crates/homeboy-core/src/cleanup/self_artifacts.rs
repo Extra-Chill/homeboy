@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use crate::{git, Error, Result};
 
 use super::{
-    git_safety, has_tracked_changes_under, path_usage, ArtifactCleanupCandidate,
-    ArtifactCleanupOptions, SELF_TEMP_ARTIFACT_CATEGORY, SELF_TEMP_ARTIFACT_LIVENESS,
-    SELF_TEMP_ARTIFACT_READINESS,
+    cargo_target_lock_is_held, git_safety, has_tracked_changes_under, path_usage,
+    ArtifactCleanupCandidate, ArtifactCleanupOptions, LIVENESS_ACTIVE_BUILD,
+    SELF_TEMP_ARTIFACT_CATEGORY, SELF_TEMP_ARTIFACT_LIVENESS, SELF_TEMP_ARTIFACT_READINESS,
 };
 
 pub(super) fn homeboy_source_checkout() -> Result<PathBuf> {
@@ -329,7 +329,13 @@ fn temp_homeboy_checkout_target_candidate(
         allocated_bytes: usage.allocated_bytes,
         usage_measurement: super::USAGE_MEASURED.to_string(),
         age_seconds: usage.age_seconds(),
-        liveness: SELF_TEMP_ARTIFACT_LIVENESS.to_string(),
+        // A temp checkout is not in the task-worktree registry, but its Cargo
+        // target still has the same live-build lock as any other checkout.
+        liveness: if cargo_target_lock_is_held(&target) {
+            LIVENESS_ACTIVE_BUILD.to_string()
+        } else {
+            SELF_TEMP_ARTIFACT_LIVENESS.to_string()
+        },
         readiness: SELF_TEMP_ARTIFACT_READINESS.to_string(),
         rehydrate_command: None,
         source_dirty: safety.source_dirty,

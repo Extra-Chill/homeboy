@@ -17,6 +17,26 @@ use super::*;
 
 pub(super) const RUNTIME_SECRET_ENV_ALLOWLIST_ENV: &str = "HOMEBOY_AGENT_RUNTIME_SECRET_ENV";
 
+/// Remove every planned secret env entry from a durable dispatch environment.
+///
+/// A reverse-runner job is persisted for replay, so its env must never carry
+/// inline secret values (`reject_inline_durable_secret_env`). The controller
+/// strips the values here and relies on the plan names surviving in the
+/// envelope so the worker rehydrates credentials from runner-owned sources
+/// after replay (Extra-Chill/homeboy#14382).
+pub(super) fn strip_durable_secret_env_values(
+    env: HashMap<String, String>,
+    plan: &SecretEnvPlan,
+) -> HashMap<String, String> {
+    let secret_names = plan.secret_env_names();
+    if secret_names.is_empty() {
+        return env;
+    }
+    env.into_iter()
+        .filter(|(name, _)| !secret_names.contains(name))
+        .collect()
+}
+
 pub(super) fn resolve_runner_secret_env_for_plan(
     secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
     plan: &SecretEnvPlan,
