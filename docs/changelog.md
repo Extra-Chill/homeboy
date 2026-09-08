@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.369.7] - 2026-09-08
+
+### Changed
+- Distinguish unverified provider authentication in runner doctor
+
+### Fixed
+- project admission retry status
+
 ## [0.369.6] - 2026-09-08
 
 ### Fixed
