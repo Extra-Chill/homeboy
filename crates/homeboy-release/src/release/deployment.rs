@@ -8,8 +8,8 @@ use std::path::Path;
 
 use super::executor::release_cleanup_paths;
 use super::types::{
-    ReleaseArtifact, ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseProjectDeployResult,
-    ReleaseRun, ReleaseStepResult, ReleaseStepStatus,
+    ReleaseArtifact, ReleaseControlPlaneContext, ReleaseDeploymentResult, ReleaseDeploymentSummary,
+    ReleaseProjectDeployResult, ReleaseRun, ReleaseStepResult, ReleaseStepStatus,
 };
 
 pub(super) fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
@@ -41,6 +41,7 @@ pub(super) fn run_deployment_step(
     released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
     package_owned_paths: &[String],
+    control_plane: Option<&ReleaseControlPlaneContext>,
 ) -> ReleaseStepResult {
     let deployment = execute_deployment(
         data_root,
@@ -49,6 +50,7 @@ pub(super) fn run_deployment_step(
         released_tag,
         artifacts,
         package_owned_paths,
+        control_plane,
     );
     let deploy_failed = deployment.summary.failed > 0;
 
@@ -90,6 +92,7 @@ fn execute_deployment(
     released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
     package_owned_paths: &[String],
+    control_plane: Option<&ReleaseControlPlaneContext>,
 ) -> ReleaseDeploymentResult {
     let component_id = &component.id;
     let local_path = &component.local_path;
@@ -120,6 +123,7 @@ fn execute_deployment(
         expected_version,
         prepared_artifact,
         &projects,
+        control_plane,
     ) {
         Ok(config) => config,
         Err(error) => return failed_deployment(&projects, error.to_string()),
@@ -326,6 +330,7 @@ fn release_deployment_config(
     expected_version: Option<&str>,
     prepared_artifact: PreparedDeployArtifact,
     projects: &[String],
+    control_plane: Option<&ReleaseControlPlaneContext>,
 ) -> Result<DeployConfig> {
     let component_id = &component.id;
     let mut requested_refs = std::collections::BTreeMap::new();
@@ -345,6 +350,10 @@ fn release_deployment_config(
 
     let mut projection = PreparedDeployProjection {
         components: BTreeMap::from([(component_id.to_string(), component.clone())]),
+        control_plane: control_plane.map(|context| homeboy_deploy::DeployControlPlaneLineage {
+            mission_id: context.mission_id.clone(),
+            release_run_id: context.release_run_id.clone(),
+        }),
     };
     for project_id in projects {
         let project = homeboy_core::project::load(project_id)?;
@@ -546,11 +555,21 @@ pub(super) fn resume_deployment(
 }
 
 fn release_deployment_config_from_record(record: &DeploymentRecovery) -> DeployConfig {
+    let control_plane =
+        record
+            .projection
+            .control_plane
+            .as_ref()
+            .map(|lineage| ReleaseControlPlaneContext {
+                mission_id: lineage.mission_id.clone(),
+                release_run_id: lineage.release_run_id.clone(),
+            });
     let mut config = release_deployment_config(
         &record.projection.components[&record.component_id],
         record.expected_version.as_deref(),
         record.artifact.clone(),
         &[],
+        control_plane.as_ref(),
     )
     .expect("stored release deployment config is valid");
     config.prepared_projection = Some(record.projection.clone());
@@ -605,9 +624,9 @@ mod tests {
         run_deployment_step, should_cleanup_release_artifacts,
     };
     use crate::release::types::{
-        ReleaseArtifact, ReleaseCommandInput, ReleaseDeploymentResult, ReleaseDeploymentSummary,
-        ReleasePipelineOptions, ReleaseRun, ReleaseRunResult, ReleaseState, ReleaseStepResult,
-        ReleaseStepStatus,
+        ReleaseArtifact, ReleaseCommandInput, ReleaseControlPlaneContext, ReleaseDeploymentResult,
+        ReleaseDeploymentSummary, ReleasePipelineOptions, ReleaseRun, ReleaseRunResult,
+        ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
     use crate::release::workflow::run_command;
     use homeboy_core::component::{Component, VersionTarget};
@@ -868,6 +887,7 @@ mod tests {
             None,
             &[],
             &[],
+            None,
         );
 
         assert_eq!(result.id, "deploy");
@@ -905,6 +925,7 @@ mod tests {
             None,
             &artifacts,
             &["build".to_string()],
+            None,
         );
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
@@ -949,6 +970,10 @@ mod tests {
             tag: "v1.2.3".to_string(),
             source_commit: "commit".to_string(),
         };
+        let control_plane = ReleaseControlPlaneContext {
+            mission_id: "release-mission-13697".to_string(),
+            release_run_id: "release-run-13697".to_string(),
+        };
         let config = super::release_deployment_config(
             &homeboy_core::component::Component {
                 id: "demo".to_string(),
@@ -958,6 +983,7 @@ mod tests {
             Some("1.2.3"),
             artifact.clone(),
             &[],
+            Some(&control_plane),
         )
         .expect("release deploy config");
 
@@ -968,6 +994,13 @@ mod tests {
         assert_eq!(config.prepared_artifact, Some(artifact));
         assert_eq!(config.requested_ref_for("demo"), Some("v1.2.3"));
         assert_eq!(config.resolved_ref_for("demo"), Some("commit"));
+        let lineage = config
+            .prepared_projection
+            .as_ref()
+            .and_then(|projection| projection.control_plane.as_ref())
+            .expect("release control-plane lineage");
+        assert_eq!(lineage.mission_id, control_plane.mission_id);
+        assert_eq!(lineage.release_run_id, control_plane.release_run_id);
         assert!(
             !config.head,
             "release deploy must not deploy the registered worktree HEAD"
@@ -1018,6 +1051,7 @@ mod tests {
                 Some("1.2.3"),
                 artifact,
                 &["first".to_string(), "second".to_string()],
+                None,
             )
             .expect("release deploy config");
             let projection = config.prepared_projection.as_ref().expect("projection");
@@ -1152,6 +1186,7 @@ mod tests {
                 None,
                 &[artifact],
                 &package_owned_paths,
+                None,
             );
             assert_eq!(first.status, ReleaseStepStatus::Failed);
             let first_deployment = first

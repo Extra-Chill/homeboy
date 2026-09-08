@@ -4241,6 +4241,199 @@ fn is_run_not_found(error: &homeboy_core::Error) -> bool {
         && error.message.contains("not found")
 }
 
+fn generic_observation_run(
+    store: &homeboy_core::observation::ObservationStore,
+    record: &homeboy_core::observation::RunRecord,
+) -> Result<ControlPlaneRun, ControlPlaneError> {
+    let run = RunId::new(&record.id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let mut resource = ControlPlaneRun::new(run);
+    resource.mission = store
+        .get_run_mission(&record.id)
+        .map_err(map_lifecycle_error)?
+        .map(MissionId::new)
+        .transpose()
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    resource.state = generic_observation_state(&record.status);
+    resource.phase = record
+        .metadata_json
+        .pointer("/control_plane/phase")
+        .and_then(Value::as_str)
+        .and_then(|value| nonempty_redacted_bounded(value, STATE_BOUND));
+    resource.created_at = record.started_at.clone();
+    resource.updated_at = record
+        .finished_at
+        .clone()
+        .or_else(|| Some(record.started_at.clone()));
+    resource.finished_at = record.finished_at.clone();
+    resource.blocker = record
+        .metadata_json
+        .pointer("/control_plane/blocker")
+        .and_then(Value::as_str)
+        .map(|message| ControlPlaneBlocker {
+            code: None,
+            message: redacted_bounded(message, MESSAGE_BOUND),
+            state: None,
+            reason: None,
+            retry: None,
+        });
+    resource.artifacts = generic_observation_artifacts(record);
+    Ok(resource)
+}
+
+fn generic_observation_state(status: &str) -> ControlPlaneRunState {
+    match status {
+        "running" => ControlPlaneRunState::Running,
+        "pass" => ControlPlaneRunState::Succeeded,
+        "fail" | "error" => ControlPlaneRunState::Failed,
+        "skipped" => ControlPlaneRunState::Skipped,
+        _ => ControlPlaneRunState::Unknown,
+    }
+}
+
+fn generic_task_state(value: &str) -> ControlPlaneState {
+    match value {
+        "queued" => ControlPlaneState::Queued,
+        "blocked" => ControlPlaneState::Blocked,
+        "running" => ControlPlaneState::Running,
+        "succeeded" => ControlPlaneState::Succeeded,
+        "partial_failure" => ControlPlaneState::PartialFailure,
+        "failed" => ControlPlaneState::Failed,
+        "cancelled" => ControlPlaneState::Cancelled,
+        "timed_out" => ControlPlaneState::TimedOut,
+        "skipped" => ControlPlaneState::Skipped,
+        _ => ControlPlaneState::Unknown,
+    }
+}
+
+fn generic_observation_artifacts(
+    record: &homeboy_core::observation::RunRecord,
+) -> Vec<ControlPlaneEvidenceRef> {
+    record
+        .metadata_json
+        .pointer("/control_plane/artifacts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(REF_BOUND)
+        .filter_map(|artifact| {
+            Some(ControlPlaneEvidenceRef {
+                id: nonempty_redacted_bounded(artifact.get("id")?.as_str()?, ID_BOUND)?,
+                kind: nonempty_redacted_bounded(artifact.get("kind")?.as_str()?, STATE_BOUND)?,
+                uri: nonempty_bounded(artifact.get("uri")?.as_str()?, URI_BOUND)
+                    .map(|uri| redacted_reference_uri(&uri, URI_BOUND))?,
+            })
+        })
+        .collect()
+}
+
+fn generic_observation_tasks(
+    store: &homeboy_core::observation::ObservationStore,
+    record: &homeboy_core::observation::RunRecord,
+) -> Result<Vec<ControlPlaneTask>, ControlPlaneError> {
+    let run = RunId::new(&record.id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let mission = store
+        .get_run_mission(&record.id)
+        .map_err(map_lifecycle_error)?
+        .ok_or_else(|| {
+            ControlPlaneError::not_found(format!("control-plane run not found: {}", record.id))
+        })?;
+    let mission = Some(
+        MissionId::new(mission)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+    );
+    let mut tasks = record
+        .metadata_json
+        .pointer("/control_plane/tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|task| {
+            let task_id = task.get("id").and_then(Value::as_str).ok_or_else(|| {
+                ControlPlaneError::invalid_argument("generic control-plane task is missing its id")
+            })?;
+            Ok(ControlPlaneTask {
+                schema: CONTROL_PLANE_TASK_SCHEMA.to_string(),
+                mission: mission.clone(),
+                run: run.clone(),
+                task: TaskId::new(task_id)
+                    .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+                state: generic_task_state(
+                    task.get("state")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>, ControlPlaneError>>()?;
+    tasks.sort_by(|left, right| left.task.as_str().cmp(right.task.as_str()));
+    if tasks.windows(2).any(|pair| pair[0].task == pair[1].task) {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "run {} contains duplicate task identities",
+            record.id
+        )));
+    }
+    Ok(tasks)
+}
+
+fn generic_observation_task(
+    store: &homeboy_core::observation::ObservationStore,
+    record: &homeboy_core::observation::RunRecord,
+    requested: &TaskId,
+) -> Result<ControlPlaneTask, ControlPlaneError> {
+    generic_observation_tasks(store, record)?
+        .into_iter()
+        .find(|task| &task.task == requested)
+        .ok_or_else(|| {
+            ControlPlaneError::not_found(format!(
+                "task not found in run {}: {requested}",
+                record.id
+            ))
+        })
+}
+
+fn generic_observation_attempt(
+    store: &homeboy_core::observation::ObservationStore,
+    record: &homeboy_core::observation::RunRecord,
+    task: &TaskId,
+) -> Result<ControlPlaneAttempt, ControlPlaneError> {
+    let task_resource = generic_observation_task(store, record, task)?;
+    Ok(ControlPlaneAttempt {
+        schema: CONTROL_PLANE_ATTEMPT_SCHEMA.to_string(),
+        run: task_resource.run.clone(),
+        task: task.clone(),
+        attempt: AttemptId::new(format!("{}:{task}:attempt-1", record.id))
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+        attempt_number: 1,
+        state: task_resource.state,
+        started_at: record.started_at.clone(),
+        finished_at: record.finished_at.clone(),
+        execution: Some(
+            ExecutionId::new(format!("{}:{task}:attempt-1:execution", record.id))
+                .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+        ),
+    })
+}
+
+fn generic_observation_execution(
+    store: &homeboy_core::observation::ObservationStore,
+    record: &homeboy_core::observation::RunRecord,
+    task: &TaskId,
+) -> Result<ControlPlaneExecution, ControlPlaneError> {
+    let attempt = generic_observation_attempt(store, record, task)?;
+    Ok(ControlPlaneExecution {
+        schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
+        run: attempt.run,
+        task: attempt.task,
+        attempt: attempt.attempt,
+        execution: attempt.execution.expect("generic attempt has execution"),
+        state: attempt.state,
+        started_at: attempt.started_at,
+        finished_at: attempt.finished_at,
+    })
+}
+
 struct RegisteredProvider;
 
 impl ControlPlaneProvider for RegisteredProvider {
@@ -4251,6 +4444,26 @@ impl ControlPlaneProvider for RegisteredProvider {
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(requested_id.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                if observation
+                    .get_run_mission(&record.id)
+                    .map_err(map_lifecycle_error)?
+                    .is_none()
+                {
+                    return Err(ControlPlaneError::not_found(format!(
+                        "control-plane run not found: {requested_id}"
+                    )));
+                }
+                return generic_observation_run(&observation, &record);
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
     }
 
@@ -4273,14 +4486,86 @@ impl ControlPlaneProvider for RegisteredProvider {
         &self,
         request: &ControlPlaneRunListRequest,
     ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
+        request.validate()?;
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-        OrchestrationService::new(LifecycleStoreLookup::new(store)).runs(request)
+        let decoded = request.cursor.as_ref().map(decode_run_cursor).transpose()?;
+        if let Some((_, cursor_mission)) = &decoded {
+            if cursor_mission.as_ref() != request.mission.as_ref() {
+                return Err(ControlPlaneError::invalid_argument(
+                    "control-plane run cursor does not match the mission filter",
+                ));
+            }
+        }
+        let after = decoded.map(|(position, _)| homeboy_core::observation::RunCursor {
+            started_at: position.started_at,
+            id: position.run_id,
+        });
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        let page = if let Some(mission) = request.mission.as_ref() {
+            observation.list_mission_runs_page(
+                mission.as_str(),
+                after.as_ref(),
+                request.limit as usize,
+            )
+        } else {
+            observation.list_control_plane_runs_page(after.as_ref(), request.limit as usize)
+        }
+        .map_err(map_lifecycle_error)?;
+        let lookup = LifecycleStoreLookup::new(store);
+        let runs = page
+            .runs
+            .iter()
+            .map(|record| {
+                if record.kind == "agent-task" {
+                    let run = RunId::new(&record.id)
+                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+                    let snapshot = lookup.get(&run)?.ok_or_else(|| {
+                        ControlPlaneError::not_found(format!("run not found: {run}"))
+                    })?;
+                    project_record(&snapshot.record, snapshot.plan.as_ref())
+                } else {
+                    generic_observation_run(&observation, record)
+                }
+            })
+            .collect::<Result<Vec<_>, ControlPlaneError>>()?;
+        let next_cursor = page
+            .next_cursor
+            .as_ref()
+            .map(|cursor| {
+                encode_run_cursor(
+                    &RunPagePosition {
+                        started_at: cursor.started_at.clone(),
+                        run_id: cursor.id.clone(),
+                    },
+                    request.mission.as_ref(),
+                )
+            })
+            .transpose()?;
+        Ok(ControlPlaneRunPage {
+            schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
+            runs,
+            has_more: next_cursor.is_some(),
+            next_cursor,
+        })
     }
 
     fn task(&self, run: &RunId, task: &TaskId) -> Result<ControlPlaneTask, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(run.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                return generic_observation_task(&observation, &record, task);
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store)).task(run, task)
     }
 
@@ -4289,8 +4574,41 @@ impl ControlPlaneProvider for RegisteredProvider {
         run: &RunId,
         request: &ControlPlaneTaskListRequest,
     ) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
+        request.validate()?;
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(run.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                let after = request
+                    .cursor
+                    .as_ref()
+                    .map(|cursor| decode_task_cursor(cursor, run))
+                    .transpose()?;
+                let mut tasks = generic_observation_tasks(&observation, &record)?;
+                if let Some(after) = after {
+                    tasks.retain(|task| task.task.as_str() > after.as_str());
+                }
+                let has_more = tasks.len() > request.limit as usize;
+                tasks.truncate(request.limit as usize);
+                let next_cursor = has_more
+                    .then(|| tasks.last().map(|task| encode_task_cursor(run, &task.task)))
+                    .flatten()
+                    .transpose()?;
+                return Ok(ControlPlaneTaskPage {
+                    schema: CONTROL_PLANE_TASK_PAGE_SCHEMA.to_string(),
+                    run: run.clone(),
+                    tasks,
+                    has_more,
+                    next_cursor,
+                });
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store)).tasks(run, request)
     }
 
@@ -4302,6 +4620,22 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<ControlPlaneAttempt, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(run.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                if attempt_number != 1 {
+                    return Err(ControlPlaneError::not_found(format!(
+                        "attempt {attempt_number} not found for task {task}"
+                    )));
+                }
+                return generic_observation_attempt(&observation, &record, task);
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store)).attempt(
             run,
             task,
@@ -4315,8 +4649,37 @@ impl ControlPlaneProvider for RegisteredProvider {
         task: &TaskId,
         request: &ControlPlaneAttemptListRequest,
     ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
+        request.validate()?;
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(run.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                let after = request
+                    .cursor
+                    .as_ref()
+                    .map(|cursor| decode_attempt_cursor(cursor, run, task))
+                    .transpose()?;
+                let attempts = if after.is_some() {
+                    Vec::new()
+                } else {
+                    vec![generic_observation_attempt(&observation, &record, task)?]
+                };
+                return Ok(ControlPlaneAttemptPage {
+                    schema: CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA.to_string(),
+                    run: run.clone(),
+                    task: task.clone(),
+                    attempts,
+                    has_more: false,
+                    next_cursor: None,
+                });
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store)).attempts(run, task, request)
     }
 
@@ -4329,6 +4692,28 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<ControlPlaneExecution, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(run.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                if attempt_number != 1 {
+                    return Err(ControlPlaneError::not_found(format!(
+                        "attempt {attempt_number} not found for task {task}"
+                    )));
+                }
+                let projected = generic_observation_execution(&observation, &record, task)?;
+                if &projected.execution != execution {
+                    return Err(ControlPlaneError::not_found(format!(
+                        "execution {execution} not found for task {task}"
+                    )));
+                }
+                return Ok(projected);
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store)).execution(
             run,
             task,
@@ -4345,6 +4730,29 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let observation = store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?;
+        if let Some(record) = observation
+            .get_run(run.as_str())
+            .map_err(map_lifecycle_error)?
+        {
+            if record.kind != "agent-task" {
+                if attempt_number != 1 {
+                    return Err(ControlPlaneError::not_found(format!(
+                        "attempt {attempt_number} not found for task {task}"
+                    )));
+                }
+                let attempt = generic_observation_attempt(&observation, &record, task)?;
+                return Ok(ControlPlaneExecutionPage {
+                    schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
+                    run: run.clone(),
+                    task: task.clone(),
+                    attempt: attempt.attempt,
+                    executions: vec![generic_observation_execution(&observation, &record, task)?],
+                });
+            }
+        }
         OrchestrationService::new(LifecycleStoreLookup::new(store)).executions(
             run,
             task,
@@ -6993,5 +7401,97 @@ mod tests {
         let from_record = project_record(&seeded, None).expect("project");
         let from_service = service().run(&requested).expect("run");
         assert_eq!(from_record, from_service);
+    }
+
+    #[test]
+    fn release_deploy_mission_projects_distinct_runs_artifact_and_target_graph() {
+        with_isolated_home(|_| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let mission = "release-mission-13697";
+            let digest = "a".repeat(64);
+            let artifact = json!({
+                "id": format!("sha256-{digest}"),
+                "kind": "release-package",
+                "uri": format!("sha256:{digest}"),
+            });
+            for (run_id, kind, tasks) in [
+                ("release-run-13697", "release", json!([])),
+                (
+                    "deploy-run-13697",
+                    "deploy",
+                    json!([
+                        { "id": "target-a", "state": "succeeded" },
+                        { "id": "target-b", "state": "failed" },
+                    ]),
+                ),
+            ] {
+                let metadata = json!({
+                    "control_plane": {
+                        "kind": kind,
+                        "phase": "completed",
+                        "tasks": tasks,
+                        "artifacts": [artifact.clone()],
+                    }
+                });
+                store
+                    .start_run_with_id_in_mission(
+                        homeboy_core::observation::NewRunRecord::builder(kind)
+                            .metadata(metadata.clone())
+                            .build(),
+                        run_id.to_string(),
+                        mission,
+                    )
+                    .expect("start canonical run");
+                store
+                    .finish_run(
+                        run_id,
+                        if kind == "release" {
+                            homeboy_core::observation::RunStatus::Pass
+                        } else {
+                            homeboy_core::observation::RunStatus::Fail
+                        },
+                        Some(metadata),
+                    )
+                    .expect("finish canonical run");
+            }
+
+            let provider = RegisteredProvider;
+            let page = provider
+                .runs(&ControlPlaneRunListRequest {
+                    mission: Some(MissionId::new(mission).expect("mission")),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .expect("mission runs");
+            assert_eq!(page.runs.len(), 2);
+            assert_ne!(page.runs[0].run, page.runs[1].run);
+            assert!(page.runs.iter().all(|run| {
+                run.artifacts
+                    .iter()
+                    .any(|artifact| artifact.uri == format!("sha256:{digest}"))
+            }));
+
+            let deploy = RunId::new("deploy-run-13697").expect("deploy run");
+            let tasks = provider
+                .tasks(&deploy, &ControlPlaneTaskListRequest::default())
+                .expect("deploy target tasks");
+            assert_eq!(tasks.tasks.len(), 2);
+            assert_eq!(tasks.tasks[0].task.as_str(), "target-a");
+            assert_eq!(tasks.tasks[0].state, ControlPlaneState::Succeeded);
+            assert_eq!(tasks.tasks[1].state, ControlPlaneState::Failed);
+            let attempt = provider
+                .attempt(&deploy, &tasks.tasks[0].task, 1)
+                .expect("target attempt");
+            let execution = provider
+                .execution(
+                    &deploy,
+                    &tasks.tasks[0].task,
+                    1,
+                    attempt.execution.as_ref().expect("execution id"),
+                )
+                .expect("target execution");
+            assert_eq!(execution.state, ControlPlaneState::Succeeded);
+        });
     }
 }

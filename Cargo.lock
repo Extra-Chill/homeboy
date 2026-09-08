@@ -1179,6 +1179,7 @@ dependencies = [
  "fs4",
  "glob",
  "glob-match",
+ "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-deploy",
  "homeboy-engine-primitives",

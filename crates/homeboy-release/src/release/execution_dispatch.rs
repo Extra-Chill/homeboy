@@ -270,6 +270,7 @@ pub(super) fn execute_release_plan_step(
             context.state.tag.as_deref(),
             &context.state.artifacts,
             &context.state.package_owned_paths,
+            context.options.control_plane.as_ref(),
         ))),
         step_kind if step_kind.starts_with("publish.") => {
             let target = step_kind.strip_prefix("publish.").unwrap_or_default();

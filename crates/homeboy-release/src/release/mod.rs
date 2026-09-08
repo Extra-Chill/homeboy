@@ -6,6 +6,7 @@ mod checkout_guard;
 // directly and it is pure git plus release metadata.
 pub mod containment;
 mod context;
+mod control_plane;
 mod deployment;
 mod execution_dispatch;
 mod execution_plan;

@@ -473,12 +473,7 @@ fn backfill_control_plane_missions(connection: &Connection) -> Result<()> {
 
     for (run_id, created_at, updated_at, metadata_json) in rows {
         let metadata: serde_json::Value =
-            serde_json::from_str(&metadata_json).map_err(|error| {
-                crate::Error::internal_json(
-                    error.to_string(),
-                    Some(format!("backfill control-plane mission for run {run_id}")),
-                )
-            })?;
+            serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
         let mission = if let Some(fanout_id) = metadata
             .pointer("/agent_task_run/metadata/fanout/id")
             .and_then(serde_json::Value::as_str)

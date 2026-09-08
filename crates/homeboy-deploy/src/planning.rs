@@ -1075,6 +1075,7 @@ mod tests {
             components: [("a".to_string(), source_a), ("b".to_string(), source_b)]
                 .into_iter()
                 .collect(),
+            control_plane: None,
         };
         let project = Project {
             id: "target".to_string(),

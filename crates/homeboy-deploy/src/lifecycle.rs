@@ -33,7 +33,52 @@ impl DeployObservation {
         project_id: &str,
         source: &str,
     ) -> Result<Self> {
-        let store = ObservationStore::open_initialized()?;
+        Self::start_with_control_plane(requested_id, project_id, source, None, None)
+    }
+
+    pub(crate) fn start_with_control_plane(
+        requested_id: Option<&str>,
+        project_id: &str,
+        source: &str,
+        lineage: Option<&crate::types::DeployControlPlaneLineage>,
+        artifact_sha256: Option<&str>,
+    ) -> Result<Self> {
+        Self::start_with_control_plane_in_store(
+            ObservationStore::open_initialized()?,
+            requested_id,
+            project_id,
+            source,
+            lineage,
+            artifact_sha256,
+        )
+    }
+
+    pub(crate) fn start_with_control_plane_in_roots(
+        roots: &homeboy_core::paths::PathRoots,
+        requested_id: Option<&str>,
+        project_id: &str,
+        source: &str,
+        lineage: Option<&crate::types::DeployControlPlaneLineage>,
+        artifact_sha256: Option<&str>,
+    ) -> Result<Self> {
+        Self::start_with_control_plane_in_store(
+            ObservationStore::open_initialized_in_roots(roots)?,
+            requested_id,
+            project_id,
+            source,
+            lineage,
+            artifact_sha256,
+        )
+    }
+
+    fn start_with_control_plane_in_store(
+        store: ObservationStore,
+        requested_id: Option<&str>,
+        project_id: &str,
+        source: &str,
+        lineage: Option<&crate::types::DeployControlPlaneLineage>,
+        artifact_sha256: Option<&str>,
+    ) -> Result<Self> {
         let metadata = json!({
             "schema": "homeboy/deploy-lifecycle/v1",
             "source": source,
@@ -46,15 +91,34 @@ impl DeployObservation {
                 "reconcile_command": "homeboy runs reconcile",
                 "pre_upload_guarantee": "remote_mutation_started=false means no remote mutation began",
             },
+            "control_plane": {
+                "kind": "deploy",
+                "phase": "admitted",
+                "parent_run": lineage.map(|lineage| lineage.release_run_id.as_str()),
+                "tasks": [],
+                "artifacts": artifact_sha256.map(|sha256| vec![json!({
+                    "id": format!("sha256-{sha256}"),
+                    "kind": "release-package",
+                    "uri": format!("sha256:{sha256}"),
+                })]).unwrap_or_default(),
+            },
         });
         let builder = NewRunRecord::builder("deploy")
             .component_id(project_id)
             .command(format!("homeboy deploy {project_id}"))
             .current_homeboy_version()
             .metadata(metadata.clone());
-        let run = match requested_id {
-            Some(id) => store.start_run_with_id(builder.build(), id.to_string())?,
-            None => store.start_run(builder.build())?,
+        let run = match (requested_id, lineage) {
+            (Some(id), Some(lineage)) => store.start_run_with_id_in_mission(
+                builder.build(),
+                id.to_string(),
+                &lineage.mission_id,
+            )?,
+            (None, Some(lineage)) => {
+                store.start_run_in_mission(builder.build(), &lineage.mission_id)?
+            }
+            (Some(id), None) => store.start_run_with_id(builder.build(), id.to_string())?,
+            (None, None) => store.start_run(builder.build())?,
         };
         Ok(Self {
             store,
@@ -108,6 +172,11 @@ impl DeployObservation {
             },
             false,
         );
+        self.metadata["control_plane"]["phase"] = json!(if status == RunStatus::Pass {
+            "completed"
+        } else {
+            "failed"
+        });
         if let Some(error) = error {
             self.metadata["error"] = json!(error);
         }
@@ -129,6 +198,27 @@ impl DeployObservation {
 
     pub(crate) fn link_resume(&mut self, prior_checkpoint_id: &str) -> Result<()> {
         self.metadata["resumes_run_id"] = json!(prior_checkpoint_id);
+        self.store
+            .update_run_metadata(&self.run_id, self.metadata.clone())
+            .map(|_| ())
+    }
+
+    pub(crate) fn project_target_tasks(
+        &mut self,
+        projects: &[crate::types::ProjectDeployResult],
+    ) -> Result<()> {
+        self.metadata["control_plane"]["tasks"] = json!(projects
+            .iter()
+            .map(|project| json!({
+                "id": project.project_id,
+                "state": match project.status.as_str() {
+                    "deployed" => "succeeded",
+                    "planned" | "skipped" => "skipped",
+                    "applied_unverified" => "partial_failure",
+                    _ => "failed",
+                },
+            }))
+            .collect::<Vec<_>>());
         self.store
             .update_run_metadata(&self.run_id, self.metadata.clone())
             .map(|_| ())
@@ -465,6 +555,84 @@ mod tests {
             assert_eq!(
                 run.metadata_json["phase_history"].as_array().map(Vec::len),
                 Some(7)
+            );
+        });
+    }
+
+    #[test]
+    fn release_triggered_deploy_projects_lineage_artifact_and_target_tasks() {
+        with_isolated_home(|_| {
+            let digest = "c".repeat(64);
+            let lineage = crate::types::DeployControlPlaneLineage {
+                mission_id: "release-mission-13697".to_string(),
+                release_run_id: "release-run-13697".to_string(),
+            };
+            let mut observation = DeployObservation::start_with_control_plane(
+                Some("deploy-run-13697"),
+                "multi",
+                "v1.2.3",
+                Some(&lineage),
+                Some(&digest),
+            )
+            .expect("admit release deployment");
+            observation
+                .project_target_tasks(&[
+                    crate::types::ProjectDeployResult {
+                        project_id: "target-a".to_string(),
+                        status: "deployed".to_string(),
+                        error: None,
+                        results: Vec::new(),
+                        summary: crate::types::DeploySummary {
+                            total: 1,
+                            succeeded: 1,
+                            failed: 0,
+                            skipped: 0,
+                        },
+                        phase_timings: None,
+                        observation_run_id: None,
+                    },
+                    crate::types::ProjectDeployResult {
+                        project_id: "target-b".to_string(),
+                        status: "failed".to_string(),
+                        error: Some("verification failed".to_string()),
+                        results: Vec::new(),
+                        summary: crate::types::DeploySummary {
+                            total: 1,
+                            succeeded: 0,
+                            failed: 1,
+                            skipped: 0,
+                        },
+                        phase_timings: None,
+                        observation_run_id: None,
+                    },
+                ])
+                .expect("project target tasks");
+            observation.finish(RunStatus::Fail, Some("target failed".to_string()));
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run("deploy-run-13697")
+                .expect("read deploy")
+                .expect("deploy run");
+            assert_eq!(
+                store.get_run_mission(&run.id).expect("mission").as_deref(),
+                Some(lineage.mission_id.as_str())
+            );
+            assert_eq!(
+                run.metadata_json["control_plane"]["parent_run"],
+                lineage.release_run_id
+            );
+            assert_eq!(
+                run.metadata_json["control_plane"]["artifacts"][0]["uri"],
+                format!("sha256:{digest}")
+            );
+            assert_eq!(
+                run.metadata_json["control_plane"]["tasks"][0]["state"],
+                "succeeded"
+            );
+            assert_eq!(
+                run.metadata_json["control_plane"]["tasks"][1]["state"],
+                "failed"
             );
         });
     }

@@ -22,6 +22,14 @@ use super::path_roots::resolve_effective_remote_path;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PreparedDeployProjection {
     pub components: BTreeMap<String, Component>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<DeployControlPlaneLineage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DeployControlPlaneLineage {
+    pub mission_id: String,
+    pub release_run_id: String,
 }
 
 /// Parse bulk component IDs from a JSON spec.
