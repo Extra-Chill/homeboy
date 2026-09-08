@@ -45,10 +45,10 @@ PY
 
 counts_case() {
     local label="$1" stream="$2" expected_counts="$3" expected_failed="$4"
-    local names="$WORK_DIR/failed-names.txt" actual status=0
+    local names="$WORK_DIR/failed-names.txt" contexts="$WORK_DIR/failure-context.json" actual status=0
     : > "$names"
-    actual="$(bash -c 'source "$1"; rust_nextest_unsharded_counts "$2" "$3"' _ \
-        "$WORK_DIR/counts-harness.sh" "$stream" "$names")" || status=$?
+    actual="$(bash -c 'source "$1"; rust_nextest_unsharded_counts "$2" "$3" "$4"' _ \
+        "$WORK_DIR/counts-harness.sh" "$stream" "$names" "$contexts")" || status=$?
 
     if [ "$expected_counts" = "UNMEASURED" ]; then
         if [ "$status" -eq 0 ]; then
@@ -94,6 +94,160 @@ cat > "$WORK_DIR/fail.jsonl" <<'EOF'
 EOF
 counts_case "run with failures" "$WORK_DIR/fail.jsonl" '4\t1\t2\t1' \
     'alpha::alpha_lib$tests::two beta::beta_integration$covers_three'
+
+# Failure context is retained before later passing output can push the failure
+# out of a bounded command log. It remains private until the shared publication
+# boundary applies redaction and then its UTF-8 byte bound.
+python3 - > "$WORK_DIR/early-failure.jsonl" <<'PY'
+import json
+import sys
+
+print(json.dumps({"type": "test", "event": "failed", "name": "alpha::alpha_lib$tests::early", "stdout": "x" * 5000 + " api_key=very-secret assertion failed: expected 2, got 1"}))
+for index in range(600):
+    print(json.dumps({"type": "test", "event": "ok", "name": f"alpha::alpha_lib$tests::late_{index}"}))
+PY
+counts_case "early bounded failure context" "$WORK_DIR/early-failure.jsonl" '601\t600\t1\t0' 'alpha::alpha_lib$tests::early'
+python3 - "$WORK_DIR/failure-context.json" <<'PY'
+import json
+import sys
+
+record = json.load(open(sys.argv[1], encoding="utf-8"))[0]
+assert "assertion failed: expected 2, got 1" in record["stdout_excerpt"], record
+assert "very-secret" in record["stdout_excerpt"], record
+PY
+
+# The Rust adapter sends excerpts through the shared test.failures writer. Test
+# the published sidecar, not the private event/context files that feed it.
+python3 - "$RUNNER" "$WORK_DIR/counts-harness.sh" <<'PY'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r"^rust_merge_failure_evidence\(\) \{\n.*?^\}\n", source, re.S | re.M)
+assert match, "rust_merge_failure_evidence not found in test-runner.sh"
+with open(sys.argv[2], "a", encoding="utf-8") as handle:
+    handle.write(match.group(0))
+PY
+cat > "$WORK_DIR/published-failed-names.txt" <<'EOF'
+alpha::alpha_lib$tests::early
+EOF
+python3 - "$WORK_DIR/published-failure-context.json" <<'PY'
+import json
+import sys
+
+long_secret = "long-secret-value-" + "x" * 10000
+many_short = " ".join(f"refresh_token=short-secret-{index}" for index in range(700))
+json.dump([{
+    "name": "alpha::alpha_lib$tests::early",
+    # The key is far outside the retained tail. Redaction must happen before
+    # bounding so no unlabelled suffix can be published.
+    "stdout_excerpt": '{\\"password\\":\\"fixture-password-value\\",\\"access_token\\":\\"fixture-access-token\\",\\"refresh_token\\":\\"fixture-refresh-token\\"} Authorization: Bearer fixture-bearer-value https://example.test/?token=fixture-query-token api_key=' + long_secret + " " + "☃" * 2500,
+    # Replacement expansion is intentionally larger than these short values.
+    "stderr_excerpt": many_short + " secret=fixture-secret-value",
+}], open(sys.argv[1], "w", encoding="utf-8"))
+PY
+HOMEBOY_TEST_FAILURES_FILE="$WORK_DIR/published-test-failures.json" \
+HOMEBOY_PUBLISHED_FAILURES="$WORK_DIR/published-test-failures.json" \
+bash -c '
+    source "$1"
+    source "$2"
+    homeboy_merge_test_failures() { cp "$1" "$HOMEBOY_PUBLISHED_FAILURES"; }
+    rust_merge_failure_evidence "$3" "" "$4"
+' _ "$EXTENSION_DIR/../scripts/lib/test-failures-adapter.sh" "$WORK_DIR/counts-harness.sh" "$WORK_DIR/published-failed-names.txt" "$WORK_DIR/published-failure-context.json"
+python3 - "$WORK_DIR/published-test-failures.json" <<'PY'
+import json
+import sys
+
+published = json.load(open(sys.argv[1], encoding="utf-8"))[0]
+evidence = published["stdout_excerpt"] + published["stderr_excerpt"]
+for fixture in ("fixture-password-value", "fixture-access-token", "fixture-refresh-token", "fixture-bearer-value", "fixture-query-token", "fixture-secret-value", "long-secret-value-", "short-secret-"):
+    assert fixture not in evidence, published
+for excerpt in (published["stdout_excerpt"], published["stderr_excerpt"]):
+    encoded = excerpt.encode("utf-8")
+    assert len(encoded) <= 4096, len(encoded)
+    assert "�" not in excerpt, excerpt
+assert evidence.count("[REDACTED]") >= 5, published
+PY
+REDACTION_UNDER_TEST="$EXTENSION_DIR/../scripts/lib/redaction.mjs" \
+node --input-type=module - "$WORK_DIR/published-test-failures.json" "$WORK_DIR/published-failure-context.json" <<'JS'
+import { readFile } from 'node:fs/promises';
+const { redactText } = await import(process.env.REDACTION_UNDER_TEST);
+
+const [publishedFile, rawFile] = process.argv.slice(2);
+const published = JSON.parse(await readFile(publishedFile, 'utf8'))[0];
+const raw = JSON.parse(await readFile(rawFile, 'utf8'))[0];
+for (const field of ['stdout_excerpt', 'stderr_excerpt']) {
+    const excerpt = published[field];
+    const match = excerpt.match(/^\[truncated (\d+) UTF-8 bytes; retained tail\]\n/);
+    if (!match) throw new Error(`${field} was expected to be truncated`);
+    const retained = excerpt.slice(match[0].length);
+    const expected = Buffer.byteLength(redactText(raw[field]), 'utf8');
+    if (Number(match[1]) + Buffer.byteLength(retained, 'utf8') !== expected) {
+        throw new Error(`${field} truncation omission count is not truthful`);
+    }
+}
+JS
+
+# The capture helper reports tee failure without hiding a real child failure.
+node --test "$EXTENSION_DIR/../scripts/lib/test-failure-record.test.mjs"
+
+python3 - "$RUNNER" "$WORK_DIR/counts-harness.sh" <<'PY'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r"^rust_capture_nextest_events\(\) \{\n.*?^\}\n", source, re.S | re.M)
+assert match, "rust_capture_nextest_events not found in test-runner.sh"
+with open(sys.argv[2], "a", encoding="utf-8") as handle:
+    handle.write(match.group(0))
+PY
+CAPTURE_EVENTS="$WORK_DIR/capture-events.jsonl"
+set +e
+CAPTURE_MARKER="${CAPTURE_EVENTS}.complete" bash -c 'source "$1"; tee() { cat > "$1"; mkdir "$CAPTURE_MARKER"; }; child() { printf "event\n"; }; rust_capture_nextest_events "$2" child' _ "$WORK_DIR/counts-harness.sh" "$CAPTURE_EVENTS" >/dev/null 2>&1
+MARKER_STATUS=$?
+set -e
+if [ "$MARKER_STATUS" -eq 0 ]; then
+    fail "a missing completeness marker must not report successful capture"
+fi
+rmdir "${CAPTURE_EVENTS}.complete"
+set +e
+bash -c 'source "$1"; tee() { cat >/dev/null; return 1; }; child() { return 37; }; rust_capture_nextest_events "$2" child' _ "$WORK_DIR/counts-harness.sh" "$CAPTURE_EVENTS" >/dev/null 2>&1
+CAPTURE_STATUS=$?
+set -e
+if [ "$CAPTURE_STATUS" -ne 37 ] || [ -f "${CAPTURE_EVENTS}.complete" ]; then
+    fail "capture failure must preserve child exit status and omit completeness marker"
+fi
+
+# An unset event path must not turn its marker into relative .complete and
+# delete an unrelated project file during an early shard failure.
+python3 - "$RUNNER" "$WORK_DIR/counts-harness.sh" <<'PY'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r"^rust_nextest_cleanup\(\) \{\n.*?^\}\n", source, re.S | re.M)
+assert match, "rust_nextest_cleanup not found in test-runner.sh"
+with open(sys.argv[2], "a", encoding="utf-8") as handle:
+    handle.write(match.group(0))
+PY
+touch "$WORK_DIR/.complete"
+bash -c 'source "$1"; homeboy_runner_harness_cleanup_path() { rm -f "$2"; }; SHARD_EVENTS=""; rust_nextest_cleanup 1' _ "$WORK_DIR/counts-harness.sh" "$WORK_DIR/.complete" || true
+if [ ! -f "$WORK_DIR/.complete" ]; then
+    fail "early cleanup with no owned event path must preserve project .complete"
+fi
+
+cat > "$WORK_DIR/names-only-failure.jsonl" <<'EOF'
+{"type":"test","event":"failed","name":"alpha::alpha_lib$tests::names_only"}
+EOF
+counts_case "names-only failure context" "$WORK_DIR/names-only-failure.jsonl" '1\t0\t1\t0' 'alpha::alpha_lib$tests::names_only'
+python3 - "$WORK_DIR/failure-context.json" <<'PY'
+import json
+import sys
+
+record = json.load(open(sys.argv[1], encoding="utf-8"))[0]
+assert record["stdout_excerpt"] == "[nextest did not emit captured per-test output]", record
+assert record["stderr_excerpt"] == "", record
+PY
 
 # All skipped is a measured outcome, not an absent one.
 cat > "$WORK_DIR/skipped.jsonl" <<'EOF'
@@ -189,9 +343,12 @@ homeboy_run_step_capture() {
     local output_var="$1" exit_var="$2"
     shift 3
     [ "${1:-}" != -- ] || shift
-    local output status=0
+    local output full status=0
     output="$(mktemp)"
-    "$@" >"$output" 2>&1 || status=$?
+    full="$(mktemp)"
+    "$@" >"$full" 2>&1 || status=$?
+    tail -c "${HOMEBOY_COMMAND_CAPTURE_MAX_BYTES:-1048576}" "$full" > "$output"
+    rm -f "$full"
     printf -v "$output_var" '%s' "$output"
     printf -v "$exit_var" '%s' "$status"
     return "$status"
@@ -209,6 +366,11 @@ path, total, passed, failed, skipped, partial = sys.argv[1:]
 json.dump({"total": int(total), "passed": int(passed), "failed": int(failed), "skipped": int(skipped), "partial": partial}, open(path, "w"))
 PY
 }
+EOF
+
+cat > "$HELPER_DIR/settings.sh" <<'EOF'
+homeboy_setting() { printf '%s' "${3:-}"; }
+homeboy_setting_bool() { printf '%s' "${2:-}"; }
 EOF
 
 # Fake cargo: replays whatever stream the case put in HOMEBOY_FAKE_NEXTEST_STREAM
@@ -232,9 +394,20 @@ exit "${HOMEBOY_FAKE_CARGO_EXIT:-0}"
 EOF
 chmod +x "$BIN_DIR/cargo"
 
+cat > "$BIN_DIR/tee" <<'EOF'
+#!/usr/bin/env bash
+if [ "${HOMEBOY_FAKE_TEE_FAIL:-}" = 1 ]; then
+    cat >/dev/null
+    exit 1
+fi
+exec /usr/bin/tee "$@"
+EOF
+chmod +x "$BIN_DIR/tee"
+
 run_runner() {
     local results_file="$1" stream="$2" cargo_exit="$3" measured="$4"
     shift 4
+    env \
     PATH="$BIN_DIR:$PATH" \
     HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
@@ -243,14 +416,14 @@ run_runner() {
     HOMEBOY_RUST_NEXTEST_MEASURED_COUNTS="$measured" \
     HOMEBOY_RUNTIME_RUNNER_PRELUDE="$HELPER_DIR/runner-prelude.sh" \
     HOMEBOY_RUNTIME_COMMAND_CAPTURE="$HELPER_DIR/command-capture.sh" \
+    HOMEBOY_RUNTIME_SETTINGS_HELPER="$HELPER_DIR/settings.sh" \
     HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$HELPER_DIR/write-test-results.sh" \
     HOMEBOY_TEST_RESULTS_FILE="$results_file" \
     HOMEBOY_FAKE_NEXTEST_STREAM="$stream" \
     HOMEBOY_FAKE_CARGO_EXIT="$cargo_exit" \
     HOMEBOY_FAKE_CARGO_ARGS="$WORK_DIR/cargo-args.txt" \
     HOMEBOY_FAKE_CARGO_ENV="$WORK_DIR/cargo-env.txt" \
-    "$@" \
-    bash "$RUNNER" 2>&1 || true
+    "$@" bash "$RUNNER" 2>&1 || true
 }
 
 # Measured green run writes the cargo-shaped result tuple.
@@ -294,6 +467,31 @@ $ACTUAL_ARGS"
 done
 if ! grep -qx 'NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1' "$WORK_DIR/cargo-env.txt"; then
     fail "measured nextest run must export NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1"
+fi
+
+# The host-facing command log retains only its tail. Counts still come from the
+# tee'd event file, so this early failure survives 600 later passing events.
+RESULTS="$WORK_DIR/results-early-failure.json"
+rm -f "$RESULTS"
+HOMEBOY_COMMAND_CAPTURE_MAX_BYTES=256 run_runner "$RESULTS" "$WORK_DIR/early-failure.jsonl" 100 1 >/dev/null
+python3 - "$RESULTS" <<'PY' || exit 1
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {"total": 601, "passed": 600, "failed": 1, "skipped": 0, "partial": ""}
+PY
+
+# A tee write failure makes evidence incomplete. Even a green child must not
+# produce passing totals from the partial event stream.
+RESULTS="$WORK_DIR/results-capture-failure.json"
+rm -f "$RESULTS"
+OUTPUT="$(run_runner "$RESULTS" "$WORK_DIR/pass.jsonl" 0 1 HOMEBOY_FAKE_TEE_FAIL=1)"
+if [ -f "$RESULTS" ]; then
+    fail "capture failure must not publish partial passing totals: $(cat "$RESULTS")"
+fi
+if [[ "$OUTPUT" != *"event capture is incomplete"* ]]; then
+    fail "capture failure must be explicit. Output:
+$OUTPUT"
 fi
 
 # Failures: counted, named, and red.

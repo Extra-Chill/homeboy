@@ -6,10 +6,10 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { createBenchArtifactContext } from './artifact-context.mjs';
-import { normalizeJsonValue, redactText, sanitizeArtifactValue } from './redaction.mjs';
+import { normalizeJsonValue, redactText, sanitizeArtifactValue } from '../../../../scripts/lib/redaction.mjs';
 
 export { createRunId } from './artifact-context.mjs';
-export { redactText, sanitizeArtifactFile, sanitizeArtifactValue, sanitizeUrl } from './redaction.mjs';
+export { redactText, sanitizeArtifactFile, sanitizeArtifactValue, sanitizeUrl } from '../../../../scripts/lib/redaction.mjs';
 
 const DEFAULT_SETTINGS_PREFIX = 'HOMEBOY_SETTINGS_';
 const RUNNER_PROGRESS_LINE_PREFIX = 'HOMEBOY_RUNNER_PROGRESS ';

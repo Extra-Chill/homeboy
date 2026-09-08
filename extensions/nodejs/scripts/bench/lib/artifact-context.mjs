@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { normalizeJsonValue, sanitizeArtifactValue } from './redaction.mjs';
+import { normalizeJsonValue, sanitizeArtifactValue } from '../../../../scripts/lib/redaction.mjs';
 
 export function createBenchArtifactContext(options = {}) {
     const id = sanitizeSegment(options.id || 'bench');

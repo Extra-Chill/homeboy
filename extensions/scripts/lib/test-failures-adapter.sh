@@ -33,29 +33,17 @@ homeboy_test_failure_record_json() {
     local stdout_excerpt="${8:-}"
     local stderr_excerpt="${9:-}"
 
-    node - "$namespace" "$test_id" "$suite" "$file" "$line" "$message" "$failure_type" "$stdout_excerpt" "$stderr_excerpt" <<'NODE'
-const crypto = require('node:crypto');
-const [namespace, testId, suite, file, line, message, failureType, stdoutExcerpt, stderrExcerpt] = process.argv.slice(2);
-const fingerprintInput = [namespace, testId, suite, file, line, message, failureType].join('\0');
-const sourceLine = line === '' ? null : Number(line || 0);
-const record = {
-  test_id: testId,
-  test_name: testId,
-  suite: suite || null,
-  file: file || null,
-  test_file: file || null,
-  line: sourceLine,
-  message,
-  failure_type: failureType || 'test_failure',
-  error_type: failureType || 'test_failure',
-  fingerprint: crypto.createHash('sha256').update(fingerprintInput).digest('hex'),
-  stdout_excerpt: stdoutExcerpt || '',
-  stderr_excerpt: stderrExcerpt || '',
-  source_file: file || null,
-  source_line: sourceLine,
-};
-console.log(JSON.stringify(record));
-NODE
+    local adapter_dir input_file status
+    adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    input_file="$(mktemp)" || return 1
+    printf '%s\0%s' "$stdout_excerpt" "$stderr_excerpt" > "$input_file"
+    if node "$adapter_dir/test-failure-record.mjs" "$namespace" "$test_id" "$suite" "$file" "$line" "$message" "$failure_type" "$input_file"; then
+        status=0
+    else
+        status=$?
+    fi
+    rm -f "$input_file"
+    return "$status"
 }
 
 homeboy_test_failure_emit_record_json() {

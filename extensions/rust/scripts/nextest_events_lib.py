@@ -29,6 +29,21 @@ TERMINAL_STATUSES = PASSED_STATUSES | FAILED_STATUSES | SKIPPED_STATUSES
 # Its TestInstanceId appends the decimal attempt only when it exceeds one.
 MAX_RETRY_ATTEMPT = 2**32
 
+MISSING_FAILURE_CONTEXT = "[nextest did not emit captured per-test output]"
+
+
+def failure_context(event):
+    """Return private raw output attached to a failed test event.
+
+    Version 0.1 normally exposes combined failure output as ``stdout``. Keep
+    ``stderr`` separately when a future nextest format supplies it instead.
+    """
+    stdout = event.get("stdout") if isinstance(event.get("stdout"), str) else ""
+    stderr = event.get("stderr") if isinstance(event.get("stderr"), str) else ""
+    if not stdout and not stderr:
+        stdout = MISSING_FAILURE_CONTEXT
+    return stdout, stderr
+
 
 class MalformedIdentity(Exception):
     """An emitted event name is not a nextest test identity."""
@@ -71,7 +86,7 @@ def retry_base_identity(emitted):
 
 
 def read_test_events(path):
-    """Yield ``(name, identity, status)`` for every ``type: test`` event.
+    """Yield ``(name, identity, status, event)`` for every ``type: test`` event.
 
     ``identity`` is ``None`` when the emitted name is not a nextest identity.
     Child processes inherit libtest JSON, so a captured stream legitimately
@@ -98,4 +113,4 @@ def read_test_events(path):
                 identity = emitted_identity(name)
             except MalformedIdentity:
                 identity = None
-            yield name, identity, event.get("event")
+            yield name, identity, event.get("event"), event
