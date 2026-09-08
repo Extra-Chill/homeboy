@@ -123,6 +123,14 @@ A useful headless UI can be built from this read/query surface:
   idempotency key. Reference URLs are query-redacted and stripped of fragments
   before persistence and projection; replay keys are not exposed by reads.
   Network writes require the same paired broker `submit` scope as run submission.
+  `POST /v1/control-plane/runs/:id/events` appends caller-owned events to a
+  dedicated durable ledger. The controller assigns the event ID and monotonic
+  run-local sequence, persists only a digest of the idempotency key, validates
+  nested identities against the run graph, and redacts bounded payloads and
+  references before persistence. Replays return the original event, including
+  after its payload ages out of the retained read window; conflicting reuse of
+  a key is rejected. Synthesized `agent-task logs` remain a separate legacy
+  projection rather than being frozen into this forward-only ledger.
   Event pages reject non-monotonic, duplicate, or cross-run streams. Their
   opaque cursors are bound to one run; the adjacent `/events/retention` resource
   reports the earliest and latest retained sequence without changing the strict

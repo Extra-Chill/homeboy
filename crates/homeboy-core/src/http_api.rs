@@ -244,6 +244,11 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 cursor,
             })
         }
+        (HttpMethod::Post, ["v1", "control-plane", "runs", id, "events"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunEventAppend {
+                id: (*id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "runs", id, "events", "retention"]) => {
             Ok(HttpEndpoint::ControlPlaneRunEventRetention {
                 id: (*id).to_string(),
@@ -454,6 +459,13 @@ where
         HttpEndpoint::ControlPlaneRunEvents { id, cursor } => {
             return control_plane_events_response(endpoint.clone(), id, cursor.as_ref());
         }
+        HttpEndpoint::ControlPlaneRunEventAppend { id } => {
+            return control_plane_event_append_response(
+                endpoint.clone(),
+                id,
+                request.body.as_ref(),
+            );
+        }
         HttpEndpoint::ControlPlaneRunEventRetention { id } => {
             return control_plane_event_retention_response(endpoint.clone(), id);
         }
@@ -642,6 +654,7 @@ where
         | HttpEndpoint::ControlPlaneAttemptExecution { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
+        | HttpEndpoint::ControlPlaneRunEventAppend { .. }
         | HttpEndpoint::ControlPlaneRunEventRetention { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
         | HttpEndpoint::ControlPlaneCapabilities => {
@@ -1125,6 +1138,38 @@ fn control_plane_events_response(
 ) -> Result<HttpApiResponse> {
     match control_plane_events(run_id, cursor) {
         Ok(events) => control_plane_ok(endpoint, events),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_event_append_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    body: Option<&Value>,
+) -> Result<HttpApiResponse> {
+    let result = body
+        .cloned()
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "control-plane event append body is required",
+            )
+        })
+        .and_then(|body| {
+            serde_json::from_value::<
+                    homeboy_control_plane_contract::ControlPlaneEventAppendRequest,
+                >(body)
+                .map_err(|error| {
+                    homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                        "invalid control-plane event append: {error}"
+                    ))
+                })
+        })
+        .and_then(|request| {
+            control_plane_run_id(run_id)
+                .and_then(|run| crate::control_plane::append_event(&run, &request))
+        });
+    match result {
+        Ok(event) => control_plane_ok(endpoint, event),
         Err(error) => control_plane_err(endpoint, error),
     }
 }

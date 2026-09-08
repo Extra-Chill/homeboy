@@ -314,6 +314,31 @@ const MIGRATIONS: &[Migration] = &[
             ON control_plane_mission_runs(mission_id, run_id);
         "#,
     },
+    Migration {
+        version: 19,
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS control_plane_event_appends (
+            run_id TEXT NOT NULL,
+            idempotency_digest TEXT NOT NULL,
+            request_digest TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            event_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(run_id, idempotency_digest),
+            UNIQUE(run_id, sequence),
+            UNIQUE(event_id),
+            FOREIGN KEY(run_id) REFERENCES runs(id),
+            CHECK(length(idempotency_digest) = 64),
+            CHECK(length(request_digest) = 64),
+            CHECK(sequence > 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_plane_event_appends_run_sequence
+            ON control_plane_event_appends(run_id, sequence);
+        CREATE INDEX IF NOT EXISTS idx_control_plane_event_appends_run_retained
+            ON control_plane_event_appends(run_id, sequence) WHERE event_json IS NOT NULL;
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

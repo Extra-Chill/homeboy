@@ -7,11 +7,12 @@
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
-    ControlPlaneError, ControlPlaneEventPage, ControlPlaneEventRetention, ControlPlaneExecution,
-    ControlPlaneExecutionPage, ControlPlaneMission, ControlPlaneMissionListRequest,
-    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneReference,
-    ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
-    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneError, ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventPage,
+    ControlPlaneEventRetention, ControlPlaneExecution, ControlPlaneExecutionPage,
+    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
+    ControlPlaneOperation, ControlPlaneReference, ControlPlaneReferencePage,
+    ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneRun,
+    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
     ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
     ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
     ControlPlaneTaskPage, EventCursor, ExecutionId, MissionId, ReferenceId, RunId, TaskId,
@@ -160,6 +161,16 @@ pub trait ControlPlaneProvider: Send + Sync {
         requested_id: &RunId,
         _cursor: Option<&EventCursor>,
     ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane run not found: {requested_id}"
+        )))
+    }
+
+    fn append_event(
+        &self,
+        requested_id: &RunId,
+        _request: &ControlPlaneEventAppendRequest,
+    ) -> Result<ControlPlaneEvent, ControlPlaneError> {
         Err(ControlPlaneError::not_found(format!(
             "control-plane run not found: {requested_id}"
         )))
@@ -318,6 +329,14 @@ pub fn events(
     cursor: Option<&EventCursor>,
 ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
     with_provider(|provider| provider.events(requested_id, cursor))
+}
+
+pub fn append_event(
+    requested_id: &RunId,
+    request: &ControlPlaneEventAppendRequest,
+) -> Result<ControlPlaneEvent, ControlPlaneError> {
+    request.validate()?;
+    with_provider(|provider| provider.append_event(requested_id, request))
 }
 
 pub fn event_retention(

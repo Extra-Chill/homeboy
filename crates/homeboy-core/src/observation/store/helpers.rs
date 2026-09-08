@@ -11,8 +11,9 @@ use super::*;
 /// leaving orphans behind. The list is asserted against the live schema in
 /// `store_test`, so adding another child table without adding it here breaks a
 /// test rather than a database.
-pub(crate) const RUN_OWNED_CHILD_TABLES: [&str; 6] = [
+pub(crate) const RUN_OWNED_CHILD_TABLES: [&str; 7] = [
     "artifacts",
+    "control_plane_event_appends",
     "control_plane_mission_runs",
     "findings",
     "triage_items",

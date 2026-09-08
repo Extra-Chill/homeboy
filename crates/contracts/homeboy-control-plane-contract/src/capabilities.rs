@@ -44,6 +44,7 @@ pub enum ControlPlaneOperation {
     GetRunReview,
     GetRunEvents,
     GetRunEventRetention,
+    AppendRunEvent,
     ExecuteRunAction,
     #[serde(other)]
     Unknown,
@@ -131,6 +132,7 @@ mod tests {
                     | ControlPlaneOperation::GetRunReview
                     | ControlPlaneOperation::GetRunEvents
                     | ControlPlaneOperation::GetRunEventRetention
+                    | ControlPlaneOperation::AppendRunEvent
                     | ControlPlaneOperation::ExecuteRunAction
             )),
             "capabilities must not advertise unwired mutations"

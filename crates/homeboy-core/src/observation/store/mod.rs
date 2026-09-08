@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::paths::PathRoots;
 
 mod artifacts;
+mod control_plane_events;
 mod findings;
 mod helpers;
 mod runs;
@@ -30,6 +31,7 @@ pub use artifacts::{
     ArtifactListFilter, ArtifactListPage, ArtifactPublication, ArtifactPublicationType,
     BoundedArtifactProjection,
 };
+pub use control_plane_events::CONTROL_PLANE_EVENT_RETENTION_LIMIT;
 pub use runs::{DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT};
 
 pub(crate) use helpers::*;

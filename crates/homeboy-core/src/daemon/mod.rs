@@ -2239,6 +2239,12 @@ where
                 Err(error) => remote_runner::auth_or_bad_request(error),
             }
         }
+        ("POST", path) if is_control_plane_event_append(path) => {
+            match authorize_control_plane_write(body, &broker_auth) {
+                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
 }
@@ -2277,6 +2283,13 @@ fn is_control_plane_reference_registration(path: &str) -> bool {
     matches!(
         http_api::route(HttpMethod::Post, path),
         Ok(http_api::HttpEndpoint::ControlPlaneRunReferenceRegister { .. })
+    )
+}
+
+fn is_control_plane_event_append(path: &str) -> bool {
+    matches!(
+        http_api::route(HttpMethod::Post, path),
+        Ok(http_api::HttpEndpoint::ControlPlaneRunEventAppend { .. })
     )
 }
 
@@ -4476,6 +4489,20 @@ mod tests {
         ));
         assert!(!is_control_plane_reference_registration(
             "/v1/control-plane/runs/run-1/tasks"
+        ));
+    }
+
+    #[test]
+    fn control_plane_event_append_paths_are_write_scoped_after_normalization() {
+        for path in [
+            "/v1/control-plane/runs/run-1/events",
+            "/v1/control-plane/runs/run-1/events/",
+            "/v1//control-plane/runs/run-1/events",
+        ] {
+            assert!(is_control_plane_event_append(path));
+        }
+        assert!(!is_control_plane_event_append(
+            "/v1/control-plane/runs/run-1/events/retention"
         ));
     }
 

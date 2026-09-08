@@ -15,10 +15,10 @@ use homeboy_control_plane_contract::{
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
     ControlPlaneCancelDisposition, ControlPlaneCancelParameters, ControlPlaneCancelResult,
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEventRetention, ControlPlaneEvidenceRef, ControlPlaneExecution,
-    ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
-    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEvidenceRef,
+    ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation,
+    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
+    ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime,
@@ -273,29 +273,26 @@ impl EventLookup for LifecycleStoreLookup {
         cursor: Option<&homeboy_control_plane_contract::EventCursor>,
     ) -> Result<Option<homeboy_control_plane_contract::ControlPlaneEventPage>, ControlPlaneError>
     {
-        match crate::agent_task_lifecycle::control_plane_events_in_store(
-            &self.store,
-            id.as_str(),
-            cursor,
-        ) {
-            Ok(events) => Ok(Some(events)),
-            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
+        let events = self
+            .store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?
+            .control_plane_event_stream(id)
+            .map_err(map_lifecycle_error)?;
+        events
+            .map(|events| event_page(id.clone(), events, cursor))
+            .transpose()
     }
 
     fn event_retention(
         &self,
         id: &RunId,
     ) -> Result<Option<ControlPlaneEventRetention>, ControlPlaneError> {
-        match crate::agent_task_lifecycle::control_plane_event_retention_in_store(
-            &self.store,
-            id.as_str(),
-        ) {
-            Ok(retention) => Ok(Some(retention)),
-            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
+        self.store
+            .open_observation_readonly()
+            .map_err(map_lifecycle_error)?
+            .control_plane_event_retention(id)
+            .map_err(map_lifecycle_error)
     }
 }
 
@@ -350,6 +347,7 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunEventRetention,
+                ControlPlaneOperation::AppendRunEvent,
             ],
         )
     }
@@ -2618,6 +2616,119 @@ fn map_lifecycle_error(error: homeboy_core::Error) -> ControlPlaneError {
     }
 }
 
+fn append_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    run: &RunId,
+    request: &ControlPlaneEventAppendRequest,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEvent, ControlPlaneError> {
+    request.validate()?;
+    let mut request = request.clone();
+    request.actor = redacted_bounded(&request.actor, 256);
+    request.kind = redacted_bounded(&request.kind, 128);
+    request.source.component = redacted_bounded(&request.source.component, 128);
+    request.source.instance = request
+        .source
+        .instance
+        .as_deref()
+        .and_then(|value| nonempty_redacted_bounded(value, 256));
+    normalize_event_references(&mut request.artifacts)?;
+    normalize_event_references(&mut request.evidence)?;
+    request.data = homeboy_core::redaction::redact_json(&request.data);
+    store
+        .with_config_lock(|| {
+            let record = store.read_record(run.as_str())?;
+            validate_event_scope(&record, &request).map_err(|error| {
+                homeboy_core::Error::validation_invalid_argument(
+                    "event_scope",
+                    error.message,
+                    None,
+                    None,
+                )
+            })?;
+            let idempotency_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+                request.idempotency_key.as_bytes(),
+            );
+            let request_digest =
+                homeboy_engine_primitives::content_hash::sha256_hex(&serde_json::to_vec(&request)?);
+            store
+                .open_observation_initialized()?
+                .append_control_plane_event(run, &request, &idempotency_digest, &request_digest)
+        })
+        .map_err(map_lifecycle_error)
+}
+
+fn normalize_event_references(
+    references: &mut [ControlPlaneEvidenceRef],
+) -> Result<(), ControlPlaneError> {
+    for reference in references {
+        reference.id = redacted_bounded(&reference.id, ID_BOUND);
+        reference.kind = redacted_bounded(&reference.kind, STATE_BOUND);
+        reference.uri = redacted_reference_uri(&reference.uri, URI_BOUND);
+        if reference.id.trim().is_empty()
+            || reference.kind.trim().is_empty()
+            || reference.uri.trim().is_empty()
+        {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event reference fields must remain nonempty after redaction",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_event_scope(
+    record: &AgentTaskRunRecord,
+    request: &ControlPlaneEventAppendRequest,
+) -> Result<(), ControlPlaneError> {
+    let Some(task) = request.task.as_ref() else {
+        if request.attempt.is_some() || request.execution.is_some() {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event attempt and execution identities require a task identity",
+            ));
+        }
+        return Ok(());
+    };
+    let task_count = record
+        .tasks
+        .iter()
+        .filter(|candidate| candidate.task_id == task.as_str())
+        .count();
+    if task_count != 1 {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "control-plane event task does not uniquely belong to run {}",
+            record.run_id
+        )));
+    }
+    let Some(attempt_id) = request.attempt.as_ref() else {
+        if request.execution.is_some() {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event execution identity requires an attempt identity",
+            ));
+        }
+        return Ok(());
+    };
+    let attempts = provider_attempts(record, task)?;
+    let attempt = attempts
+        .iter()
+        .find(|candidate| candidate.attempt == *attempt_id)
+        .ok_or_else(|| {
+            ControlPlaneError::invalid_argument(format!(
+                "control-plane event attempt does not belong to run {} and task {task}",
+                record.run_id
+            ))
+        })?;
+    if request
+        .execution
+        .as_ref()
+        .is_some_and(|execution| attempt.execution.as_ref() != Some(execution))
+    {
+        return Err(ControlPlaneError::invalid_argument(
+            "control-plane event execution does not belong to its run, task, and attempt",
+        ));
+    }
+    Ok(())
+}
+
 impl<L: EventLookup> OrchestrationService<L> {
     pub fn events(
         &self,
@@ -3817,6 +3928,16 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).events(requested_id, cursor)
     }
 
+    fn append_event(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneEventAppendRequest,
+    ) -> Result<homeboy_control_plane_contract::ControlPlaneEvent, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        append_event_in_store(&store, requested_id, request)
+    }
+
     fn event_retention(
         &self,
         requested_id: &RunId,
@@ -3847,8 +3968,9 @@ pub fn register() {
 mod tests {
     use super::{
         bounded_review_evidence, decode_event_cursor, decode_mission_cursor, encode_event_cursor,
-        encode_mission_cursor, event_page, live_provider_liveness, observed_file_timestamp, phase,
-        project_record, references_for_record, register_reference_in_store, review_failure_reasons,
+        encode_mission_cursor, event_page, live_provider_liveness, normalize_event_references,
+        observed_file_timestamp, phase, project_record, references_for_record,
+        register_reference_in_store, review_failure_reasons, validate_event_scope,
         LifecycleStoreLookup, OrchestrationService, RegisteredProvider, RunListLookup, RunLookup,
         RunPagePosition, RunSnapshot, RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
     };
@@ -3863,16 +3985,18 @@ mod tests {
         ControlPlaneActionPayload, ControlPlaneActionRequest,
         ControlPlaneAdmissionRetryDisposition, ControlPlaneAttemptListRequest,
         ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneErrorClass,
-        ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneMissionListRequest,
-        ControlPlaneOperation, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
-        ControlPlaneRunListRequest, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-        ControlPlaneState, ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EventCursor,
-        EventId, ExecutionId, MissionId, ReferenceId, RunCursor, RunId, TaskId,
+        ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventSource,
+        ControlPlaneEvidenceRef, ControlPlaneMissionListRequest, ControlPlaneOperation,
+        ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneRunListRequest,
+        ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
+        ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EventCursor, EventId,
+        ExecutionId, MissionId, ReferenceId, RunCursor, RunId, TaskId,
         CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-        CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -4020,6 +4144,26 @@ mod tests {
                 instance: None,
             },
             data: json!({ "sequence": sequence }),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+        }
+    }
+
+    fn event_append_request() -> ControlPlaneEventAppendRequest {
+        ControlPlaneEventAppendRequest {
+            schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
+            idempotency_key: "progress-1".to_string(),
+            actor: "broker:controller".to_string(),
+            kind: "task.progress".to_string(),
+            source: ControlPlaneEventSource {
+                component: "runner".to_string(),
+                instance: None,
+            },
+            occurred_at: None,
+            task: None,
+            attempt: None,
+            execution: None,
+            data: json!({}),
             artifacts: Vec::new(),
             evidence: Vec::new(),
         }
@@ -4190,6 +4334,84 @@ mod tests {
     }
 
     #[test]
+    fn appended_event_scope_is_bound_to_the_exact_run_graph() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.tasks.push(AgentTaskRunTask {
+            task_id: "review".to_string(),
+            state: AgentTaskState::Succeeded,
+            backend: "claude".to_string(),
+            selector: None,
+            model: None,
+            provider_ref: None,
+        });
+        let attempt = format!("{AGENT_TASK_RUN}:review:1");
+        let execution = format!("{attempt}:execution");
+        record.metadata["provider_executions"] = json!([{
+            "task_id": "review",
+            "attempt": 1,
+            "owner_identity": attempt,
+            "execution_identity": execution,
+            "state": "succeeded",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:01:00Z"
+        }]);
+        let mut request = event_append_request();
+        request.task = Some(TaskId::new("review").expect("task"));
+        request.attempt = Some(
+            homeboy_control_plane_contract::AttemptId::new(format!("{AGENT_TASK_RUN}:review:1"))
+                .expect("attempt"),
+        );
+        request.execution = Some(ExecutionId::new(execution).expect("execution"));
+        validate_event_scope(&record, &request).expect("exact scope");
+
+        request.execution = Some(ExecutionId::new("foreign:execution").expect("foreign"));
+        assert_eq!(
+            validate_event_scope(&record, &request)
+                .expect_err("foreign execution")
+                .class,
+            ControlPlaneErrorClass::InvalidArgument
+        );
+        request.task = None;
+        assert_eq!(
+            validate_event_scope(&record, &request)
+                .expect_err("orphan identities")
+                .class,
+            ControlPlaneErrorClass::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn appended_event_references_are_redacted_and_bounded_before_persistence() {
+        let mut references = vec![ControlPlaneEvidenceRef {
+            id: format!("evidence-token=secret-{}", "x".repeat(200)),
+            kind: format!("transcript-token=secret-{}", "x".repeat(100)),
+            uri: "https://user:password@example.invalid/log?token=secret#fragment".to_string(),
+        }];
+        normalize_event_references(&mut references).expect("normalize references");
+        let encoded = serde_json::to_string(&references).expect("references");
+        assert!(!encoded.contains("secret"));
+        assert!(!encoded.contains("password"));
+        assert!(!encoded.contains("fragment"));
+        assert!(references[0].id.len() <= super::ID_BOUND);
+        assert!(references[0].kind.len() <= super::STATE_BOUND);
+        assert!(references[0].uri.len() <= super::URI_BOUND);
+    }
+
+    #[test]
+    fn appended_event_data_uses_structured_secret_redaction() {
+        let mut request = event_append_request();
+        request.data = json!({
+            "access_token": "secret-value",
+            "message": "token=inline-secret"
+        });
+        request.data = homeboy_core::redaction::redact_json(&request.data);
+        let encoded = serde_json::to_string(&request.data).expect("data");
+        assert!(!encoded.contains("secret-value"));
+        assert!(!encoded.contains("inline-secret"));
+        assert_eq!(request.data["access_token"], "[REDACTED]");
+    }
+
+    #[test]
     fn event_pages_reject_non_monotonic_or_foreign_streams() {
         let run = RunId::new("run-events").expect("run");
         let error = event_page(run.clone(), vec![event(&run, 2), event(&run, 1)], None)
@@ -4266,6 +4488,7 @@ mod tests {
                 ControlPlaneOperation::RegisterRunExternalReference,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunEventRetention,
+                ControlPlaneOperation::AppendRunEvent,
                 ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
             ]
@@ -5004,8 +5227,15 @@ mod tests {
                 service.execute_action(&run, &request).expect("replay"),
                 first
             );
-            let events = service.events(&run, None).expect("action events");
-            let action_kinds: Vec<_> = events
+            assert!(service
+                .events(&run, None)
+                .expect("durable appended events")
+                .events
+                .is_empty());
+            let legacy_logs =
+                crate::agent_task_lifecycle::logs_in_store(&service.lookup.store, run.as_str())
+                    .expect("legacy synthesized logs");
+            let action_kinds: Vec<_> = legacy_logs
                 .events
                 .iter()
                 .filter(|event| event.kind.starts_with("action."))

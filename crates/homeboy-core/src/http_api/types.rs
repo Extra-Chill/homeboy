@@ -138,6 +138,9 @@ pub enum HttpEndpoint {
         id: String,
         cursor: Option<homeboy_control_plane_contract::EventCursor>,
     },
+    ControlPlaneRunEventAppend {
+        id: String,
+    },
     ControlPlaneRunEventRetention {
         id: String,
     },
@@ -233,6 +236,7 @@ impl HttpEndpoint {
             Self::ControlPlaneMission { .. } => "control_plane.missions.show",
             Self::ControlPlaneRuns { .. } => "control_plane.runs.list",
             Self::ControlPlaneRunSubmit => "control_plane.runs.submit",
+            Self::ControlPlaneRunEventAppend { .. } => "control_plane.runs.events.append",
             Self::ControlPlaneRun { .. } => "control_plane.runs.show",
             Self::ControlPlaneRunTasks { .. } => "control_plane.runs.tasks.list",
             Self::ControlPlaneRunTask { .. } => "control_plane.runs.tasks.show",

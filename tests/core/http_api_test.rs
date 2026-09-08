@@ -11,27 +11,29 @@ use homeboy_control_plane_contract::{
     AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
-    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
-    ControlPlaneEventRetention, ControlPlaneEventSource, ControlPlaneExecution,
-    ControlPlaneExecutionPage, ControlPlaneMission, ControlPlaneMissionListRequest,
-    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneReference,
-    ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
-    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest,
-    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
-    ControlPlaneState, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
-    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId,
-    ExecutionId, MissionCursor, MissionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventAppendRequest,
+    ControlPlaneEventPage, ControlPlaneEventRetention, ControlPlaneEventSource,
+    ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneReference, ControlPlaneReferencePage, ControlPlaneReferenceRegistration,
+    ControlPlaneReferenceType, ControlPlaneResource, ControlPlaneResult, ControlPlaneRun,
+    ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId, ExecutionId,
+    MissionCursor, MissionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
-    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
-    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
-    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-    CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-    CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
-    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
+    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
+    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_REVIEW_SCHEMA,
+    CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_resource_topology_contract::{
     ResourceTopologyResourceKind, ResourceTopologyResourceRef,
@@ -728,6 +730,33 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
             ));
         }
         Ok(fixture_control_plane_events(cursor))
+    }
+
+    fn append_event(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneEventAppendRequest,
+    ) -> Result<ControlPlaneEvent, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("run not found"));
+        }
+        request.validate()?;
+        Ok(ControlPlaneEvent {
+            schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
+            event: EventId::new(format!("{requested_id}:event:3")).expect("event"),
+            sequence: 3,
+            occurred_at: request.occurred_at.clone(),
+            mission: Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission")),
+            run: requested_id.clone(),
+            task: request.task.clone(),
+            attempt: request.attempt.clone(),
+            execution: request.execution.clone(),
+            kind: request.kind.clone(),
+            source: request.source.clone(),
+            data: request.data.clone(),
+            artifacts: request.artifacts.clone(),
+            evidence: request.evidence.clone(),
+        })
     }
 
     fn event_retention(
@@ -1519,6 +1548,33 @@ fn control_plane_http_exposes_event_retention_without_changing_v1_pages() {
 
     let page = serde_json::to_value(fixture_control_plane_events(None)).expect("event page");
     assert!(page.get("retention").is_none());
+}
+
+#[test]
+fn control_plane_http_appends_a_typed_event() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Post,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/events"),
+        body: Some(serde_json::json!({
+            "schema": CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+            "idempotency_key": "progress-3",
+            "actor": "broker:controller",
+            "kind": "task.progress",
+            "source": { "component": "runner" },
+            "task": "task-a",
+            "data": { "percent": 75 }
+        })),
+    })
+    .expect("append event");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.events.append");
+    let result: ControlPlaneResult<ControlPlaneEvent> =
+        serde_json::from_value(response.body).expect("result");
+    let event = result.resource.expect("event");
+    assert_eq!(event.sequence, 3);
+    assert_eq!(event.task.as_ref().map(TaskId::as_str), Some("task-a"));
+    assert_eq!(event.data["percent"], 75);
 }
 
 #[test]
