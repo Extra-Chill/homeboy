@@ -143,15 +143,6 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
                         "resume is legal but explicitly re-arms this admission; automatic reconciliation is scheduled for {next_attempt_at}, so waiting is the recommended next action"
                     ));
                 }
-                if matches!(
-                    state,
-                    "blocked_runner_unavailable" | "blocked_runner_stale" | "queued"
-                ) && admission["retry"]["next_attempt_at"].as_str().is_some()
-                {
-                    return available(
-                        "a bounded automatic admission retry is scheduled; resume is an explicit rearm after runner remediation and revalidates eligibility",
-                    );
-                }
                 return available(
                     "unmaterialized Cook admission can be explicitly rearmed after remediation and revalidates runner eligibility",
                 );
@@ -335,7 +326,8 @@ mod tests {
             resume.availability,
             ControlPlaneActionAvailability::Available
         );
-        assert!(resume
+        assert!(resume.reason.contains("explicitly rearmed"));
+        assert!(!resume
             .reason
             .contains("automatic admission retry is scheduled"));
     }
