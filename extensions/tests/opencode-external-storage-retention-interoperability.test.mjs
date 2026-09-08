@@ -4,14 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const extensionRoot = new URL('..', import.meta.url).pathname;
-const manifest = JSON.parse(await (await import('node:fs/promises')).readFile(join(extensionRoot, 'homeboy.json'), 'utf8'));
+const extensionRoot = new URL('../agent-runtimes/opencode/', import.meta.url).pathname;
+const manifest = JSON.parse(await (await import('node:fs/promises')).readFile(join(extensionRoot, 'opencode.json'), 'utf8'));
 const providers = manifest.external_storage_retention.providers;
 assert.equal(providers.length, 1);
 const [provider] = providers;
 assert.deepEqual(provider, {
   id: 'opencode.external-storage-retention',
-  command: ['node', '{{extension_path}}/agent-runtimes/opencode/scripts/agent/homeboy-opencode-external-storage-retention.cjs'],
+  command: ['node', '{{extension_path}}/scripts/agent/homeboy-opencode-external-storage-retention.cjs'],
   timeout_seconds: 30,
 });
 const root = mkdtempSync(join(tmpdir(), 'opencode-retention-contract-'));

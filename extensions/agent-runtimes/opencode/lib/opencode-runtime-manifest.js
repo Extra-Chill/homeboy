@@ -3,6 +3,9 @@
 const {
 	providerContract,
 } = require('./opencode-agent-task-executor');
+const {
+	externalStorageRetentionProviderContract,
+} = require('./opencode-external-storage-retention');
 
 function runtimeManifest() {
 	return {
@@ -11,6 +14,9 @@ function runtimeManifest() {
 		name: 'OpenCode',
 		version: '1.4.8',
 		description: 'OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.',
+		external_storage_retention: {
+			providers: [externalStorageRetentionProviderContract()],
+		},
 		requires: {
 			// Older cores safely ignore the optional top-level retention capability.
 			// Cleanup requires a core that implements external_storage_retention.

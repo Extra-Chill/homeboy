@@ -3,18 +3,6 @@
   "changelog_target": "CHANGELOG.md",
   "id": "homeboy-extensions",
   "remote_path": "",
-  "external_storage_retention": {
-    "providers": [
-      {
-        "id": "opencode.external-storage-retention",
-        "command": [
-          "node",
-          "{{extension_path}}/agent-runtimes/opencode/scripts/agent/homeboy-opencode-external-storage-retention.cjs"
-        ],
-        "timeout_seconds": 30
-      }
-    ]
-  },
   "self_checks": {
     "test": [
       "node tests/agent-task-provider-contract-smoke.mjs",

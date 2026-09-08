@@ -19,9 +19,10 @@ const MAX_WALK_ENTRIES = 10_000;
 const MAX_WALK_DEPTH = 32;
 const MAX_WALK_BYTES = 1024 * 1024 * 1024 * 1024;
 const CREDENTIAL_NAMES = new Set(['auth.json', 'account.json', 'mcp-auth.json', 'anthropic-oauth-accounts.json', 'openai-oauth-accounts.json']);
+const HISTORY_NAMES = new Set(['history', 'history.json', 'history.db', 'messages', 'messages.json']);
 
 function externalStorageRetentionProviderContract() {
-	return { id: PROVIDER_ID, command: ['homeboy-opencode-external-storage-retention'], timeout_seconds: 30 };
+	return { id: PROVIDER_ID, command: ['node', '{{extension_path}}/scripts/agent/homeboy-opencode-external-storage-retention.cjs'], timeout_seconds: 30 };
 }
 
 function handleRequest(request, options = {}) {
@@ -83,8 +84,7 @@ function inventoryFor(config, options) {
 	const sessions = discoverSessions(config, [], roots, options);
 	const markerItems = config.marker_key ? discoverMarkers(config, roots, options, new Set(sessions.map((entry) => entry.id.slice('session:'.length)))) : [];
 	const protectedItems = discoverProtected(config, roots);
-	const compaction = pendingCompaction(config, options.env || process.env, roots);
-	const items = [...markerItems, ...sessions, ...protectedItems, ...(compaction ? [compaction] : [])].slice(0, MAX_ITEMS);
+	const items = [...markerItems, ...sessions, ...protectedItems].slice(0, MAX_ITEMS);
 	const known = new Set(items.map((item) => item._path).filter(Boolean));
 	const unknownBytes = roots.reduce((total, root) => total + unknownBytesBelow(root.path, known), 0);
 	const generation = digest(JSON.stringify({ roots: roots.map((root) => [root.id, fingerprint(root.path)]), items: items.map((item) => [item.id, item.state]) }));
@@ -126,6 +126,7 @@ function discoverProtected(config, roots) {
 		for (const entry of safeEntries(root).slice(0, MAX_ITEMS)) {
 			const candidate = path.join(root, entry.name);
 			if (CREDENTIAL_NAMES.has(entry.name)) items.push(item(`credential:${entry.name}`, rootId(candidate, roots), 'credential', candidate, false, false, true, 0, fingerprint(candidate)));
+			if (HISTORY_NAMES.has(entry.name)) items.push(item(`history:${entry.name}`, rootId(candidate, roots), 'history', candidate, false, false, true, 0, fingerprint(candidate)));
 			if (/^(?:snapshot|export)/i.test(entry.name)) items.push(item(`pinned:${entry.name}`, rootId(candidate, roots), 'pinned_export', candidate, false, false, true, 0, fingerprint(candidate)));
 		}
 	}
@@ -134,17 +135,7 @@ function discoverProtected(config, roots) {
 
 function nativeReclaim(itemToReclaim, config, options) {
 	if (itemToReclaim.class === 'scratch') return reclaimScratch(itemToReclaim.id, config, options);
-	if (itemToReclaim.id.startsWith('compaction:')) return retryCompaction(config, options.env || process.env);
-	if (!itemToReclaim.id.startsWith('session:')) return null;
-	const sessionId = itemToReclaim.id.slice('session:'.length);
-	const before = sizeOf(config.db_path);
-	const deleted = run(config.command, ['session', 'delete', sessionId], options.env || process.env);
-	if (deleted.status !== 0) return null;
-	const compacted = run(config.command, ['db', 'VACUUM'], options.env || process.env);
-	// A successful deletion is a confirmed, idempotent mutation even if compaction fails.
-	if (compacted.status !== 0) { writeCompaction(config, options.env || process.env); return { bytes: 0 }; }
-	clearCompaction(options.env || process.env);
-	return { bytes: Math.max(0, before - sizeOf(config.db_path)) };
+	return null;
 }
 
 function reclaimScratch(id, config, options) {
@@ -213,14 +204,9 @@ function safeStateDirectory(state) {
 	const directory = path.join(current, 'homeboy'); if (fs.existsSync(directory) && fs.lstatSync(directory).isSymbolicLink()) return '';
 	fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); return fs.realpathSync(directory);
 }
-function stateFile(env, name) { const state = env?.XDG_STATE_HOME || (env?.HOME && path.join(env.HOME, '.local', 'state')); return safeAbsolutePath(state) ? path.join(state, 'homeboy', name) : ''; }
-function writeCompaction(config, env) { try { const file = stateFile(env, 'opencode-retention-compaction.json'); if (!file) return; fs.writeFileSync(file, JSON.stringify({ db_path: config.db_path, created_at: new Date().toISOString() }), { mode: 0o600 }); } catch { /* The successful session receipt remains truthful even if retry state is unavailable. */ } }
-function clearCompaction(env) { try { const file = stateFile(env, 'opencode-retention-compaction.json'); if (file) fs.unlinkSync(file); } catch { /* No pending state is equivalent to cleared state. */ } }
-function pendingCompaction(config, env, roots) { try { const file = stateFile(env, 'opencode-retention-compaction.json'); const state = file && JSON.parse(fs.readFileSync(file, 'utf8')); return state?.db_path === config.db_path ? item(`compaction:${digest(config.db_path).slice(0, 16)}`, rootId(config.db_path, roots), 'session_store', config.db_path, true, false, false, ageDays(state.created_at), `compaction:${fingerprint(file)}`, 0) : null; } catch { return null; } }
-function retryCompaction(config, env) { const before = sizeOf(config.db_path); const compacted = run(config.command, ['db', 'VACUUM'], env); if (compacted.status !== 0) return null; clearCompaction(env); return { bytes: Math.max(0, before - sizeOf(config.db_path)) }; }
 function sign(value, key) { return crypto.createHmac('sha256', key).update(JSON.stringify(value)).digest('hex'); }
 function secureEqual(left, right) { return left.length === right.length && crypto.timingSafeEqual(Buffer.from(left), Buffer.from(right)); }
-function reclaimable(value) { return value.ownership_known && value.reconstructable && !value.active && !value.referenced && !['credential', 'pinned_export'].includes(value.class); }
+function reclaimable(value) { return value.class === 'scratch' && value.ownership_known && value.reconstructable && !value.active && !value.referenced; }
 function processAlive(pid) { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } }
 function safeEntries(directory, limit = MAX_WALK_ENTRIES) { try { const handle = fs.opendirSync(directory, { bufferSize: Math.min(limit, 128) }); const entries = []; for (let entry = handle.readSync(); entry && entries.length < limit; entry = handle.readSync()) entries.push(entry); handle.closeSync(); return entries; } catch { return []; } }
 function sizeOf(candidate) {
