@@ -479,9 +479,11 @@ pub(crate) fn run_loaded_plan_with_derived_cook_baseline(
         executor,
         derived_cook_baseline,
         supplied_harvest_context,
+        LoadedPlanExecution::NewDurable,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     plan: AgentTaskPlan,
@@ -497,7 +499,34 @@ pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store(
         executor,
         derived_cook_baseline,
         supplied_harvest_context,
+        LoadedPlanExecution::NewDurable,
     )
+}
+
+/// Execute the durable attempt whose running claim is already owned by Cook.
+pub(crate) fn run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    plan: AgentTaskPlan,
+    run_id: &str,
+    executor: SharedAgentTaskExecutor,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
+    run_loaded_plan_with_derived_cook_baseline_in_optional_store(
+        Some(lifecycle_store),
+        plan,
+        Some(run_id),
+        executor,
+        derived_cook_baseline,
+        supplied_harvest_context,
+        LoadedPlanExecution::ClaimedCookAttempt,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum LoadedPlanExecution {
+    NewDurable,
+    ClaimedCookAttempt,
 }
 
 fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
@@ -507,6 +536,7 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
     executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
+    execution: LoadedPlanExecution,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if record_run_id.is_none() {
         prepare_plan_for_execution(&mut plan, None)?;
@@ -529,6 +559,11 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
         });
     }
     let run_id = record_run_id.expect("record run id is present after ephemeral execution");
+    let request = crate::agent_task_submission_service::prepared_submission_request(
+        Some(run_id),
+        false,
+        "homeboy-loaded-plan",
+    )?;
     // Prepare before persistence so the lifecycle record and scheduler use the
     // same materialized workspace contract. In particular, Cook's derived
     // baseline capability must bind the persisted task workspace.
@@ -539,11 +574,7 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
             prepared = prepared.with_lifecycle_store(store.clone());
         }
         crate::agent_task_submission_service::reject_prepared_plan(
-            &crate::agent_task_submission_service::prepared_submission_request(
-                Some(run_id),
-                false,
-                "homeboy-loaded-plan",
-            )?,
+            &request,
             prepared,
             "prepare_plan_for_execution",
             &error,
@@ -557,15 +588,26 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
     if let Some(harvest_context) = supplied_harvest_context {
         prepared = prepared.with_harvest_context(harvest_context);
     }
-    // Cook marks its durable attempt running before entering this loaded-plan
-    // execution path. Re-submitting it would reject that legitimate owner as a
-    // duplicate submission; execute the claim the Cook runtime already owns.
-    let outcome = crate::agent_task_submission_service::execute_claimed_plan(
-        run_id,
-        prepared,
-        executor,
-        derived_cook_baseline,
-    )?;
+    let outcome = match execution {
+        LoadedPlanExecution::NewDurable => {
+            crate::agent_task_submission_service::submit_prepared_plan_with_cook_baseline(
+                &request,
+                prepared,
+                executor,
+                derived_cook_baseline,
+            )?
+        }
+        // Cook marks its durable attempt running before entering this explicit
+        // claimed-attempt path, so it must execute that existing ownership.
+        LoadedPlanExecution::ClaimedCookAttempt => {
+            crate::agent_task_submission_service::execute_claimed_plan(
+                run_id,
+                prepared,
+                executor,
+                derived_cook_baseline,
+            )?
+        }
+    };
     let aggregate = outcome.aggregate.ok_or_else(|| {
         Error::internal_unexpected("durable loaded-plan submission produced no aggregate")
     })?;

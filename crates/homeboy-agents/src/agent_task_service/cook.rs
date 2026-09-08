@@ -71,9 +71,9 @@ use super::cook_promotion::{
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
+use super::execution::run_claimed_loaded_plan_with_derived_cook_baseline_in_store;
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
-use super::execution::run_loaded_plan_with_derived_cook_baseline_in_store;
 use super::AgentTaskRunResult;
 
 /// Lease window for a cook promotion operation claim. Long enough that a healthy
@@ -3872,10 +3872,10 @@ pub(crate) fn dispatch_cook_follow_up(
             }
         } else {
             ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
-            run_loaded_plan_with_derived_cook_baseline_in_store(
+            run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
                 lifecycle_store,
                 follow_up_plan,
-                Some(&next_run_id),
+                &next_run_id,
                 executor,
                 Some(baseline.capability()),
                 Some(cook_attempt_harvest_context(&options.harvest_context)),
@@ -6210,10 +6210,10 @@ fn run_cook_spine(
                                 }
                             }
                         });
-                        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
+                        let result = run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
                             lifecycle_store,
                             dispatch_plan,
-                            Some(&run_id),
+                            &run_id,
                             executor.clone(),
                             effective_baseline.map(CookFollowUpBaseline::capability),
                             Some(cook_attempt_harvest_context(&options.harvest_context)),
