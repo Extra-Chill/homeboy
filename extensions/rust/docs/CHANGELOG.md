@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.7] - 2026-09-08
+
+### Fixed
+- retain bounded redacted failure context
+
 ## [1.37.6] - 2026-08-29
 
 ### Changed
