@@ -14,7 +14,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
     ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
     ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEvidenceRef, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
+    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
     ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
     ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
@@ -25,7 +26,8 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
@@ -286,6 +288,7 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneResource::Run,
                 ControlPlaneResource::Task,
                 ControlPlaneResource::Attempt,
+                ControlPlaneResource::Execution,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -299,6 +302,8 @@ impl<L: RunLookup> OrchestrationService<L> {
                 ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::ListTaskAttempts,
                 ControlPlaneOperation::GetTaskAttempt,
+                ControlPlaneOperation::ListAttemptExecutions,
+                ControlPlaneOperation::GetAttemptExecution,
                 ControlPlaneOperation::GetRunEvents,
             ],
         )
@@ -446,6 +451,56 @@ impl<L: RunLookup> OrchestrationService<L> {
             has_more,
         })
     }
+
+    pub fn execution(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+        requested: &ExecutionId,
+    ) -> Result<ControlPlaneExecution, ControlPlaneError> {
+        self.executions(run, task, attempt_number)?
+            .executions
+            .into_iter()
+            .find(|execution| execution.execution == *requested)
+            .ok_or_else(|| {
+                ControlPlaneError::not_found(format!(
+                    "execution not found for run {run}, task {task}, attempt {attempt_number}: {requested}"
+                ))
+            })
+    }
+
+    pub fn executions(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+    ) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
+        let attempt = self.attempt(run, task, attempt_number)?;
+        let executions = attempt
+            .execution
+            .clone()
+            .map(|execution| {
+                vec![ControlPlaneExecution {
+                    schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
+                    run: run.clone(),
+                    task: task.clone(),
+                    attempt: attempt.attempt.clone(),
+                    execution,
+                    state: attempt.state,
+                    started_at: attempt.started_at.clone(),
+                    finished_at: attempt.finished_at.clone(),
+                }]
+            })
+            .unwrap_or_default();
+        Ok(ControlPlaneExecutionPage {
+            schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            task: task.clone(),
+            attempt: attempt.attempt,
+            executions,
+        })
+    }
 }
 
 fn provider_attempts(
@@ -496,6 +551,19 @@ fn project_provider_attempt(
             "provider attempt owner identity does not match its run, task, and number",
         ));
     }
+    let execution_id = execution
+        .get("execution_identity")
+        .and_then(Value::as_str)
+        .map(|execution_id| {
+            if execution_id != format!("{id}:execution") {
+                return Err(ControlPlaneError::invalid_argument(
+                    "provider execution identity does not match its attempt",
+                ));
+            }
+            ExecutionId::new(execution_id)
+                .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
+        })
+        .transpose()?;
     let state = execution["state"]
         .as_str()
         .and_then(provider_attempt_state)
@@ -523,7 +591,7 @@ fn project_provider_attempt(
         state,
         started_at: started_at.to_string(),
         finished_at,
-        execution: None,
+        execution: execution_id,
     })
 }
 
@@ -2381,15 +2449,12 @@ pub fn project_record(
     let mut resource = ControlPlaneRun::new(run);
     if let Some(identities) = identities {
         resource.mission = Some(identities.mission);
-        resource.attempt = Some(identities.attempt);
-        resource.attempt_number = Some(identities.attempt_number);
     }
     if let Some(mission) = fanout_mission(record)? {
         resource.mission = Some(mission);
     }
     resource.state = run_state(record);
     resource.location = location(record);
-    resource.execution = execution(record)?;
     resource.phase = phase(record);
     resource.blocker = blocker(record);
     resource.owner = Some(owner(record));
@@ -2499,15 +2564,6 @@ fn location(record: &AgentTaskRunRecord) -> Option<ControlPlaneLocation> {
         runner_id,
         remote_run_id: transport,
     })
-}
-
-fn execution(record: &AgentTaskRunRecord) -> Result<Option<ExecutionId>, ControlPlaneError> {
-    let Some(job_id) = record.runner_job_id() else {
-        return Ok(None);
-    };
-    ExecutionId::new(job_id)
-        .map(Some)
-        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
 }
 
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
@@ -3027,6 +3083,38 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).attempts(run, task, request)
     }
 
+    fn execution(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+        execution: &ExecutionId,
+    ) -> Result<ControlPlaneExecution, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).execution(
+            run,
+            task,
+            attempt_number,
+            execution,
+        )
+    }
+
+    fn executions(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+    ) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).executions(
+            run,
+            task,
+            attempt_number,
+        )
+    }
+
     fn submit(
         &self,
         request: &ControlPlaneSubmissionRequest,
@@ -3130,12 +3218,12 @@ mod tests {
         ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneMissionListRequest,
         ControlPlaneOperation, ControlPlaneRunListRequest, ControlPlaneRunReviewRequest,
         ControlPlaneRunState, ControlPlaneState, ControlPlaneSubmissionRequest,
-        ControlPlaneTaskListRequest, EventCursor, EventId, MissionId, RunCursor, RunId, TaskId,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        ControlPlaneTaskListRequest, EventCursor, EventId, ExecutionId, MissionId, RunCursor,
+        RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -3475,6 +3563,8 @@ mod tests {
                 ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::ListTaskAttempts,
                 ControlPlaneOperation::GetTaskAttempt,
+                ControlPlaneOperation::ListAttemptExecutions,
+                ControlPlaneOperation::GetAttemptExecution,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::GetRunReview,
                 ControlPlaneOperation::ExecuteRunAction,
@@ -3579,7 +3669,8 @@ mod tests {
                 "attempt": 2,
                 "state": "running",
                 "started_at": "2026-01-01T00:02:00Z",
-                "owner_identity": "run-with-tasks:m-task:2"
+                "owner_identity": "run-with-tasks:m-task:2",
+                "execution_identity": "run-with-tasks:m-task:2:execution"
             }
         ]);
         let service = OrchestrationService::new(MapLookup {
@@ -3635,6 +3726,23 @@ mod tests {
             .attempt(&run, &TaskId::new("m-task").expect("task"), 2)
             .expect("active attempt");
         assert_eq!(active.state, ControlPlaneState::Running);
+        assert_eq!(
+            active.execution.as_ref().map(ExecutionId::as_str),
+            Some("run-with-tasks:m-task:2:execution")
+        );
+        let executions = service
+            .executions(&run, &TaskId::new("m-task").expect("task"), 2)
+            .expect("execution page");
+        assert_eq!(executions.executions.len(), 1);
+        let execution = service
+            .execution(
+                &run,
+                &TaskId::new("m-task").expect("task"),
+                2,
+                &ExecutionId::new("run-with-tasks:m-task:2:execution").expect("execution"),
+            )
+            .expect("execution detail");
+        assert_eq!(execution.attempt.as_str(), "run-with-tasks:m-task:2");
         let error = service
             .tasks(
                 &RunId::new("another-run").expect("run"),
@@ -4396,7 +4504,6 @@ mod tests {
             resource.mission.as_ref().map(|id| id.as_str()),
             Some(AGENT_TASK_COOK)
         );
-        assert_eq!(resource.attempt_number, Some(1));
         assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("terminal"));
         assert_eq!(
@@ -4452,10 +4559,6 @@ mod tests {
             CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA
         );
         assert_eq!(
-            resource.execution.as_ref().map(|id| id.as_str()),
-            Some("job-1")
-        );
-        assert_eq!(
             resource
                 .location
                 .as_ref()
@@ -4496,7 +4599,6 @@ mod tests {
             durable.mission.as_ref().map(|mission| mission.as_str()),
             Some("fanout-portfolio-1")
         );
-        assert_eq!(durable.attempt_number, Some(1));
     }
 
     #[test]

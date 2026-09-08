@@ -65,12 +65,11 @@ opaque_identity!(
     TaskId
 );
 opaque_identity!(
-    /// The attempt identity encoded by a run id. The opaque string is the run
-    /// id itself; the attempt *number* lives on [`crate::ResolvedIdentities`].
+    /// One task-scoped attempt identity.
     AttemptId
 );
 opaque_identity!(
-    /// A runner-job / execution identity.
+    /// One canonical execution identity persisted beneath an attempt.
     ExecutionId
 );
 opaque_identity!(

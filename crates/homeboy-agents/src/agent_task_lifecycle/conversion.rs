@@ -382,10 +382,8 @@ pub(crate) fn control_plane_event<'a>(
         mission: identities.as_ref().map(|value| value.mission.clone()),
         run,
         task: Some(task),
-        attempt: identities.map(|value| value.attempt),
-        execution: record
-            .runner_job_id()
-            .and_then(|value| homeboy_control_plane_contract::ExecutionId::new(value).ok()),
+        attempt: None,
+        execution: None,
         kind: kind.to_string(),
         source: ControlPlaneEventSource {
             component: source.to_string(),

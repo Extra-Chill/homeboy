@@ -12,16 +12,18 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneCapabilities,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
-    ControlPlaneEventSource, ControlPlaneMission, ControlPlaneMissionListRequest,
-    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
-    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
-    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId, MissionCursor,
-    MissionId, RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    ControlPlaneEventSource, ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+    ControlPlaneState, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
+    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId,
+    ExecutionId, MissionCursor, MissionId, RunCursor, RunId, TaskCursor, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
     CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
@@ -333,7 +335,24 @@ fn fixture_control_plane_attempt() -> ControlPlaneAttempt {
         state: ControlPlaneState::Running,
         started_at: "2026-01-01T00:00:00Z".to_string(),
         finished_at: None,
-        execution: None,
+        execution: Some(
+            ExecutionId::new(format!("{CONTROL_PLANE_FIXTURE_RUN}:review:1:execution"))
+                .expect("execution"),
+        ),
+    }
+}
+
+fn fixture_control_plane_execution() -> ControlPlaneExecution {
+    ControlPlaneExecution {
+        schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
+        run: RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run"),
+        task: TaskId::new("review").expect("task"),
+        attempt: AttemptId::new(format!("{CONTROL_PLANE_FIXTURE_RUN}:review:1")).expect("attempt"),
+        execution: ExecutionId::new(format!("{CONTROL_PLANE_FIXTURE_RUN}:review:1:execution"))
+            .expect("execution"),
+        state: ControlPlaneState::Running,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        finished_at: None,
     }
 }
 
@@ -393,6 +412,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneResource::Run,
                 ControlPlaneResource::Task,
                 ControlPlaneResource::Attempt,
+                ControlPlaneResource::Execution,
                 ControlPlaneResource::Event,
             ],
             vec![
@@ -406,6 +426,8 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneOperation::GetRunTask,
                 ControlPlaneOperation::ListTaskAttempts,
                 ControlPlaneOperation::GetTaskAttempt,
+                ControlPlaneOperation::ListAttemptExecutions,
+                ControlPlaneOperation::GetAttemptExecution,
                 ControlPlaneOperation::GetRunEvents,
                 ControlPlaneOperation::ExecuteRunAction,
             ],
@@ -522,6 +544,45 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 .collect(),
             next_cursor: None,
             has_more: false,
+        })
+    }
+
+    fn execution(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+        execution: &ExecutionId,
+    ) -> Result<ControlPlaneExecution, ControlPlaneError> {
+        let fixture = fixture_control_plane_execution();
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN
+            || task.as_str() != "review"
+            || attempt_number != 1
+            || execution != &fixture.execution
+        {
+            return Err(ControlPlaneError::not_found("execution not found"));
+        }
+        Ok(fixture)
+    }
+
+    fn executions(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        attempt_number: u32,
+    ) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
+        if run.as_str() != CONTROL_PLANE_FIXTURE_RUN
+            || task.as_str() != "review"
+            || attempt_number != 1
+        {
+            return Err(ControlPlaneError::not_found("attempt not found"));
+        }
+        Ok(ControlPlaneExecutionPage {
+            schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
+            run: run.clone(),
+            task: task.clone(),
+            attempt: AttemptId::new(format!("{run}:{task}:{attempt_number}")).expect("attempt"),
+            executions: vec![fixture_control_plane_execution()],
         })
     }
 
@@ -720,6 +781,31 @@ fn routes_versioned_control_plane_endpoints() {
     assert_eq!(
         http_api::route(
             HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/tasks/task-1/attempts/2/executions",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneAttemptExecutions {
+            id: "run-abc".to_string(),
+            task_id: "task-1".to_string(),
+            attempt_number: 2,
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/tasks/task-1/attempts/2/executions/execution%2D1",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneAttemptExecution {
+            id: "run-abc".to_string(),
+            task_id: "task-1".to_string(),
+            attempt_number: 2,
+            execution_id: "execution%2D1".to_string(),
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
             "/v1/control-plane/runs/run-abc/review?to_worktree=homeboy%40candidate&provider_argv=homeboy&provider_argv=--config%3Dpath+with+spaces",
         )
         .expect("route"),
@@ -851,6 +937,8 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
             ControlPlaneOperation::GetRunTask,
             ControlPlaneOperation::ListTaskAttempts,
             ControlPlaneOperation::GetTaskAttempt,
+            ControlPlaneOperation::ListAttemptExecutions,
+            ControlPlaneOperation::GetAttemptExecution,
             ControlPlaneOperation::GetRunEvents,
             ControlPlaneOperation::ExecuteRunAction,
         ]
@@ -999,6 +1087,47 @@ fn control_plane_http_lists_and_gets_task_scoped_attempts() {
     let result: ControlPlaneResult<ControlPlaneAttempt> =
         serde_json::from_value(response.body).expect("result");
     assert_eq!(result.resource, Some(fixture_control_plane_attempt()));
+}
+
+#[test]
+fn control_plane_http_lists_and_gets_attempt_scoped_executions() {
+    register_fixture_control_plane_provider();
+    let base = format!(
+        "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/tasks/review/attempts/1/executions"
+    );
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: base.clone(),
+        body: None,
+    })
+    .expect("execution page");
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.endpoint,
+        "control_plane.runs.tasks.attempts.executions.list"
+    );
+    let result: ControlPlaneResult<ControlPlaneExecutionPage> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(
+        result.resource.expect("page").executions,
+        vec![fixture_control_plane_execution()]
+    );
+
+    let execution_id = format!("{CONTROL_PLANE_FIXTURE_RUN}:review:1:execution");
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("{base}/{}", execution_id.replace(':', "%3A")),
+        body: None,
+    })
+    .expect("execution detail");
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.endpoint,
+        "control_plane.runs.tasks.attempts.executions.show"
+    );
+    let result: ControlPlaneResult<ControlPlaneExecution> =
+        serde_json::from_value(response.body).expect("result");
+    assert_eq!(result.resource, Some(fixture_control_plane_execution()));
 }
 
 #[test]

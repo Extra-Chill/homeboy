@@ -3523,6 +3523,7 @@ pub fn reserve_provider_execution_in_store(
                 "owner_pid": std::process::id(),
                 "owner_linux_starttime_ticks": homeboy_core::process::linux_process_starttime_ticks(std::process::id()).ok().flatten(),
                 "owner_identity": format!("{run_id}:{execution_key}"),
+                "execution_identity": format!("{run_id}:{execution_key}:execution"),
             }));
             let consumed = executions.len();
             metadata.insert("provider_executions_consumed".to_string(), json!(consumed));

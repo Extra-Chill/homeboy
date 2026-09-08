@@ -1,8 +1,6 @@
 //! Canonical control-plane identities for the agent-task status projection.
 
-use homeboy_control_plane_contract::{
-    resolve, AttemptId, IdentityKind, MissionId, ResolveError, RunId,
-};
+use homeboy_control_plane_contract::{resolve, IdentityKind, MissionId, ResolveError, RunId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,8 +12,7 @@ use homeboy_core::{Error, Result};
 pub struct CanonicalControlPlaneIdentities {
     pub mission: MissionId,
     pub run: RunId,
-    pub attempt: AttemptId,
-    pub attempt_number: u32,
+    pub cook_attempt_number: u32,
 }
 
 pub fn canonical_fanout_mission(metadata: &Value) -> Result<Option<MissionId>> {
@@ -75,20 +72,17 @@ pub fn canonical_control_plane_identities_for_run(
             ))
         }
     };
-    let (Some(mission), Some(run), Some(attempt), Some(attempt_number)) = (
-        resolved.mission,
-        resolved.run,
-        resolved.attempt,
-        resolved.attempt_number,
-    ) else {
+    let (Some(mission), Some(run), Some(cook_attempt_number)) =
+        (resolved.mission, resolved.run, resolved.cook_attempt_number)
+    else {
         return Ok(None);
     };
     if let Some(recorded) = recorded_attempt {
-        if recorded != attempt_number {
+        if recorded != cook_attempt_number {
             return Err(Error::validation_invalid_argument(
                 "cook_attempt",
                 format!(
-                    "run id `{run_id}` encodes attempt {attempt_number}, but the durable record carries attempt {recorded}"
+                    "run id `{run_id}` encodes attempt {cook_attempt_number}, but the durable record carries attempt {recorded}"
                 ),
                 Some(run_id.to_string()),
                 None,
@@ -98,8 +92,7 @@ pub fn canonical_control_plane_identities_for_run(
     Ok(Some(CanonicalControlPlaneIdentities {
         mission,
         run,
-        attempt,
-        attempt_number,
+        cook_attempt_number,
     }))
 }
 
@@ -141,19 +134,17 @@ mod tests {
     }
 
     #[test]
-    fn real_agent_task_run_id_resolves_mission_run_and_attempt() {
+    fn real_agent_task_run_id_resolves_mission_run_and_cook_attempt() {
         let identities = canonical_control_plane_identities(&record(AGENT_TASK_RUN, Some(1)))
             .expect("resolve")
             .expect("canonical identities");
         assert_eq!(identities.mission.as_str(), AGENT_TASK_COOK);
         assert_eq!(identities.run.as_str(), AGENT_TASK_RUN);
-        assert_eq!(identities.attempt.as_str(), AGENT_TASK_RUN);
-        assert_eq!(identities.attempt_number, 1);
+        assert_eq!(identities.cook_attempt_number, 1);
         let json = serde_json::to_value(&identities).expect("serialize");
         assert_eq!(json["mission"], AGENT_TASK_COOK);
         assert_eq!(json["run"], AGENT_TASK_RUN);
-        assert_eq!(json["attempt"], AGENT_TASK_RUN);
-        assert_eq!(json["attempt_number"], 1);
+        assert_eq!(json["cook_attempt_number"], 1);
         let decoded: CanonicalControlPlaneIdentities =
             serde_json::from_value(json).expect("deserialize");
         assert_eq!(decoded, identities);

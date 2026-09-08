@@ -2,7 +2,7 @@
 //!
 //! These behavior-free data structures name the resource identities Homeboy
 //! already persists as untyped strings — mission (Cook / fanout portfolio),
-//! run, task, attempt, execution (runner job), and provider session — and
+//! run, task, attempt, execution, and provider session — and
 //! resolve those strings deterministically. They also version the run resource
 //! and the shared result envelope once. They depend only on serde, which
 //! keeps this a leaf crate other crates can depend on without pulling in core.
@@ -45,16 +45,17 @@ pub use resource::{
     ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
     ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneAttempt,
     ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
-    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
-    ControlPlaneLocation, ControlPlaneMission, ControlPlaneMissionListRequest,
-    ControlPlaneMissionPage, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
-    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState,
-    ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
-    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_SCHEMA,
+    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneExecution,
+    ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
+    ControlPlaneProviderSummary, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState,
+    ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage,
+    CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 pub use review::{
     ControlPlaneRunReview, ControlPlaneRunReviewRequest, CONTROL_PLANE_RUN_REVIEW_SCHEMA,

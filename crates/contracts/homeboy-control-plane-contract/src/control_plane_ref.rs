@@ -181,7 +181,7 @@ mod tests {
             AttemptId::new(AGENT_TASK_RUN).expect("attempt"),
         ));
         round_trip(ControlPlaneRef::Execution(
-            ExecutionId::new("accepted-daemon-job").expect("execution"),
+            ExecutionId::new(format!("{AGENT_TASK_RUN}:review:1:execution")).expect("execution"),
         ));
         round_trip(ControlPlaneRef::ProviderSession(
             ProviderSessionId::new("session-123").expect("session"),

@@ -142,14 +142,24 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         ) => Ok(HttpEndpoint::ControlPlaneTaskAttempt {
             id: (*id).to_string(),
             task_id: (*task_id).to_string(),
-            attempt_number: attempt.parse::<u32>().map_err(|_| {
-                Error::validation_invalid_argument(
-                    "attempt",
-                    "control-plane attempt number must be a positive integer",
-                    Some((*attempt).to_string()),
-                    None,
-                )
-            })?,
+            attempt_number: control_plane_attempt_number(attempt)?,
+        }),
+        (
+            HttpMethod::Get,
+            ["v1", "control-plane", "runs", id, "tasks", task_id, "attempts", attempt, "executions"],
+        ) => Ok(HttpEndpoint::ControlPlaneAttemptExecutions {
+            id: (*id).to_string(),
+            task_id: (*task_id).to_string(),
+            attempt_number: control_plane_attempt_number(attempt)?,
+        }),
+        (
+            HttpMethod::Get,
+            ["v1", "control-plane", "runs", id, "tasks", task_id, "attempts", attempt, "executions", execution_id],
+        ) => Ok(HttpEndpoint::ControlPlaneAttemptExecution {
+            id: (*id).to_string(),
+            task_id: (*task_id).to_string(),
+            attempt_number: control_plane_attempt_number(attempt)?,
+            execution_id: (*execution_id).to_string(),
         }),
         (HttpMethod::Get, ["v1", "control-plane", "runs", id, "review"]) => {
             Ok(HttpEndpoint::ControlPlaneRunReview {
@@ -309,6 +319,32 @@ where
                 id,
                 task_id,
                 *attempt_number,
+            );
+        }
+        HttpEndpoint::ControlPlaneAttemptExecutions {
+            id,
+            task_id,
+            attempt_number,
+        } => {
+            return control_plane_attempt_executions_response(
+                endpoint.clone(),
+                id,
+                task_id,
+                *attempt_number,
+            );
+        }
+        HttpEndpoint::ControlPlaneAttemptExecution {
+            id,
+            task_id,
+            attempt_number,
+            execution_id,
+        } => {
+            return control_plane_attempt_execution_response(
+                endpoint.clone(),
+                id,
+                task_id,
+                *attempt_number,
+                execution_id,
             );
         }
         HttpEndpoint::ControlPlaneMissions { request } => {
@@ -507,6 +543,8 @@ where
         | HttpEndpoint::ControlPlaneRunTask { .. }
         | HttpEndpoint::ControlPlaneTaskAttempts { .. }
         | HttpEndpoint::ControlPlaneTaskAttempt { .. }
+        | HttpEndpoint::ControlPlaneAttemptExecutions { .. }
+        | HttpEndpoint::ControlPlaneAttemptExecution { .. }
         | HttpEndpoint::ControlPlaneRunReview { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
@@ -592,6 +630,7 @@ where
 /// segment from reaching the record store — the same discipline
 /// `daemon_endpoint_identity` applies to its nonce.
 const MAX_AGENT_TASK_RUN_ID_LEN: usize = 256;
+const MAX_CONTROL_PLANE_EXECUTION_ID_LEN: usize = 1024;
 
 /// Versioned control-plane capability, run, and event reads.
 ///
@@ -697,6 +736,58 @@ fn control_plane_task_attempt_response(
     }
 }
 
+fn control_plane_attempt_executions_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    task_id: &str,
+    attempt_number: u32,
+) -> Result<HttpApiResponse> {
+    if attempt_number == 0 {
+        return control_plane_err(
+            endpoint,
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "control-plane attempt number must be positive",
+            ),
+        );
+    }
+    let result = control_plane_run_id(run_id).and_then(|run| {
+        control_plane_task_id(task_id)
+            .and_then(|task| crate::control_plane::executions(&run, &task, attempt_number))
+    });
+    match result {
+        Ok(executions) => control_plane_ok(endpoint, executions),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_attempt_execution_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    task_id: &str,
+    attempt_number: u32,
+    execution_id: &str,
+) -> Result<HttpApiResponse> {
+    if attempt_number == 0 {
+        return control_plane_err(
+            endpoint,
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "control-plane attempt number must be positive",
+            ),
+        );
+    }
+    let result = control_plane_run_id(run_id).and_then(|run| {
+        control_plane_task_id(task_id).and_then(|task| {
+            control_plane_execution_id(execution_id).and_then(|execution| {
+                crate::control_plane::execution(&run, &task, attempt_number, &execution)
+            })
+        })
+    });
+    match result {
+        Ok(execution) => control_plane_ok(endpoint, execution),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
 fn control_plane_mission_response(
     endpoint: HttpEndpoint,
     mission_id: &str,
@@ -747,6 +838,41 @@ fn control_plane_task_id(
         );
     }
     homeboy_control_plane_contract::TaskId::new(task_id).map_err(|error| {
+        homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+    })
+}
+
+fn control_plane_attempt_number(attempt: &str) -> Result<u32> {
+    attempt.parse::<u32>().map_err(|_| {
+        Error::validation_invalid_argument(
+            "attempt",
+            "control-plane attempt number must be a positive integer",
+            Some(attempt.to_string()),
+            None,
+        )
+    })
+}
+
+fn control_plane_execution_id(
+    execution_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ExecutionId,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let execution_id = crate::execution_contract::decode_uri_component_strict(execution_id)
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "execution id contains invalid percent encoding",
+            )
+        })?;
+    if execution_id.len() > MAX_CONTROL_PLANE_EXECUTION_ID_LEN {
+        return Err(
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                "execution id exceeds {MAX_CONTROL_PLANE_EXECUTION_ID_LEN} bytes"
+            )),
+        );
+    }
+    homeboy_control_plane_contract::ExecutionId::new(execution_id).map_err(|error| {
         homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
     })
 }

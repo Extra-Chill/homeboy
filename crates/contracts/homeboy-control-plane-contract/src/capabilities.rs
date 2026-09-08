@@ -30,6 +30,8 @@ pub enum ControlPlaneOperation {
     GetRunTask,
     ListTaskAttempts,
     GetTaskAttempt,
+    ListAttemptExecutions,
+    GetAttemptExecution,
     GetRunReview,
     GetRunEvents,
     ExecuteRunAction,
@@ -102,6 +104,8 @@ mod tests {
                     | ControlPlaneOperation::GetRunTask
                     | ControlPlaneOperation::ListTaskAttempts
                     | ControlPlaneOperation::GetTaskAttempt
+                    | ControlPlaneOperation::ListAttemptExecutions
+                    | ControlPlaneOperation::GetAttemptExecution
                     | ControlPlaneOperation::GetRunReview
                     | ControlPlaneOperation::GetRunEvents
                     | ControlPlaneOperation::ExecuteRunAction

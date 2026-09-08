@@ -3584,6 +3584,10 @@ fn local_provider_reservation_persists_reusable_owner_identity_before_execution(
         execution["owner_identity"],
         json!("owner-identity:task-a:1")
     );
+    assert_eq!(
+        execution["execution_identity"],
+        json!("owner-identity:task-a:1:execution")
+    );
     assert_eq!(execution["state"], json!("running"));
 }
 

@@ -19,6 +19,8 @@ pub const CONTROL_PLANE_TASK_SCHEMA: &str = "homeboy/control-plane-task/v1";
 pub const CONTROL_PLANE_TASK_PAGE_SCHEMA: &str = "homeboy/control-plane-task-page/v1";
 pub const CONTROL_PLANE_ATTEMPT_SCHEMA: &str = "homeboy/control-plane-attempt/v1";
 pub const CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA: &str = "homeboy/control-plane-attempt-page/v1";
+pub const CONTROL_PLANE_EXECUTION_SCHEMA: &str = "homeboy/control-plane-execution/v1";
+pub const CONTROL_PLANE_EXECUTION_PAGE_SCHEMA: &str = "homeboy/control-plane-execution-page/v1";
 pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
     "homeboy/control-plane-action-eligibility/v1";
 
@@ -122,15 +124,9 @@ pub struct ControlPlaneRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mission: Option<MissionId>,
     pub run: RunId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attempt: Option<AttemptId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attempt_number: Option<u32>,
     pub state: ControlPlaneRunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ControlPlaneLocation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution: Option<ExecutionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,11 +166,8 @@ impl ControlPlaneRun {
             schema: CONTROL_PLANE_RUN_SCHEMA.to_string(),
             mission: None,
             run: run.clone(),
-            attempt: None,
-            attempt_number: None,
             state: ControlPlaneRunState::Unknown,
             location: None,
-            execution: None,
             phase: None,
             blocker: None,
             owner: None,
@@ -393,6 +386,30 @@ pub struct ControlPlaneAttemptPage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneExecution {
+    pub schema: String,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub execution: ExecutionId,
+    pub state: ControlPlaneState,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneExecutionPage {
+    pub schema: String,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub executions: Vec<ControlPlaneExecution>,
+}
+
 /// Bounded live provider evidence. This intentionally carries timestamps and a
 /// source name only; provider output and filesystem paths remain out of status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -564,16 +581,18 @@ mod tests {
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
         ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneAttempt,
         ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
-        ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
-        ControlPlaneLocation, ControlPlaneMission, ControlPlaneMissionListRequest,
-        ControlPlaneMissionPage, ControlPlaneOwner, ControlPlaneProviderSummary,
-        ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
-        ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary,
-        ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
-        CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-        CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+        ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneExecution,
+        ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+        ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
+        ControlPlaneProviderSummary, ControlPlaneResult, ControlPlaneRun,
+        ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunState, ControlPlaneRuntime,
+        ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest,
+        ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
+        CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+        CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+        CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
     };
     use crate::{
         AttemptCursor, AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
@@ -588,14 +607,11 @@ mod tests {
         let run = RunId::new(AGENT_TASK_RUN).expect("run");
         let mut resource = ControlPlaneRun::new(run.clone());
         resource.mission = Some(MissionId::new(AGENT_TASK_COOK).expect("mission"));
-        resource.attempt = Some(AttemptId::new(AGENT_TASK_RUN).expect("attempt"));
-        resource.attempt_number = Some(1);
         resource.state = ControlPlaneRunState::Succeeded;
         resource.location = Some(ControlPlaneLocation {
             runner_id: Some("homeboy-lab".to_string()),
             remote_run_id: Some("remote-run-1".to_string()),
         });
-        resource.execution = Some(ExecutionId::new("job-1").expect("execution"));
         resource.phase = Some("terminal".to_string());
         resource.blocker = Some(ControlPlaneBlocker {
             code: Some("stale".to_string()),
@@ -670,8 +686,9 @@ mod tests {
         assert_eq!(value["schema"], CONTROL_PLANE_RUN_SCHEMA);
         assert_eq!(value["mission"], AGENT_TASK_COOK);
         assert_eq!(value["run"], AGENT_TASK_RUN);
-        assert_eq!(value["attempt"], AGENT_TASK_RUN);
-        assert_eq!(value["attempt_number"], 1);
+        assert!(value.get("attempt").is_none());
+        assert!(value.get("attempt_number").is_none());
+        assert!(value.get("execution").is_none());
         assert_eq!(value["state"], "succeeded");
         assert_eq!(value["phase"], "terminal");
         assert_eq!(value["owner"]["kind"], "runner");
@@ -832,6 +849,33 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn attempt_scoped_execution_resource_and_page_round_trip() {
+        let attempt = AttemptId::new(format!("{AGENT_TASK_RUN}:review:1")).expect("attempt");
+        let execution = ControlPlaneExecution {
+            schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
+            run: RunId::new(AGENT_TASK_RUN).expect("run"),
+            task: TaskId::new("review").expect("task"),
+            attempt: attempt.clone(),
+            execution: ExecutionId::new(format!("{attempt}:execution")).expect("execution"),
+            state: ControlPlaneState::Succeeded,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:01:00Z".to_string()),
+        };
+        let page = ControlPlaneExecutionPage {
+            schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
+            run: execution.run.clone(),
+            task: execution.task.clone(),
+            attempt,
+            executions: vec![execution],
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneExecutionPage>(value).expect("deserialize"),
+            page
+        );
     }
 
     #[test]
