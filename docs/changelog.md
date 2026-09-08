@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.369.6] - 2026-09-08
+
+### Fixed
+- render external storage provider commands
+- retain snapshot staging ownership
+- admit exhausted Cook retries
+- carry provider credentials as SecretEnvPlan references in reverse-runner Cook handoff
+- bound reconciliation passes
+- resolve abbreviated refresh authorities
+- protect temp Cargo targets
+- Fix queued Cook readiness rearm dispatch
+- compare full build identities
+
 ## [0.369.5] - 2026-09-07
 
 ### Fixed

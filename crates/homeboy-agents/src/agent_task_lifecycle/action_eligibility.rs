@@ -138,6 +138,11 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
                         "unmaterialized Cook admission is owned by an active replay or materialization",
                     );
                 }
+                if let Some(next_attempt_at) = scheduled_unmaterialized_admission_retry(record) {
+                    return available(format!(
+                        "resume is legal but explicitly re-arms this admission; automatic reconciliation is scheduled for {next_attempt_at}, so waiting is the recommended next action"
+                    ));
+                }
                 if matches!(
                     state,
                     "blocked_runner_unavailable" | "blocked_runner_stale" | "queued"
@@ -164,6 +169,18 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
         },
         _ => unavailable("terminal runs cannot be resumed"),
     }
+}
+
+fn scheduled_unmaterialized_admission_retry(record: &AgentTaskRunRecord) -> Option<String> {
+    let admission = record.metadata.get("unmaterialized_cook_admission")?;
+    if !admission.is_object() || record.state.is_terminal() {
+        return None;
+    }
+    let next_attempt_at = admission.pointer("/retry/next_attempt_at")?.as_str()?;
+    let next_attempt_at = chrono::DateTime::parse_from_rfc3339(next_attempt_at)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    (next_attempt_at > chrono::Utc::now()).then(|| next_attempt_at.to_rfc3339())
 }
 
 fn retry_availability(
@@ -382,6 +399,29 @@ mod tests {
             ),
             ControlPlaneActionAvailability::Unavailable
         );
+    }
+
+    #[test]
+    fn scheduled_unmaterialized_retry_describes_resume_as_a_manual_rearm() {
+        let mut record = record(AgentTaskRunState::Queued, false);
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_stale",
+            "retry": { "next_attempt_at": "2099-01-01T00:00:00Z" },
+        });
+
+        let report = lifecycle_action_eligibility(&record, None);
+        let resume = report
+            .actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Available
+        );
+        assert!(resume.reason.contains("explicitly re-arms"));
+        assert!(resume.reason.contains("recommended next action"));
     }
 
     #[test]

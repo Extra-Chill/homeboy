@@ -490,8 +490,14 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(blocker) = string_value(payload, &["blocker", "message"]) {
         lines.push(format!("Blocker: {blocker}"));
     }
-    if string_value(payload, &["admission", "disposition"]) == Some("scheduled_automatic_retry") {
-        lines.push("Admission: bounded automatic retry is scheduled".to_string());
+    if string_value(payload, &["blocker", "retry", "disposition"])
+        == Some("automatic_reconciliation_scheduled")
+    {
+        let next_attempt_at = string_value(payload, &["blocker", "retry", "next_attempt_at"])
+            .unwrap_or("the recorded retry time");
+        lines.push(format!(
+            "Retry: automatic reconciliation scheduled for {next_attempt_at}; waiting is recommended"
+        ));
     }
     lines.push(format!(
         "Artifacts: {}",
@@ -505,7 +511,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 }
 
 fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
-    if string_value(payload, &["admission", "disposition"]) == Some("scheduled_automatic_retry") {
+    if string_value(payload, &["blocker", "retry", "disposition"])
+        == Some("automatic_reconciliation_scheduled")
+    {
         return format!("homeboy agent-task status {run_id} --watch");
     }
     if string_value(payload, &["blocker", "code"]) == Some("controller_failure")
@@ -1722,22 +1730,42 @@ mod tests {
     }
 
     #[test]
-    fn status_summary_watches_scheduled_admission_retry_instead_of_resuming() {
+    fn status_summary_waits_for_a_scheduled_unmaterialized_admission_retry() {
         let payload = json!({
             "schema": "homeboy/control-plane-run/v1",
-            "run": "scheduled-cook",
+            "run": "unmaterialized-cook",
             "state": "queued",
-            "artifacts": [],
-            "admission": {"disposition": "scheduled_automatic_retry"},
-            "action_eligibility": {"actions": [{
-                "action": "resume", "availability": "available"
-            }]}
+            "blocker": {
+                "code": "queued",
+                "state": "queued",
+                "message": "Lab admission is waiting for runner reconciliation",
+                "reason": "Lab admission is waiting for runner reconciliation",
+                "retry": {
+                    "policy": "bounded_exponential",
+                    "attempts": 3,
+                    "max_attempts": 20,
+                    "next_attempt_at": "2099-01-01T00:00:00+00:00",
+                    "disposition": "automatic_reconciliation_scheduled"
+                }
+            },
+            "action_eligibility": {
+                "actions": [{
+                    "action": "resume",
+                    "availability": "available",
+                    "reason": "resume is legal but explicitly re-arms this admission",
+                    "confirmation": "none",
+                    "idempotent": true,
+                    "requires_revalidation": true,
+                    "result_resource_type": "agent_task_run"
+                }]
+            }
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-        assert!(summary.contains("Admission: bounded automatic retry is scheduled\n"));
-        assert!(summary.contains("Next: homeboy agent-task status scheduled-cook --watch\n"));
-        assert!(!summary.contains("resume scheduled-cook"));
+
+        assert!(summary.contains("Retry: automatic reconciliation scheduled"));
+        assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
+        assert!(!summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
     }
 
     #[test]
