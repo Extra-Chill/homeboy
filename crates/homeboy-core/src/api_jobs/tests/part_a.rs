@@ -39,6 +39,29 @@ fn inspection_reuses_the_canonical_job_and_keeps_events_separate() {
 }
 
 #[test]
+fn inspection_projects_linked_durable_run_from_retained_event_metadata() {
+    let store = JobStore::default();
+    let job = store.create("controller.work");
+    store
+        .append_event(
+            job.id,
+            JobEventKind::Progress,
+            None,
+            Some(json!({"durable_run_id": "run-linked-1"})),
+        )
+        .expect("append linked run metadata");
+
+    assert_eq!(
+        store
+            .inspection(job.id)
+            .expect("inspection")
+            .linked_durable_run_id
+            .as_deref(),
+        Some("run-linked-1")
+    );
+}
+
+#[test]
 fn active_count_reads_durable_jobs_without_reconciling_them() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");
