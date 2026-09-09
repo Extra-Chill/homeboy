@@ -1153,6 +1153,103 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     Ok(updated.unwrap_or(current))
 }
 
+/// Authorize one queued Cook admission to replay locally without creating a new
+/// Cook. The admission parent remains the canonical mission/run identity; only
+/// its unconsumed replay route changes. A claimed replay, materializing child,
+/// or any provider execution has crossed the ownership boundary and is refused.
+pub fn update_unmaterialized_cook_placement_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    placement: &str,
+    actor: &str,
+) -> Result<AgentTaskRunRecord> {
+    if placement != "local" {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "queued Cook placement updates currently require explicit local placement",
+            Some(placement.to_string()),
+            None,
+        ));
+    }
+    let cook_id = sanitize_run_id(cook_id);
+    store.with_config_lock(|| {
+        let updated = store.mutate_record_locked_without_terminal_projection(&cook_id, |record| {
+            let execution_started = record.metadata["provider_executions"]
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+                || store.read_cook_index(&cook_id).is_ok()
+                || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
+                    .as_str()
+                    .is_some_and(|run_id| store.read_record(run_id).is_ok());
+            let admission = &mut record.metadata["unmaterialized_cook_admission"];
+            if record.state.is_terminal()
+                || !admission.is_object()
+                || execution_started
+                || matches!(
+                    admission["lease"]["state"].as_str(),
+                    Some("claimed" | "consumed" | "materializing")
+                )
+            {
+                return false;
+            }
+            let Some(argv) = admission["binding"]["replay_intent"]["argv"].as_array_mut() else {
+                return false;
+            };
+            let mut found = false;
+            let mut index = 0;
+            while index < argv.len() {
+                if argv[index] == "--placement" {
+                    if let Some(value) = argv.get_mut(index + 1) {
+                        *value = json!("local");
+                        found = true;
+                        break;
+                    }
+                    return false;
+                }
+                if argv[index]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("--placement="))
+                {
+                    argv[index] = json!("--placement=local");
+                    found = true;
+                    break;
+                }
+                index += 1;
+            }
+            if !found {
+                argv.insert(1, json!("--placement=local"));
+            }
+            admission["binding"]["placement"]["requested"] = json!("local");
+            admission["binding"]["placement"]["local_fallback"] = json!(true);
+            admission["state"] = json!("queued");
+            admission["reason"] = json!("explicit local placement authorized");
+            admission["retry"]["next_attempt_at"] = json!(chrono::Utc::now().to_rfc3339());
+            record.metadata["placement_update"] = json!({
+                "schema": "homeboy/unmaterialized-cook-placement-update/v1",
+                "placement": "local",
+                "actor": homeboy_core::redaction::redact_string(actor),
+                "confirmed_at": now_timestamp(),
+                "preserved_identity": true,
+            });
+            record.updated_at = Some(now_timestamp());
+            true
+        })?;
+        if let Some(updated) = updated {
+            return Ok(updated);
+        }
+        let current = store.read_record(&cook_id)?;
+        if current.metadata["placement_update"]["placement"] == "local" {
+            return Ok(current);
+        }
+        Err(Error::validation_invalid_argument(
+            "placement",
+            "placement update requires an unexecuted queued Cook admission with no active replay ownership",
+            Some(cook_id),
+            None,
+        ))
+    })
+}
+
 /// Read the durable cancellation fence from an explicitly rooted store.
 ///
 /// The fence is a field on the handoff parent record, not a separate marker

@@ -20,7 +20,7 @@ use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
-    LifecycleReadArgs, LogsArgs, PromoteArgs, QuarantineArgs, RearmArgs,
+    LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs,
     RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
     SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
@@ -167,6 +167,8 @@ pub enum AgentTaskCommand {
     Rearm(RearmArgs),
     /// Resume a queued or stale-running durable run.
     Resume(ResumeArgs),
+    /// Change an unexecuted queued Cook's placement after explicit confirmation.
+    PlacementUpdate(PlacementUpdateArgs),
     /// Submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
     /// Cook, submit, and inspect batches of independent tasks.

@@ -27,8 +27,9 @@ use homeboy::core::Error;
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, PromotionProviderArgs,
-    ResumeArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs, ValidatePlanArgs,
+    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, PlacementUpdateArgs,
+    PromotionProviderArgs, ResumeArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs,
+    ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::validate_gate_contracts;
@@ -8219,6 +8220,43 @@ pub(super) fn resume(args: ResumeArgs) -> CmdResult<Value> {
         args.idempotency_key,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
+}
+
+pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
+    if !homeboy::core::resource_policy_context::captured_context()
+        .is_some_and(|context| context.local_override)
+    {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "placement update requires explicit --placement local authorization",
+            None,
+            None,
+        ));
+    }
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        &args.run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::PlacementUpdate,
+            idempotency_key: args
+                .idempotency_key
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema:
+                    homeboy_control_plane_contract::CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA
+                        .to_string(),
+                data: json!({ "placement": "local" }),
+            },
+            confirmed: args.confirm,
+        },
+    )?;
+    Ok((
+        serde_json::to_value(acknowledgement)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        0,
+    ))
 }
 
 pub(super) fn run_resume_with_executor(

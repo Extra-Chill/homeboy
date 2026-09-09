@@ -41,12 +41,12 @@ pub use args::{
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, DiagnoseArgs, EvidenceArgs,
-    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PromoteArgs,
-    PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, ReconcileRecordsArgs,
-    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
-    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs, VerifyGateArgs,
-    VerifyReplacementArgs,
+    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PlacementUpdateArgs,
+    PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs,
+    ReconcileRecordsArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs,
+    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
+    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs,
+    VerifyGateArgs, VerifyReplacementArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -286,6 +286,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
 ) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
+        AgentTaskCommand::PlacementUpdate(args) => run::placement_update(args),
         AgentTaskCommand::Cook(mut cook_args) => {
             // Consume a redirected prompt before routing can hand Cook to another
             // process. The captured value, rather than stdin, is then the input

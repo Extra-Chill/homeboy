@@ -726,6 +726,7 @@ pub struct ControlPlaneStateSummary {
 pub enum ControlPlaneAction {
     Cancel,
     Resume,
+    PlacementUpdate,
     Retry,
     Promote,
     Reconcile,

@@ -67,6 +67,18 @@ pub struct ResumeArgs {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Args, Debug)]
+pub struct PlacementUpdateArgs {
+    /// Durable queued Cook ID whose unexecuted placement will be changed.
+    pub run_id: String,
+    /// Record the operator's confirmation of this execution-route change.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Stable key used to replay this placement update without changing it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
+}
+
 #[cfg_attr(test, derive(Default))]
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
@@ -207,6 +219,21 @@ mod tests {
         assert_eq!(args.run_id, "run-a");
         assert_eq!(args.artifact.as_deref(), Some("/trusted/homeboy"));
         assert!(args.source.is_none());
+    }
+
+    #[test]
+    fn placement_update_requires_explicit_local_confirmation() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "placement-update",
+            "cook-a",
+            "--confirm",
+        ])
+        .expect("local placement update parses");
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Local);
     }
 
     #[test]
