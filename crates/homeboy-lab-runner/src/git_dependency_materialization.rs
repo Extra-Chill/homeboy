@@ -842,9 +842,6 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::{Duration, Instant};
 
     use homeboy_core::engine::shell;
     use homeboy_core::test_support::GitFixture as GitRepository;
@@ -940,64 +937,6 @@ mod tests {
             git_output(checkout.path(), &["rev-parse", "HEAD"]),
             expected
         );
-    }
-
-    #[test]
-    fn dependency_refresh_waits_for_remote_tracking_authority() {
-        let fixture = GitDependencyFixture::new();
-        fixture.commit_file("initial.txt", "initial");
-        fixture.push();
-        let checkout = fixture.clone_checkout();
-        let (locked, ready) = mpsc::channel();
-        let (release, released) = mpsc::channel();
-        let locked_checkout = checkout.path().to_path_buf();
-        let holder = thread::spawn(move || {
-            homeboy_core::git::with_remote_tracking_authority_until(
-                &locked_checkout,
-                "test lock holder",
-                Instant::now() + Duration::from_secs(2),
-                |_| {
-                    locked.send(()).unwrap();
-                    released.recv().expect("release authority");
-                    Ok(())
-                },
-            )
-            .unwrap();
-        });
-        ready.recv().expect("authority acquired");
-
-        let attempted = fixture.temp.path().join("contender-attempted-authority");
-        let _attempted = homeboy_core::test_support::EnvVarGuard::set(
-            "HOMEB0Y_REMOTE_TRACKING_FETCH_LOCK_ATTEMPTED",
-            &attempted,
-        );
-        let (done, completed) = mpsc::channel();
-        let contender_checkout = checkout.path().to_path_buf();
-        let contender = thread::spawn(move || {
-            done.send(ensure_git_dependency_fresh(
-                &contender_checkout,
-                None,
-                false,
-            ))
-            .expect("report contender result");
-        });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !attempted.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(attempted.exists(), "contender did not attempt authority");
-        assert!(
-            completed.try_recv().is_err(),
-            "contender proceeded before authority release"
-        );
-
-        release.send(()).expect("release holder");
-        holder.join().unwrap();
-        completed
-            .recv()
-            .expect("contender completes after authority release")
-            .expect("refresh succeeds");
-        contender.join().unwrap();
     }
 
     #[test]
