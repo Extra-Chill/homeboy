@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.1] - 2026-09-09
+
+### Changed
+- one duration parser for every command surface
+- declare the extension root manifest once
+
+### Fixed
+- initialize pre-execution blocker metadata
+- bound fanout preview readiness admission
+- resolve secret_env_projections from component settings in preflight.test_secret_env
+- cover remaining fetch authority paths
+- restore the workspace build for detached staging blockers
+- stop reporting platform-split tests as shadowed coverage
+- complete remote tracking fetch authority
+- expose detached staging failures
+- reuse authoritative rotation observation
+- re-resolve binary after promotion
+- persist lifecycle registry ownership
+- keep preview provider readiness owned
+- serialize remote tracking fetches
+- canonicalize execution mirror run identity
+- remove derived job authority
+
 ## [0.371.0] - 2026-09-09
 
 ### Added
