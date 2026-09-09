@@ -1109,23 +1109,7 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    fn ssh_runner() -> Runner {
-        Runner {
-            id: "lab".to_string(),
-            kind: RunnerKind::Ssh,
-            server_id: Some("srv".to_string()),
-            workspace_root: Some("/srv/homeboy".to_string()),
-            settings: RunnerSettings {
-                daemon: true,
-                ..Default::default()
-            },
-            env: Default::default(),
-            secret_env: Default::default(),
-            resources: Default::default(),
-            policy: RunnerPolicy::default(),
-        }
-    }
-
+    pub(crate) use crate::test_support::ssh_runner;
     #[test]
     fn capability_preflight_uses_injected_homeboy_command() {
         let mut runner = ssh_runner();

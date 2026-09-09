@@ -137,23 +137,7 @@ fn mirror_refresh_recovers_terminal_evidence_from_the_exact_retained_generation(
     );
 }
 
-fn ssh_runner() -> Runner {
-    Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: Some("srv".to_string()),
-        workspace_root: Some("/srv/homeboy".to_string()),
-        settings: RunnerSettings {
-            daemon: true,
-            ..Default::default()
-        },
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: RunnerPolicy::default(),
-    }
-}
-
+pub(crate) use crate::test_support::ssh_runner;
 fn terminal_runner_job() -> Job {
     Job {
         id: Uuid::new_v4(),
