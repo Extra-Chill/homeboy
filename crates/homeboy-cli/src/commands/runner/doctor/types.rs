@@ -27,6 +27,10 @@ pub struct RunnerDoctorOutput {
     pub runner_id: String,
     pub runner: RunnerTargetSummary,
     pub status: RunnerDoctorStatus,
+    /// The selected, actionable root cause when doctor reports a nonzero
+    /// readiness result. This is lifted into the command-result envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunnerDoctorFailure>,
     pub capabilities: RunnerCapabilities,
     pub resources: RunnerResources,
     pub checks: Vec<RunnerCheck>,
@@ -46,6 +50,17 @@ pub struct RunnerDoctorOutput {
     pub provider_readiness: Option<RunnerDoctorProviderReadiness>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<RunnerRepair>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerDoctorFailure {
+    pub code: String,
+    pub message: String,
+    pub details: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<crate::commands::utils::response::CommandNextAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
