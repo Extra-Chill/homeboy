@@ -6920,7 +6920,7 @@ fn write_http_response(mut stream: TcpStream, response: &HttpResponse) -> std::i
     };
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response.status_code,
         status_text,
         body.len(),

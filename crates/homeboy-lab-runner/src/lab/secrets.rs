@@ -23,6 +23,7 @@ use homeboy_core::secret_env_plan::{
     SecretEnvHandoffEntry, SecretEnvPlan, SecretEnvPlanMaterializeRequest,
 };
 use homeboy_core::{config, Error, Result};
+use homeboy_runner_contract::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 
 use super::super::Runner;
 use super::args_util::{non_empty_arg, subcommand_index};
@@ -79,7 +80,8 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
         .into_iter()
         .filter(|(name, _)| !secret_env_names.contains(name))
         .collect::<BTreeMap<_, _>>();
-    let secret_env_plan = materialized_lab_secret_env_plan(public_env, secret_env_names.clone())?;
+    let mut secret_env_plan =
+        materialized_lab_secret_env_plan(public_env, secret_env_names.clone())?;
     let resolved_secret_env_names = secret_env_plan.secret_env_names();
     let secret_values = env_delta
         .iter()
@@ -96,6 +98,26 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&tunnel_secret_env));
     runner_deferred_secret_env.sort();
     runner_deferred_secret_env.dedup();
+    // Preserve authority with the durable name-only plan. Only values resolved
+    // by this controller are eligible for the transient broker sidecar.
+    secret_env_plan.env_materialization = Some(EnvMaterializationPlan {
+        secret_refs: secret_env_plan
+            .secret_env_names()
+            .into_iter()
+            .map(|name| EnvSecretRef {
+                owner: Some(
+                    if runner_deferred_secret_env.contains(&name) {
+                        "runner"
+                    } else {
+                        "controller"
+                    }
+                    .to_string(),
+                ),
+                name,
+            })
+            .collect(),
+        ..EnvMaterializationPlan::default()
+    });
     let entries = lab_secret_env_handoff_entries(
         &env_delta,
         &runner_deferred_secret_env,

@@ -1,4 +1,5 @@
 use homeboy_engine_primitives::content_hash;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -61,6 +62,28 @@ pub(super) fn exec_via_reverse_broker(
     });
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
+    let controller_credential_delivery = {
+        // SecretEnvPlan is intentionally name-only. The materialization plan is
+        // the durable ownership authority, so an ambient controller value never
+        // overrides a runner-owned reference with the same name.
+        let controller_owned = secret_env_plan
+            .env_materialization
+            .as_ref()
+            .map(|plan| {
+                plan.secret_refs
+                    .iter()
+                    .filter(|secret| secret.owner.as_deref() == Some("controller"))
+                    .map(|secret| secret.name.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let env: BTreeMap<_, _> = redaction_env
+            .iter()
+            .filter(|(name, _)| controller_owned.contains(name.as_str()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        (!env.is_empty()).then_some(homeboy_runner_contract::RunnerCredentialDelivery { env })
+    };
     // Durable reverse-runner jobs cannot persist inline secret values
     // (`reject_inline_durable_secret_env`). Strip every planned secret name —
     // including provider credential requirements and env-name aliases — so the
@@ -172,12 +195,15 @@ pub(super) fn exec_via_reverse_broker(
         envelope,
         workspace_claim_binding: None,
         workspace_owner_lease: workspace_owner_lease.clone(),
+        credential_delivery: controller_credential_delivery,
     };
     if detach_after_handoff {
         if let Some(run_id) = run_id.as_deref() {
+            let mut durable_submission = submission.clone();
+            durable_submission.credential_delivery = None;
             homeboy_agents::agent_task_lifecycle::record_lab_offload_submission_envelope(
                 run_id,
-                &submission,
+                &durable_submission,
             )?;
         }
     }

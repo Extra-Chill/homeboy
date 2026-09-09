@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use reqwest::blocking::Client;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobResult};
 use homeboy_core::error::{Error, Result};
@@ -169,6 +170,37 @@ pub(super) fn consume_execution(
         )
     })?;
     Ok(job)
+}
+
+/// Fetch controller-owned credentials only after the worker has verified the
+/// claim. The broker atomically consumes this capability before returning it.
+pub(super) fn consume_credential_delivery(
+    client: &Client,
+    broker_url: &str,
+    token: Option<&str>,
+    runner_id: &str,
+    claim: &RunnerApiClaimedExecution,
+) -> Result<BTreeMap<String, String>> {
+    let Some(delivery) = claim.credential_delivery.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    let data = broker_http::post_json(
+        client,
+        broker_url,
+        &format!(
+            "/runner/jobs/{}/credentials/{}",
+            claim.job_id, delivery.delivery_id
+        ),
+        json!({ "runner_id": runner_id, "claim_id": remote_runner_claim_id(claim) }),
+        "consume controller credential delivery",
+        token,
+    )?;
+    serde_json::from_value(data["env"].clone()).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse controller credential delivery".to_string()),
+        )
+    })
 }
 
 /// Check the exact durable owner lease without consuming the execution receipt.

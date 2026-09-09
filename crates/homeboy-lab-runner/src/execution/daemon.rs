@@ -137,6 +137,7 @@ pub(super) fn exec_via_daemon(
         envelope,
         workspace_claim_binding: None,
         workspace_owner_lease: None,
+        credential_delivery: None,
     };
     let payload = serde_json::to_value(DirectDaemonExecSubmitRequest {
         submission,

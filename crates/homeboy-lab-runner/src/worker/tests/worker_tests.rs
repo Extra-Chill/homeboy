@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -5,8 +6,9 @@ use std::sync::{
 use std::time::Duration;
 
 use homeboy_core::api_jobs::{
-    JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
+    Job, JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
 };
+use homeboy_core::broker_auth::BROKER_TOKEN_HEADER;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::server::{RunnerPolicy, RunnerSecretEnvRef};
 use homeboy_core::test_support;
@@ -158,6 +160,114 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
                 serde_json::json!("linux_procfs_process_tree")
             );
             assert!(result["metrics"]["sample_count"].as_u64().is_some());
+        }
+    });
+}
+
+#[test]
+fn reverse_worker_receives_controller_credential_over_authenticated_broker_without_persistence() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+            false,
+        )
+        .expect("create runner");
+        crate::merge(
+            Some("lab"),
+            &serde_json::json!({
+                "policy": RunnerPolicy {
+                    allow_raw_exec: Some(true),
+                    workspace_roots: vec!["/tmp".to_string()],
+                    allowed_commands: vec!["sh".to_string()],
+                    ..Default::default()
+                }
+            })
+            .to_string(),
+            &[],
+        )
+        .expect("set policy");
+        let broker = test_support::AuthenticatedReverseBrokerFixture::start("lab");
+        let sentinel = "controller-secret-sentinel-do-not-persist";
+        let request = RemoteRunnerJobRequest {
+            runner_id: "lab".to_string(),
+            project_id: None,
+            operation: "runner.exec".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "test -n \"$PROVIDER_TOKEN\" && printf controller-credential-ok".to_string(),
+            ],
+            cwd: Some("/tmp".to_string()),
+            env: Default::default(),
+            secret_env_names: vec!["PROVIDER_TOKEN".to_string()],
+            secret_env_plan: SecretEnvPlan {
+                env_materialization: Some(
+                    homeboy_runner_contract::env_materialization_plan::EnvMaterializationPlan {
+                        secret_refs: vec![
+                            homeboy_runner_contract::env_materialization_plan::EnvSecretRef {
+                                name: "PROVIDER_TOKEN".to_string(),
+                                owner: Some("controller".to_string()),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ),
+                ..SecretEnvPlan::from_secret_env_names(["PROVIDER_TOKEN".to_string()])
+            },
+            env_materialization: None,
+            capture_patch: false,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            require_paths: Vec::new(),
+            extension_env_providers: Vec::new(),
+            lab_runner_workload: None,
+            lifecycle: None,
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            metadata: None,
+        };
+        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "controller-credential-worker-e2e".to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), sentinel.to_string())]),
+            }),
+        };
+        let response: serde_json::Value = reqwest::blocking::Client::new()
+            .post(format!("{}/runner/jobs", broker.url()))
+            .header(BROKER_TOKEN_HEADER, broker.token())
+            .json(&submission)
+            .send()
+            .expect("submit controller credential job")
+            .error_for_status()
+            .expect("accept controller credential job")
+            .json()
+            .expect("decode controller submission response");
+        let job: Job = serde_json::from_value(response["data"]["body"]["job"].clone())
+            .expect("decode submitted job");
+
+        let mut options = worker_options(broker.url().to_string());
+        options.broker_token = Some(broker.token().to_string());
+        let (output, exit_code) = run_reverse_worker(options).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.job.as_ref().expect("finished job").id, job.id);
+        assert_eq!(
+            result_event_data(&broker.store, job.id)["stdout"],
+            serde_json::json!("controller-credential-ok")
+        );
+        for value in [
+            serde_json::to_string(&output).expect("serialize worker output"),
+            serde_json::to_string(&broker.store.get(job.id).expect("stored job"))
+                .expect("serialize stored job"),
+            serde_json::to_string(&broker.store.events(job.id).expect("stored events"))
+                .expect("serialize stored events"),
+        ] {
+            assert!(!value.contains(sentinel));
         }
     });
 }

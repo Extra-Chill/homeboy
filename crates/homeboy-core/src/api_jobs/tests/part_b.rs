@@ -1502,6 +1502,7 @@ fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
         envelope,
         workspace_claim_binding: None,
         workspace_owner_lease: None,
+        credential_delivery: None,
     };
     let accepted = store
         .submit_runner_api_request(submission.clone())

@@ -1,11 +1,187 @@
 #![cfg(test)]
 
+use std::collections::BTreeMap;
 use std::fs;
 
 use serde_json::json;
 
 use super::*;
 use crate::observation::{ArtifactRecord, RunRecord};
+use crate::secret_env_plan::SecretEnvPlan;
+
+fn controller_owned_secret_plan(name: &str) -> SecretEnvPlan {
+    let mut plan = SecretEnvPlan::from_secret_env_names(vec![name.to_string()]);
+    plan.env_materialization = Some(
+        homeboy_runner_contract::env_materialization_plan::EnvMaterializationPlan {
+            secret_refs: vec![
+                homeboy_runner_contract::env_materialization_plan::EnvSecretRef {
+                    name: name.to_string(),
+                    owner: Some("controller".to_string()),
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    plan
+}
+
+#[test]
+fn controller_credential_delivery_is_claim_bound_one_time_and_not_durable() {
+    let store = JobStore::default();
+    let sentinel = "controller-secret-sentinel-do-not-persist";
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
+    let job = store
+        .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "controller-credential-delivery".to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), sentinel.to_string())]),
+            }),
+        })
+        .expect("credential delivery queues");
+    assert!(!serde_json::to_string(&store.get(job.id).unwrap())
+        .unwrap()
+        .contains(sentinel));
+    assert!(!serde_json::to_string(&store.events(job.id).unwrap())
+        .unwrap()
+        .contains(sentinel));
+
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let delivery = claim
+        .credential_delivery
+        .clone()
+        .expect("claim references delivery");
+    assert_eq!(delivery.env_names, vec!["PROVIDER_TOKEN"]);
+    assert!(!serde_json::to_string(&claim).unwrap().contains(sentinel));
+    let claim_id = claim.job.claim_id.as_deref().unwrap();
+    assert!(store
+        .consume_ephemeral_credential_delivery(
+            job.id,
+            "other-runner",
+            claim_id,
+            &delivery.delivery_id
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .consume_ephemeral_credential_delivery(
+                job.id,
+                "homeboy-lab",
+                claim_id,
+                &delivery.delivery_id
+            )
+            .expect("matching claim consumes delivery")
+            .get("PROVIDER_TOKEN"),
+        Some(&sentinel.to_string())
+    );
+    assert!(store
+        .consume_ephemeral_credential_delivery(
+            job.id,
+            "homeboy-lab",
+            claim_id,
+            &delivery.delivery_id
+        )
+        .is_err());
+
+    let mut cancelled_request = remote_runner_request("homeboy-lab", None);
+    cancelled_request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
+    let cancelled = store
+        .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "cancelled-controller-credential-delivery".to_string(),
+            envelope: cancelled_request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), sentinel.to_string())]),
+            }),
+        })
+        .expect("credential delivery queues");
+    let cancelled_claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let cancelled_delivery = cancelled_claim
+        .credential_delivery
+        .expect("delivery reference");
+    store
+        .cancel_remote_runner_job(cancelled.id, "test cancellation")
+        .expect("cancel succeeds");
+    assert!(store
+        .consume_ephemeral_credential_delivery(
+            cancelled.id,
+            "homeboy-lab",
+            cancelled_claim.job.claim_id.as_deref().unwrap(),
+            &cancelled_delivery.delivery_id,
+        )
+        .is_err());
+}
+
+#[test]
+fn controller_delivery_requires_explicit_controller_ownership_and_fails_after_loss() {
+    let store = JobStore::default();
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
+    let submit = |plan: SecretEnvPlan, key: &str| {
+        store.submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: key.to_string(),
+            envelope: {
+                let mut request = request.clone();
+                request.secret_env_plan = plan;
+                request.execution_envelope()
+            },
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), "sentinel".to_string())]),
+            }),
+        })
+    };
+    let mut runner_owned = controller_owned_secret_plan("PROVIDER_TOKEN");
+    runner_owned
+        .env_materialization
+        .as_mut()
+        .unwrap()
+        .secret_refs[0]
+        .owner = Some("runner".to_string());
+    assert!(submit(runner_owned, "runner-owned-delivery").is_err());
+
+    let job = submit(request.secret_env_plan.clone(), "controller-delivery").expect("submit");
+    // This models a controller restart: durable ownership survives while the
+    // process-local plaintext registry is intentionally lost.
+    store.discard_ephemeral_credential_delivery(job.id);
+    let independent = store
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
+        .expect("queue independent runner-owned job");
+    assert!(store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("missing sidecar transitions its job")
+        .is_none());
+    assert_eq!(
+        store.get(job.id).expect("lost-sidecar job").status,
+        JobStatus::Failed
+    );
+    assert_eq!(
+        store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+            .expect("independent job remains claimable")
+            .expect("independent claim")
+            .job
+            .id,
+        independent.id
+    );
+}
 
 #[test]
 fn remote_runner_job_claim_returns_oldest_matching_job() {
@@ -545,6 +721,7 @@ fn remote_runner_protocol_v1_claim_retains_legacy_request_projection() {
             envelope: request.execution_envelope(),
             workspace_claim_binding: None,
             workspace_owner_lease: None,
+            credential_delivery: None,
         })
         .expect("runner API request queues");
     let protocol = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
@@ -606,6 +783,7 @@ fn runner_api_legacy_json_claim_sidecars_match_across_v2_and_v1_projections() {
             envelope: request.execution_envelope(),
             workspace_claim_binding: Some(binding.clone()),
             workspace_owner_lease: Some(owner_lease.clone()),
+            credential_delivery: None,
         })
         .expect("legacy Runner API JSON");
         let submission =

@@ -26,7 +26,8 @@ pub use capability::{
 };
 pub use claim::{
     RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
-    RunnerApiClaimedExecution, RUNNER_API_CLAIM_REQUEST_SCHEMA, RUNNER_API_CLAIM_RESPONSE_SCHEMA,
+    RunnerApiClaimedExecution, RunnerCredentialDeliveryDescriptor, RUNNER_API_CLAIM_REQUEST_SCHEMA,
+    RUNNER_API_CLAIM_RESPONSE_SCHEMA,
 };
 pub use discovery::{
     RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerApiCompatibility,
@@ -59,7 +60,7 @@ pub use session::{
 };
 pub use submission::{
     RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse,
-    RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
+    RunnerCredentialDelivery, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
 };
 pub use workspace::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
