@@ -747,6 +747,9 @@ fn failure_diagnostics_for_data(
     if let Some(diagnostics) = upgrade_runner_convergence_diagnostics(exit_code, data) {
         return Some(diagnostics);
     }
+    if let Some(diagnostics) = runner_reconciliation_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
 
     let specialized_digest = release_failure_digest(data)
         .or_else(|| cook_batch_failure_digest(data))
@@ -773,6 +776,85 @@ fn failure_diagnostics_for_data(
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
     failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+/// Promote the blocker already computed by `runner reconcile` into the command
+/// envelope. The full reconciliation report remains under `data` (#14498).
+fn runner_reconciliation_diagnostics(exit_code: i32, data: &Value) -> Option<CommandDiagnostics> {
+    if data.get("command").and_then(Value::as_str) != Some("runner.reconcile") {
+        return None;
+    }
+
+    let reconciliation = data.get("reconciliation")?;
+    let status = reconciliation.get("status")?.as_str()?;
+    if !matches!(status, "blocked" | "partial_progress") {
+        return None;
+    }
+    let blocker = reconciliation.get("remaining_blocker")?.as_str()?;
+    let retry_predicate = reconciliation
+        .get("retry_predicate")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let message = match retry_predicate.as_deref() {
+        Some(predicate) => format!("runner reconcile {status}: {blocker}; {predicate}"),
+        None => format!("runner reconcile {status}: {blocker}"),
+    };
+    let next_actions = reconciliation
+        .get("next_action")
+        .and_then(Value::as_str)
+        .map(|command| {
+            vec![CommandNextAction::new(
+                "resolve the runner reconciliation blocker",
+                command,
+            )]
+        })
+        .unwrap_or_default();
+    let mut details = Map::new();
+    details.insert("exit_code".to_string(), Value::from(exit_code));
+    details.insert(
+        "source_pointer".to_string(),
+        Value::String("/reconciliation".to_string()),
+    );
+    details.insert(
+        "reconciliation_status".to_string(),
+        Value::String(status.to_string()),
+    );
+    details.insert(
+        "remaining_blocker".to_string(),
+        Value::String(blocker.to_string()),
+    );
+    if let Some(retry_predicate) = retry_predicate {
+        details.insert(
+            "retry_predicate".to_string(),
+            Value::String(retry_predicate),
+        );
+    }
+    if let Some(ownership_evidence) = data
+        .pointer("/connection/daemon_freshness/ownership_evidence")
+        .and_then(Value::as_str)
+    {
+        details.insert(
+            "ownership_evidence".to_string(),
+            Value::String(ownership_evidence.to_string()),
+        );
+    }
+
+    let failure_digest = CommandFailureDigest {
+        summary: message.clone(),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
+        retryable: None,
+    };
+    Some(CommandDiagnostics {
+        code: format!("runner.reconcile.{blocker}"),
+        message,
+        details: Value::Object(details),
+        hints: None,
+        retryable: None,
+        failure_digest: Some(failure_digest),
+    })
 }
 
 fn declared_failure_diagnostics(
@@ -2705,6 +2787,93 @@ mod tests {
             );
             assert_eq!(value["data"], payload, "exit {exit_code} keeps all evidence");
         }
+    }
+
+    #[test]
+    fn runner_reconcile_blockers_are_promoted_with_only_legal_actions() {
+        for (label, payload, code, action) in [
+            (
+                "incompatible daemon",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "daemon_compatibility",
+                        "next_action": "homeboy runner doctor homeboy-lab --scope lab-offload",
+                        "retry_predicate": "daemon_compatible=true after the selected daemon identity is repaired",
+                    },
+                }),
+                "runner.reconcile.daemon_compatibility",
+                Some("homeboy runner doctor homeboy-lab --scope lab-offload"),
+            ),
+            (
+                "ownership evidence unavailable",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "daemon_ownership_evidence_unavailable",
+                        "retry_predicate": "ownership evidence required before daemon recovery: remote daemon lease ownership could not be established",
+                    },
+                    "connection": {
+                        "action": "status",
+                        "daemon_freshness": {
+                            "ownership_evidence": "remote daemon lease ownership could not be established",
+                        },
+                    },
+                }),
+                "runner.reconcile.daemon_ownership_evidence_unavailable",
+                None,
+            ),
+        ] {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(payload.clone()),
+                1,
+                &CommandIdentity::with_operation("runner", "reconcile"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["diagnostics"]["code"], code, "{label}");
+            assert_eq!(
+                value["diagnostics"]["details"]["remaining_blocker"],
+                payload["reconciliation"]["remaining_blocker"],
+                "{label}"
+            );
+            assert_eq!(
+                value["diagnostics"]["details"]["retry_predicate"],
+                payload["reconciliation"]["retry_predicate"],
+                "{label}"
+            );
+            if label == "ownership evidence unavailable" {
+                assert_eq!(
+                    value["diagnostics"]["details"]["ownership_evidence"],
+                    "remote daemon lease ownership could not be established"
+                );
+            }
+            assert_eq!(value["data"], payload, "{label} keeps all evidence");
+            match action {
+                Some(action) => assert_eq!(value["next_actions"][0]["command"], action, "{label}"),
+                None => assert!(value["next_actions"].is_null(), "{label}"),
+            }
+        }
+    }
+
+    #[test]
+    fn successful_runner_reconcile_has_no_failure_diagnostics() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "command": "runner.reconcile",
+                "reconciliation": { "status": "converged" },
+            })),
+            0,
+            &CommandIdentity::with_operation("runner", "reconcile"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], true);
+        assert!(value["diagnostics"].is_null());
     }
 
     #[test]
