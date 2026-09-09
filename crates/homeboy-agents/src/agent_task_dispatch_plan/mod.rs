@@ -361,6 +361,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "resolved_runtime_identity": request.core.resolved_provider_policy
                     .as_ref()
                     .and_then(|policy| policy.runtime_identity.as_ref()),
+                "provider_readiness_generated_fanout_context": request.core.generated_fanout_context,
             }),
         });
     }
@@ -2224,6 +2225,7 @@ mod tests {
                 tasks_json: overrides.core.tasks_json,
                 provider_config: overrides.core.provider_config,
                 client_context: overrides.core.client_context,
+                generated_fanout_context: overrides.core.generated_fanout_context,
                 attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
                 provider_rotations: overrides.core.provider_rotations,

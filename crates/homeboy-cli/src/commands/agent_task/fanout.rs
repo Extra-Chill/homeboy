@@ -1772,6 +1772,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_and_placement(
         attempt_dispatcher,
         None,
         placement,
+        provider::ProviderRuntimeReadinessCache::default(),
     )
 }
 
@@ -1780,6 +1781,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
     attempt_dispatcher: &CookAttemptDispatcherFactory,
     claim: Option<(String, bool)>,
     placement: Placement,
+    mut readiness_cache: provider::ProviderRuntimeReadinessCache,
 ) -> CmdResult<Value> {
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
@@ -1794,15 +1796,19 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
             claim_id.clone(),
             fanout_command(placement, "status", &plan.fanout_id),
         )?;
-        persist_batch_cook_recipes(&plan, |options| {
+        persist_batch_cook_recipes_with_readiness_cache(&plan, &mut readiness_cache, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
             options.provider_transport.attempt_dispatcher = Some(attempt_dispatcher(options));
         })?;
         let ready_plan = plan.ready_plan()?;
-        let cooks = compile_batch_cooks(&ready_plan, |options| {
-            record_gate_contract_validation(options, &gate_contract_validation);
-            options.provider_transport.attempt_dispatcher = Some(attempt_dispatcher(options));
-        })?;
+        let cooks = compile_batch_cooks_with_readiness_cache(
+            &ready_plan,
+            &mut readiness_cache,
+            |options| {
+                record_gate_contract_validation(options, &gate_contract_validation);
+                options.provider_transport.attempt_dispatcher = Some(attempt_dispatcher(options));
+            },
+        )?;
         let concurrency = batch_concurrency(&plan, &cooks);
         let result = batch::start_fanout_run_batch(&plan.fanout_id, &claim_id).and_then(|()| {
             agent_task_service::run_cook_batch_with_control(
@@ -1839,6 +1845,7 @@ fn run_batch_cook_fanout_plan_with_placement(
         Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
         None,
         placement,
+        provider::ProviderRuntimeReadinessCache::default(),
     )
 }
 
@@ -1847,6 +1854,7 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
     executor: SharedAgentTaskExecutor,
     claim: Option<(String, bool)>,
     placement: Placement,
+    mut readiness_cache: provider::ProviderRuntimeReadinessCache,
 ) -> CmdResult<Value> {
     let gate_workspace = batch_plan_gate_workspace(&plan)?;
     let gate_contract_validation = validate_batch_gate_contracts(&plan, gate_workspace.as_deref())?;
@@ -1861,13 +1869,17 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
             claim_id.clone(),
             fanout_command(placement, "status", &plan.fanout_id),
         )?;
-        persist_batch_cook_recipes(&plan, |options| {
+        persist_batch_cook_recipes_with_readiness_cache(&plan, &mut readiness_cache, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
         })?;
         let ready_plan = plan.ready_plan()?;
-        let cooks = compile_batch_cooks(&ready_plan, |options| {
-            record_gate_contract_validation(options, &gate_contract_validation);
-        })?;
+        let cooks = compile_batch_cooks_with_readiness_cache(
+            &ready_plan,
+            &mut readiness_cache,
+            |options| {
+                record_gate_contract_validation(options, &gate_contract_validation);
+            },
+        )?;
         let concurrency = batch_concurrency(&plan, &cooks);
         let result = batch::start_fanout_run_batch(&plan.fanout_id, &claim_id).and_then(|()| {
             agent_task_service::run_cook_batch_with_control(
@@ -2304,7 +2316,16 @@ fn persist_batch_cook_recipes(
     plan: &BatchCookFanoutPlan,
     configure: impl Fn(&mut CookRequest),
 ) -> Result<()> {
-    for options in compile_batch_cooks(plan, configure)? {
+    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
+    persist_batch_cook_recipes_with_readiness_cache(plan, &mut readiness_cache, configure)
+}
+
+fn persist_batch_cook_recipes_with_readiness_cache(
+    plan: &BatchCookFanoutPlan,
+    readiness_cache: &mut provider::ProviderRuntimeReadinessCache,
+    configure: impl Fn(&mut CookRequest),
+) -> Result<()> {
+    for options in compile_batch_cooks_with_readiness_cache(plan, readiness_cache, configure)? {
         agent_task_service::persist_initial_recipe(&options)?;
     }
     Ok(())
@@ -2338,8 +2359,16 @@ fn compile_batch_cooks(
     plan: &BatchCookFanoutPlan,
     configure: impl Fn(&mut CookRequest),
 ) -> Result<Vec<CookRequest>> {
-    let harvest_context = batch_harvest_context()?;
     let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
+    compile_batch_cooks_with_readiness_cache(plan, &mut readiness_cache, configure)
+}
+
+fn compile_batch_cooks_with_readiness_cache(
+    plan: &BatchCookFanoutPlan,
+    readiness_cache: &mut provider::ProviderRuntimeReadinessCache,
+    configure: impl Fn(&mut CookRequest),
+) -> Result<Vec<CookRequest>> {
+    let harvest_context = batch_harvest_context()?;
     plan.cooks
         .iter()
         .map(|cook| {
@@ -2347,7 +2376,7 @@ fn compile_batch_cooks(
             let mut options = agent_task_service::compile_cook_attempt_with_readiness_cache(
                 invocation.options,
                 invocation.dispatch,
-                &mut readiness_cache,
+                readiness_cache,
             )?;
             if !cook.repository_identity.is_null() {
                 options.identity.initial_plan.metadata["cook_repository_identity"] =
@@ -2684,11 +2713,16 @@ fn cook_batch_inner(
         }
         None
     };
+    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     if can_run {
         // Compare the exact workspace-bound recipe that provider execution will
         // persist, not the handle-only planning form created before worktree
         // materialization.
-        if let Err(error) = preflight_batch_cook_recipes(&plan, attempt_dispatcher) {
+        if let Err(error) = preflight_batch_cook_recipes_with_readiness_cache(
+            &plan,
+            attempt_dispatcher,
+            &mut readiness_cache,
+        ) {
             record_batch_preflight_failure(
                 claim.as_ref().map(|(claim_id, _)| claim_id.as_str()),
                 &plan,
@@ -2705,12 +2739,14 @@ fn cook_batch_inner(
                 dispatcher,
                 claim.clone(),
                 placement,
+                readiness_cache,
             )?,
             None => run_batch_cook_fanout_plan_with_executor_claim(
                 plan.clone(),
                 Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
                 claim.clone(),
                 placement,
+                readiness_cache,
             )?,
         };
         Some(serde_json::json!({ "exit_code": exit_code, "result": value }))
@@ -3134,7 +3170,7 @@ fn cook_batch_dry_run_with_deadline(
     let plan_ref = batch_plan_reference(&plan)?;
     let provider_selection_plan = plan.clone();
     let provider_selection_plan_ref = plan_ref.clone();
-    let _provider_selection = planner.run_bounded(
+    let static_routes = planner.run_bounded(
         "provider_selection",
         "static provider selection",
         move || {
@@ -3178,7 +3214,7 @@ fn cook_batch_dry_run_with_deadline(
     planner.record_live_progress("started", Some("provider-owned readiness admission"));
     let provider_dispatchability = (|| {
         let catalog = AgentTaskProviderCatalog::discover();
-        preview_provider_dispatchability_evidence(&plan, &catalog, &plan_ref)
+        preview_provider_dispatchability_evidence(&static_routes, &catalog, &plan_ref)
     })()
     .map_err(|error| {
         planner.record_live_progress("failed", Some("provider-owned readiness admission"));
@@ -3196,7 +3232,7 @@ fn cook_batch_dry_run_with_deadline(
             "preflight": {
                 "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
-                "provider_selection": provider_selection_preflight(&args),
+                "provider_selection": static_routes.evidence,
                 "provider_dispatchability": provider_dispatchability,
                 "deferred_live_checks": ["workspace_materialization"],
                 "placement": fanout_placement_preflight(plan.placement.as_ref()),
@@ -3995,10 +4031,22 @@ fn preflight_batch_cook_recipes(
     plan: &BatchCookFanoutPlan,
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
 ) -> Result<()> {
+    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
+    preflight_batch_cook_recipes_with_readiness_cache(
+        plan,
+        attempt_dispatcher,
+        &mut readiness_cache,
+    )
+}
+
+fn preflight_batch_cook_recipes_with_readiness_cache(
+    plan: &BatchCookFanoutPlan,
+    attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
+    mut readiness_cache: &mut provider::ProviderRuntimeReadinessCache,
+) -> Result<()> {
     // Planning and dry-run callers may only have a managed worktree handle.
     // Validate immutable recipe inputs without resolving that handle as a live
     // workspace; execution validates the materialized workspace separately.
-    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     for cook in &plan.cooks {
         let invocation = cook.to_cook_invocation(plan)?;
         // Preflight must construct the same initial plan that Cook persists.
@@ -4021,13 +4069,24 @@ fn preflight_batch_cook_recipes(
 /// Project static provider selection without a live admission. This runs under
 /// `DryRunPlanner`; the returned route is then admitted once outside that
 /// planner by [`preview_provider_dispatchability_evidence`].
+struct PreviewStaticRoutePlans {
+    evidence: Value,
+    routes: Vec<PreviewStaticRoutePlan>,
+}
+
+struct PreviewStaticRoutePlan {
+    cook_id: String,
+    plan: AgentTaskPlan,
+}
+
 fn preview_provider_selection_evidence(
     plan: &BatchCookFanoutPlan,
     catalog: &AgentTaskProviderCatalog,
     plan_ref: &Value,
-) -> Result<Value> {
+) -> Result<PreviewStaticRoutePlans> {
     let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     let mut children = Vec::with_capacity(plan.cooks.len());
+    let mut routes = Vec::with_capacity(plan.cooks.len());
     for cook in &plan.cooks {
         let mut invocation = cook.to_cook_invocation(plan)?;
         // Generated fanout cooks carry a future worktree handle. Provider
@@ -4043,7 +4102,20 @@ fn preview_provider_selection_evidence(
                 catalog,
                 &mut readiness_cache,
             )?;
-        let task = options.identity.initial_plan.tasks.first().ok_or_else(|| {
+        let mut route_plan = options.identity.initial_plan;
+        route_plan.tasks.truncate(1);
+        if let Some(deadline) = current_cook_deadline() {
+            route_plan.options.execution_budget.deadline_unix_ms = Some(
+                route_plan
+                    .options
+                    .execution_budget
+                    .deadline_unix_ms
+                    .map_or(deadline.deadline_unix_ms(), |existing| {
+                        existing.min(deadline.deadline_unix_ms())
+                    }),
+            );
+        }
+        let task = route_plan.tasks.first().ok_or_else(|| {
             Error::internal_unexpected("compiled fanout cook has no provider task")
         })?;
         children.push(serde_json::json!({
@@ -4055,83 +4127,58 @@ fn preview_provider_selection_evidence(
             },
             "admission": { "state": "pending", "owner": "provider_runtime_readiness" },
         }));
+        routes.push(PreviewStaticRoutePlan {
+            cook_id: cook.cook_id.clone(),
+            plan: route_plan,
+        });
     }
     let checked_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    Ok(serde_json::json!({
-        "schema": "homeboy/agent-task-fanout-provider-selection/v1",
-        "state": "pending",
-        "plan_ref": plan_ref,
-        "checked_at_unix_ms": checked_at_unix_ms,
-        "freshness_window_seconds": Value::Null,
-        "revalidate_before_execution": false,
-        "children": children,
-    }))
+    Ok(PreviewStaticRoutePlans {
+        evidence: serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-provider-selection/v1",
+            "state": "pending",
+            "plan_ref": plan_ref,
+            "checked_at_unix_ms": checked_at_unix_ms,
+            "freshness_window_seconds": Value::Null,
+            "revalidate_before_execution": false,
+            "children": children,
+        }),
+        routes,
+    })
 }
 
 /// Admit each statically selected route exactly once. The caller binds the
 /// batch deadline before entering this function, which propagates it to the
 /// provider readiness cache wait and contained process tree.
 fn preview_provider_dispatchability_evidence(
-    plan: &BatchCookFanoutPlan,
+    static_routes: &PreviewStaticRoutePlans,
     catalog: &AgentTaskProviderCatalog,
     plan_ref: &Value,
 ) -> Result<Value> {
     let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     let mut admitted_routes: BTreeMap<String, Value> = BTreeMap::new();
-    let mut children = Vec::with_capacity(plan.cooks.len());
-    for cook in &plan.cooks {
-        let mut invocation = cook.to_cook_invocation(plan)?;
-        if cook.cwd.is_none() && cook.workspace.is_none() {
-            invocation.dispatch.workspace = None;
-        }
-        let mut static_options =
-            agent_task_service::compile_cook_attempt_static_with_catalog_and_readiness_cache(
-                invocation.options,
-                invocation.dispatch,
-                catalog,
-                &mut readiness_cache,
-            )?;
-        if let Some(deadline) = current_cook_deadline() {
-            let budget = &mut static_options
-                .identity
-                .initial_plan
-                .options
-                .execution_budget;
-            budget.deadline_unix_ms = Some(
-                budget
-                    .deadline_unix_ms
-                    .map_or(deadline.deadline_unix_ms(), |existing| {
-                        existing.min(deadline.deadline_unix_ms())
-                    }),
-            );
-        }
-        let static_task = static_options
-            .identity
-            .initial_plan
-            .tasks
-            .first()
-            .ok_or_else(|| {
-                Error::internal_unexpected("compiled fanout cook has no provider task")
-            })?;
+    let mut children = Vec::with_capacity(static_routes.routes.len());
+    for route in &static_routes.routes {
+        let static_task = route.plan.tasks.first().ok_or_else(|| {
+            Error::internal_unexpected("compiled fanout cook has no provider task")
+        })?;
         // The compiled Cook may contain controller follow-up tasks. This
         // preview admission is for the selected provider route, not every
         // future task in that Cook; admitting the full plan would probe the
         // same route again before execution-side deduplication applies.
-        let mut route_plan = static_options.identity.initial_plan.clone();
-        route_plan.tasks.truncate(1);
         // Share a verdict only when the selected provider would use the same
         // runtime-readiness cache entry, including effective config and secret
         // value identities.
         let route_key =
-            provider::provider_runtime_readiness_cache_identity_for_plan(catalog, &route_plan)?;
+            provider::provider_runtime_readiness_cache_identity_for_plan(catalog, &route.plan)?;
         let admission = if let Some(admission) = admitted_routes.get(&route_key) {
             admission.clone()
         } else {
             let admitted_plan = homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-                &route_plan,
+                &route.plan,
                 catalog,
                 &mut readiness_cache,
             )?;
@@ -4148,7 +4195,7 @@ fn preview_provider_dispatchability_evidence(
             admission
         };
         children.push(serde_json::json!({
-            "cook_id": cook.cook_id,
+            "cook_id": route.cook_id,
             "executor": {
                 "backend": static_task.executor.backend,
                 "selector": static_task.executor.selector,
@@ -5021,6 +5068,7 @@ impl BatchCookSpec {
                 tasks_json: None,
                 provider_config,
                 client_context: Some(merged_client_context(plan, self)),
+                generated_fanout_context: true,
                 attempts: Some(retry_budget.provider_executions),
                 same_provider_retries: Some(retry_budget.same_provider_remediations),
                 provider_rotations: Some(retry_budget.provider_rotations),
@@ -10100,8 +10148,13 @@ fi
                     + 3_000,
             )),
             || {
-                preview_provider_dispatchability_evidence(
+                let static_routes = preview_provider_selection_evidence(
                     &plan,
+                    &catalog,
+                    &json!({"fanout_id": plan.fanout_id}),
+                )?;
+                preview_provider_dispatchability_evidence(
+                    &static_routes,
                     &catalog,
                     &json!({"fanout_id": plan.fanout_id}),
                 )
@@ -10264,8 +10317,14 @@ fi
         )
         .expect("fanout plan");
 
-        let evidence = preview_provider_dispatchability_evidence(
+        let static_routes = preview_provider_selection_evidence(
             &plan,
+            &catalog,
+            &json!({"fanout_id": plan.fanout_id}),
+        )
+        .expect("static routes");
+        let evidence = preview_provider_dispatchability_evidence(
+            &static_routes,
             &catalog,
             &json!({"fanout_id": plan.fanout_id}),
         )
@@ -10321,8 +10380,13 @@ fi
                     + 3_000,
             )),
             || {
-                preview_provider_dispatchability_evidence(
+                let static_routes = preview_provider_selection_evidence(
                     &plan,
+                    &catalog,
+                    &json!({"fanout_id": plan.fanout_id}),
+                )?;
+                preview_provider_dispatchability_evidence(
+                    &static_routes,
                     &catalog,
                     &json!({"fanout_id": plan.fanout_id}),
                 )
