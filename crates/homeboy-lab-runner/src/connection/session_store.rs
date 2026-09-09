@@ -982,6 +982,7 @@ fn is_controller_session_file(path: &std::path::Path) -> bool {
         "generations.json",
         "pending-replacement.json",
         "replacement-operation.json",
+        "admission-mutation-reservation.json",
     ];
 
     path.is_file()
@@ -1327,8 +1328,16 @@ mod tests {
             "generations.json",
             "pending-replacement.json",
             "replacement-operation.json",
+            "admission-mutation-reservation.json",
         ] {
-            std::fs::write(root.path().join(sidecar), "{}").expect("write reserved sidecar");
+            let contents = match sidecar {
+                "admission-mutation-reservation.json" => {
+                    r#"{"operation_id":"operation","owner_pid":1,"owner_start_identity":{"platform":"macos","start_seconds":1,"start_microseconds":1},"created_at":"2026-09-09T00:00:00Z","operation":"ensure_remote_daemon"}"#
+                }
+                "replacement-operation.json" => r#"{"runner_id":"lab","operation_id":"operation"}"#,
+                _ => "{}",
+            };
+            std::fs::write(root.path().join(sidecar), contents).expect("write reserved sidecar");
         }
 
         let live_peer = live_peer_session_in(
