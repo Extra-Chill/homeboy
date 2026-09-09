@@ -232,36 +232,38 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
 
     eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
     let repository = Path::new(path);
-    let remote = resolve_default_remote(repository);
+    let (remote, reference) = remote_and_ref(path, git_ref);
+    let tracking_ref = reference.strip_prefix("refs/heads/").unwrap_or(&reference);
+    let refspec = format!("{reference}:refs/remotes/{remote}/{tracking_ref}");
     let deadline = Instant::now() + Duration::from_secs(30);
-    let _ = fetch_remote_tracking_refs_until(
+    fetch_remote_tracking_refs_until(
         repository,
-        &["fetch", &remote, git_ref, "--depth=50"],
+        &["fetch", &remote, &refspec, "--depth=50"],
         "git fetch changed-since ref",
         &[],
         deadline,
-    );
+    )?;
     for depth in ["50", "200"] {
-        let _ = fetch_remote_tracking_refs_until(
+        fetch_remote_tracking_refs_until(
             repository,
-            &["fetch", "--deepen", depth],
+            &["fetch", &remote, "--deepen", depth],
             "git deepen changed-since history",
             &[],
             deadline,
-        );
+        )?;
         if has_merge_base(path, git_ref) {
             eprintln!("Merge base found after deepening by {depth} commits");
             return Ok(());
         }
     }
     eprintln!("Merge base not found with depth 200, unshallowing repository");
-    let _ = fetch_remote_tracking_refs_until(
+    fetch_remote_tracking_refs_until(
         repository,
-        &["fetch", "--unshallow"],
+        &["fetch", &remote, "--unshallow"],
         "git unshallow changed-since history",
         &[],
         deadline,
-    );
+    )?;
     if has_merge_base(path, git_ref) {
         eprintln!("Merge base found after full unshallow");
         Ok(())
@@ -270,6 +272,27 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
             "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
         )))
     }
+}
+
+fn remote_and_ref(path: &str, git_ref: &str) -> (String, String) {
+    let remote_ref = git_ref.strip_prefix("refs/remotes/").unwrap_or(git_ref);
+    if let Some((remote, reference)) = remote_ref.split_once('/') {
+        let remotes = execute_git(path, &["remote"])
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .any(|name| name == remote)
+            })
+            .unwrap_or(false);
+        if !reference.is_empty() && remotes {
+            return (remote.to_string(), reference.to_string());
+        }
+    }
+
+    (resolve_default_remote(Path::new(path)), git_ref.to_string())
 }
 
 fn is_shallow_repo(path: &str) -> bool {
@@ -652,6 +675,71 @@ mod tests {
 
         assert!(files.contains(&"changed.txt".to_string()));
         assert!(files.contains(&"untracked.txt".to_string()));
+    }
+
+    #[test]
+    fn resolve_merge_base_deepens_remote_qualified_ref_through_named_remote() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let source = dir.path().join("source");
+        let remote = dir.path().join("remote.git");
+        let checkout = dir.path().join("checkout");
+        fs::create_dir(&source).expect("create source");
+        let source_path = source.to_str().expect("utf-8 source path");
+        init_repo_with_initial_commit(source_path);
+        git(source_path, &["checkout", "-qb", "feature"]);
+        fs::write(source.join("feature.txt"), "feature\n").expect("write feature commit");
+        git(source_path, &["add", "."]);
+        git(source_path, &["commit", "-qm", "feature"]);
+        git(
+            source_path,
+            &[
+                "init",
+                "--bare",
+                "-q",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(
+            source_path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(source_path, &["push", "-q", "upstream", "main", "feature"]);
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--branch",
+                "feature",
+                &format!("file://{}", remote.display()),
+                checkout.to_str().expect("utf-8 checkout path"),
+            ])
+            .output()
+            .expect("clone shallow checkout");
+        assert!(clone.status.success(), "shallow clone must succeed");
+        let checkout_path = checkout.to_str().expect("utf-8 checkout path");
+        git(checkout_path, &["remote", "rename", "origin", "upstream"]);
+        git(
+            checkout_path,
+            &["remote", "add", "origin", "file:///missing/origin.git"],
+        );
+        git(
+            checkout_path,
+            &["config", "branch.feature.remote", "origin"],
+        );
+        git(
+            checkout_path,
+            &["config", "branch.feature.merge", "refs/heads/feature"],
+        );
+
+        let merge_base = resolve_merge_base(checkout_path, "upstream/main")
+            .expect("resolve through upstream rather than branch origin");
+        assert!(!merge_base.is_empty());
     }
 
     fn init_repo_with_initial_commit(path: &str) {

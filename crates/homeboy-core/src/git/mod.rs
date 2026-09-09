@@ -96,8 +96,8 @@ pub use primitives::{
     fetch_remote_tracking_refs_until, get_component_path_prefix, get_git_root,
     get_git_root_with_timeout, git_probe_path, has_staged_changes, is_workdir_clean_or_not_git,
     pull_repo, resolve_default_remote, run_git, run_git_output, run_git_output_with_env,
-    run_git_output_with_env_timeout, run_git_with_env, run_git_with_env_timeout, stage_all,
-    update_to_remote_default_branch,
+    run_git_output_with_env_timeout, run_git_remote_tracking_operation_until, run_git_with_env,
+    run_git_with_env_timeout, stage_all, update_to_remote_default_branch,
 };
 pub use primitives::{is_git_repo, is_tracked_path};
 pub use primitives_query::{

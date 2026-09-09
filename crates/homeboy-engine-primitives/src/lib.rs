@@ -19,6 +19,7 @@ pub mod edit_op;
 pub mod edit_op_apply;
 pub mod fs_index_lock;
 pub mod git_changes;
+pub mod git_remote_tracking_authority;
 pub mod grammar;
 pub mod identifier;
 pub mod language;
