@@ -287,6 +287,7 @@ pub(super) fn self_temp_artifact_candidates(
                 source_dirty: false,
                 unpushed_commits: false,
                 pressure_eligible: false,
+                age_gate_days: None,
             });
         }
     }
@@ -341,6 +342,7 @@ fn temp_homeboy_checkout_target_candidate(
         source_dirty: safety.source_dirty,
         unpushed_commits: safety.unpushed_commits,
         pressure_eligible: false,
+        age_gate_days: None,
     }))
 }
 
@@ -393,6 +395,7 @@ fn partial_homeboy_temp_target_candidate(
         source_dirty: false,
         unpushed_commits: false,
         pressure_eligible: false,
+        age_gate_days: None,
     }))
 }
 
