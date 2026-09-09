@@ -520,18 +520,7 @@ mod tests {
     use homeboy::core::observation::{NewRunRecord, RunRecord};
     use homeboy::test_support::with_isolated_home;
 
-    fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-        NewRunRecord::builder(kind)
-            .component_id(component_id)
-            .command(format!("homeboy {kind} {component_id}"))
-            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-            .homeboy_version("test-version")
-            .git_sha(Some("abc123".to_string()))
-            .rig_id(rig_id)
-            .metadata(metadata)
-            .build()
-    }
-
+    use crate::commands::runs::test_support::sample_run;
     fn ownerless_running_run(id: &str, started_at: String) -> RunRecord {
         RunRecord {
             id: id.to_string(),

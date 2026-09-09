@@ -224,18 +224,7 @@ mod tests {
     use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
-    fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-        NewRunRecord::builder(kind)
-            .component_id(component_id)
-            .command(format!("homeboy {kind} {component_id}"))
-            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-            .homeboy_version("test-version")
-            .git_sha(Some("abc123".to_string()))
-            .rig_id(rig_id)
-            .metadata(metadata)
-            .build()
-    }
-
+    use crate::commands::runs::test_support::sample_run;
     #[test]
     fn distribution_counts_scalar_metadata_values() {
         with_isolated_home(|_home| {
