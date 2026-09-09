@@ -32,24 +32,26 @@ else
   payload="$(gh api "repos/${repository}/rulesets/${ruleset_id}")"
 fi
 
-expected_contexts="$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | sort' "${config}")"
-live_contexts="$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | sort' <<<"${payload}")"
-expected_strict="$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.strict_required_status_checks_policy] | first' "${config}")"
-live_strict="$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.strict_required_status_checks_policy] | first' <<<"${payload}")"
-expected_bypass="$(jq -cS '.bypass_actors // []' "${config}")"
-live_bypass="$(jq -cS '.bypass_actors // []' <<<"${payload}")"
+project_contract() {
+  jq -cS '{name, target, enforcement, bypass_actors: (.bypass_actors // []), conditions, rules}'
+}
+
+expected_contract="$(project_contract < "${config}")"
+live_contract="$(project_contract <<<"${payload}")"
+expected_contexts="$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | sort' <<<"${expected_contract}")"
+live_contexts="$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | sort' <<<"${live_contract}")"
 
 outcome="enforced"
 reason=""
 if [ "${live_contexts}" = '[]' ]; then
   outcome="absent"
   reason="required_status_checks is absent"
-elif [ "${expected_contexts}" != "${live_contexts}" ] || [ "${expected_strict}" != "${live_strict}" ] || [ "${expected_bypass}" != "${live_bypass}" ] || [ "$(jq -r '.enforcement // empty' <<<"${payload}")" != "active" ]; then
+elif [ "${expected_contract}" != "${live_contract}" ]; then
   outcome="divergent"
   reason="live ruleset differs from the declared candidate"
 fi
 
-echo "required-gates-ruleset repo=${repository} branch=${branch} ruleset=${ruleset_id} head=${head_sha} outcome=${outcome} expected_contexts=${expected_contexts} live_contexts=${live_contexts} strict=${live_strict} bypass_actors=${live_bypass}"
+echo "required-gates-ruleset repo=${repository} branch=${branch} ruleset=${ruleset_id} head=${head_sha} outcome=${outcome} expected_contexts=${expected_contexts} live_contexts=${live_contexts} expected_contract=${expected_contract} live_contract=${live_contract}"
 
 if [ "${outcome}" != "enforced" ]; then
   echo "::error::required-gates-ruleset: ${reason}" >&2

@@ -26,24 +26,12 @@ fn run_validator(live: &str) -> std::process::Output {
     output
 }
 
-fn live_ruleset(contexts: serde_json::Value) -> String {
-    serde_json::json!({
-        "id": 13680120,
-        "name": "main",
-        "target": "branch",
-        "enforcement": "active",
-        "bypass_actors": [],
-        "rules": [
-            { "type": "deletion" },
-            { "type": "non_fast_forward" },
-            { "type": "required_status_checks", "parameters": {
-                "do_not_enforce_on_create": false,
-                "strict_required_status_checks_policy": true,
-                "required_status_checks": contexts
-            }}
-        ]
-    })
-    .to_string()
+fn divergent_live_ruleset(mutate: impl FnOnce(&mut serde_json::Value)) -> String {
+    let candidate: serde_json::Value = serde_json::from_str(CANDIDATE).expect("candidate JSON");
+    let mut live = candidate;
+    live["id"] = serde_json::json!(13680120);
+    mutate(&mut live);
+    live.to_string()
 }
 
 #[test]
@@ -68,7 +56,26 @@ fn candidate_requires_the_terminal_context_and_ci_emits_it() {
 }
 
 #[test]
-fn live_ruleset_validation_fails_when_status_checks_are_absent_or_diverge() {
+fn terminal_job_checks_out_the_pr_head_before_running_its_script() {
+    let workflow = include_str!("../.github/workflows/ci.yml");
+    let terminal_job = workflow
+        .split("  required-gates-executed:")
+        .nth(1)
+        .expect("terminal job");
+    let checkout = terminal_job
+        .find("- uses: actions/checkout@v6")
+        .expect("terminal job checkout");
+    let script = terminal_job
+        .find("bash .github/ci-required-gates-executed.sh")
+        .expect("terminal job script");
+    assert!(
+        checkout < script,
+        "the repository script must be checked out first"
+    );
+}
+
+#[test]
+fn live_ruleset_validation_fails_when_status_checks_are_absent_or_declared_contract_diverges() {
     let absent = serde_json::json!({
         "id": 13680120,
         "name": "main",
@@ -82,24 +89,91 @@ fn live_ruleset_validation_fails_when_status_checks_are_absent_or_diverge() {
     assert!(!absent_output.status.success());
     assert!(String::from_utf8_lossy(&absent_output.stdout).contains("outcome=absent"));
 
-    let divergent_output = run_validator(
-        live_ruleset(serde_json::json!([
-            { "context": "homeboy / Rustfmt", "integration_id": 15368 }
-        ]))
-        .as_str(),
-    );
-    assert!(!divergent_output.status.success());
-    assert!(String::from_utf8_lossy(&divergent_output.stdout).contains("outcome=divergent"));
+    for (name, live) in [
+        (
+            "target-branch",
+            divergent_live_ruleset(|ruleset| {
+                ruleset["conditions"]["ref_name"]["include"] =
+                    serde_json::json!(["refs/heads/release"]);
+            }),
+        ),
+        (
+            "missing-required-rule",
+            divergent_live_ruleset(|ruleset| {
+                ruleset["rules"][1] = serde_json::json!({ "type": "creation" });
+            }),
+        ),
+        (
+            "nonstrict",
+            divergent_live_ruleset(|ruleset| {
+                ruleset["rules"][2]["parameters"]["strict_required_status_checks_policy"] =
+                    serde_json::json!(false);
+            }),
+        ),
+        (
+            "bypass-actor",
+            divergent_live_ruleset(|ruleset| {
+                ruleset["bypass_actors"] = serde_json::json!([{ "actor_id": 1, "actor_type": "RepositoryRole", "bypass_mode": "always" }]);
+            }),
+        ),
+        (
+            "create-behavior",
+            divergent_live_ruleset(|ruleset| {
+                ruleset["rules"][2]["parameters"]["do_not_enforce_on_create"] =
+                    serde_json::json!(true);
+            }),
+        ),
+    ] {
+        let output = run_validator(&live);
+        assert!(
+            !output.status.success(),
+            "{name} divergence must fail the live audit"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("outcome=divergent"),
+            "{name} divergence must be reported"
+        );
+    }
 }
 
 #[test]
-fn terminal_gate_rejects_cancelled_required_work() {
-    let output = Command::new("bash")
-        .arg(".github/ci-required-gates-executed.sh")
-        .env("REQUIRED_GATES_HEAD_SHA", "0123456789012345678901234567890123456789")
-        .env("CI_GATE_RESULTS", r#"{"rustfmt":{"result":"success"},"lint":{"result":"cancelled"},"homeboy":{"result":"success"}}"#)
-        .output()
-        .expect("run terminal gate");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("lint=cancelled"));
+fn terminal_gate_rejects_cancelled_pending_and_absent_work_for_the_pr_head() {
+    const HEAD: &str = "0123456789012345678901234567890123456789";
+    for (name, results, expected) in [
+        (
+            "cancelled",
+            r#"{"rustfmt":{"result":"success"},"lint":{"result":"cancelled"},"homeboy":{"result":"success"}}"#,
+            "lint=cancelled",
+        ),
+        (
+            "pending",
+            r#"{"rustfmt":{"result":"success"},"lint":{"result":"success"},"homeboy":{"result":"pending"}}"#,
+            "homeboy=pending",
+        ),
+        (
+            "absent",
+            r#"{"rustfmt":{"result":"success"},"lint":{"result":"success"}}"#,
+            "missing=[homeboy]",
+        ),
+    ] {
+        let output = Command::new("bash")
+            .arg(".github/ci-required-gates-executed.sh")
+            .env("REQUIRED_GATES_HEAD_SHA", HEAD)
+            .env("CI_GATE_RESULTS", results)
+            .output()
+            .expect("run terminal gate");
+        assert!(
+            !output.status.success(),
+            "{name} work must fail the PR head"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(HEAD),
+            "{name} result must identify the PR head"
+        );
+        assert!(
+            stdout.contains(expected),
+            "{name} result must identify the gate state"
+        );
+    }
 }

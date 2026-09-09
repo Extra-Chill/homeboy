@@ -8,8 +8,10 @@ dependencies.
 
 The scheduled `Required Gates Ruleset Audit` workflow is read-only. It queries
 the live ruleset and fails with reviewer-resolvable evidence containing the
-repository, branch, ruleset ID, head SHA, expected and live contexts,
-strictness, and bypass actors.
+repository, branch, ruleset ID, head SHA, and expected and live ruleset
+contracts. The comparison covers the target and `main` ref conditions,
+enforcement, every required rule and status-check parameter (including
+strictness and create behavior), and bypass actors.
 
 ## Operator Application
 
