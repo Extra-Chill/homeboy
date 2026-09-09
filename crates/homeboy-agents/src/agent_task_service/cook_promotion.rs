@@ -3141,7 +3141,9 @@ pub(crate) fn cook_finalization_options_with_stores(
             artifact_refs,
             attempt_summary,
             ai_tool: options.ai_disclosure.ai_tool.clone(),
-            ai_model: options.ai_disclosure.ai_model.clone(),
+            // Runtime rotation can select a fallback after the immutable Cook
+            // request was persisted. The dossier carries that terminal route.
+            ai_model: Some(review_dossier.ai_assistance.model.clone()),
             source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification {
                 targeted_checks_run,
