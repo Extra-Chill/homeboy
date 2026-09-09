@@ -60,6 +60,58 @@ fn diagnose_projects_causal_pre_execution_provider_evidence() {
 }
 
 #[test]
+fn status_projects_detached_staging_phase_and_failure_cause() {
+    with_temp_home(|| {
+        let run_id = "run-cli-detached-staging-failure";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("record staging phase");
+        let error = Error::validation_invalid_argument(
+            "rig",
+            "runner dispatch cannot materialize selected rig package",
+            Some("fixture-rig".to_string()),
+            None,
+        );
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "lab_staging_controller",
+            &error,
+        )
+        .expect("record staging failure");
+
+        let (status_value, exit_code) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+            ..Default::default()
+        })
+        .expect("status projects staging failure");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(status_value["state"], "failed");
+        assert_eq!(status_value["phase"], "materializing");
+        assert_eq!(
+            status_value["blocker"]["code"],
+            "validation.invalid_argument"
+        );
+        assert_eq!(
+            status_value["blocker"]["message"],
+            "Invalid argument 'rig': runner dispatch cannot materialize selected rig package"
+        );
+    });
+}
+
+#[test]
 fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-controller-admission-hash-io";

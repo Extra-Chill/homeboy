@@ -975,6 +975,14 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
                 .map(|adoption| bounded(&adoption.phase, STATE_BOUND))
                 .filter(|value| !value.is_empty())
         })
+        .or_else(|| {
+            record
+                .metadata
+                .get("phase")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| bounded(value, STATE_BOUND))
+        })
 }
 
 fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
@@ -1016,6 +1024,22 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
             code: Some("controller_failure".to_string()),
             message: redacted_bounded(message, MESSAGE_BOUND),
         });
+    }
+    if let Some(failure) = record.metadata.get("pre_execution_failure") {
+        if let Some(message) = failure
+            .get("message")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(ControlPlaneBlocker {
+                code: failure
+                    .get("error_code")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| bounded(value, STATE_BOUND)),
+                message: redacted_bounded(message, MESSAGE_BOUND),
+            });
+        }
     }
     record
         .candidate_adoption
