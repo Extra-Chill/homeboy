@@ -378,9 +378,32 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
     cache: &mut ProviderRuntimeReadinessCache,
     deadline_unix_ms: Option<u64>,
 ) -> Result<ProviderReadinessInvocationResult> {
+    readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
+        provider,
+        config,
+        credential_env,
+        cache,
+        deadline_unix_ms,
+        false,
+    )
+}
+
+pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    cache: &mut ProviderRuntimeReadinessCache,
+    deadline_unix_ms: Option<u64>,
+    generated_fanout_context: bool,
+) -> Result<ProviderReadinessInvocationResult> {
     let started = Instant::now();
     ensure_readiness_deadline("probe", deadline_unix_ms)?;
-    let request_key = readiness_cache_identity(provider, config, credential_env)?;
+    let request_key = readiness_cache_identity_for_generated_fanout_context(
+        provider,
+        config,
+        credential_env,
+        generated_fanout_context,
+    )?;
     ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
     let mut registered_waiter = false;
     loop {
@@ -623,41 +646,7 @@ pub(crate) fn readiness_request_key(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
 ) -> Result<String> {
-    let mut provider_config = config.as_object().cloned().unwrap_or_default();
-    normalize_generated_fanout_client_context(&mut provider_config);
-    let mut environment = provider
-        .readiness_invocation
-        .as_ref()
-        .and_then(|invocation| invocation.extra.get("env_allowlist"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    environment.extend(super::credential_readiness::provider_required_secret_env_names(provider));
-    environment.extend(["PATH".to_string(), "HOME".to_string()]);
-    environment.sort();
-    environment.dedup();
-    let environment = environment
-        .into_iter()
-        .map(|name| {
-            let value = std::env::var_os(&name)
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            (name, value)
-        })
-        .collect::<Vec<_>>();
-    let value = json!({
-        "provider_id": provider.id,
-        "runtime_path": provider.runtime_path,
-        "invocation": provider.readiness_invocation,
-        "effective_config": provider_config,
-        "environment": environment,
-    });
-    let encoded = serde_json::to_vec(&value)
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    Ok(content_hash::sha256_hex(&encoded))
+    readiness_request_key_for_generated_fanout_context(provider, config, false)
 }
 
 /// Child-specific fanout identity is orchestration metadata rather than a
@@ -687,17 +676,67 @@ fn normalize_generated_fanout_client_context(provider_config: &mut serde_json::M
 
 /// The complete process-local readiness cache identity. Callers that coalesce
 /// readiness work must use this rather than approximating a provider route.
-pub(crate) fn readiness_cache_identity(
+pub(crate) fn readiness_cache_identity_for_generated_fanout_context(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
     credential_env: &[(String, String)],
+    generated_fanout_context: bool,
 ) -> Result<String> {
-    let base_key = readiness_request_key(provider, config)?;
+    let base_key = readiness_request_key_for_generated_fanout_context(
+        provider,
+        config,
+        generated_fanout_context,
+    )?;
     let credential_identity = credential_env
         .iter()
         .map(|(name, value)| (name, content_hash::sha256_hex(value.as_bytes())))
         .collect::<Vec<_>>();
     let encoded = serde_json::to_vec(&(base_key, credential_identity))
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok(content_hash::sha256_hex(&encoded))
+}
+
+fn readiness_request_key_for_generated_fanout_context(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    generated_fanout_context: bool,
+) -> Result<String> {
+    let mut provider_config = config.as_object().cloned().unwrap_or_default();
+    if generated_fanout_context {
+        normalize_generated_fanout_client_context(&mut provider_config);
+    }
+    let environment = provider
+        .readiness_invocation
+        .as_ref()
+        .and_then(|invocation| invocation.extra.get("env_allowlist"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .chain(super::credential_readiness::provider_required_secret_env_names(provider))
+        .chain(["PATH".to_string(), "HOME".to_string()])
+        .collect::<Vec<_>>();
+    let mut environment = environment;
+    environment.sort();
+    environment.dedup();
+    let environment = environment
+        .into_iter()
+        .map(|name| {
+            let value = std::env::var_os(&name)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (name, value)
+        })
+        .collect::<Vec<_>>();
+    let value = json!({
+        "provider_id": provider.id,
+        "runtime_path": provider.runtime_path,
+        "invocation": provider.readiness_invocation,
+        "effective_config": provider_config,
+        "environment": environment,
+    });
+    let encoded = serde_json::to_vec(&value)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     Ok(content_hash::sha256_hex(&encoded))
 }
@@ -903,7 +942,7 @@ mod tests {
 
         for (cook_id, to_worktree) in [("first", "homeboy@first"), ("second", "homeboy@second")] {
             assert!(
-                readiness_verdict(
+                readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
                     &provider,
                     &json!({
                         "model": "ready",
@@ -918,7 +957,10 @@ mod tests {
                             },
                         },
                     }),
+                    &[],
                     &mut cache,
+                    None,
+                    true,
                 )
                 .expect("readiness verdict")
                 .ready
@@ -926,6 +968,34 @@ mod tests {
         }
 
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+    }
+
+    #[test]
+    fn caller_fanout_shape_without_the_internal_marker_remains_distinct() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let provider = provider(&readiness_script(root.path()), &count);
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        for cook_id in ["first", "second"] {
+            assert!(
+                readiness_verdict(
+                    &provider,
+                    &json!({
+                        "model": "ready",
+                        "client_context": { "fanout": {
+                            "id": "shared-fanout", "semantics": "batch_cook",
+                            "cook_id": cook_id,
+                        }},
+                    }),
+                    &mut cache,
+                )
+                .expect("readiness verdict")
+                .ready
+            );
+        }
+
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
     }
 
     #[test]
