@@ -165,6 +165,7 @@ struct AutomaticArtifactRetentionPolicy {
 struct ArtifactInventoryBounds {
     deadline: Option<Instant>,
     inspection_limit: Option<usize>,
+    measurement_step_limit: Option<usize>,
     automatic_policy: Option<AutomaticArtifactRetentionPolicy>,
 }
 
@@ -175,9 +176,24 @@ pub struct ArtifactCleanupCursor {
     pub worktree: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_relative_path: Option<String>,
+    /// Partial recursive measurement for `next_relative_path`. Keeping the
+    /// traversal frontier makes a deadline interruption advance inside one
+    /// large declaration rather than restarting its tree on every pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    measurement: Option<ArtifactMeasurementCursor>,
     pub merged_only: bool,
     pub min_age_days: Option<u64>,
     pub include_active_worktrees: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ArtifactMeasurementCursor {
+    /// Paths are relative to the declared artifact root and are produced only
+    /// by the no-follow walker below.
+    pending_paths: Vec<String>,
+    logical_bytes: u64,
+    allocated_bytes: u64,
+    newest_modified_unix_seconds: Option<u64>,
 }
 
 pub fn parse_artifact_cleanup_cursor(value: &str) -> Result<ArtifactCleanupCursor> {
@@ -476,6 +492,7 @@ fn run_automatic_artifact_retention_in(
             ArtifactInventoryBounds {
                 deadline,
                 inspection_limit: Some(policy.scan_limit()),
+                measurement_step_limit: None,
                 automatic_policy: Some(automatic_policy),
             },
         )
@@ -1043,11 +1060,13 @@ struct WorktreeCandidateScan {
     inspected_count: usize,
     scan_complete: bool,
     next_relative_path: Option<String>,
+    measurement: Option<ArtifactMeasurementCursor>,
 }
 
 /// Scan one worktree for artifact-cleanup candidates. Fallible git/inventory
 /// operations are contained here so the caller can skip a single bad worktree
 /// (stale, non-Git, or vanished) without aborting the whole batch (#9925).
+#[cfg(test)]
 fn collect_worktree_candidates(
     worktree: &WorktreeInfo,
     options: &ArtifactCleanupOptions,
@@ -1057,6 +1076,32 @@ fn collect_worktree_candidates(
     inspection_limit: Option<usize>,
     automatic_policy: Option<AutomaticArtifactRetentionPolicy>,
     next_relative_path: Option<&str>,
+) -> Result<WorktreeCandidateScan> {
+    collect_worktree_candidates_bounded(
+        worktree,
+        options,
+        active,
+        protected,
+        deadline,
+        inspection_limit,
+        None,
+        automatic_policy,
+        next_relative_path,
+        None,
+    )
+}
+
+fn collect_worktree_candidates_bounded(
+    worktree: &WorktreeInfo,
+    options: &ArtifactCleanupOptions,
+    active: &ActiveWorktrees,
+    protected: &ProtectedControllerExecutables,
+    deadline: Option<Instant>,
+    inspection_limit: Option<usize>,
+    measurement_step_limit: Option<usize>,
+    automatic_policy: Option<AutomaticArtifactRetentionPolicy>,
+    next_relative_path: Option<&str>,
+    measurement: Option<&ArtifactMeasurementCursor>,
 ) -> Result<WorktreeCandidateScan> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
@@ -1098,6 +1143,7 @@ fn collect_worktree_candidates(
             inspected_count,
             scan_complete: true,
             next_relative_path: None,
+            measurement: None,
         });
     }
     for declaration in declarations {
@@ -1149,6 +1195,7 @@ fn collect_worktree_candidates(
                 inspected_count,
                 scan_complete: false,
                 next_relative_path: Some(declaration.relative_path.clone()),
+                measurement: None,
             });
         }
         inspected_count += 1;
@@ -1219,18 +1266,24 @@ fn collect_worktree_candidates(
                 newest_modified: None,
             }
         } else {
-            match path_usage_with_deadline(&artifact_path, deadline) {
-                Ok(usage) => usage,
-                Err(_error) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
+            match path_usage_resumable(
+                &artifact_path,
+                measurement
+                    .filter(|_| next_relative_path == Some(declaration.relative_path.as_str())),
+                deadline,
+                measurement_step_limit,
+            )? {
+                PathUsageMeasurement::Complete(usage) => usage,
+                PathUsageMeasurement::Interrupted(measurement) => {
                     return Ok(WorktreeCandidateScan {
                         candidates,
                         skipped,
                         inspected_count,
                         scan_complete: false,
                         next_relative_path: Some(declaration.relative_path.clone()),
+                        measurement: Some(measurement),
                     });
                 }
-                Err(error) => return Err(error),
             }
         };
         let usage_measurement = if pressure_eligible {
@@ -1287,6 +1340,7 @@ fn collect_worktree_candidates(
         inspected_count,
         scan_complete: true,
         next_relative_path: None,
+        measurement: None,
     })
 }
 
@@ -1375,6 +1429,7 @@ fn cleanup_artifacts_in_worktrees(
     let ArtifactInventoryBounds {
         deadline,
         inspection_limit,
+        measurement_step_limit,
         automatic_policy,
     } = bounds;
     let start = if let Some(cursor) = &options.cursor {
@@ -1432,32 +1487,38 @@ fn cleanup_artifacts_in_worktrees(
     for (index, worktree) in worktrees.iter().enumerate() {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             scan_complete = false;
-            next_cursor = repository_artifact_cursor(&root, worktree, None, options);
+            next_cursor = repository_artifact_cursor(&root, worktree, None, None, options);
             break;
         }
         let remaining_inspections =
             inspection_limit.map(|limit| limit.saturating_sub(inspected_count));
         if remaining_inspections == Some(0) {
             scan_complete = false;
-            next_cursor = repository_artifact_cursor(&root, worktree, None, options);
+            next_cursor = repository_artifact_cursor(&root, worktree, None, None, options);
             break;
         }
         // A single stale/non-Git/vanished worktree candidate must not abort the
         // whole batch: classify it, record a bounded diagnostic, and continue so
         // independent valid worktrees are still cleaned (#9925).
-        match collect_worktree_candidates(
+        match collect_worktree_candidates_bounded(
             worktree,
             options,
             &active,
             &protected,
             deadline,
             remaining_inspections,
+            measurement_step_limit,
             automatic_policy,
             options
                 .cursor
                 .as_ref()
                 .filter(|cursor| cursor.worktree == worktree.path.to_string_lossy())
                 .and_then(|cursor| cursor.next_relative_path.as_deref()),
+            options
+                .cursor
+                .as_ref()
+                .filter(|cursor| cursor.worktree == worktree.path.to_string_lossy())
+                .and_then(|cursor| cursor.measurement.as_ref()),
         ) {
             Ok(WorktreeCandidateScan {
                 candidates: worktree_candidates,
@@ -1465,23 +1526,29 @@ fn cleanup_artifacts_in_worktrees(
                 inspected_count: worktree_inspected_count,
                 scan_complete: worktree_scan_complete,
                 next_relative_path,
+                measurement,
             }) => {
                 inspected_count = inspected_count.saturating_add(worktree_inspected_count);
                 candidates.extend(worktree_candidates);
                 skipped.extend(worktree_skipped);
                 if !worktree_scan_complete {
                     scan_complete = false;
-                    next_cursor =
-                        repository_artifact_cursor(&root, worktree, next_relative_path, options);
+                    next_cursor = repository_artifact_cursor(
+                        &root,
+                        worktree,
+                        next_relative_path,
+                        measurement,
+                        options,
+                    );
                     break;
                 }
                 if inspection_limit.is_some_and(|limit| inspected_count >= limit)
                     && index + 1 < worktrees.len()
                 {
                     scan_complete = false;
-                    next_cursor = worktrees
-                        .get(index + 1)
-                        .and_then(|next| repository_artifact_cursor(&root, next, None, options));
+                    next_cursor = worktrees.get(index + 1).and_then(|next| {
+                        repository_artifact_cursor(&root, next, None, None, options)
+                    });
                     break;
                 }
             }
@@ -1492,9 +1559,9 @@ fn cleanup_artifacts_in_worktrees(
                 ));
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     scan_complete = false;
-                    next_cursor = worktrees
-                        .get(index + 1)
-                        .and_then(|next| repository_artifact_cursor(&root, next, None, options));
+                    next_cursor = worktrees.get(index + 1).and_then(|next| {
+                        repository_artifact_cursor(&root, next, None, None, options)
+                    });
                     break;
                 }
             }
@@ -1634,12 +1701,14 @@ fn artifact_cleanup_cursor(
     root: &Path,
     worktree: &WorktreeInfo,
     next_relative_path: Option<String>,
+    measurement: Option<ArtifactMeasurementCursor>,
     options: &ArtifactCleanupOptions,
 ) -> ArtifactCleanupCursor {
     ArtifactCleanupCursor {
         root: root.to_string_lossy().to_string(),
         worktree: worktree.path.to_string_lossy().to_string(),
         next_relative_path,
+        measurement,
         merged_only: options.merged_only,
         min_age_days: options.min_age_days,
         include_active_worktrees: options.include_active_worktrees,
@@ -1650,10 +1719,11 @@ fn repository_artifact_cursor(
     root: &Path,
     worktree: &WorktreeInfo,
     next_relative_path: Option<String>,
+    measurement: Option<ArtifactMeasurementCursor>,
     options: &ArtifactCleanupOptions,
 ) -> Option<ArtifactCleanupCursor> {
     (options.scope == ArtifactCleanupScope::RepositoryWorktrees)
-        .then(|| artifact_cleanup_cursor(root, worktree, next_relative_path, options))
+        .then(|| artifact_cleanup_cursor(root, worktree, next_relative_path, measurement, options))
 }
 
 fn artifact_cleanup_apply_command(
@@ -2523,6 +2593,111 @@ impl PathUsage {
 
 pub(crate) fn path_usage(path: &Path) -> Result<PathUsage> {
     path_usage_with_deadline(path, None)
+}
+
+enum PathUsageMeasurement {
+    Complete(PathUsage),
+    Interrupted(ArtifactMeasurementCursor),
+}
+
+fn path_usage_resumable(
+    path: &Path,
+    cursor: Option<&ArtifactMeasurementCursor>,
+    deadline: Option<Instant>,
+    step_limit: Option<usize>,
+) -> Result<PathUsageMeasurement> {
+    let mut cursor = cursor
+        .cloned()
+        .unwrap_or_else(|| ArtifactMeasurementCursor {
+            pending_paths: vec![String::new()],
+            logical_bytes: 0,
+            allocated_bytes: 0,
+            newest_modified_unix_seconds: None,
+        });
+    let mut steps = 0usize;
+    while let Some(relative_path) = cursor.pending_paths.pop() {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || step_limit.is_some_and(|limit| steps >= limit)
+        {
+            cursor.pending_paths.push(relative_path);
+            return Ok(PathUsageMeasurement::Interrupted(cursor));
+        }
+        let relative = Path::new(&relative_path);
+        if !relative_path.is_empty()
+            && (!is_safe_artifact_path(&relative_path) || relative.is_absolute())
+        {
+            return Err(Error::validation_invalid_argument(
+                "cursor",
+                "artifact cleanup measurement cursor contains an unsafe path",
+                None,
+                None,
+            ));
+        }
+        let entry_path = path.join(relative);
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("stat {}", entry_path.display())),
+            )
+        })?;
+        steps = steps.saturating_add(1);
+        cursor.newest_modified_unix_seconds = match (
+            cursor.newest_modified_unix_seconds,
+            metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs()),
+        ) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        };
+        if metadata.is_file() || metadata.file_type().is_symlink() {
+            cursor.logical_bytes = cursor.logical_bytes.saturating_add(metadata.len());
+            cursor.allocated_bytes = cursor
+                .allocated_bytes
+                .saturating_add(allocated_bytes(&metadata, metadata.len()));
+            continue;
+        }
+        cursor.allocated_bytes = cursor
+            .allocated_bytes
+            .saturating_add(allocated_bytes(&metadata, 0));
+        for child in fs::read_dir(&entry_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read directory {}", entry_path.display())),
+            )
+        })? {
+            let child = child.map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read directory entry {}", entry_path.display())),
+                )
+            })?;
+            let child_path = if relative_path.is_empty() {
+                child.file_name()
+            } else {
+                relative.join(child.file_name()).into_os_string()
+            };
+            let child_path = child_path.into_string().map_err(|_| {
+                Error::validation_invalid_argument(
+                    "cursor",
+                    "artifact cleanup cannot resume a non-Unicode artifact path",
+                    None,
+                    None,
+                )
+            })?;
+            cursor.pending_paths.push(child_path);
+        }
+    }
+    Ok(PathUsageMeasurement::Complete(PathUsage {
+        logical_bytes: cursor.logical_bytes,
+        allocated_bytes: cursor.allocated_bytes,
+        newest_modified: cursor
+            .newest_modified_unix_seconds
+            .map(|seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)),
+    }))
 }
 
 fn path_usage_with_deadline(path: &Path, deadline: Option<Instant>) -> Result<PathUsage> {
@@ -5154,6 +5329,68 @@ mod tests {
                 ArtifactInventoryBounds::default(),
             );
             assert!(changed_filters.is_err());
+        });
+    }
+
+    #[test]
+    fn bounded_measurement_resumes_one_large_declaration_without_losing_its_candidate() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let depth = 24usize;
+            let mut leaf = repo.path().join("target");
+            for index in 0..depth {
+                leaf.push(format!("nested-{index}"));
+            }
+            write_file(&leaf.join("artifact"), "largest");
+            let worktrees = vec![WorktreeInfo {
+                path: repo.path().to_path_buf(),
+            }];
+            let options = ArtifactCleanupOptions {
+                scope: ArtifactCleanupScope::RepositoryWorktrees,
+                sort: ArtifactCleanupSort::Size,
+                ..ArtifactCleanupOptions::default()
+            };
+            let mut cursor = None;
+            let mut completed = None;
+            // One filesystem node is measured per pass. A depth-N tree has its
+            // root, N directories, and one file, so N + 2 passes is a strict
+            // worst-case bound including the final candidate-reporting pass.
+            for _ in 0..=depth + 1 {
+                let page = cleanup_artifacts_in_worktrees(
+                    repo.path().to_path_buf(),
+                    worktrees.clone(),
+                    &ArtifactCleanupOptions {
+                        cursor: cursor.clone(),
+                        ..options.clone()
+                    },
+                    false,
+                    Vec::new(),
+                    ArtifactInventoryBounds {
+                        measurement_step_limit: Some(1),
+                        ..ArtifactInventoryBounds::default()
+                    },
+                )
+                .expect("bounded measurement page");
+                if page.scan_complete {
+                    completed = Some(page);
+                    break;
+                }
+                let next = page.next_cursor.expect("measurement continuation");
+                assert_eq!(next.next_relative_path.as_deref(), Some("target"));
+                assert!(next.measurement.is_some(), "inner-tree progress is durable");
+                cursor = Some(
+                    parse_artifact_cleanup_cursor(
+                        &serde_json::to_string(&next).expect("serialize continuation cursor"),
+                    )
+                    .expect("parse continuation cursor"),
+                );
+            }
+            let completed = completed.expect("one declaration must finish in the node bound");
+            assert_eq!(completed.candidate_count, 1);
+            assert_eq!(completed.candidates[0].relative_path, "target");
+            assert_eq!(completed.candidates[0].size_bytes, 7);
+            assert_eq!(completed.candidates[0].usage_measurement, USAGE_MEASURED);
+            assert!(completed.next_cursor.is_none());
         });
     }
 
