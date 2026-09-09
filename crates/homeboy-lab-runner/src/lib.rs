@@ -2076,7 +2076,7 @@ mod tests {
                 "old".to_string(),
                 "current".to_string(),
                 None,
-                Some("current".to_string()),
+                Some("homeboy 0.371.0+d1a1a6d2092f250780ccf40a57a12becff2a164f".to_string()),
             )),
             configured_job_binary_build_identity: None,
             daemon_freshness: Some(DaemonFreshnessReport {
@@ -2085,7 +2085,7 @@ mod tests {
                 restartable: true,
                 lease_id: Some("lease-current".to_string()),
                 pid: Some(1),
-                recovery_evidence: None,
+                recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
                 ownership_evidence: None,
                 adoption_command: None,
                 binary_hash: None,
@@ -2094,7 +2094,13 @@ mod tests {
                 runtime_paths: None,
                 active_jobs: 0,
                 termination_evidence: None,
-                repair_plan: Vec::new(),
+                repair_plan: vec![crate::daemon_repair::action_step(
+                    crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                    crate::daemon_repair::refresh_homeboy_action_for_ref(
+                        "homeboy-lab",
+                        Some("d1a1a6d2092f250780ccf40a57a12becff2a164f"),
+                    ),
+                )],
             }),
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
@@ -2113,6 +2119,12 @@ mod tests {
 
         assert!(!snapshot.summary.accepting_jobs);
         assert!(snapshot.summary.safe_to_rotate);
+        assert_eq!(
+            snapshot.summary.next_action.as_deref(),
+            Some(
+                "homeboy runner refresh-homeboy homeboy-lab --ref d1a1a6d2092f250780ccf40a57a12becff2a164f --reconnect"
+            )
+        );
     }
 
     #[test]

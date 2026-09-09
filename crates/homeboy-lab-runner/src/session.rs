@@ -1507,6 +1507,81 @@ mod status_serialization_tests {
     }
 
     #[test]
+    fn admission_summary_known_configured_drift_preserves_drained_owners_and_recovers() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.370.1".to_string(),
+            "0.371.0".to_string(),
+            Some("homeboy 0.370.1+0732665ce13b8a70cbf8915b1c9c1ddc0fd5eb09".to_string()),
+            Some("homeboy 0.371.0+d1a1a6d2092f250780ccf40a57a12becff2a164f".to_string()),
+        ));
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            restartable: false,
+            lease_id: Some("known-lease".to_string()),
+            pid: Some(1234),
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
+            ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: Some("0.370.1".to_string()),
+            daemon_build_identity: Some(
+                "homeboy 0.370.1+0732665ce13b8a70cbf8915b1c9c1ddc0fd5eb09".to_string(),
+            ),
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: vec![crate::daemon_repair::action_step(
+                crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                crate::daemon_repair::refresh_homeboy_action_for_ref(
+                    "homeboy-lab",
+                    Some("d1a1a6d2092f250780ccf40a57a12becff2a164f"),
+                ),
+            )],
+        });
+        let generations = (0..4)
+            .map(|index| RunnerDaemonGenerationStatus {
+                generation: format!("lease-draining-{index}"),
+                admission_owner: false,
+                drain_state: crate::RollingDrainState::Draining,
+                active_job_count: 0,
+                observed_active_job_count: Some(0),
+                active_job_count_authoritative: true,
+                job_owner_count: 6,
+                run_owner_count: 6,
+                artifact_owner_count: 0,
+                homeboy_build_identity: None,
+                remote_daemon_lease_id: Some(format!("lease-draining-{index}")),
+                remote_daemon_address: None,
+                local_url: None,
+            })
+            .collect::<Vec<_>>();
+        let owners = (0..4)
+            .map(|index| RunnerGenerationJobOwners {
+                generation: format!("lease-draining-{index}"),
+                job_ids: (0..6).map(|job| format!("durable-{index}-{job}")).collect(),
+            })
+            .collect::<Vec<_>>();
+
+        let summary = report.admission_summary_with_generations(&generations, &owners, 4);
+
+        assert!(!summary.accepting_jobs);
+        assert!(summary.safe_to_rotate);
+        assert_eq!(summary.active_job_count, 0);
+        assert_eq!(summary.draining_generation_count, 4);
+        assert_eq!(summary.retained_durable_job_count, 24);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some(
+                "homeboy runner refresh-homeboy homeboy-lab --ref d1a1a6d2092f250780ccf40a57a12becff2a164f --reconnect"
+            )
+        );
+    }
+
+    #[test]
     fn admission_summary_missing_or_unclassified_freshness_is_not_safe_to_rotate() {
         let mut missing_report = base_report();
         missing_report.active_job_state = RunnerActiveJobState::Available;
@@ -1899,9 +1974,9 @@ impl RunnerStaleDaemonWarning {
     /// Recovery commands safe to publish to an operator or machine consumer.
     ///
     /// Persisted command text is evidence, not authority. A refresh is exposed
-    /// only when its typed immutable ref equals the observed daemon commit or
-    /// git proves it is a descendant; unknown and divergent histories have no
-    /// mutating recovery recommendation.
+    /// only when its typed immutable ref is the observed configured job binary
+    /// and it cannot request a downgrade. Refresh promotion then validates that
+    /// exact target against the runner's authoritative source checkout.
     pub fn safe_recovery_commands(&self) -> Vec<String> {
         self.safe_recovery_actions()
             .into_iter()
@@ -1913,8 +1988,8 @@ impl RunnerStaleDaemonWarning {
     /// published command projection. Callers must not reconstruct actions from
     /// persisted command text.
     pub(crate) fn safe_recovery_actions(&self) -> Vec<ExecutableAction> {
-        let Some(active) = self
-            .active_daemon_control_plane_build_identity
+        let Some(configured) = self
+            .job_command_binary_build_identity
             .as_deref()
             .and_then(build_identity_commit)
         else {
@@ -1927,7 +2002,8 @@ impl RunnerStaleDaemonWarning {
                     .args
                     .windows(2)
                     .find_map(|args| (args[0] == "--ref").then(|| args[1].as_str()))?;
-                (target == active || commits_are_ancestral(&active, target)).then(|| action.clone())
+                (target == configured && !action.args.iter().any(|arg| arg == "--allow-downgrade"))
+                    .then(|| action.clone())
             })
             .collect()
     }
@@ -2369,10 +2445,13 @@ fn recovery_ref(
         // replaced with the initiating controller's unrelated commit.
         Some(identity) => homeboy_upgrade::upgrade::parse_build_identity_display(identity)
             .filter(|identity| identity.git_dirty != Some(true))
-            .and_then(|identity| identity.git_commit),
-        None if initiating_identity.git_dirty != Some(true) => {
-            initiating_identity.git_commit.clone()
-        }
+            .and_then(|identity| identity.git_commit)
+            .filter(|commit| is_immutable_build_commit(commit)),
+        None if initiating_identity.git_dirty != Some(true) => initiating_identity
+            .git_commit
+            .as_deref()
+            .filter(|commit| is_immutable_build_commit(commit))
+            .map(str::to_string),
         None => None,
     }
 }
@@ -2381,13 +2460,13 @@ fn build_identity_commit(identity: &str) -> Option<String> {
     homeboy_upgrade::upgrade::parse_build_identity_display(identity)
         .filter(|identity| identity.git_dirty != Some(true))
         .and_then(|identity| identity.git_commit)
+        .filter(|commit| is_immutable_build_commit(commit))
 }
 
-fn commits_are_ancestral(older: &str, newer: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", older, newer])
-        .output()
-        .is_ok_and(|output| output.status.success())
+/// A Homeboy build display carries a Git object ID, not an arbitrary Git ref.
+/// The short form is accepted because product builds embed abbreviated SHAs.
+fn is_immutable_build_commit(commit: &str) -> bool {
+    (7..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn same_homeboy_version(left: &str, right: &str) -> bool {
