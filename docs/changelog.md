@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.2] - 2026-09-09
+
+### Fixed
+- overlay a registered component with its own checkout manifest
+- restore the test build by dropping an unrunnable authority test
+- expose pinned configured-daemon recovery
+- preserve reconcile failure blockers
+
 ## [0.371.1] - 2026-09-09
 
 ### Changed
