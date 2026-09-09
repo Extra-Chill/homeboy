@@ -381,7 +381,13 @@ pub fn pull_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
 /// Returns Ok(Some(n)) if behind by n commits, Ok(None) if not behind or no upstream.
 pub fn fetch_and_get_behind_count(path: &str) -> Result<Option<u32>> {
     // Run git fetch (update tracking refs)
-    crate::engine::command::run_in(path, "git", &["fetch"], "git fetch")?;
+    super::fetch_remote_tracking_refs_until(
+        Path::new(path),
+        &["fetch"],
+        "git fetch",
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )?;
 
     // Check if upstream exists
     let upstream = crate::engine::command::run_in_optional(

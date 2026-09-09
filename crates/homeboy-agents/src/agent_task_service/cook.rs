@@ -8124,11 +8124,12 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
     ) {
         return Ok(resolved.trim().to_string());
     }
-    homeboy_core::git::with_remote_tracking_authority(
+    homeboy_core::git::with_remote_tracking_authority_until(
         target,
         "materialize prepared Cook base",
-        || {
-            homeboy_core::git::run_git(
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        |remaining| {
+            homeboy_core::git::run_git_with_env_timeout(
                 target,
                 &[
                     "fetch",
@@ -8138,6 +8139,8 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
                     base_sha,
                 ],
                 "materialize prepared Cook base",
+                &[],
+                remaining,
             )
             .map(|_| ())
         },

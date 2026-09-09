@@ -92,10 +92,11 @@ pub use pr_refresh::{
 pub(crate) use primitives::list_tracked_markdown_files;
 pub use primitives::{
     clone_repo, clone_repo_at_ref, clone_repo_at_ref_with_timeout, commit_staged_with_author,
-    default_branch_name, default_remote_branch, get_component_path_prefix, get_git_root,
-    get_git_root_with_timeout, git_probe_path, has_staged_changes, is_workdir_clean_or_not_git,
-    pull_repo, resolve_default_remote, run_git, run_git_output, run_git_output_with_env,
-    run_git_with_env, run_git_with_env_timeout, stage_all, update_to_remote_default_branch,
+    default_branch_name, default_remote_branch, fetch_remote_tracking_refs_until,
+    get_component_path_prefix, get_git_root, get_git_root_with_timeout, git_probe_path,
+    has_staged_changes, is_workdir_clean_or_not_git, pull_repo, resolve_default_remote, run_git,
+    run_git_output, run_git_output_with_env, run_git_output_with_env_timeout, run_git_with_env,
+    run_git_with_env_timeout, stage_all, update_to_remote_default_branch,
 };
 pub use primitives::{is_git_repo, is_tracked_path};
 pub use primitives_query::{
@@ -104,9 +105,7 @@ pub use primitives_query::{
     rev_parse, short_head_revision, status_porcelain, status_porcelain_bytes,
     status_porcelain_scoped, toplevel, BoundedGitRead, DEFAULT_GIT_READ_PROBE_TIMEOUT,
 };
-pub use remote_tracking_authority::{
-    with_remote_tracking_authority, with_remote_tracking_authority_if_git,
-};
+pub use remote_tracking_authority::with_remote_tracking_authority_until;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;

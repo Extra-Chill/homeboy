@@ -124,10 +124,12 @@ pub fn pr_refresh(
         ));
     }
 
-    git_checked(
+    super::fetch_remote_tracking_refs_until(
         root,
         &["fetch", "origin", &pr.base_ref_name],
         "git fetch base",
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
     )?;
 
     let strategy = resolve_strategy(root, options.strategy, &branch)?;

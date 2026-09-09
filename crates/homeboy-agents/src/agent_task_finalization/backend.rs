@@ -132,20 +132,23 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn resolve_base(&mut self, path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
         let reference = format!("refs/homeboy/finalization/base/{base}");
-        let output = homeboy_core::git::with_remote_tracking_authority(
+        let output = homeboy_core::git::with_remote_tracking_authority_until(
             Path::new(path),
             "fetch requested finalization base",
-            || {
-                std::process::Command::new("git")
-                    .args([
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            |remaining| {
+                homeboy_core::git::run_git_output_with_env_timeout(
+                    Path::new(path),
+                    &[
                         "fetch",
                         "--no-tags",
                         "origin",
                         &format!("refs/heads/{base}:{reference}"),
-                    ])
-                    .current_dir(path)
-                    .output()
-                    .map_err(|error| Error::git_command_failed(error.to_string()))
+                    ],
+                    "fetch requested finalization base",
+                    &[],
+                    remaining,
+                )
             },
         )?;
         if !output.status.success() {
@@ -188,22 +191,23 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             ],
         )
         .or_else(|_| {
-            let fetch = homeboy_core::git::with_remote_tracking_authority(
+            let fetch = homeboy_core::git::with_remote_tracking_authority_until(
                 Path::new(path),
                 "materialize verified finalization base",
-                || {
-                    std::process::Command::new("git")
-                        .args([
-                            "fetch",
-                            "--no-tags",
-                            "--no-write-fetch-head",
-                            "origin",
-                            verified_base_sha,
-                        ])
-                        .current_dir(path)
-                        .output()
-                        .map_err(|error| Error::git_command_failed(error.to_string()))
-                },
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+                |remaining| homeboy_core::git::run_git_output_with_env_timeout(
+                    Path::new(path),
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        "origin",
+                        verified_base_sha,
+                    ],
+                    "materialize verified finalization base",
+                    &[],
+                    remaining,
+                ),
             )?;
             if !fetch.status.success() {
                 return Err(Error::validation_invalid_argument(
@@ -775,15 +779,18 @@ fn remote_head_is_ancestor_of_candidate(path: &str, remote_head: &str, local_hea
     // Best-effort: bring the remote-only commit into the local object database
     // so ancestry can be evaluated. Ignore failure; the ancestry check below
     // fails closed when the object is unavailable.
-    let _ = homeboy_core::git::with_remote_tracking_authority(
+    let _ = homeboy_core::git::with_remote_tracking_authority_until(
         Path::new(path),
         "materialize finalization remote head",
-        || {
-            std::process::Command::new("git")
-                .args(["fetch", "--no-tags", "origin", remote_head])
-                .current_dir(path)
-                .output()
-                .map_err(|error| Error::git_command_failed(error.to_string()))
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        |remaining| {
+            homeboy_core::git::run_git_output_with_env_timeout(
+                Path::new(path),
+                &["fetch", "--no-tags", "origin", remote_head],
+                "materialize finalization remote head",
+                &[],
+                remaining,
+            )
         },
     );
     std::process::Command::new("git")

@@ -6,6 +6,7 @@ use crate::engine::command;
 use crate::error::{Error, GitCommandFailedDetails, Result};
 
 use super::primitives_query::current_branch;
+use super::with_remote_tracking_authority_until;
 
 fn git_command_display(args: &[&str]) -> String {
     if args.is_empty() {
@@ -165,6 +166,37 @@ pub fn run_git_with_env_timeout(
     env: &[(String, String)],
     timeout: Duration,
 ) -> Result<String> {
+    let output = run_git_output_with_env_timeout(git_root, args, context, env, timeout)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(Error::git_command_failed_with_details(
+            git_failure_message(context, &detail),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                io_error: None,
+            },
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run Git with a deadline and preserve its exit status and captured output.
+///
+/// This supports callers that need command-specific diagnostics while still
+/// sharing a caller-owned deadline with remote-tracking authority waits.
+pub fn run_git_output_with_env_timeout(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<std::process::Output> {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -213,31 +245,38 @@ pub fn run_git_with_env_timeout(
         )
     })?
     .into_output();
-    if !output.status.success() {
-        let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if timed_out {
-            if !stderr.is_empty() {
-                stderr.push('\n');
-            }
-            stderr.push_str(&format!(
-                "Git phase timed out after {}s; terminated child process group.",
-                timeout.as_secs()
-            ));
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if timed_out {
         return Err(Error::git_command_failed_with_details(
-            git_failure_message(context, if stderr.is_empty() { &stdout } else { &stderr }),
+            format!(
+                "{context} timed out after {}s; terminated child process group.",
+                timeout.as_secs()
+            ),
             GitCommandFailedDetails {
                 command: git_command_display(args),
                 cwd: git_cwd_display(git_root),
                 exit_code: output.status.code(),
-                stdout,
-                stderr,
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
                 io_error: None,
             },
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output)
+}
+
+/// Fetch remote refs while serializing the shared remote-tracking namespace of
+/// linked worktrees. Waiting and Git execution consume one caller-owned budget.
+pub fn fetch_remote_tracking_refs_until(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+    deadline: Instant,
+) -> Result<String> {
+    debug_assert_eq!(args.first(), Some(&"fetch"));
+    with_remote_tracking_authority_until(git_root, context, deadline, |remaining| {
+        run_git_with_env_timeout(git_root, args, context, env, remaining)
+    })
 }
 
 /// Run a git command in a repository and return raw output without treating
@@ -380,10 +419,12 @@ pub fn default_branch_name(path: &Path) -> Option<String> {
 pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
     let remote = resolve_default_remote(git_root);
     let old_branch = current_branch(git_root);
-    run_git(
+    fetch_remote_tracking_refs_until(
         git_root,
         &["fetch", &remote],
         &format!("git fetch {remote}"),
+        &[],
+        Instant::now() + Duration::from_secs(30),
     )?;
     let mut detached_default_branch: Option<String> = None;
 
