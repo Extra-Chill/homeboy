@@ -446,6 +446,18 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
         serialized["data"]["reconciliation"]["retry_predicate"],
         "an authoritative active-job view is available"
     );
+    assert_eq!(
+        serialized["diagnostics"]["code"],
+        "runner.reconcile.admission_unavailable"
+    );
+    assert_eq!(
+        serialized["diagnostics"]["details"]["remaining_blocker"],
+        serialized["data"]["reconciliation"]["remaining_blocker"]
+    );
+    assert_eq!(
+        serialized["next_actions"][0]["command"],
+        "homeboy runner status homeboy-lab --full"
+    );
 }
 
 #[test]
