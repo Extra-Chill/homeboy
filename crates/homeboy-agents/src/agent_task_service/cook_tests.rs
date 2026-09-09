@@ -9310,6 +9310,106 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
 }
 
 #[test]
+fn local_startup_base_capture_is_durable_and_reported_before_interruption() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&["add", "fixture.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            repository.to_str().expect("repository path"),
+        ]);
+
+        let cook_id = "cook-local-startup-base-capture";
+        let run_id = format!("{cook_id}-run");
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(MaterializationInterruptingDispatcher {
+                run_id: run_id.clone(),
+                state_at_materialization: Arc::new(Mutex::new(None)),
+            }),
+        );
+        options.identity.initial_run_id = run_id.clone();
+        options.workspace.to_worktree = repository.display().to_string();
+        options.workspace.source_worktree_path = Some(repository.clone());
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some(repository.display().to_string());
+
+        let hook = Arc::new(WorkspaceBaseCaptureHook {
+            workspace: repository,
+            count: AtomicUsize::new(0),
+            fail_after_recipe_persistence: AtomicBool::new(true),
+        });
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("install workspace base capture interruption") = Some(Arc::clone(&hook));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observer_records = Arc::clone(&observed);
+        let result = run_cook(CookContext {
+            durable_observer: Some(&move |event: &CookProgressEvent<'_>| {
+                observer_records
+                    .lock()
+                    .expect("observer records lock")
+                    .push((event.phase.to_string(), event.detail.map(str::to_string)));
+                assert_eq!(
+                    agent_task_lifecycle::reconcile_status(event.cook_id)
+                        .expect("announced Cook alias resolves")
+                        .run_id,
+                    event.run_id
+                );
+                Ok(())
+            }),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .expect("startup interruption produces a durable report");
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("remove workspace base capture interruption") = None;
+
+        let observed = observed.lock().expect("observer records lock");
+        assert_eq!(
+            observed.first().map(|event| event.0.as_str()),
+            Some("durable_identity")
+        );
+        assert!(
+            observed.iter().any(|(phase, detail)| {
+                phase == "workspace_base_capture"
+                    && detail.as_deref() == Some("starting; elapsed=0s")
+            }),
+            "startup base capture must be named with bounded elapsed detail: {observed:?}"
+        );
+        assert_eq!(hook.count.load(Ordering::SeqCst), 1);
+        assert_eq!(result.value.status, "pre_execution_failure");
+        let record = agent_task_lifecycle::reconcile_status(&run_id)
+            .expect("interrupted startup remains status-addressable");
+        assert!(record.state.is_terminal());
+        assert!(agent_task_lifecycle::logs(cook_id).is_ok());
+    });
+}
+
+#[test]
 fn provider_dispatch_observes_a_durable_provider_start_boundary() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-provider-start-durable";
