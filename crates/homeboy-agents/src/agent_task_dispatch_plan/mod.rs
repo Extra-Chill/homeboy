@@ -155,7 +155,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let (mut provider_config, generated_provider_client_context) = dispatch_provider_config(
+    let (mut provider_config, _) = dispatch_provider_config(
         request,
         &repo,
         &component,
@@ -173,6 +173,12 @@ pub fn build_dispatch_plan_with_provider_requirements(
             .expect("dispatch provider config object")
             .extend(overrides.clone());
     }
+    // Policy-route configuration is authoritative for the selected provider.
+    // Its client context is caller-owned even when Homeboy generated the base.
+    let generated_provider_client_context = !provider_config
+        .as_object()
+        .expect("dispatch provider config object")
+        .contains_key("client_context");
     let policy_backend = initial_route
         .as_ref()
         .map(|route| route.backend.clone())
@@ -1261,6 +1267,50 @@ mod tests {
                 .filter_map(|entry| entry.model.as_deref())
                 .collect::<Vec<_>>(),
             ["model-two", "model-three"]
+        );
+    }
+
+    #[test]
+    fn policy_route_client_context_is_not_marked_as_generated_fanout_context() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with the policy provider context.".to_string()),
+            core: DispatchCoreInputs {
+                generated_fanout_context: true,
+                resolved_provider_policy: Some(
+                    crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                        backend: "policy-backend".to_string(),
+                        selector: None,
+                        model: None,
+                        rotation: Some(AgentTaskProviderRotationPolicy {
+                            entries: vec![
+                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                    provider_config: serde_json::json!({
+                                        "client_context": {"fanout": {"cook_id": "caller-owned"}}
+                                    }),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }),
+                        rotation_starts_with_first_entry: true,
+                        retry: AgentTaskRetryPolicy::default(),
+                        liveness_timeout_ms: None,
+                        runtime_identity: None,
+                    },
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].executor.config["client_context"]["fanout"]["cook_id"],
+            "caller-owned"
+        );
+        assert_eq!(
+            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
+            false
         );
     }
 

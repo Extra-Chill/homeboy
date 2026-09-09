@@ -1224,21 +1224,37 @@ mod tests {
         let script = root.path().join("owner-different-deadlines.js");
         std::fs::write(
             &script,
-            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),200);",
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),1000);",
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
         let mut cache = ProviderRuntimeReadinessCache::default();
 
-        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
-        let error = readiness_verdict_with_credentials_and_deadline(
-            &provider,
-            &json!({"model":"same"}),
-            &[],
-            &mut cache,
-            Some(short_deadline),
-        )
-        .expect_err("short probe owner must time out locally");
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 300;
+        let short_provider = provider.clone();
+        let mut short_cache = cache.clone();
+        let short = std::thread::spawn(move || {
+            readiness_verdict_with_credentials_and_deadline(
+                &short_provider,
+                &json!({"model":"same"}),
+                &[],
+                &mut short_cache,
+                Some(short_deadline),
+            )
+        });
+        let start_deadline = Instant::now() + Duration::from_secs(2);
+        while !count.exists() {
+            assert!(Instant::now() < start_deadline, "short probe did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            crate::agent_task_timeout::now_unix_ms() < short_deadline,
+            "short deadline expired before its probe started"
+        );
+        let error = short
+            .join()
+            .expect("short probe owner")
+            .expect_err("short probe owner must time out locally");
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["deadline_unix_ms"], short_deadline);
 

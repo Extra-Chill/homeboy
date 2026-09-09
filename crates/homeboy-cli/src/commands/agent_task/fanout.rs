@@ -4182,18 +4182,24 @@ fn preview_provider_dispatchability_evidence(
         // from that selected route so an unavailable primary cannot block it.
         let route_key =
             provider::provider_runtime_readiness_cache_identity_for_plan(catalog, &admitted_plan)?;
-        let admission = if let Some(admission) = admitted_routes.get(&route_key) {
+        let mut admission = if let Some(admission) = admitted_routes.get(&route_key) {
             admission.clone()
         } else {
             let admission = serde_json::json!({
                 "state": "completed",
                 "owner": "provider_runtime_readiness",
                 "deadline_unix_ms": admitted_task.limits.execution_deadline_unix_ms,
-                "routing": admitted_task.metadata.get("provider_readiness_routing").cloned().unwrap_or(Value::Null),
             });
             admitted_routes.insert(route_key, admission.clone());
             admission
         };
+        // Readiness is shared by the selected route, but each child retains the
+        // route history that led to it.
+        admission["routing"] = admitted_task
+            .metadata
+            .get("provider_readiness_routing")
+            .cloned()
+            .unwrap_or(Value::Null);
         children.push(serde_json::json!({
             "cook_id": route.cook_id,
             "executor": {
@@ -10387,12 +10393,14 @@ fi
                     "prompt": "fix the first issue",
                     "to_worktree": "homeboy@fallback-preview-first",
                     "backend": "missing-primary",
+                    "model": "primary-model-one",
                     "verify": ["true"]
                 }, {
                     "cook_id": "second",
                     "prompt": "fix the second issue",
                     "to_worktree": "homeboy@fallback-preview-second",
                     "backend": "missing-primary",
+                    "model": "primary-model-two",
                     "verify": ["true"]
                 }]
             }),
@@ -10405,18 +10413,29 @@ fi
             &json!({"fanout_id": plan.fanout_id}),
         )
         .expect("static routes");
-        for route in &mut static_routes.routes {
-            route.plan.options.rotation = Some(
-                homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
-                    entries: vec![
-                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                            backend: Some("ready-fallback".to_string()),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                },
-            );
+        for (route, primary_model) in static_routes
+            .routes
+            .iter_mut()
+            .zip(["primary-model-one", "primary-model-two"])
+        {
+            let task = route.plan.tasks.first_mut().expect("provider task");
+            task.executor.backend = "ready-fallback".to_string();
+            task.executor.selector = None;
+            task.executor.model = Some("fallback-model".to_string());
+            if let Some(selection) = task.executor.runtime_selection.as_mut() {
+                selection.executor_backend = Some("ready-fallback".to_string());
+                selection.executor_provider_id = None;
+                selection.model = Some("fallback-model".to_string());
+            }
+            task.metadata["provider_readiness_routing"] = json!({
+                "skipped": [{
+                    "backend": "missing-primary",
+                    "model": primary_model,
+                    "state": "account_unavailable"
+                }]
+            });
+            task.metadata["provider_readiness_generated_fanout_context"] = json!(true);
+            route.plan.options.rotation = None;
         }
 
         let evidence = preview_provider_dispatchability_evidence(
@@ -10435,6 +10454,22 @@ fi
         assert_eq!(
             evidence["children"][1]["executor"]["backend"],
             "ready-fallback"
+        );
+        assert_eq!(
+            evidence["children"][0]["admission"]["routing"]["skipped"][0]["model"],
+            "primary-model-one"
+        );
+        assert_eq!(
+            evidence["children"][1]["admission"]["routing"]["skipped"][0]["model"],
+            "primary-model-two"
+        );
+        assert_eq!(
+            evidence["children"][0]["executor"]["model"],
+            "fallback-model"
+        );
+        assert_eq!(
+            evidence["children"][1]["executor"]["model"],
+            "fallback-model"
         );
         assert_eq!(
             std::fs::read_to_string(invoked).expect("readiness count"),
