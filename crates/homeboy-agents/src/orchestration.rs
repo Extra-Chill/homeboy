@@ -1483,12 +1483,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     .to_string(),
                 replacement_schema: "homeboy/control-plane-run/v1#state,action_eligibility"
                     .to_string(),
-                remove_in: "0.370.0".to_string(),
+                remove_in: "0.371.0".to_string(),
             },
             ControlPlaneCompatibilityWindow {
                 projection: "homeboy/runner-execution-record/v1#agent_task_run_id".to_string(),
                 replacement_schema: "homeboy/control-plane-run/v1#run".to_string(),
-                remove_in: "0.370.0".to_string(),
+                remove_in: "0.371.0".to_string(),
             },
         ];
         capabilities
@@ -5673,7 +5673,7 @@ mod tests {
         assert!(capabilities
             .compatibility_windows
             .iter()
-            .all(|window| window.remove_in == "0.370.0"));
+            .all(|window| window.remove_in == "0.371.0"));
         assert!(capabilities.compatibility_windows.iter().any(|window| {
             window.projection == "homeboy/agent-task-cook/v1#lifecycle_status,terminal,retryable"
                 && window.replacement_schema
