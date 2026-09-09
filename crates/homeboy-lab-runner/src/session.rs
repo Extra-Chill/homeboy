@@ -1523,7 +1523,7 @@ mod status_serialization_tests {
             restartable: false,
             lease_id: Some("known-lease".to_string()),
             pid: Some(1234),
-            recovery_evidence: None,
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
             adoption_command: None,
             binary_hash: None,
@@ -1534,7 +1534,13 @@ mod status_serialization_tests {
             runtime_paths: None,
             active_jobs: 0,
             termination_evidence: None,
-            repair_plan: Vec::new(),
+            repair_plan: vec![crate::daemon_repair::action_step(
+                crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                crate::daemon_repair::refresh_homeboy_action_for_ref(
+                    "homeboy-lab",
+                    Some("d1a1a6d2092f250780ccf40a57a12becff2a164f"),
+                ),
+            )],
         });
         let generations = (0..4)
             .map(|index| RunnerDaemonGenerationStatus {
