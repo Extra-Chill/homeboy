@@ -387,6 +387,16 @@ fn run_once_output(
             lease,
         )?;
     }
+    // Bind the controller capability while the live claim is freshly verified,
+    // before potentially slow source preparation. The values remain only in
+    // this worker process until they are projected into the execution child.
+    let controller_credentials = consume_credential_delivery(
+        &client,
+        &options.broker_url,
+        options.broker_token.as_deref(),
+        &options.runner_id,
+        &claim,
+    )?;
     let _command_assets = materialize_command_assets(&claim.job_id, &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
     let _staged_workspace = materialize_staged_source_artifact(
@@ -442,15 +452,7 @@ fn run_once_output(
         execution_context.clone(),
         claim.job_id.clone(),
     )?;
-    // Keep controller-owned values out of the envelope; they exist only between
-    // this claimed fetch and the direct provider child environment projection.
-    exec_options.env.extend(consume_credential_delivery(
-        &client,
-        &options.broker_url,
-        options.broker_token.as_deref(),
-        &options.runner_id,
-        &claim,
-    )?);
+    exec_options.env.extend(controller_credentials);
     let exec_result = exec_worker_local_until_cancelled_with_progress(
         &options.runner_id,
         exec_options,

@@ -1672,12 +1672,28 @@ impl JobStore {
                     .map(controller_owned_secret_env_names)
                     .unwrap_or_default();
                 if !controller_owned.is_empty() && !deliveries.contains_key(&job_id) {
-                    return Err(Error::validation_invalid_argument(
-                        "credential_delivery",
-                        "controller credential delivery is unavailable after broker restart or revocation",
-                        Some(job_id.to_string()),
-                        None,
-                    ));
+                    Self::append_event_already_locked(
+                        self,
+                        inner,
+                        job_id,
+                        JobEventKind::Error,
+                        Some(
+                            "controller credential delivery is unavailable after broker restart or revocation"
+                                .to_string(),
+                        ),
+                        Some(serde_json::json!({
+                            "status": JobStatus::Failed,
+                            "reason": "controller_credential_delivery_unavailable",
+                            "controller_owned_env_names": controller_owned,
+                        })),
+                    )?;
+                    let stored = inner.jobs.get_mut(&job_id).expect("candidate exists");
+                    stored.job.status = JobStatus::Failed;
+                    stored.job.updated_at_ms = now;
+                    stored.job.finished_at_ms = Some(now);
+                    // A lost sidecar is terminal for this job, but must not
+                    // poison later independent work for the same runner.
+                    return Ok(None);
                 }
                 match execution_protocol {
                     Some(protocol) => {

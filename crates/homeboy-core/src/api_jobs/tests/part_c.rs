@@ -161,12 +161,26 @@ fn controller_delivery_requires_explicit_controller_ownership_and_fails_after_lo
     // This models a controller restart: durable ownership survives while the
     // process-local plaintext registry is intentionally lost.
     store.discard_ephemeral_credential_delivery(job.id);
-    let error = store
+    let independent = store
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
+        .expect("queue independent runner-owned job");
+    assert!(store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
-        .expect_err("missing controller sidecar must reject the claim");
-    assert!(error
-        .message
-        .contains("controller credential delivery is unavailable"));
+        .expect("missing sidecar transitions its job")
+        .is_none());
+    assert_eq!(
+        store.get(job.id).expect("lost-sidecar job").status,
+        JobStatus::Failed
+    );
+    assert_eq!(
+        store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+            .expect("independent job remains claimable")
+            .expect("independent claim")
+            .job
+            .id,
+        independent.id
+    );
 }
 
 #[test]
