@@ -9152,6 +9152,11 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                     run_id.to_string()
                 ),
                 (
+                    "workspace_base_capture".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
                     "provider_ready".to_string(),
                     cook_id.to_string(),
                     run_id.to_string()
@@ -10968,6 +10973,11 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
             agent_task_lifecycle::reconcile_status("cook-slow-baseline-attempt-1")
                 .expect("staging attempt is durable before controller completion")
         });
+        assert_eq!(
+            dispatches.load(Ordering::SeqCst),
+            0,
+            "provider handoff must wait for startup base capture"
+        );
         std::fs::write(&release, "release").expect("release baseline staging");
         let result = controller
             .join()

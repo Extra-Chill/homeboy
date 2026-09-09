@@ -5443,21 +5443,19 @@ fn run_cook_spine(
     }
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.
-    let has_startup_workspace = cook_startup_workspace(&options).is_some();
     let cook_id = options.identity.cook_id.clone();
     let run_id = options.identity.initial_run_id.clone();
-    let base_capture = if has_startup_workspace {
-        run_cook_startup_phase(
-            lifecycle_store,
-            durable_observer,
-            &cook_id,
-            &run_id,
-            "workspace_base_capture",
-            || pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options),
-        )
-    } else {
-        pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options)
-    };
+    // Even a runner-owned workspace can wait on this Cook's shared capture
+    // lock, so keep the durable attempt live regardless of whether the
+    // controller has a local path to pin.
+    let base_capture = run_cook_startup_phase(
+        lifecycle_store,
+        durable_observer,
+        &cook_id,
+        &run_id,
+        "workspace_base_capture",
+        || pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options),
+    );
     base_capture.map_err(|error| {
         let mut error = error;
         error.details["cook_materialized_by_invocation"] = Value::Bool(true);
