@@ -205,8 +205,7 @@ fn project_job_list(
                 .flatten(),
         )
         .map(|job| {
-            let unknown_owner = job.lifecycle_state.as_deref() == Some("unknown_owner")
-                && job.job_id.starts_with("unknown-daemon-owner-");
+            let unknown_owner = job.job_id.starts_with("unknown-daemon-owner-");
             RunnerJobListEntry {
                 job_id: job.job_id.clone(),
                 source: if unknown_owner {
@@ -782,8 +781,6 @@ mod tests {
             claim_expires_in_ms: None,
             durable_run_id: Some("run-11770".to_string()),
             stale_reason: None,
-            lifecycle_state: Some("active".to_string()),
-            retryable: Some(false),
             artifact_refs: Vec::new(),
         }
     }
@@ -901,13 +898,11 @@ mod tests {
 
     #[test]
     fn unknown_daemon_owner_is_inspect_only() {
-        let mut unknown = runner_job(
+        let unknown = runner_job(
             "unknown-daemon-owner-lease-live-1",
             JobStatus::Running,
             "unprojected daemon child",
         );
-        unknown.lifecycle_state = Some("unknown_owner".to_string());
-
         let jobs = project_job_list(
             "homeboy-lab",
             &[unknown],

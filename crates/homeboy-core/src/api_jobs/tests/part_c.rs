@@ -334,11 +334,6 @@ fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
     assert_eq!(stale_jobs[0].runner_id, "homeboy-lab");
     assert_eq!(stale_jobs[0].status, JobStatus::Failed);
     assert_eq!(
-        stale_jobs[0].lifecycle_state.as_deref(),
-        Some("orphaned_after_control_plane_loss")
-    );
-    assert_eq!(stale_jobs[0].retryable, Some(true));
-    assert_eq!(
         stale_jobs[0].stale_reason.as_deref(),
         Some("control plane lost before the job reached a terminal status")
     );

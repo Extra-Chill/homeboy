@@ -3546,8 +3546,6 @@ mod tests {
                     lifecycle: None,
                     durable_run_id: None,
                     stale_reason: None,
-                    lifecycle_state: None,
-                    retryable: None,
                     active_child_count: None,
                     active_cell_count: None,
                 }],

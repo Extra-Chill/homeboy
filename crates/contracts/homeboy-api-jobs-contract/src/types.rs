@@ -167,13 +167,38 @@ pub struct ActiveRunnerJobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retryable: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_child_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_cell_count: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveRunnerJobSummary;
+
+    #[test]
+    fn legacy_runner_summary_authority_fields_deserialize_without_reemitting() {
+        let legacy = serde_json::json!({
+            "runner_id": "runner-a",
+            "job_id": "job-a",
+            "operation": "runner.exec",
+            "source": "daemon",
+            "kind": "runner.exec",
+            "status": "running",
+            "command": "true",
+            "started_at_ms": 1,
+            "elapsed_ms": 0,
+            "lifecycle_state": "active",
+            "retryable": false
+        });
+
+        let summary: ActiveRunnerJobSummary =
+            serde_json::from_value(legacy).expect("old daemon summary deserializes");
+        let emitted = serde_json::to_value(summary).expect("summary serializes");
+
+        assert!(emitted.get("lifecycle_state").is_none());
+        assert!(emitted.get("retryable").is_none());
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

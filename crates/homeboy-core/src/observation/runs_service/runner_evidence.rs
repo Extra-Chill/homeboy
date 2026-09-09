@@ -52,9 +52,7 @@ pub struct StaleRunnerJobInfo {
     pub runner_id: String,
     pub job_id: String,
     pub status: String,
-    pub lifecycle_state: Option<String>,
     pub stale_reason: Option<String>,
-    pub retryable: Option<bool>,
 }
 
 /// The result of downloading a remote runner artifact, slimmed to what

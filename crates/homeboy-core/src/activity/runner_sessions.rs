@@ -327,8 +327,6 @@ mod tests {
             lifecycle: None,
             durable_run_id: durable_run_id.map(str::to_string),
             stale_reason: None,
-            lifecycle_state: None,
-            retryable: None,
             active_child_count: None,
             active_cell_count: None,
         }
