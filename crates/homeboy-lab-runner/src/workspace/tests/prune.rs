@@ -1155,8 +1155,12 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
 #[test]
 fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        const WORKSPACE_COUNT: usize = 5_214;
-        const ORPHAN_INDICES: [usize; 3] = [1_333, 2_607, 5_213];
+        // Pagination is what this covers: the scan limit below is 127, so this
+        // still walks several pages and places orphans mid-page, on a later
+        // page, and on the final entry. Thousands of fixtures only multiplied
+        // setup I/O without adding a distinct cursor transition.
+        const WORKSPACE_COUNT: usize = 640;
+        const ORPHAN_INDICES: [usize; 3] = [200, 401, 639];
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspaces_root = runner_root.path().join("_lab_workspaces");
         fs::create_dir_all(&workspaces_root).expect("workspaces root");
@@ -1230,7 +1234,11 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
 #[test]
 fn ssh_prune_scan_command_bounds_thousands_of_entries() {
     let temp = tempfile::tempdir().expect("tempdir");
-    for index in 0..5_214 {
+    // The generated scan breaks out of its read loop once `scan_limit` entries
+    // are counted, so entries beyond the limit are never processed. Size the
+    // fixture to prove the bound and the `partial` marker, not to benchmark
+    // `find`.
+    for index in 0..40 {
         write_orphan_workspace(&temp.path().join(format!("workspace-{index:05}")));
     }
 
