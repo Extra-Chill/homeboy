@@ -166,6 +166,37 @@ pub fn run_git_with_env_timeout(
     env: &[(String, String)],
     timeout: Duration,
 ) -> Result<String> {
+    let output = run_git_output_with_env_timeout(git_root, args, context, env, timeout)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(Error::git_command_failed_with_details(
+            git_failure_message(context, &detail),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                io_error: None,
+            },
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run Git with a deadline and preserve its exit status and captured output.
+///
+/// This supports callers that need command-specific diagnostics while still
+/// sharing a caller-owned deadline with remote-tracking authority waits.
+pub fn run_git_output_with_env_timeout(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<std::process::Output> {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -214,31 +245,23 @@ pub fn run_git_with_env_timeout(
         )
     })?
     .into_output();
-    if !output.status.success() {
-        let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if timed_out {
-            if !stderr.is_empty() {
-                stderr.push('\n');
-            }
-            stderr.push_str(&format!(
-                "Git phase timed out after {}s; terminated child process group.",
-                timeout.as_secs()
-            ));
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if timed_out {
         return Err(Error::git_command_failed_with_details(
-            git_failure_message(context, if stderr.is_empty() { &stdout } else { &stderr }),
+            format!(
+                "{context} timed out after {}s; terminated child process group.",
+                timeout.as_secs()
+            ),
             GitCommandFailedDetails {
                 command: git_command_display(args),
                 cwd: git_cwd_display(git_root),
                 exit_code: output.status.code(),
-                stdout,
-                stderr,
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
                 io_error: None,
             },
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output)
 }
 
 /// Fetch remote refs while serializing the shared remote-tracking namespace of

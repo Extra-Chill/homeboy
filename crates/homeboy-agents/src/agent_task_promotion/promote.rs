@@ -2903,7 +2903,7 @@ fn capture_declared_base_with_git_and_timeout(
         worktree_path,
         "fetch declared promotion base",
         std::time::Instant::now() + timeout,
-        |_| {
+        |remaining| {
             run_declared_base_git(
                 worktree_path,
                 git,
@@ -2917,7 +2917,7 @@ fn capture_declared_base_with_git_and_timeout(
                 environment,
                 base_ref,
                 "fetch",
-                timeout,
+                remaining,
             )
         },
     )?;

@@ -197,34 +197,31 @@ mod tests {
         git(path, &["commit", "-qm", "fixture"]);
     }
 
-    fn git_stdout(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(output.status.success(), "git {:?} failed", args);
-        String::from_utf8(output.stdout)
-            .expect("git output")
-            .trim()
-            .to_string()
-    }
-
     #[test]
-    fn two_process_sibling_worktrees_fetch_requested_revisions() {
+    fn two_process_sibling_worktrees_serialize_fetch_paths() {
         const CHILD: &str = "HOMEB0Y_REMOTE_TRACKING_FETCH_CHILD";
-        if let (Some(path), Some(revision)) = (
-            std::env::var_os(CHILD),
-            std::env::var_os("HOMEB0Y_REMOTE_TRACKING_FETCH_REVISION"),
-        ) {
-            crate::git::fetch_remote_tracking_refs_until(
-                Path::new(&path),
-                &["fetch", "origin", revision.to_str().expect("revision")],
-                "two-process remote-tracking fetch",
-                &[],
-                Instant::now() + Duration::from_secs(10),
-            )
-            .expect("child fetch");
+        if let Some(path) = std::env::var_os(CHILD) {
+            let path = Path::new(&path);
+            if let Some(attempted) = std::env::var_os("HOMEB0Y_REMOTE_TRACKING_FETCH_ATTEMPTED") {
+                std::fs::write(attempted, "attempted\n").expect("write child fetch attempt");
+            }
+            match std::env::var("HOMEB0Y_REMOTE_TRACKING_FETCH_OPERATION").as_deref() {
+                Ok("behind") => {
+                    crate::git::fetch_and_get_behind_count(path.to_str().expect("path"))
+                        .expect("child behind fetch");
+                }
+                Ok("origin") => {
+                    crate::git::fetch_origin(path.to_str().expect("path"))
+                        .expect("child origin fetch");
+                }
+                Ok("tags") => {
+                    crate::git::fetch_tags(path.to_str().expect("path")).expect("child tag fetch");
+                }
+                operation => panic!("unexpected child fetch operation: {operation:?}"),
+            }
+            if let Some(done) = std::env::var_os("HOMEB0Y_REMOTE_TRACKING_FETCH_DONE") {
+                std::fs::write(done, "done\n").expect("write child completion");
+            }
             return;
         }
 
@@ -242,16 +239,6 @@ mod tests {
             &["remote", "add", "origin", remote.to_str().expect("path")],
         );
         git(&source, &["push", "-q", "origin", "HEAD:main"]);
-        for revision in ["requested-a", "requested-b"] {
-            std::fs::write(source.join(revision), format!("{revision}\n")).expect("revision");
-            git(&source, &["add", revision]);
-            git(&source, &["commit", "-qm", revision]);
-            git(
-                &source,
-                &["push", "-q", "origin", &format!("HEAD:{revision}")],
-            );
-            git(&source, &["reset", "--hard", "-q", "HEAD~1"]);
-        }
         let sibling = temp.path().join("sibling");
         git(
             &source,
@@ -265,31 +252,109 @@ mod tests {
         );
 
         let executable = std::env::current_exe().expect("test executable");
-        let test_name = "git::remote_tracking_authority::tests::two_process_sibling_worktrees_fetch_requested_revisions";
-        let spawn = |path: &Path, revision: &str| {
-            Command::new(&executable)
+        let test_name =
+            "git::remote_tracking_authority::tests::two_process_sibling_worktrees_serialize_fetch_paths";
+        let wrapper_dir = temp.path().join("bin");
+        std::fs::create_dir(&wrapper_dir).expect("wrapper directory");
+        let started = temp.path().join("first-fetch-started");
+        let release = temp.path().join("release-first-fetch");
+        let upload_pack = wrapper_dir.join("git-upload-pack");
+        std::fs::write(
+            &upload_pack,
+            "#!/bin/sh\nif [ -n \"$HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED\" ]; then\n  touch \"$HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED\"\nfi\nif [ -n \"$HOMEB0Y_REMOTE_TRACKING_FETCH_STARTED\" ]; then\n  touch \"$HOMEB0Y_REMOTE_TRACKING_FETCH_STARTED\"\n  while ! test -e \"$HOMEB0Y_REMOTE_TRACKING_FETCH_RELEASE\"; do sleep 0.01; done\nfi\nexec \"$HOMEB0Y_REMOTE_TRACKING_REAL_GIT\" upload-pack \"$@\"\n",
+        )
+        .expect("write upload-pack wrapper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755))
+                .expect("make upload-pack wrapper executable");
+        }
+        git(
+            &source,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                upload_pack.to_str().expect("upload-pack path"),
+            ],
+        );
+        let real_git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+            .map(|directory| directory.join("git"))
+            .find_map(|candidate| candidate.canonicalize().ok())
+            .expect("real git executable");
+        let path_env = format!(
+            "{}:{}",
+            wrapper_dir.display(),
+            std::env::var("PATH").expect("PATH")
+        );
+        let spawn = |path: &Path,
+                     operation: &str,
+                     hold_fetch: bool,
+                     attempted: Option<&Path>,
+                     reached: Option<&Path>,
+                     done: Option<&Path>| {
+            let mut command = Command::new(&executable);
+            command
                 .args(["--exact", test_name, "--nocapture"])
                 .env(CHILD, path)
-                .env("HOMEB0Y_REMOTE_TRACKING_FETCH_REVISION", revision)
-                .spawn()
-                .expect("spawn fetch child")
+                .env("HOMEB0Y_REMOTE_TRACKING_FETCH_OPERATION", operation)
+                .env("PATH", &path_env)
+                .env("HOMEB0Y_REMOTE_TRACKING_REAL_GIT", &real_git);
+            if hold_fetch {
+                command
+                    .env("HOMEB0Y_REMOTE_TRACKING_FETCH_STARTED", &started)
+                    .env("HOMEB0Y_REMOTE_TRACKING_FETCH_RELEASE", &release);
+            }
+            if let Some(attempted) = attempted {
+                command.env("HOMEB0Y_REMOTE_TRACKING_FETCH_ATTEMPTED", attempted);
+            }
+            if let Some(reached) = reached {
+                command.env("HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED", reached);
+            }
+            if let Some(done) = done {
+                command.env("HOMEB0Y_REMOTE_TRACKING_FETCH_DONE", done);
+            }
+            command.spawn().expect("spawn fetch child")
         };
-        let mut first = spawn(&source, "requested-a");
-        let mut second = spawn(&sibling, "requested-b");
+        let mut first = spawn(&source, "behind", true, None, None, None);
+        let wait_deadline = Instant::now() + Duration::from_secs(2);
+        while !started.exists() && Instant::now() < wait_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.exists(), "first fetch did not reach upload-pack");
+        let second_attempted = temp.path().join("second-fetch-attempted");
+        let second_reached = temp.path().join("second-fetch-reached-upload-pack");
+        let second_done = temp.path().join("second-fetch-done");
+        let mut second = spawn(
+            &sibling,
+            "origin",
+            false,
+            Some(&second_attempted),
+            Some(&second_reached),
+            Some(&second_done),
+        );
+        let attempt_deadline = Instant::now() + Duration::from_secs(2);
+        while !second_attempted.exists() && Instant::now() < attempt_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            second_attempted.exists(),
+            "second fetch did not attempt authority"
+        );
+        let contention_deadline = Instant::now() + Duration::from_millis(500);
+        while !second_reached.exists() && Instant::now() < contention_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !second_reached.exists(),
+            "sibling fetch reached transport while the first fetch held remote-tracking authority"
+        );
+        std::fs::write(&release, "release\n").expect("release first fetch");
         assert!(first.wait().expect("wait first").success());
         assert!(second.wait().expect("wait second").success());
-
-        for revision in ["requested-a", "requested-b"] {
-            assert!(!git_stdout(
-                &source,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    &format!("refs/remotes/origin/{revision}^{{commit}}")
-                ],
-            )
-            .is_empty());
-        }
+        assert!(second_done.exists(), "sibling fetch did not complete");
+        let mut tags = spawn(&sibling, "tags", false, None, None, None);
+        assert!(tags.wait().expect("wait tag fetch").success());
     }
 
     #[test]
