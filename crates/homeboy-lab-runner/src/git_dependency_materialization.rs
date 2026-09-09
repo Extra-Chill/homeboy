@@ -944,6 +944,7 @@ mod tests {
 
     #[test]
     fn dependency_refresh_waits_for_remote_tracking_authority() {
+        let _env_lock = homeboy_core::test_support::env_lock();
         let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();

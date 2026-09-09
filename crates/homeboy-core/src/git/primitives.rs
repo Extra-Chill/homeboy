@@ -113,7 +113,7 @@ pub fn pull_repo(repo_dir: &Path) -> Result<()> {
     let output = fetch_and_merge_upstream_ff_only(repo_dir, deadline)?;
     ensure_git_success(
         repo_dir,
-        &["merge", "--ff-only", "@{upstream}"],
+        &["merge", "--ff-only", "FETCH_HEAD"],
         "git merge --ff-only",
         &output,
     )?;
@@ -300,16 +300,32 @@ pub fn fetch_and_merge_upstream_ff_only(
     git_root: &Path,
     deadline: Instant,
 ) -> Result<std::process::Output> {
-    fetch_remote_tracking_refs_until(git_root, &["fetch"], "git fetch", &[], deadline)?;
-    let upstream = run_git(
+    let branch = current_branch(git_root)
+        .ok_or_else(|| Error::git_command_failed("resolve current branch for git pull"))?;
+    let remote = run_git(
         git_root,
-        &["rev-parse", "--abbrev-ref", "@{upstream}"],
-        "git upstream",
+        &["config", "--get", &format!("branch.{branch}.remote")],
+        "git upstream remote",
+    )?
+    .trim()
+    .to_string();
+    let upstream_ref = run_git(
+        git_root,
+        &["config", "--get", &format!("branch.{branch}.merge")],
+        "git upstream ref",
+    )?
+    .trim()
+    .to_string();
+    fetch_remote_tracking_refs_until(
+        git_root,
+        &["fetch", &remote, &upstream_ref],
+        &format!("git fetch {remote} {upstream_ref}"),
+        &[],
+        deadline,
     )?;
-    let upstream = upstream.trim();
     run_git_output(
         git_root,
-        &["merge", "--ff-only", upstream],
+        &["merge", "--ff-only", "FETCH_HEAD"],
         "git merge --ff-only",
     )
 }
@@ -490,12 +506,12 @@ pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
             "git merge default branch --ff-only",
         )?;
     } else {
-        let output = fetch_and_merge_upstream_ff_only(git_root, deadline)?;
-        ensure_git_success(
+        // The authority fetch above already refreshed this branch's tracking
+        // ref. Do not call the pull helper here because it would fetch again.
+        run_git(
             git_root,
             &["merge", "--ff-only", "@{upstream}"],
-            "git merge --ff-only",
-            &output,
+            "git merge upstream --ff-only",
         )?;
     }
 
@@ -835,6 +851,194 @@ mod tests {
     }
 
     #[test]
+    fn pull_repo_fetches_configured_non_default_upstream_with_restricted_refspec() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let origin = tmp.path().join("origin.git");
+        let upstream = tmp.path().join("upstream.git");
+        let seed = tmp.path().join("seed");
+        let checkout = tmp.path().join("checkout");
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "main", origin.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "topic", upstream.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["config", "user.email", "t@x.test"]);
+        git(&seed, &["config", "user.name", "T"]);
+        std::fs::write(seed.join("f.txt"), "one\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "initial"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+        git(
+            &seed,
+            &["remote", "add", "upstream", upstream.to_str().unwrap()],
+        );
+        git(&seed, &["switch", "-qc", "topic"]);
+        std::fs::write(seed.join("f.txt"), "two\n").unwrap();
+        git(&seed, &["commit", "-qam", "topic"]);
+        git(&seed, &["push", "-q", "upstream", "topic"]);
+        let expected = run_git(&seed, &["rev-parse", "HEAD"], "seed head").unwrap();
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        git(
+            &checkout,
+            &["remote", "add", "upstream", upstream.to_str().unwrap()],
+        );
+        git(&checkout, &["config", "branch.main.remote", "upstream"]);
+        git(
+            &checkout,
+            &["config", "branch.main.merge", "refs/heads/topic"],
+        );
+        git(
+            &checkout,
+            &[
+                "config",
+                "remote.upstream.fetch",
+                "+refs/heads/main:refs/remotes/upstream/main",
+            ],
+        );
+        git(
+            &checkout,
+            &["remote", "set-url", "origin", "missing-origin.git"],
+        );
+        let fetches = tmp.path().join("fetches");
+        let upload_pack = tmp.path().join("count-upload-pack");
+        std::fs::write(
+            &upload_pack,
+            format!(
+                "#!/bin/sh\nprintf fetch >> {}\nexec git upload-pack \"$@\"\n",
+                fetches.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        git(
+            &checkout,
+            &[
+                "config",
+                "remote.upstream.uploadpack",
+                upload_pack.to_str().unwrap(),
+            ],
+        );
+
+        pull_repo(&checkout).expect("pull configured upstream");
+
+        assert_eq!(
+            run_git(&checkout, &["rev-parse", "HEAD"], "checkout head").unwrap(),
+            expected
+        );
+        assert!(
+            run_git(
+                &checkout,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/upstream/topic"
+                ],
+                "upstream tracking ref",
+            )
+            .is_err(),
+            "the restricted fetch refspec must leave the topic without a tracking ref"
+        );
+        assert_eq!(std::fs::read_to_string(fetches).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn update_to_remote_default_branch_fallback_merges_without_a_second_fetch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let remote = tmp.path().join("remote.git");
+        let seed = tmp.path().join("seed");
+        let checkout = tmp.path().join("checkout");
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "feature", remote.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["config", "user.email", "t@x.test"]);
+        git(&seed, &["config", "user.name", "T"]);
+        std::fs::write(seed.join("f.txt"), "one\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "initial"]);
+        git(&seed, &["push", "-q", "origin", "feature"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        git(&checkout, &["remote", "set-head", "origin", "-d"]);
+        let fetches = tmp.path().join("fetches");
+        let upload_pack = tmp.path().join("count-upload-pack");
+        std::fs::write(
+            &upload_pack,
+            format!(
+                "#!/bin/sh\nprintf fetch >> {}\nexec git upload-pack \"$@\"\n",
+                fetches.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        git(
+            &checkout,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                upload_pack.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(seed.join("f.txt"), "two\n").unwrap();
+        git(&seed, &["commit", "-qam", "advance"]);
+        git(&seed, &["push", "-q", "origin", "feature"]);
+        let expected = run_git(&seed, &["rev-parse", "HEAD"], "seed head").unwrap();
+
+        update_to_remote_default_branch(&checkout).expect("fallback update");
+
+        assert_eq!(
+            run_git(&checkout, &["rev-parse", "HEAD"], "checkout head").unwrap(),
+            expected
+        );
+        assert_eq!(std::fs::read_to_string(fetches).unwrap().lines().count(), 1);
+    }
+
+    #[test]
     fn update_to_remote_default_branch_detaches_when_the_local_default_branch_is_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let remote = tmp.path().join("remote.git");
@@ -892,6 +1096,7 @@ mod tests {
 
     #[test]
     fn update_to_remote_default_branch_waits_for_remote_tracking_authority() {
+        let _env_lock = crate::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let repository = dir.path();
         git(repository, &["init", "-q", "-b", "main"]);
