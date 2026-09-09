@@ -261,6 +261,35 @@ impl LocalControllerJobClient {
         Self::connect_with_admission_guard(None)
     }
 
+    /// Connect to the daemon generation that already owns `job_id`.
+    ///
+    /// Observation and cancellation must retain the job's original generation.
+    /// In particular, they must not call `ensure_running`, which can rotate a
+    /// stale admission daemon to the caller's build.
+    pub fn connect_existing_job(job_id: &str) -> Result<Self> {
+        let endpoint = generation_store::endpoint_for_job(job_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_job_id",
+                "controller job has no recorded daemon generation",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| {
+                Error::internal_unexpected(format!("build local controller-job client: {error}"))
+            })?;
+        Ok(Self {
+            endpoint: format!("http://{}", endpoint.address),
+            lease_id: endpoint.lease_id,
+            client,
+            _admission_guard: None,
+        })
+    }
+
     fn connect_with_admission_guard(admission_guard: Option<File>) -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
@@ -4591,6 +4620,157 @@ mod tests {
             controller_job_response(&wire).expect("reader recovers the written job")["id"],
             "written-by-the-daemon"
         );
+    }
+
+    #[test]
+    fn existing_job_connection_uses_the_draining_generation_for_status_and_cancellation() {
+        crate::test_support::with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
+            let owner_address = listener
+                .local_addr()
+                .expect("fake daemon address")
+                .to_string();
+            let job_id = Uuid::new_v4();
+            let (requests_tx, requests_rx) = mpsc::channel();
+            let server = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().expect("accept fake daemon request");
+                    let mut request = [0_u8; 4096];
+                    let length = stream.read(&mut request).expect("read fake daemon request");
+                    let request_line = std::str::from_utf8(&request[..length])
+                        .expect("decode fake daemon request")
+                        .lines()
+                        .next()
+                        .expect("request line")
+                        .to_string();
+                    requests_tx.send(request_line).expect("record request");
+                    let job = json!({
+                        "id": job_id,
+                        "operation": "test",
+                        "status": "running",
+                        "created_at_ms": 1,
+                        "updated_at_ms": 1,
+                        "event_count": 0,
+                        "artifacts": [],
+                        "daemon_lease_id": "draining",
+                    });
+                    let body = json!({
+                        "success": true,
+                        "data": { "body": { "job": job } },
+                    })
+                    .to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    )
+                    .expect("respond from fake daemon");
+                    stream.flush().expect("flush fake daemon response");
+                }
+            });
+            let state =
+                |lease_id: &str,
+                 address: &str,
+                 build_identity: crate::build_identity::BuildIdentity| {
+                    DaemonState {
+                        schema: DAEMON_LEASE_SCHEMA.to_string(),
+                        lease_id: lease_id.to_string(),
+                        startup_token: "test".to_string(),
+                        address: address.to_string(),
+                        pid: 1,
+                        state_path: crate::paths::daemon_state_file()
+                            .expect("state path")
+                            .display()
+                            .to_string(),
+                        started_at: "now".to_string(),
+                        last_seen_at: "now".to_string(),
+                        build_identity,
+                        binary_sha256: None,
+                        runtime_paths: DaemonRuntimeSnapshot {
+                            loaded_at: "now".to_string(),
+                            paths: Vec::new(),
+                        },
+                    }
+                };
+            let draining_identity = crate::build_identity::BuildIdentity {
+                version: "0.370.0".to_string(),
+                git_commit: Some("old".to_string()),
+                git_dirty: None,
+                display: "homeboy 0.370.0+old".to_string(),
+            };
+            let admission_identity = crate::build_identity::BuildIdentity {
+                version: "0.370.1".to_string(),
+                git_commit: Some("new".to_string()),
+                git_dirty: None,
+                display: "homeboy 0.370.1+new".to_string(),
+            };
+            let draining = state("draining", &owner_address, draining_identity.clone());
+            generation_store::seed(&draining).expect("seed draining generation");
+            generation_store::record_job(&job_id.to_string(), "draining").expect("record job");
+            let admission = state("admission", "127.0.0.1:1002", admission_identity.clone());
+            generation_store::activate(&admission).expect("activate new generation");
+
+            let client = LocalControllerJobClient::connect_existing_job(&job_id.to_string())
+                .expect("connect existing job");
+
+            assert_eq!(client.endpoint, format!("http://{owner_address}"));
+            assert_eq!(client.lease_id, "draining");
+            assert_eq!(
+                client.status(&job_id.to_string()).expect("read old job").id,
+                job_id
+            );
+            assert_eq!(
+                client
+                    .cancel(&job_id.to_string(), "test cancellation")
+                    .expect("cancel old job")
+                    .id,
+                job_id
+            );
+            server.join().expect("stop fake daemon");
+            assert_eq!(
+                requests_rx.recv().expect("status request"),
+                format!("GET /jobs/{job_id} HTTP/1.1")
+            );
+            assert_eq!(
+                requests_rx.recv().expect("cancellation request"),
+                format!("POST /controller/jobs/{job_id}/cancel HTTP/1.1")
+            );
+            assert_eq!(
+                generation_store::admitting()
+                    .expect("read admission generation")
+                    .expect("admission generation")
+                    .lease_id,
+                "admission"
+            );
+            assert_eq!(
+                generation_store::generations()
+                    .expect("read generations")
+                    .into_iter()
+                    .find(|endpoint| endpoint.lease_id == "draining")
+                    .expect("draining generation")
+                    .build_identity,
+                draining_identity.display
+            );
+            assert_eq!(
+                generation_store::admitting()
+                    .expect("read admission generation")
+                    .expect("admission generation")
+                    .build_identity,
+                admission_identity.display
+            );
+            let state_path = crate::paths::daemon_state_file().expect("state path");
+            assert!(!state_path.exists());
+            let error = match LocalControllerJobClient::connect_existing_job("missing-job") {
+                Ok(_) => panic!("missing job owner must fail closed"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.code,
+                crate::error::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(!state_path.exists());
+        });
     }
 
     /// `LocalControllerJobClient::status` polls the read-only `GET /jobs/<id>`

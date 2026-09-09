@@ -510,7 +510,7 @@ fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
 }
 
 fn cleanup_job_status(job_id: &str, full: bool) -> homeboy::core::Result<Value> {
-    let job = LocalControllerJobClient::connect()?.status(job_id)?;
+    let job = LocalControllerJobClient::connect_existing_job(job_id)?.status(job_id)?;
     if full {
         return serde_json::to_value(job).map_err(|error| {
             homeboy::core::Error::internal_json(
@@ -525,7 +525,7 @@ fn cleanup_job_status(job_id: &str, full: bool) -> homeboy::core::Result<Value> 
 fn cleanup_job_resume(job_id: &str) -> homeboy::core::Result<Value> {
     // Starting is idempotent: a running or terminal job returns its durable state.
     Ok(compact_cleanup_job(
-        &LocalControllerJobClient::connect()?.start(job_id)?,
+        &LocalControllerJobClient::connect_existing_job(job_id)?.start(job_id)?,
         "resume",
     ))
 }

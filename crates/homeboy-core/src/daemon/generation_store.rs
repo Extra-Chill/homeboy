@@ -191,11 +191,10 @@ pub(super) fn complete_job(job_id: &str) -> Result<Option<LocalDaemonEndpoint>> 
 }
 
 pub(super) fn generation_state_dir() -> Result<PathBuf> {
-    let root = crate::paths::daemon_state_file()?;
-    let parent = root
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent"))?;
-    Ok(parent
+    // A replacement inherits HOMEBOY_DAEMON_STATE_DIR from its generation. The
+    // router location is stable across that handoff and therefore owns sibling
+    // generation allocation.
+    Ok(router_dir()?
         .join("generations")
         .join(uuid::Uuid::new_v4().to_string()))
 }
@@ -228,6 +227,28 @@ mod tests {
     use super::*;
     use crate::build_identity;
     use crate::test_support::with_isolated_home;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let prior = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn state(lease_id: &str, address: &str) -> DaemonState {
         DaemonState {
@@ -279,6 +300,30 @@ mod tests {
             assert!(complete_job("job-a").expect("complete A").is_some());
             assert!(endpoint_for_job("job-a").expect("retired A").is_none());
             assert_eq!(admitting().expect("admitting").expect("B").lease_id, "B");
+        });
+    }
+
+    #[test]
+    fn replacement_generations_are_siblings_under_the_stable_router_root() {
+        with_isolated_home(|home| {
+            let router = home.path().join("stable-router");
+            let first_generation = router.join("generations").join("first");
+            let _router_env = EnvVarGuard::set(DAEMON_ROUTER_DIR_ENV, &router);
+            std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, &first_generation);
+
+            let second_generation = generation_state_dir().expect("allocate second generation");
+            std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, &second_generation);
+            let third_generation = generation_state_dir().expect("allocate third generation");
+
+            assert_eq!(
+                second_generation.parent(),
+                Some(router.join("generations").as_path())
+            );
+            assert_eq!(
+                third_generation.parent(),
+                Some(router.join("generations").as_path())
+            );
+            assert!(!third_generation.starts_with(&second_generation));
         });
     }
 }
