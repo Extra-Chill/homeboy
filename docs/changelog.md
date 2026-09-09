@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.0] - 2026-09-09
+
+### Added
+- update queued Cook placement
+- version heartbeat renewal API
+
+### Fixed
+- heartbeat runner-owned Cook startup
+- report only enforced probe limits
+- retain doctor failure causes
+- expose Cook before local startup
+- bound and diagnose full inventory probes
+- classify admission reservations as sidecars
+- discover unmaterialized Cook admissions
+- preserve draining generation ownership
+- preserve compact daemon lease identity
+
 ## [0.370.1] - 2026-09-09
 
 ### Changed
