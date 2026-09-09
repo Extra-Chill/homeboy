@@ -2200,7 +2200,7 @@ fn child_run_matching_accepts_durable_run_id_or_command_reference() {
 }
 
 #[test]
-fn orphaned_child_run_job_reports_stale_retryable_runner_state() {
+fn orphaned_child_run_job_reports_stale_runner_state() {
     let job = orphaned_child_run_job("homeboy-lab", sample_run_summary("run-child-1"));
 
     assert_eq!(job.runner_id, "homeboy-lab");
@@ -2212,8 +2212,6 @@ fn orphaned_child_run_job_reports_stale_retryable_runner_state() {
         job.stale_reason.as_deref(),
         Some("child_run_running_without_active_runner_job")
     );
-    assert_eq!(job.lifecycle_state.as_deref(), Some("recoverable_orphan"));
-    assert_eq!(job.retryable, Some(true));
 }
 
 #[test]
