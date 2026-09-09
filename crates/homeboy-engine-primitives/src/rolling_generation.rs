@@ -84,6 +84,16 @@ impl<E> RollingGenerations<E> {
     }
 
     pub fn activate(&mut self, generation: &str) -> bool {
+        self.activate_inner(generation, true)
+    }
+
+    /// Activate a generation while leaving empty draining generations available
+    /// to a caller that must finish an external retirement protocol first.
+    pub fn activate_preserving_drained(&mut self, generation: &str) -> bool {
+        self.activate_inner(generation, false)
+    }
+
+    fn activate_inner(&mut self, generation: &str, retire_drained: bool) -> bool {
         if !self.generations.contains_key(generation) {
             return false;
         }
@@ -98,7 +108,9 @@ impl<E> RollingGenerations<E> {
             .get_mut(generation)
             .expect("generation was checked")
             .drain_state = RollingDrainState::Admitting;
-        self.retire_drained();
+        if retire_drained {
+            self.retire_drained();
+        }
         true
     }
 
@@ -278,5 +290,13 @@ mod tests {
         generations.recover();
         assert_eq!(generations.admission_owner, "A");
         assert_eq!(generations.job_owner("job-a"), Some("A"));
+    }
+
+    #[test]
+    fn ordinary_activation_retires_an_empty_drained_generation() {
+        let mut generations = RollingGenerations::new("A", "endpoint-a");
+        assert_eq!(generations.begin("B", "endpoint-b"), RollingStart::Start);
+        assert!(generations.activate("B"));
+        assert!(!generations.generations.contains_key("A"));
     }
 }
