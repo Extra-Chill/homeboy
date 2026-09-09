@@ -82,3 +82,15 @@ jobs:
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit
+
+  required-gates-executed:
+    name: homeboy / Required Gates Executed
+    needs: [rustfmt, lint, homeboy]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every required gate completed for this PR head
+        env:
+          CI_GATE_RESULTS: ${{ toJSON(needs) }}
+          REQUIRED_GATES_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash .github/ci-required-gates-executed.sh

@@ -34,6 +34,10 @@
           {
             "context": "homeboy / Test",
             "integration_id": 15368
+          },
+          {
+            "context": "homeboy / Required Gates Executed",
+            "integration_id": 15368
           }
         ],
         "strict_required_status_checks_policy": true

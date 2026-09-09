@@ -1,0 +1,21 @@
+name: Required Gates Ruleset Audit
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: homeboy / Required Gates Ruleset Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify the live main ruleset matches the declared candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRED_GATES_HEAD_SHA: ${{ github.sha }}
+        run: bash .github/validate-required-gates-ruleset.sh --github
