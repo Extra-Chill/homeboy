@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.3] - 2026-09-09
+
+### Changed
+- share the conservative shell arg quoter
+- one daemon response envelope
+- one env guard instead of nine hand-rolled copies
+- one promotion request type and one serialized shape
+- Make artifact cleanup bounded and resumable without skipping candidates
+
+### Fixed
+- rename the promotion request in its integration test
+
 ## [0.371.2] - 2026-09-09
 
 ### Fixed
