@@ -1160,9 +1160,17 @@ fn dirty_controller_preserves_a_runner_side_daemon_recovery() {
         "active_daemon_control_plane_version != job_command_binary_version"
     );
     let actions = warning.safe_recovery_actions();
-    assert!(
-        actions.is_empty(),
-        "the active daemon does not verify this recovery target"
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[0].args,
+        [
+            "runner",
+            "refresh-homeboy",
+            "homeboy-lab",
+            "--ref",
+            "1e63f1ae0369",
+            "--reconnect",
+        ]
     );
     assert!(!warning.message.contains("upgrade --force"));
 }
