@@ -3909,6 +3909,9 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| bounded(value, STATE_BOUND)),
                 message: redacted_bounded(message, MESSAGE_BOUND),
+                state: None,
+                reason: None,
+                retry: None,
             });
         }
     }
