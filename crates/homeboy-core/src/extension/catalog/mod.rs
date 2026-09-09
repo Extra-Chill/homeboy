@@ -1,8 +1,8 @@
 use crate::config;
 use crate::error::{Error, ErrorCode, Result};
+use crate::extension::root_manifest::ExtensionRootManifest;
 use crate::output::MergeOutput;
 use crate::paths;
-use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -181,27 +181,6 @@ fn discover_extensions_at(extensions_dir: &Path) -> Vec<DiscoveredExtension> {
     extensions
         .sort_by(|left, right| discovered_extension_id(left).cmp(discovered_extension_id(right)));
     extensions
-}
-
-#[derive(Deserialize)]
-struct ExtensionRootManifest {
-    #[serde(default)]
-    shared_assets: Vec<SharedAssetDeclaration>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SharedAssetDeclaration {
-    Path(String),
-    Object { path: String },
-}
-
-impl SharedAssetDeclaration {
-    fn path(self) -> String {
-        match self {
-            Self::Path(path) | Self::Object { path } => path,
-        }
-    }
 }
 
 /// Shared assets live beside installed extensions but are declared by a source
