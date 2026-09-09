@@ -2445,10 +2445,13 @@ fn recovery_ref(
         // replaced with the initiating controller's unrelated commit.
         Some(identity) => homeboy_upgrade::upgrade::parse_build_identity_display(identity)
             .filter(|identity| identity.git_dirty != Some(true))
-            .and_then(|identity| identity.git_commit),
-        None if initiating_identity.git_dirty != Some(true) => {
-            initiating_identity.git_commit.clone()
-        }
+            .and_then(|identity| identity.git_commit)
+            .filter(|commit| is_immutable_build_commit(commit)),
+        None if initiating_identity.git_dirty != Some(true) => initiating_identity
+            .git_commit
+            .as_deref()
+            .filter(|commit| is_immutable_build_commit(commit))
+            .map(str::to_string),
         None => None,
     }
 }
@@ -2457,6 +2460,13 @@ fn build_identity_commit(identity: &str) -> Option<String> {
     homeboy_upgrade::upgrade::parse_build_identity_display(identity)
         .filter(|identity| identity.git_dirty != Some(true))
         .and_then(|identity| identity.git_commit)
+        .filter(|commit| is_immutable_build_commit(commit))
+}
+
+/// A Homeboy build display carries a Git object ID, not an arbitrary Git ref.
+/// The short form is accepted because product builds embed abbreviated SHAs.
+fn is_immutable_build_commit(commit: &str) -> bool {
+    (7..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn same_homeboy_version(left: &str, right: &str) -> bool {
