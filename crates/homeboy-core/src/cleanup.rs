@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use homeboy_engine_primitives::fs_index_lock::{FsIndexLock, FsIndexLockConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::error::{ActionSafety, CapacityReserveDetails, ExecutableAction};
 use crate::observation::disk_budget::disk_budget;
@@ -176,11 +177,13 @@ pub struct ArtifactCleanupCursor {
     pub worktree: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_relative_path: Option<String>,
-    /// Partial recursive measurement for `next_relative_path`. Keeping the
-    /// traversal frontier makes a deadline interruption advance inside one
-    /// large declaration rather than restarting its tree on every pass.
+    /// Opaque reference to the repository-bound recursive measurement state.
+    /// The frontier itself stays in durable cleanup state so broad trees do not
+    /// turn a continuation command into an oversized argv payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    measurement: Option<ArtifactMeasurementCursor>,
+    pub measurement_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_checksum: Option<String>,
     pub merged_only: bool,
     pub min_age_days: Option<u64>,
     pub include_active_worktrees: bool,
@@ -194,6 +197,19 @@ struct ArtifactMeasurementCursor {
     logical_bytes: u64,
     allocated_bytes: u64,
     newest_modified_unix_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ArtifactMeasurementCheckpoint {
+    root: String,
+    worktree: String,
+    relative_path: String,
+    measurement: ArtifactMeasurementCursor,
+}
+
+struct LoadedArtifactMeasurementCheckpoint {
+    path: PathBuf,
+    measurement: ArtifactMeasurementCursor,
 }
 
 pub fn parse_artifact_cleanup_cursor(value: &str) -> Result<ArtifactCleanupCursor> {
@@ -651,6 +667,8 @@ pub struct ArtifactCleanupCandidate {
     pub source_dirty: bool,
     pub unpushed_commits: bool,
     pub pressure_eligible: bool,
+    #[serde(skip)]
+    pub(crate) age_gate_days: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1331,6 +1349,7 @@ fn collect_worktree_candidates_bounded(
             source_dirty: safety.source_dirty,
             unpushed_commits: safety.unpushed_commits,
             pressure_eligible,
+            age_gate_days: effective_min_age_days(options.min_age_days, declaration_min_age_days),
         });
     }
 
@@ -1460,6 +1479,18 @@ fn cleanup_artifacts_in_worktrees(
     } else {
         0
     };
+    let measurement_checkpoint = options
+        .cursor
+        .as_ref()
+        .filter(|cursor| cursor.worktree == worktrees[start].path.to_string_lossy())
+        .filter(|cursor| cursor.measurement_ref.is_some() || cursor.measurement_checksum.is_some())
+        .map(|cursor| load_artifact_measurement_checkpoint(&root, cursor))
+        .transpose()?;
+    let resumed_relative_path = options
+        .cursor
+        .as_ref()
+        .filter(|cursor| cursor.worktree == worktrees[start].path.to_string_lossy())
+        .and_then(|cursor| cursor.next_relative_path.clone());
     let total_worktree_count = worktrees.len();
     let worktrees = &worktrees[start..];
     // Repository-wide pages bound declaration inspections, independent of sort.
@@ -1487,14 +1518,42 @@ fn cleanup_artifacts_in_worktrees(
     for (index, worktree) in worktrees.iter().enumerate() {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             scan_complete = false;
-            next_cursor = repository_artifact_cursor(&root, worktree, None, None, options);
+            next_cursor = repository_artifact_cursor(
+                &root,
+                worktree,
+                (index == 0)
+                    .then(|| resumed_relative_path.clone())
+                    .flatten(),
+                (index == 0)
+                    .then(|| {
+                        measurement_checkpoint
+                            .as_ref()
+                            .map(|checkpoint| checkpoint.measurement.clone())
+                    })
+                    .flatten(),
+                options,
+            )?;
             break;
         }
         let remaining_inspections =
             inspection_limit.map(|limit| limit.saturating_sub(inspected_count));
         if remaining_inspections == Some(0) {
             scan_complete = false;
-            next_cursor = repository_artifact_cursor(&root, worktree, None, None, options);
+            next_cursor = repository_artifact_cursor(
+                &root,
+                worktree,
+                (index == 0)
+                    .then(|| resumed_relative_path.clone())
+                    .flatten(),
+                (index == 0)
+                    .then(|| {
+                        measurement_checkpoint
+                            .as_ref()
+                            .map(|checkpoint| checkpoint.measurement.clone())
+                    })
+                    .flatten(),
+                options,
+            )?;
             break;
         }
         // A single stale/non-Git/vanished worktree candidate must not abort the
@@ -1518,7 +1577,11 @@ fn cleanup_artifacts_in_worktrees(
                 .cursor
                 .as_ref()
                 .filter(|cursor| cursor.worktree == worktree.path.to_string_lossy())
-                .and_then(|cursor| cursor.measurement.as_ref()),
+                .and_then(|_| {
+                    measurement_checkpoint
+                        .as_ref()
+                        .map(|checkpoint| &checkpoint.measurement)
+                }),
         ) {
             Ok(WorktreeCandidateScan {
                 candidates: worktree_candidates,
@@ -1539,16 +1602,20 @@ fn cleanup_artifacts_in_worktrees(
                         next_relative_path,
                         measurement,
                         options,
-                    );
+                    )?;
                     break;
                 }
                 if inspection_limit.is_some_and(|limit| inspected_count >= limit)
                     && index + 1 < worktrees.len()
                 {
                     scan_complete = false;
-                    next_cursor = worktrees.get(index + 1).and_then(|next| {
-                        repository_artifact_cursor(&root, next, None, None, options)
-                    });
+                    next_cursor = repository_artifact_cursor(
+                        &root,
+                        &worktrees[index + 1],
+                        None,
+                        None,
+                        options,
+                    )?;
                     break;
                 }
             }
@@ -1559,9 +1626,11 @@ fn cleanup_artifacts_in_worktrees(
                 ));
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     scan_complete = false;
-                    next_cursor = worktrees.get(index + 1).and_then(|next| {
-                        repository_artifact_cursor(&root, next, None, None, options)
-                    });
+                    next_cursor = worktrees
+                        .get(index + 1)
+                        .map(|next| repository_artifact_cursor(&root, next, None, None, options))
+                        .transpose()?
+                        .flatten();
                     break;
                 }
             }
@@ -1694,6 +1763,9 @@ fn cleanup_artifacts_in_worktrees(
             })),
         )?;
     }
+    if let Some(checkpoint) = measurement_checkpoint {
+        let _ = fs::remove_file(checkpoint.path);
+    }
     Ok(output)
 }
 
@@ -1703,16 +1775,159 @@ fn artifact_cleanup_cursor(
     next_relative_path: Option<String>,
     measurement: Option<ArtifactMeasurementCursor>,
     options: &ArtifactCleanupOptions,
-) -> ArtifactCleanupCursor {
-    ArtifactCleanupCursor {
+) -> Result<ArtifactCleanupCursor> {
+    let (measurement_ref, measurement_checksum) = match measurement {
+        Some(measurement) => write_artifact_measurement_checkpoint(
+            root,
+            &worktree.path,
+            next_relative_path.as_deref().ok_or_else(|| {
+                Error::internal_unexpected(
+                    "interrupted artifact measurement lacks its declaration path",
+                )
+            })?,
+            measurement,
+        )?,
+        None => (None, None),
+    };
+    Ok(ArtifactCleanupCursor {
         root: root.to_string_lossy().to_string(),
         worktree: worktree.path.to_string_lossy().to_string(),
         next_relative_path,
-        measurement,
+        measurement_ref,
+        measurement_checksum,
         merged_only: options.merged_only,
         min_age_days: options.min_age_days,
         include_active_worktrees: options.include_active_worktrees,
+    })
+}
+
+fn artifact_measurement_checkpoint_path(root: &Path, reference: &str) -> Result<PathBuf> {
+    let reference = uuid::Uuid::parse_str(reference).map_err(|_| {
+        Error::validation_invalid_argument(
+            "cursor",
+            "artifact cleanup measurement checkpoint reference is invalid",
+            None,
+            None,
+        )
+    })?;
+    Ok(cleanup_session_state_path(root)?.with_file_name(format!(
+        "homeboy-cleanup-artifacts-measurement-{reference}.json"
+    )))
+}
+
+fn measurement_checkpoint_checksum(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn write_artifact_measurement_checkpoint(
+    root: &Path,
+    worktree: &Path,
+    relative_path: &str,
+    measurement: ArtifactMeasurementCursor,
+) -> Result<(Option<String>, Option<String>)> {
+    let reference = uuid::Uuid::new_v4().to_string();
+    let checkpoint = ArtifactMeasurementCheckpoint {
+        root: root.to_string_lossy().to_string(),
+        worktree: worktree.to_string_lossy().to_string(),
+        relative_path: relative_path.to_string(),
+        measurement,
+    };
+    let bytes = serde_json::to_vec(&checkpoint).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize artifact cleanup measurement checkpoint".to_string()),
+        )
+    })?;
+    let path = artifact_measurement_checkpoint_path(root, &reference)?;
+    if path.exists() {
+        return Err(Error::internal_unexpected(
+            "artifact cleanup measurement checkpoint reference already exists",
+        ));
     }
+    crate::io::write_output_file_atomically(&path, &bytes, crate::io::OutputWriteOptions::file())
+        .map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "write artifact cleanup measurement checkpoint {}",
+                path.display()
+            )),
+        )
+    })?;
+    Ok((
+        Some(reference),
+        Some(measurement_checkpoint_checksum(&bytes)),
+    ))
+}
+
+fn load_artifact_measurement_checkpoint(
+    root: &Path,
+    cursor: &ArtifactCleanupCursor,
+) -> Result<LoadedArtifactMeasurementCheckpoint> {
+    let (reference, checksum) = match (&cursor.measurement_ref, &cursor.measurement_checksum) {
+        (None, None) => {
+            return Err(Error::validation_invalid_argument(
+                "cursor",
+                "artifact cleanup cursor is missing its measurement checkpoint",
+                None,
+                None,
+            ))
+        }
+        (Some(reference), Some(checksum))
+            if checksum.len() == 64 && checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            (reference, checksum)
+        }
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "cursor",
+                "artifact cleanup measurement checkpoint checksum is invalid",
+                None,
+                None,
+            ))
+        }
+    };
+    let path = artifact_measurement_checkpoint_path(root, reference)?;
+    let bytes = fs::read(&path).map_err(|_| {
+        Error::validation_invalid_argument(
+            "cursor",
+            "artifact cleanup measurement checkpoint is unavailable",
+            None,
+            None,
+        )
+    })?;
+    if measurement_checkpoint_checksum(&bytes) != *checksum {
+        return Err(Error::validation_invalid_argument(
+            "cursor",
+            "artifact cleanup measurement checkpoint checksum does not match",
+            None,
+            None,
+        ));
+    }
+    let checkpoint: ArtifactMeasurementCheckpoint =
+        serde_json::from_slice(&bytes).map_err(|_| {
+            Error::validation_invalid_argument(
+                "cursor",
+                "artifact cleanup measurement checkpoint is invalid",
+                None,
+                None,
+            )
+        })?;
+    if checkpoint.root != cursor.root
+        || checkpoint.worktree != cursor.worktree
+        || cursor.next_relative_path.as_deref() != Some(checkpoint.relative_path.as_str())
+    {
+        return Err(Error::validation_invalid_argument(
+            "cursor",
+            "artifact cleanup measurement checkpoint does not match the requested repository",
+            None,
+            None,
+        ));
+    }
+    Ok(LoadedArtifactMeasurementCheckpoint {
+        path,
+        measurement: checkpoint.measurement,
+    })
 }
 
 fn repository_artifact_cursor(
@@ -1721,9 +1936,10 @@ fn repository_artifact_cursor(
     next_relative_path: Option<String>,
     measurement: Option<ArtifactMeasurementCursor>,
     options: &ArtifactCleanupOptions,
-) -> Option<ArtifactCleanupCursor> {
+) -> Result<Option<ArtifactCleanupCursor>> {
     (options.scope == ArtifactCleanupScope::RepositoryWorktrees)
         .then(|| artifact_cleanup_cursor(root, worktree, next_relative_path, measurement, options))
+        .transpose()
 }
 
 fn artifact_cleanup_apply_command(
@@ -2082,6 +2298,19 @@ fn apply_artifact_candidate_with_before_remove(
                     "checkout became active or its liveness became unknown before removal"
                         .to_string(),
                 );
+            }
+        }
+    }
+    if !candidate.pressure_eligible {
+        if let Some(min_age_days) = candidate.age_gate_days {
+            let usage = match path_usage(path) {
+                Ok(usage) => usage,
+                Err(error) => return ArtifactCleanupCandidateApplyOutcome::Failed(error),
+            };
+            if !meets_age_gate(usage.age_seconds(), min_age_days) {
+                return ArtifactCleanupCandidateApplyOutcome::Skipped(format!(
+                    "artifact was modified within the {min_age_days}-day age gate after discovery"
+                ));
             }
         }
     }
@@ -5178,6 +5407,7 @@ mod tests {
             source_dirty: false,
             unpushed_commits: false,
             pressure_eligible: false,
+            age_gate_days: None,
         }
     }
 
@@ -5377,7 +5607,11 @@ mod tests {
                 }
                 let next = page.next_cursor.expect("measurement continuation");
                 assert_eq!(next.next_relative_path.as_deref(), Some("target"));
-                assert!(next.measurement.is_some(), "inner-tree progress is durable");
+                assert!(
+                    next.measurement_ref.is_some(),
+                    "inner-tree progress is durable"
+                );
+                assert!(next.measurement_checksum.is_some());
                 cursor = Some(
                     parse_artifact_cleanup_cursor(
                         &serde_json::to_string(&next).expect("serialize continuation cursor"),
@@ -5391,6 +5625,151 @@ mod tests {
             assert_eq!(completed.candidates[0].size_bytes, 7);
             assert_eq!(completed.candidates[0].usage_measurement, USAGE_MEASURED);
             assert!(completed.next_cursor.is_none());
+        });
+    }
+
+    #[test]
+    fn broad_measurement_checkpoint_keeps_cursor_bounded_and_is_removed_after_resume() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            for index in 0..512 {
+                write_file(
+                    &repo.path().join(format!("target/sibling-{index}/artifact")),
+                    "artifact",
+                );
+            }
+            let worktrees = vec![WorktreeInfo {
+                path: repo.path().to_path_buf(),
+            }];
+            let options = ArtifactCleanupOptions {
+                scope: ArtifactCleanupScope::RepositoryWorktrees,
+                ..ArtifactCleanupOptions::default()
+            };
+
+            let first = cleanup_artifacts_in_worktrees(
+                repo.path().to_path_buf(),
+                worktrees.clone(),
+                &options,
+                false,
+                Vec::new(),
+                ArtifactInventoryBounds {
+                    measurement_step_limit: Some(1),
+                    ..ArtifactInventoryBounds::default()
+                },
+            )
+            .expect("first bounded measurement page");
+            let cursor = first.next_cursor.expect("measurement continuation");
+            let cursor_json = serde_json::to_string(&cursor).expect("serialize bounded cursor");
+            assert!(
+                cursor_json.len() < 512,
+                "cursor must not contain every sibling"
+            );
+            let checkpoint_path = artifact_measurement_checkpoint_path(
+                repo.path(),
+                cursor
+                    .measurement_ref
+                    .as_deref()
+                    .expect("checkpoint reference"),
+            )
+            .expect("checkpoint path");
+            assert!(
+                checkpoint_path.exists(),
+                "frontier checkpoint was atomically published"
+            );
+
+            let expired = cleanup_artifacts_in_worktrees(
+                repo.path().to_path_buf(),
+                worktrees.clone(),
+                &ArtifactCleanupOptions {
+                    cursor: Some(
+                        parse_artifact_cleanup_cursor(&cursor_json).expect("cursor round trip"),
+                    ),
+                    ..options.clone()
+                },
+                false,
+                Vec::new(),
+                ArtifactInventoryBounds {
+                    deadline: Some(Instant::now()),
+                    ..ArtifactInventoryBounds::default()
+                },
+            )
+            .expect("expired continuation keeps its frontier");
+            let cursor = expired.next_cursor.expect("continued checkpoint");
+            assert!(cursor.measurement_ref.is_some());
+            assert!(
+                !checkpoint_path.exists(),
+                "the consumed checkpoint must be replaced, not retained"
+            );
+
+            let resumed = cleanup_artifacts_in_worktrees(
+                repo.path().to_path_buf(),
+                worktrees,
+                &ArtifactCleanupOptions {
+                    cursor: Some(cursor),
+                    ..options
+                },
+                false,
+                Vec::new(),
+                ArtifactInventoryBounds::default(),
+            )
+            .expect("resume broad measurement");
+            assert!(resumed.scan_complete);
+            assert_eq!(resumed.candidate_count, 1);
+            assert!(
+                !checkpoint_path.exists(),
+                "a consumed checkpoint must not remain reachable after completion"
+            );
+        });
+    }
+
+    #[test]
+    fn apply_rechecks_an_age_gated_artifact_after_new_work_appears() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            let artifact = repo.path().join("target/debug/app");
+            write_file(&artifact, "old artifact");
+            let old = SystemTime::now() - Duration::from_secs(2 * SECONDS_PER_DAY);
+            for path in [
+                &artifact,
+                &repo.path().join("target/debug"),
+                &repo.path().join("target"),
+            ] {
+                fs::File::open(path)
+                    .expect("open old artifact path")
+                    .set_times(fs::FileTimes::new().set_modified(old))
+                    .expect("age artifact path");
+            }
+            let scan = collect_worktree_candidates(
+                &WorktreeInfo {
+                    path: repo.path().to_path_buf(),
+                },
+                &ArtifactCleanupOptions {
+                    min_age_days: Some(1),
+                    ..ArtifactCleanupOptions::default()
+                },
+                &ActiveWorktrees::default(),
+                &ProtectedControllerExecutables::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("discover old candidate");
+            let candidate = scan.candidates.into_iter().next().expect("old candidate");
+            write_file(&artifact, "new artifact");
+
+            let outcome =
+                apply_artifact_candidate(&candidate, &ActiveWorktrees::default(), "test-run");
+
+            assert!(matches!(
+                outcome,
+                ArtifactCleanupCandidateApplyOutcome::Skipped(reason)
+                    if reason.contains("age gate after discovery")
+            ));
+            assert!(
+                artifact.exists(),
+                "new work must not be removed from a stale snapshot"
+            );
         });
     }
 
