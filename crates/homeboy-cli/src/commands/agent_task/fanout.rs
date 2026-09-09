@@ -4173,19 +4173,18 @@ fn preview_provider_dispatchability_evidence(
         // preview admission is for the selected provider route, not every
         // future task in that Cook; admitting the full plan would probe the
         // same route again before execution-side deduplication applies.
-        // Share a verdict only when the selected provider would use the same
-        // runtime-readiness cache entry, including effective config and secret
-        // value identities.
+        let admitted_plan = homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+            &route.plan,
+            catalog,
+            &mut readiness_cache,
+        )?;
+        // Admission binds any viable fallback route. Derive coalescing identity
+        // from that selected route so an unavailable primary cannot block it.
         let route_key =
-            provider::provider_runtime_readiness_cache_identity_for_plan(catalog, &route.plan)?;
+            provider::provider_runtime_readiness_cache_identity_for_plan(catalog, &admitted_plan)?;
         let admission = if let Some(admission) = admitted_routes.get(&route_key) {
             admission.clone()
         } else {
-            let admitted_plan = homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-                &route.plan,
-                catalog,
-                &mut readiness_cache,
-            )?;
             let task = admitted_plan.tasks.first().ok_or_else(|| {
                 Error::internal_unexpected("compiled fanout cook has no provider task")
             })?;
@@ -10306,14 +10305,14 @@ fi
                     "prompt": "fix the first issue",
                     "to_worktree": "homeboy@configured-preview-first",
                     "backend": "configured",
-                    "provider_config": "{\"client_context\":{\"account\":\"first\"}}",
+                    "provider_config": "{\"client_context\":{\"fanout\":{\"account\":\"first\"}}}",
                     "verify": ["true"]
                 }, {
                     "cook_id": "second",
                     "prompt": "fix the second issue",
                     "to_worktree": "homeboy@configured-preview-second",
                     "backend": "configured",
-                    "provider_config": "{\"client_context\":{\"account\":\"second\"}}",
+                    "provider_config": "{\"client_context\":{\"fanout\":{\"account\":\"second\"}}}",
                     "verify": ["true"]
                 }]
             }),
@@ -10338,6 +10337,103 @@ fi
         assert_eq!(
             std::fs::read_to_string(invoked).expect("readiness count"),
             "2"
+        );
+    }
+
+    #[test]
+    fn preview_readiness_admits_and_coalesces_a_selected_fallback_route() {
+        let root = tempfile::tempdir().expect("fixture directory");
+        let invoked = root.path().join("invoked");
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "unready-primary",
+                    "backend": "missing-primary",
+                    "readiness_invocation": {
+                        "argv": [
+                            "sh",
+                            "-c",
+                            "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"account\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"primary unavailable\",\"cache_key\":\"primary\",\"identity\":{}}'"
+                        ],
+                        "timeout_ms": 5_000
+                    }
+                }))
+                .expect("provider fixture"),
+                serde_json::from_value(serde_json::json!({
+                "id": "ready-fallback",
+                "backend": "ready-fallback",
+                "readiness_invocation": {
+                    "argv": [
+                        "sh",
+                        "-c",
+                        format!(
+                            "count=$(cat {0} 2>/dev/null || printf 0); printf '%s' \"$((count + 1))\" > {0}; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"ready\",\"identity\":{{}}}}'",
+                            invoked.display()
+                        )
+                    ],
+                    "timeout_ms": 5_000
+                }
+            }))
+            .expect("provider fixture"),
+            ],
+            ..AgentTaskProviderCatalog::default()
+        };
+        let mut invocation_args = args();
+        invocation_args.backend = Some("missing-primary".to_string());
+        invocation_args.selector = None;
+        let plan = BatchCookFanoutPlan::from_value(
+            json!({
+                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                "fanout_id": "fallback-preview",
+                "cooks": [{
+                    "cook_id": "first",
+                    "prompt": "fix the first issue",
+                    "to_worktree": "homeboy@fallback-preview-first",
+                    "backend": "missing-primary",
+                    "verify": ["true"]
+                }, {
+                    "cook_id": "second",
+                    "prompt": "fix the second issue",
+                    "to_worktree": "homeboy@fallback-preview-second",
+                    "backend": "missing-primary",
+                    "verify": ["true"]
+                }]
+            }),
+            &invocation_args,
+        )
+        .expect("fanout plan");
+        let mut static_routes = preview_provider_selection_evidence(
+            &plan,
+            &catalog,
+            &json!({"fanout_id": plan.fanout_id}),
+        )
+        .expect("static routes");
+        for route in &mut static_routes.routes {
+            route.plan.options.rotation = Some(
+                homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("ready-fallback".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+        }
+
+        let evidence = preview_provider_dispatchability_evidence(
+            &static_routes,
+            &catalog,
+            &json!({"fanout_id": plan.fanout_id}),
+        )
+        .expect("ready fallback admits each child");
+
+        assert_eq!(evidence["children"][0]["admission"]["state"], "completed");
+        assert_eq!(evidence["children"][1]["admission"]["state"], "completed");
+        assert_eq!(
+            std::fs::read_to_string(invoked).expect("readiness count"),
+            "1"
         );
     }
 

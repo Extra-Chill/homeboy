@@ -155,7 +155,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let mut provider_config = dispatch_provider_config(
+    let (mut provider_config, generated_provider_client_context) = dispatch_provider_config(
         request,
         &repo,
         &component,
@@ -361,7 +361,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "resolved_runtime_identity": request.core.resolved_provider_policy
                     .as_ref()
                     .and_then(|policy| policy.runtime_identity.as_ref()),
-                "provider_readiness_generated_fanout_context": request.core.generated_fanout_context,
+                "provider_readiness_generated_fanout_context": request.core.generated_fanout_context && generated_provider_client_context,
             }),
         });
     }
