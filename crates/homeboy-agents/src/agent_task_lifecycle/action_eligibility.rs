@@ -18,6 +18,7 @@ pub fn lifecycle_action_eligibility(
         Err(error) => unavailable(error.message),
     };
     let resume = resume_availability(record);
+    let placement_update = placement_update_availability(record);
     let retry = retry_availability(record, plan);
     let promotion = if matches!(
         record.state,
@@ -58,6 +59,14 @@ pub fn lifecycle_action_eligibility(
                 "agent_task_run",
             ),
             action(
+                ControlPlaneAction::PlacementUpdate,
+                placement_update,
+                ControlPlaneActionConfirmation::Required,
+                vec!["placement"],
+                true,
+                "agent_task_run",
+            ),
+            action(
                 ControlPlaneAction::Retry,
                 retry,
                 ControlPlaneActionConfirmation::Required,
@@ -83,6 +92,27 @@ pub fn lifecycle_action_eligibility(
             ),
         ],
     }
+}
+
+fn placement_update_availability(
+    record: &AgentTaskRunRecord,
+) -> (ControlPlaneActionAvailability, String) {
+    let admission = &record.metadata["unmaterialized_cook_admission"];
+    if record.state != AgentTaskRunState::Queued || !admission.is_object() {
+        return unavailable("placement updates require a queued unmaterialized Cook admission");
+    }
+    if record.metadata["provider_executions"]
+        .as_array()
+        .is_some_and(|executions| !executions.is_empty())
+        || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"].is_string()
+        || matches!(
+            admission["lease"]["state"].as_str(),
+            Some("claimed" | "consumed" | "materializing")
+        )
+    {
+        return unavailable("execution ownership has crossed the placement-update safety boundary");
+    }
+    available("explicit local placement can be confirmed before provider execution")
 }
 
 fn action(
@@ -275,7 +305,7 @@ mod tests {
         ] {
             let report = lifecycle_action_eligibility(&record(state, false), None);
             assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
-            assert_eq!(report.actions.len(), 5);
+            assert_eq!(report.actions.len(), 6);
             if state.is_terminal() {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Cancel),
@@ -435,6 +465,30 @@ mod tests {
         assert_eq!(
             decision(&report, ControlPlaneAction::Retry),
             ControlPlaneActionAvailability::Available
+        );
+    }
+
+    #[test]
+    fn placement_update_is_available_only_before_execution_ownership() {
+        let mut record = record(AgentTaskRunState::Queued, false);
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_unavailable",
+            "binding": { "replay_intent": { "argv": ["homeboy"] } },
+        });
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&record, None),
+                ControlPlaneAction::PlacementUpdate
+            ),
+            ControlPlaneActionAvailability::Available
+        );
+        record.metadata["provider_executions"] = serde_json::json!([{ "state": "running" }]);
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&record, None),
+                ControlPlaneAction::PlacementUpdate
+            ),
+            ControlPlaneActionAvailability::Unavailable
         );
     }
 }

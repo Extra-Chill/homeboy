@@ -16,6 +16,10 @@ pub const CONTROL_PLANE_CANCEL_RESULT_SCHEMA: &str = "homeboy/control-plane-canc
 pub const CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA: &str = "homeboy/control-plane-retry-parameters/v1";
 pub const CONTROL_PLANE_RETRY_RESULT_SCHEMA: &str = "homeboy/control-plane-retry-result/v1";
 pub const CONTROL_PLANE_RESUME_RESULT_SCHEMA: &str = "homeboy/control-plane-resume-result/v1";
+pub const CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA: &str =
+    "homeboy/control-plane-placement-update-parameters/v1";
+pub const CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA: &str =
+    "homeboy/control-plane-placement-update-result/v1";
 pub const CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-promote-parameters/v1";
 pub const CONTROL_PLANE_PROMOTE_RESULT_SCHEMA: &str = "homeboy/control-plane-promote-result/v1";
@@ -80,6 +84,14 @@ pub struct ControlPlaneRetryParameters {
     pub force: bool,
 }
 
+/// A deliberate execution-route change. The control plane accepts only explicit
+/// local placement today, rather than silently broadening an automatic route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlanePlacementUpdateParameters {
+    pub placement: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneActionRequest {
@@ -121,6 +133,10 @@ impl ControlPlaneActionRequest {
                 ("reconcile", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA)
             }
             ControlPlaneAction::Resume => ("resume", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
+            ControlPlaneAction::PlacementUpdate => (
+                "placement_update",
+                CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
+            ),
             ControlPlaneAction::Retry => ("retry", CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA),
         };
         if self.parameters.schema != expected_schema {
@@ -151,9 +167,25 @@ impl ControlPlaneActionRequest {
                     crate::ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
                 })?;
         }
+        if self.action == ControlPlaneAction::PlacementUpdate {
+            let parameters: ControlPlanePlacementUpdateParameters =
+                serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!(
+                        "placement update parameters: {error}"
+                    ))
+                })?;
+            if parameters.placement != "local" {
+                return Err(crate::ControlPlaneError::invalid_argument(
+                    "placement update currently requires explicit local placement",
+                ));
+            }
+        }
         if matches!(
             self.action,
-            ControlPlaneAction::Cancel | ControlPlaneAction::Promote | ControlPlaneAction::Retry
+            ControlPlaneAction::Cancel
+                | ControlPlaneAction::PlacementUpdate
+                | ControlPlaneAction::Promote
+                | ControlPlaneAction::Retry
         ) && !self.confirmed
         {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
@@ -257,5 +289,26 @@ mod tests {
             serde_json::from_value::<ControlPlaneCancelResult>(value).expect("deserialize"),
             result
         );
+    }
+
+    #[test]
+    fn placement_update_requires_confirmation_and_explicit_local() {
+        let mut request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: ControlPlaneAction::PlacementUpdate,
+            idempotency_key: "placement-1".to_string(),
+            actor: "operator".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA.to_string(),
+                data: serde_json::json!({ "placement": "local" }),
+            },
+            confirmed: false,
+        };
+        assert!(request.validate().is_err());
+        request.confirmed = true;
+        assert!(request.validate().is_ok());
+        request.parameters.data = serde_json::json!({ "placement": "auto" });
+        assert!(request.validate().is_err());
     }
 }

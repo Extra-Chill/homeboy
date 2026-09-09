@@ -7,7 +7,6 @@
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
     AttemptCursor, AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement,
     ControlPlaneActionAvailability, ControlPlaneActionOutcome, ControlPlaneActionPayload,
@@ -33,10 +32,13 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
     CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
     CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
-    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
+    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+};
+use homeboy_control_plane_contract::{
+    ControlPlanePlacementUpdateParameters, ControlPlaneRetryParameters,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -1803,6 +1805,53 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 ),
                             }
                         }
+                        ControlPlaneAction::PlacementUpdate => {
+                            let parameters: ControlPlanePlacementUpdateParameters =
+                                serde_json::from_value(request.parameters.data.clone()).map_err(
+                                    |error| {
+                                        ControlPlaneError::invalid_argument(format!(
+                                            "placement update parameters: {error}"
+                                        ))
+                                    },
+                                )?;
+                            let updated = (|| -> homeboy_core::Result<_> {
+                                let updated = crate::agent_task_lifecycle::update_unmaterialized_cook_placement_in_store(
+                                    &self.lookup.store,
+                                    &resolved,
+                                    &parameters.placement,
+                                    &request.actor,
+                                )?;
+                                let reconciliation = crate::agent_task_service::reconcile_unmaterialized_cook_admission(
+                                    &resolved,
+                                )?;
+                                let current = self.lookup.store.read_record(&resolved)?;
+                                Ok((updated, current, reconciliation))
+                            })();
+                            match updated {
+                                Ok((_updated, current, reconciliation)) => (
+                                    ControlPlaneActionOutcome::Succeeded,
+                                    project_record(&current, None)?,
+                                    ControlPlaneActionPayload {
+                                        schema: CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA
+                                            .to_string(),
+                                        data: serde_json::json!({
+                                            "schema": CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
+                                            "run_id": current.run_id,
+                                            "placement": parameters.placement,
+                                            "reconciliation": reconciliation,
+                                            "preserved_identity": true,
+                                        }),
+                                    },
+                                    None,
+                                ),
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
                         ControlPlaneAction::Retry => {
                             let mut parameters: ControlPlaneRetryParameters =
                                 serde_json::from_value(request.parameters.data.clone()).map_err(
@@ -2104,6 +2153,9 @@ fn recover_interrupted_action_acknowledgement(
         )?,
         ControlPlaneAction::Reconcile => failed(
             "reconcile was interrupted after acceptance and its external outcome is ambiguous; inspect current state before issuing a new action",
+        )?,
+        ControlPlaneAction::PlacementUpdate => failed(
+            "placement update was interrupted after acceptance without authoritative completion evidence; no second route change was attempted",
         )?,
         ControlPlaneAction::Retry => {
             let parameters: ControlPlaneRetryParameters =
@@ -3020,6 +3072,7 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
     match action {
         ControlPlaneAction::Cancel => "cancel",
         ControlPlaneAction::Resume => "resume",
+        ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
         ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",

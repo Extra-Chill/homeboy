@@ -1854,6 +1854,9 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
         &self,
         request: &serde_json::Value,
     ) -> homeboy::core::Result<serde_json::Value> {
+        if request["binding"]["placement"]["requested"] == "local" {
+            return Ok(serde_json::json!({ "state": "eligible", "runner_id": "local" }));
+        }
         crate::cli_runtime::select_unmaterialized_cook_runner(request)
     }
 
@@ -1912,7 +1915,7 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
         // `--runner` is a pin and conflicts with explicit placement. Required
         // Lab placement already selects a ready runner during replay, retaining
         // the operator's durable request instead of rewriting it as Auto.
-        if placement != homeboy::cli_surface::Placement::Lab {
+        if placement == homeboy::cli_surface::Placement::Auto {
             args.splice(0..0, ["--runner".to_string(), runner_id.to_string()]);
         }
         let worker_log = Path::new(&intent.input_manifest.path)

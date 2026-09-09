@@ -336,7 +336,25 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     } else {
         0
     };
-    Ok((serde_json::to_value(run).unwrap_or(Value::Null), exit_code))
+    let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
+    if value["action_eligibility"]["actions"]
+        .as_array()
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action["action"] == "placement_update" && action["availability"] == "available"
+            })
+        })
+    {
+        value["action_guidance"] = json!([{
+            "action": "placement_update",
+            "command": format!(
+                "homeboy --placement local agent-task placement-update {} --confirm",
+                quote_arg(&target.run_id)
+            ),
+            "reason": "explicit local placement is legal before execution ownership begins",
+        }]);
+    }
+    Ok((value, exit_code))
 }
 
 fn control_plane_run_requires_action(
@@ -349,6 +367,7 @@ fn control_plane_run_requires_action(
             matches!(
                 action.action,
                 ControlPlaneAction::Resume
+                    | ControlPlaneAction::PlacementUpdate
                     | ControlPlaneAction::Retry
                     | ControlPlaneAction::Promote
             ) && action.availability == ControlPlaneActionAvailability::Available
