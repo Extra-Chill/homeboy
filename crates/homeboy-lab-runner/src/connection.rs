@@ -889,12 +889,16 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     // inspecting A or selecting any ordinary replacement path.
     if recovery_daemon.is_none() {
         let replay = super::generation_store::replacement_operation_replay(runner_id)?;
-        // Explicit candidate reconciliation is the authority selected to
-        // resolve an unleased process conflict. Replaying a prior
-        // ensure-running command first can only reproduce that conflict; the
-        // reconciliation block below durably records the typed supersession.
-        let replay =
-            replay.filter(|(kind, _)| !(reconcile_unleased_candidates && kind == "ensure-running"));
+        // An explicit recovery intent is authoritative over the stale automatic
+        // ensure-running replay it is meant to resolve. Its exact validation
+        // still runs below before the replay is terminalized.
+        let replay = replay.filter(|(kind, _)| {
+            should_replay_pending_replacement(
+                kind,
+                reconcile_unleased_candidates,
+                live_lease_expectation.is_some(),
+            )
+        });
         if let Some((kind, command)) = replay {
             let command = if kind == "ensure-running" {
                 if let Err(error) = negotiate_ensure_running_operation_id(
@@ -1474,6 +1478,11 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
             tunnel_process_start_identity.as_ref(),
         ));
     }
+    if live_lease_expectation.is_some() {
+        super::generation_store::terminalize_ensure_running_replay_for_live_lease_adoption(
+            runner_id,
+        )?;
+    }
     let connection_warning = daemon
         .inspected_freshness
         .as_ref()
@@ -1701,6 +1710,14 @@ fn verify_live_lease_adoption(
         ));
     }
     Ok(())
+}
+
+fn should_replay_pending_replacement(
+    kind: &str,
+    reconcile_unleased_candidates: bool,
+    adopt_live_lease: bool,
+) -> bool {
+    kind != "ensure-running" || (!reconcile_unleased_candidates && !adopt_live_lease)
 }
 
 fn remote_leaseless_recovery_command(

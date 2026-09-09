@@ -128,6 +128,26 @@ fn explicit_live_lease_adoption_requires_the_exact_current_lease_and_pid() {
 }
 
 #[test]
+fn explicit_live_lease_adoption_precedes_only_stale_ensure_running_replay() {
+    assert!(!should_replay_pending_replacement(
+        "ensure-running",
+        false,
+        true
+    ));
+    assert!(!should_replay_pending_replacement(
+        "ensure-running",
+        true,
+        false
+    ));
+    assert!(should_replay_pending_replacement(
+        "ensure-running",
+        false,
+        false
+    ));
+    assert!(should_replay_pending_replacement("state-loss", false, true));
+}
+
+#[test]
 fn explicit_live_lease_adoption_accepts_an_exact_reachable_stale_daemon() {
     let session = direct_ssh_session("lease-recorded");
     let mut status = remote_daemon_status_for_test(false, true, 1, "lease-live", 4646);
