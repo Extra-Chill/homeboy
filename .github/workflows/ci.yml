@@ -28,6 +28,21 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # The Test gate routes to changed test identities, and it reports success when
+  # the candidate fails to enumerate at all -- a broken test build produces zero
+  # test identities, so the differential comparison sees no candidate-only
+  # failures and passes. Two test-build breaks reached main that way on
+  # 2026-09-09 (#14505, #14507), both semantic conflicts between separately
+  # green PRs. This gate is codegen-free and fails closed on exactly that case.
+  workspace-tests-compile:
+    name: homeboy / Workspace Tests Compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Compile every workspace test target
+        run: cargo check --workspace --tests --locked
+
   lint:
     name: homeboy / Lint
     runs-on: ubuntu-latest
