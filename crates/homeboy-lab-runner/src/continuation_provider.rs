@@ -307,12 +307,6 @@ fn runner_authority_from_inventory(
     }
 }
 
-#[derive(Deserialize)]
-struct DaemonEnvelope {
-    success: bool,
-    data: Option<Value>,
-}
-
 fn workspace_claim_post(
     runner_id: &str,
     path: &str,
@@ -502,12 +496,13 @@ fn daemon_response(
     let body = body.map_err(|error| {
         workspace_claim_error(runner_id, format!("read daemon {path} response: {error}"))
     })?;
-    let envelope: DaemonEnvelope = serde_json::from_str(&body).map_err(|error| {
-        workspace_claim_error(
-            runner_id,
-            format!("malformed daemon {path} response: {error}"),
-        )
-    })?;
+    let envelope: crate::execution::DaemonEnvelope =
+        serde_json::from_str(&body).map_err(|error| {
+            workspace_claim_error(
+                runner_id,
+                format!("malformed daemon {path} response: {error}"),
+            )
+        })?;
     if status != 200 || !envelope.success {
         return Err(workspace_claim_error(
             runner_id,
