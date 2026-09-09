@@ -11,7 +11,7 @@ use homeboy_extension_contract::{DiscoveryMarkerConfig, ExtensionManifest};
 
 pub mod report;
 
-pub use report::{build_report, build_report_for_component};
+pub use report::{build_report, build_report_for_component, build_report_with_progress};
 
 // === Local Context Detection (homeboy context command) ===
 
@@ -70,12 +70,23 @@ pub fn run(path: Option<&str>) -> Result<(ContextOutput, i32)> {
 pub fn run_with_inventory(
     path: Option<&str>,
 ) -> Result<(ContextOutput, Vec<component::Component>, i32)> {
+    run_with_inventory_with_progress(path, |_, _| {})
+}
+
+/// Detect local context while exposing the two potentially blocking providers.
+/// This lets isolated callers distinguish target resolution from registry
+/// inventory without changing the ordinary context API.
+pub fn run_with_inventory_with_progress(
+    path: Option<&str>,
+    progress: impl Fn(&'static str, Option<String>),
+) -> Result<(ContextOutput, Vec<component::Component>, i32)> {
     let cwd = match path {
         Some(p) => PathBuf::from(p),
         None => std::env::current_dir().map_err(|e| Error::internal_io(e.to_string(), None))?,
     };
 
     let cwd_str = cwd.to_string_lossy().to_string();
+    progress("resolve_context_target", Some(cwd_str.clone()));
     let resolved_target = component::resolve_target(component::TargetSpec {
         path_override: Some(&cwd_str),
         allow_synthetic: true,
@@ -87,6 +98,10 @@ pub fn run_with_inventory(
         .as_ref()
         .map(|path| path.to_string_lossy().to_string());
 
+    progress(
+        "build_component_inventory",
+        Some("component_registry".to_string()),
+    );
     let components = component::inventory().unwrap_or_default();
     let matched_components: Vec<String> = components
         .iter()

@@ -1392,6 +1392,7 @@ mod tests {
             progress: Some(homeboy_engine_primitives::command::CommandProgress {
                 phase: "building".to_string(),
                 current: Some("shared-component".to_string()),
+                ..Default::default()
             }),
             output_tail: String::new(),
         };
