@@ -288,18 +288,7 @@ mod tests {
     };
     use super::*;
 
-    fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-        NewRunRecord::builder(kind)
-            .component_id(component_id)
-            .command(format!("homeboy {kind} {component_id}"))
-            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-            .homeboy_version("test-version")
-            .git_sha(Some("abc123".to_string()))
-            .rig_id(rig_id)
-            .metadata(metadata)
-            .build()
-    }
-
+    use crate::commands::runs::test_support::sample_run;
     #[test]
     fn evidence_command_reports_registry_artifacts_retention_and_failure_summary() {
         with_isolated_home(|home| {
