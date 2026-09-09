@@ -201,9 +201,10 @@ pub struct AgentTaskFanoutCookBatchArgs {
     )]
     pub max_duration: Option<u64>,
     /// Resolve and validate the batch without repository hydration, provider
-    /// dispatch, provider-runtime readiness, or worktree creation. Prints the
-    /// static plan, worktree projection, preflight, and a replayable command;
-    /// execution owns bounded provider readiness admission.
+    /// dispatch, or worktree creation. Static planning remains bounded
+    /// separately; preview then performs one bounded provider-owned readiness
+    /// admission using the batch deadline before printing the plan and replay
+    /// command.
     /// `--dry-run` is accepted as the historical spelling of this flag.
     #[arg(long = "preview", alias = "dry-run")]
     pub preview: bool,

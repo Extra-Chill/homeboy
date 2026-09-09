@@ -410,6 +410,18 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                 if !registered_waiter {
                     *state.waiters.entry(request_key.clone()).or_default() += 1;
                     registered_waiter = true;
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "provider_readiness_progress",
+                            "provider_id": provider.id,
+                            "backend": provider.backend,
+                            "state": "waiting",
+                            "elapsed_ms": started.elapsed().as_millis(),
+                            "cache": "shared_wait",
+                            "deadline_unix_ms": deadline_unix_ms,
+                        })
+                    );
                 }
                 let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
                     release_cache_waiter(&mut state, &request_key);

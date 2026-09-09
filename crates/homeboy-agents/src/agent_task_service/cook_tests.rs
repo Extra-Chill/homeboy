@@ -4862,6 +4862,10 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
             &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
         )
         .expect("Cook compiles to its first ready route");
+        assert_eq!(
+            options.ai_disclosure.ai_model.as_deref(),
+            Some("ready-model")
+        );
         let plan = options.identity.initial_plan;
         assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
         assert_eq!(plan.tasks[0].executor.config["account"], "ready-account");
