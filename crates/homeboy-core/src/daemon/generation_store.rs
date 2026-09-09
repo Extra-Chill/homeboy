@@ -1,7 +1,11 @@
 //! Stable routing state for local daemon generations.
 
-use std::fs;
+use std::collections::BTreeSet;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use fs4::fs_std::FileExt;
 
 use homeboy_engine_primitives::rolling_generation::{
     RollingDrainState, RollingGenerations, RollingStart,
@@ -39,6 +43,8 @@ impl LocalDaemonEndpoint {
 struct LocalDaemonGenerationRegistry {
     schema: String,
     generations: RollingGenerations<LocalDaemonEndpoint>,
+    #[serde(default)]
+    completed_jobs: BTreeSet<String>,
 }
 
 const SCHEMA: &str = "homeboy.daemon.generations.v1";
@@ -78,6 +84,50 @@ fn read_registry() -> Result<Option<LocalDaemonGenerationRegistry>> {
     }
 }
 
+fn mutate_registry<T>(
+    mutation: impl FnOnce(&mut Option<LocalDaemonGenerationRegistry>) -> Result<T>,
+) -> Result<T> {
+    static PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _process_lock = PROCESS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("daemon generation registry mutex poisoned");
+    let path = registry_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("daemon generation registry has no parent"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let lock_path = parent.join(".generations.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("open {}", lock_path.display())),
+            )
+        })?;
+    lock.lock_exclusive().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("lock {}", lock_path.display())),
+        )
+    })?;
+    let mut registry = read_registry()?;
+    let output = mutation(&mut registry)?;
+    if let Some(registry) = registry.as_ref() {
+        write_registry(registry)?;
+    }
+    Ok(output)
+}
+
 fn write_registry(registry: &LocalDaemonGenerationRegistry) -> Result<()> {
     let path = registry_path()?;
     let parent = path
@@ -96,10 +146,23 @@ fn write_registry(registry: &LocalDaemonGenerationRegistry) -> Result<()> {
             Some("serialize daemon generations".to_string()),
         )
     })?;
-    fs::write(&temporary, bytes).map_err(|error| {
+    let mut temporary_file = File::create(&temporary).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("write {}", temporary.display())),
+        )
+    })?;
+    use std::io::Write;
+    temporary_file.write_all(&bytes).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("write {}", temporary.display())),
+        )
+    })?;
+    temporary_file.sync_all().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("sync {}", temporary.display())),
         )
     })?;
     fs::rename(&temporary, &path).map_err(|error| {
@@ -107,17 +170,28 @@ fn write_registry(registry: &LocalDaemonGenerationRegistry) -> Result<()> {
             error.to_string(),
             Some(format!("rename {}", path.display())),
         )
-    })
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync {}", parent.display())),
+            )
+        })
 }
 
 pub(super) fn seed(state: &DaemonState) -> Result<()> {
-    if read_registry()?.is_some() {
-        return Ok(());
-    }
-    let endpoint = LocalDaemonEndpoint::from_state(state);
-    write_registry(&LocalDaemonGenerationRegistry {
-        schema: SCHEMA.to_string(),
-        generations: RollingGenerations::new(endpoint.lease_id.clone(), endpoint),
+    mutate_registry(|registry| {
+        if registry.is_none() {
+            let endpoint = LocalDaemonEndpoint::from_state(state);
+            *registry = Some(LocalDaemonGenerationRegistry {
+                schema: SCHEMA.to_string(),
+                generations: RollingGenerations::new(endpoint.lease_id.clone(), endpoint),
+                completed_jobs: BTreeSet::new(),
+            });
+        }
+        Ok(())
     })
 }
 
@@ -144,50 +218,104 @@ pub(super) fn endpoint_for_job(job_id: &str) -> Result<Option<LocalDaemonEndpoin
 }
 
 pub(super) fn record_job(job_id: &str, lease_id: &str) -> Result<()> {
-    let Some(mut registry) = read_registry()? else {
-        return Err(Error::internal_unexpected(
-            "local daemon admitted a job without a generation registry",
-        ));
-    };
-    if !registry.generations.admit_job_for(lease_id, job_id)
-        && registry.generations.job_owner(job_id).is_none()
-    {
-        return Err(Error::internal_unexpected(
-            "local daemon job owner was not present in the generation registry",
-        ));
-    }
-    write_registry(&registry)
+    mutate_registry(|registry| {
+        let registry = registry.as_mut().ok_or_else(|| {
+            Error::internal_unexpected("local daemon admitted a job without a generation registry")
+        })?;
+        if !registry.generations.admit_job_for(lease_id, job_id)
+            && registry.generations.job_owner(job_id).is_none()
+        {
+            return Err(Error::internal_unexpected(
+                "local daemon job owner was not present in the generation registry",
+            ));
+        }
+        Ok(())
+    })
 }
 
 pub(super) fn activate(state: &DaemonState) -> Result<()> {
-    let endpoint = LocalDaemonEndpoint::from_state(state);
-    let mut registry = read_registry()?.ok_or_else(|| {
-        Error::internal_unexpected("local daemon rotation has no seeded generation registry")
-    })?;
-    if registry
-        .generations
-        .begin(endpoint.lease_id.clone(), endpoint)
-        == RollingStart::Start
-    {
-        // `begin` leaves candidates draining. Only a caller that has checked the
-        // published lease and exact build may expose it to admissions.
-    }
-    registry.generations.activate(&state.lease_id);
-    write_registry(&registry)
+    mutate_registry(|registry| {
+        let registry = registry.as_mut().ok_or_else(|| {
+            Error::internal_unexpected("local daemon rotation has no seeded generation registry")
+        })?;
+        let endpoint = LocalDaemonEndpoint::from_state(state);
+        if registry
+            .generations
+            .begin(endpoint.lease_id.clone(), endpoint)
+            == RollingStart::Start
+        {
+            // `begin` leaves candidates draining. Only a caller that has checked the
+            // published lease and exact build may expose it to admissions.
+        }
+        // A daemon generation must be lease-stopped before its routing entry is
+        // retired. Generic rolling users retain the normal eager cleanup.
+        registry
+            .generations
+            .activate_preserving_drained(&state.lease_id);
+        Ok(())
+    })
 }
 
-pub(super) fn complete_job(job_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
-    let Some(mut registry) = read_registry()? else {
-        return Ok(None);
-    };
-    let endpoint = registry
-        .generations
-        .job_owner(job_id)
-        .and_then(|owner| registry.generations.generations.get(owner))
-        .map(|entry| entry.endpoint.clone());
-    let retired = registry.generations.complete_job(job_id);
-    write_registry(&registry)?;
-    Ok(retired.then_some(endpoint).flatten())
+pub(super) fn mark_job_terminal(job_id: &str) -> Result<()> {
+    mutate_registry(|registry| {
+        let Some(registry) = registry.as_mut() else {
+            return Ok(());
+        };
+        if !registry.completed_jobs.insert(job_id.to_string()) {
+            return Ok(());
+        }
+        if let Some(owner) = registry.generations.job_owner(job_id).map(str::to_string) {
+            if let Some(generation) = registry.generations.generations.get_mut(&owner) {
+                generation.active_jobs = generation.active_jobs.saturating_sub(1);
+            }
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn reconcile_drained_generations(
+    serving_lease_id: &str,
+    stop: impl Fn(&LocalDaemonEndpoint) -> Result<()>,
+) -> Result<()> {
+    let endpoints = read_registry()?
+        .into_iter()
+        .flat_map(|registry| registry.generations.generations.into_iter())
+        .filter_map(|(lease_id, generation)| {
+            (lease_id != serving_lease_id
+                && generation.drain_state == RollingDrainState::Draining
+                && generation.active_jobs == 0)
+                .then_some((lease_id, generation.endpoint))
+        })
+        .collect::<Vec<_>>();
+    for (lease_id, endpoint) in endpoints {
+        stop(&endpoint)?;
+        mutate_registry(|registry| {
+            let Some(registry) = registry.as_mut() else {
+                return Ok(());
+            };
+            let can_retire =
+                registry
+                    .generations
+                    .generations
+                    .get(&lease_id)
+                    .is_some_and(|generation| {
+                        generation.drain_state == RollingDrainState::Draining
+                            && generation.active_jobs == 0
+                    });
+            if can_retire {
+                registry.generations.generations.remove(&lease_id);
+                registry
+                    .generations
+                    .job_owners
+                    .retain(|_, owner| owner != &lease_id);
+                registry
+                    .completed_jobs
+                    .retain(|job_id| registry.generations.job_owners.contains_key(job_id));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 pub(super) fn generation_state_dir() -> Result<PathBuf> {
@@ -212,6 +340,7 @@ pub(super) fn generations() -> Result<Vec<LocalDaemonEndpoint>> {
         .unwrap_or_default())
 }
 
+#[cfg(test)]
 pub(super) fn is_draining(lease_id: &str) -> Result<bool> {
     Ok(read_registry()?.is_some_and(|registry| {
         registry
@@ -297,9 +426,82 @@ mod tests {
                 b.address
             );
             assert!(is_draining("A").expect("A drains"));
-            assert!(complete_job("job-a").expect("complete A").is_some());
+            mark_job_terminal("job-a").expect("mark A terminal");
+            // A failed stop retains the terminal job's owner for status and the
+            // next lifecycle pass rather than losing its recovery identity.
+            assert!(
+                reconcile_drained_generations("B", |_| Err(Error::internal_unexpected(
+                    "stop failed"
+                )))
+                .is_err()
+            );
+            assert_eq!(
+                endpoint_for_job("job-a")
+                    .expect("retain A route")
+                    .expect("A")
+                    .address,
+                a.address
+            );
+            reconcile_drained_generations("B", |endpoint| {
+                assert_eq!(endpoint.lease_id, "A");
+                Ok(())
+            })
+            .expect("retire stopped A");
             assert!(endpoint_for_job("job-a").expect("retired A").is_none());
             assert_eq!(admitting().expect("admitting").expect("B").lease_id, "B");
+        });
+    }
+
+    #[test]
+    fn concurrent_job_ownership_writes_preserve_every_admission() {
+        with_isolated_home(|_| {
+            let a = state("A", "127.0.0.1:1001");
+            seed(&a).expect("seed A");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(17));
+            let workers = (0..16)
+                .map(|index| {
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        record_job(&format!("job-{index}"), "A")
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            for worker in workers {
+                worker.join().expect("join writer").expect("record job");
+            }
+            for index in 0..16 {
+                assert_eq!(
+                    endpoint_for_job(&format!("job-{index}"))
+                        .expect("read owner")
+                        .expect("owner")
+                        .lease_id,
+                    "A"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn lost_admission_response_retry_keeps_the_original_generation_owner() {
+        with_isolated_home(|_| {
+            let a = state("A", "127.0.0.1:1001");
+            seed(&a).expect("seed A");
+            // The server committed this binding, but the client lost the response.
+            record_job("job-a", "A").expect("first server admission");
+            let b = state("B", "127.0.0.1:1002");
+            activate(&b).expect("rotate to B");
+            // A retry reaches B. Idempotent recording must preserve A rather than
+            // silently re-home the already durable job.
+            record_job("job-a", "B").expect("retry admission");
+            assert_eq!(
+                endpoint_for_job("job-a")
+                    .expect("route job")
+                    .expect("owner")
+                    .lease_id,
+                "A"
+            );
         });
     }
 
