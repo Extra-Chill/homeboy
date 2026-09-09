@@ -11,9 +11,11 @@ use crate::error::{Error, Result};
 use crate::paths;
 use homeboy_runner_contract::{
     RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
+    RunnerApiHeartbeatOutcome, RunnerApiHeartbeatRequest, RunnerApiHeartbeatResponse,
     RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiSubmitOutcome,
     RunnerApiSubmitRequest, RunnerApiSubmitResponse, RUNNER_API_CLAIM_REQUEST_SCHEMA,
-    RUNNER_API_CLAIM_RESPONSE_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1,
+    RUNNER_API_CLAIM_RESPONSE_SCHEMA, RUNNER_API_HEARTBEAT_REQUEST_SCHEMA,
+    RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1,
 };
 use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
@@ -979,39 +981,113 @@ fn heartbeat(
     job_store: &JobStore,
     auth: &BrokerAuthContext,
 ) -> Result<Value> {
+    let canonical = body
+        .as_ref()
+        .is_some_and(|value| value.get("schema").is_some() || value.get("api_version").is_some());
+    if canonical {
+        let request: RunnerApiHeartbeatRequest = parse_body(body, "Runner API heartbeat request")?;
+        if request.schema != RUNNER_API_HEARTBEAT_REQUEST_SCHEMA
+            || request.api_version != RUNNER_API_V1
+        {
+            return Err(Error::validation_invalid_argument(
+                "schema",
+                "unsupported Runner API heartbeat request",
+                Some(request.schema),
+                None,
+            ));
+        }
+        if request.job_id != job_id.to_string() {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "Runner API heartbeat job id does not match the request path",
+                Some(request.job_id),
+                None,
+            ));
+        }
+        // Authentication remains an HTTP concern; only an authenticated
+        // renewal failure is represented by the versioned operation outcome.
+        auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
+        let outcome = match renew_heartbeat(
+            job_id,
+            &request.runner_id,
+            &request.claim_id,
+            request.lease_ms,
+            request.workspace_claim_binding.as_ref(),
+            request.workspace_owner_lease.as_ref(),
+            job_store,
+            auth,
+        ) {
+            Ok((claim_expires_at_ms, workspace_owner_lease)) => {
+                RunnerApiHeartbeatOutcome::Renewed {
+                    claim_expires_at_ms,
+                    workspace_owner_lease,
+                }
+            }
+            Err(error) => RunnerApiHeartbeatOutcome::Rejected {
+                failure: RunnerApiOperationFailure {
+                    code: RunnerApiOperationFailureCode::SubmissionRejected,
+                    message: error.message,
+                },
+            },
+        };
+        return Ok(json!({ "response": RunnerApiHeartbeatResponse {
+            schema: RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA.to_string(), api_version: RUNNER_API_V1, outcome,
+        }}));
+    }
     let request: HeartbeatRequest = parse_body(body, "remote runner heartbeat request")?;
-    auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-    touch_reverse_session(&request.runner_id)?;
-    authorize_exact_workspace_claim_binding(
-        job_store,
+    let (_claim_expires_at_ms, renewed_owner_lease) = renew_heartbeat(
         job_id,
+        &request.runner_id,
+        &request.claim_id,
+        request.lease_ms.unwrap_or(30_000),
         request.workspace_claim_binding.as_ref(),
-    )?;
-    authorize_exact_workspace_owner_lease(
-        job_store,
-        job_id,
         request.workspace_owner_lease.as_ref(),
+        job_store,
+        auth,
     )?;
-    let lease_ms = request.lease_ms.unwrap_or(30_000);
+    let job = job_store.get(job_id)?;
+    Ok(json!({
+        "command": "api.runner.jobs.heartbeat", "job": job, "workspace_owner_lease": renewed_owner_lease,
+    }))
+}
+
+/// The single legacy adapter delegates renewal to the canonical authority path
+/// but preserves the established unversioned request and response document.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "A renewal must carry every authority binding together."
+)]
+fn renew_heartbeat(
+    job_id: Uuid,
+    runner_id: &str,
+    claim_id: &str,
+    lease_ms: u64,
+    workspace_claim_binding: Option<&crate::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_lease: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<(u64, Option<crate::workspace_claim::WorkspaceOwnerLease>)> {
+    auth.authorize(BrokerScope::Work, Some(runner_id))?;
+    touch_reverse_session(runner_id)?;
+    authorize_exact_workspace_claim_binding(job_store, job_id, workspace_claim_binding)?;
+    authorize_exact_workspace_owner_lease(job_store, job_id, workspace_owner_lease)?;
     // One authority for the renewal and its failure-recovery write. The renewal
     // advances the durable owner epoch, so recording the failure against a
     // separately resolved store would strand the advanced lease unrecoverable.
-    let owner_claim_store = match request.workspace_owner_lease.as_ref() {
+    let owner_claim_store = match workspace_owner_lease {
         Some(_) => Some(workspace_claim_store()?),
         None => None,
     };
-    let renewed_owner_lease = request
-        .workspace_owner_lease
-        .as_ref()
+    let renewed_owner_lease = workspace_owner_lease
         .zip(owner_claim_store.as_ref())
         .map(|(lease, store)| store.renew_owner(lease, lease_ms, workspace_claim_now_ms()))
         .transpose()?;
     let job = match job_store.renew_remote_runner_claim_with_workspace_owner_lease(
         job_id,
-        &request.runner_id,
-        &request.claim_id,
+        runner_id,
+        claim_id,
         lease_ms,
-        request.workspace_owner_lease.as_ref(),
+        workspace_owner_lease,
         renewed_owner_lease.clone(),
     ) {
         Ok(job) => job,
@@ -1026,11 +1102,10 @@ fn heartbeat(
             return Err(error);
         }
     };
-    Ok(json!({
-        "command": "api.runner.jobs.heartbeat",
-        "job": job,
-        "workspace_owner_lease": renewed_owner_lease,
-    }))
+    Ok((
+        job.claim_expires_at_ms.expect("renewed claim expiry"),
+        renewed_owner_lease,
+    ))
 }
 
 fn consume(
@@ -1474,6 +1549,17 @@ mod auth_tests {
             "runner_id": "homeboy-lab",
             "lease_ms": 30000,
             "execution_protocol": execution_protocol,
+        })
+    }
+
+    fn canonical_heartbeat_body(job_id: &str, claim_id: &str) -> Value {
+        json!({
+            "schema": RUNNER_API_HEARTBEAT_REQUEST_SCHEMA,
+            "api_version": { "major": 1 },
+            "runner_id": "homeboy-lab",
+            "job_id": job_id,
+            "claim_id": claim_id,
+            "lease_ms": 30000,
         })
     }
 
@@ -1967,6 +2053,103 @@ mod auth_tests {
         assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
         assert!(claim.body["body"]["claim"].get("envelope").is_some());
         assert!(claim.body["body"].get("response").is_none());
+    }
+
+    #[test]
+    fn heartbeat_canonical_wire_rejects_stale_claims_and_legacy_adapter_preserves_wire() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({ "runner_id": "homeboy-lab", "lease_ms": 30000 })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+
+        let canonical = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/heartbeat"),
+            Some(canonical_heartbeat_body(&job_id, &claim_id)),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(
+            canonical.status_code, 200,
+            "canonical body: {}",
+            canonical.body
+        );
+        assert_eq!(
+            canonical.body["body"]["response"],
+            json!({
+                "schema": RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "outcome": {
+                    "status": "renewed",
+                    "claim_expires_at_ms": canonical.body["body"]["response"]["outcome"]["claim_expires_at_ms"],
+                }
+            })
+        );
+        assert!(
+            canonical.body["body"]["response"]["outcome"]["claim_expires_at_ms"]
+                .as_u64()
+                .is_some()
+        );
+
+        let stale = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/heartbeat"),
+            Some(canonical_heartbeat_body(&job_id, "stale-claim")),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(stale.status_code, 200, "stale body: {}", stale.body);
+        assert_eq!(
+            stale.body["body"]["response"]["outcome"]["status"],
+            "rejected"
+        );
+
+        let malformed = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/heartbeat"),
+            Some(json!({
+                "schema": RUNNER_API_HEARTBEAT_REQUEST_SCHEMA,
+                "api_version": { "major": 2 },
+                "runner_id": "homeboy-lab", "job_id": job_id, "claim_id": claim_id, "lease_ms": 30000,
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(malformed.status_code, 400);
+
+        let legacy = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/heartbeat"),
+            Some(json!({
+                "runner_id": "homeboy-lab", "claim_id": claim_id, "lease_ms": 30000,
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(legacy.status_code, 200, "legacy body: {}", legacy.body);
+        assert_eq!(legacy.body["body"]["command"], "api.runner.jobs.heartbeat");
+        assert!(legacy.body["body"]["job"].is_object());
+        assert!(legacy.body["body"].get("response").is_none());
     }
 
     #[test]

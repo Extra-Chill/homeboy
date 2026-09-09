@@ -13,9 +13,10 @@ use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobResult};
 use homeboy_core::error::{Error, Result};
 use homeboy_runner_contract::{
     RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
-    RunnerApiClaimedExecution, RunnerJobExecutionProtocol, WorkspaceClaimBinding,
+    RunnerApiClaimedExecution, RunnerApiHeartbeatOutcome, RunnerApiHeartbeatRequest,
+    RunnerApiHeartbeatResponse, RunnerJobExecutionProtocol, WorkspaceClaimBinding,
     WorkspaceClaimProtocol, WorkspaceOwnerLease, WorkspaceOwnerLeaseProtocol,
-    RUNNER_API_CLAIM_REQUEST_SCHEMA, RUNNER_API_V1,
+    RUNNER_API_CLAIM_REQUEST_SCHEMA, RUNNER_API_HEARTBEAT_REQUEST_SCHEMA, RUNNER_API_V1,
 };
 
 use super::super::broker_http;
@@ -250,30 +251,45 @@ fn renew_claim(
     lease_ms: u64,
     workspace_claim_binding: Option<&WorkspaceClaimBinding>,
     workspace_owner_lease: Option<&WorkspaceOwnerLease>,
-) -> Result<(Job, Option<WorkspaceOwnerLease>)> {
+) -> Result<Option<WorkspaceOwnerLease>> {
     let claim_id = remote_runner_claim_id(claim);
     let data = broker_http::post_json(
         client,
         broker_url,
         &format!("/runner/jobs/{}/heartbeat", claim.job_id),
-        json!({
-            "runner_id": runner_id,
-            "claim_id": claim_id,
-            "lease_ms": lease_ms.max(1),
-            "workspace_claim_binding": workspace_claim_binding,
-            "workspace_owner_lease": workspace_owner_lease,
-        }),
+        serde_json::to_value(RunnerApiHeartbeatRequest {
+            schema: RUNNER_API_HEARTBEAT_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: runner_id.to_string(),
+            job_id: claim.job_id.clone(),
+            claim_id: claim_id.to_string(),
+            lease_ms: lease_ms.max(1),
+            workspace_claim_binding: workspace_claim_binding.cloned(),
+            workspace_owner_lease: workspace_owner_lease.cloned(),
+        })
+        .expect("runner API heartbeat request serializes"),
         "renew reverse runner claim",
         token,
     )?;
-    let job = serde_json::from_value(data["job"].clone()).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse reverse runner heartbeat job".to_string()),
-        )
-    })?;
-    let owner = serde_json::from_value(data["workspace_owner_lease"].clone()).ok();
-    Ok((job, owner))
+    let response: RunnerApiHeartbeatResponse = serde_json::from_value(data["response"].clone())
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse reverse runner heartbeat response".to_string()),
+            )
+        })?;
+    match response.outcome {
+        RunnerApiHeartbeatOutcome::Renewed {
+            workspace_owner_lease,
+            ..
+        } => Ok(workspace_owner_lease),
+        RunnerApiHeartbeatOutcome::Rejected { failure } => Err(Error::validation_invalid_argument(
+            "heartbeat",
+            failure.message,
+            Some(claim.job_id.clone()),
+            None,
+        )),
+    }
 }
 
 pub(super) fn start_claim_heartbeat(
@@ -310,9 +326,7 @@ pub(super) fn start_claim_heartbeat(
             workspace_claim_binding.as_ref(),
             presented_owner.as_ref(),
         ) {
-            Ok((_job, renewed_owner)) => {
-                *heartbeat_owner.lock().expect("owner lease lock") = renewed_owner
-            }
+            Ok(renewed_owner) => *heartbeat_owner.lock().expect("owner lease lock") = renewed_owner,
             Err(err) => {
                 eprintln!(
                     "{}",
