@@ -192,11 +192,9 @@ pub struct ReportProgress {
     pub completed: usize,
     pub total: usize,
     pub unfinished: Vec<String>,
-    pub item_deadline_ms: Option<u128>,
 }
 
 const CONTEXT_REPORT_WORKERS: usize = 4;
-const CONTEXT_REPORT_ITEM_DEADLINE_MS: u128 = 25_000;
 
 pub fn build_report(show_all_flag: bool, command: &str) -> Result<ContextReport> {
     build_report_with_progress(show_all_flag, command, |_| {})
@@ -236,7 +234,6 @@ fn build_report_at(
                 completed: 0,
                 total: 0,
                 unfinished: Vec::new(),
-                item_deadline_ms: None,
             });
         })?;
 
@@ -430,7 +427,6 @@ fn build_component_states(
         completed: initial.completed,
         total,
         unfinished: initial.unfinished.clone(),
-        item_deadline_ms: Some(CONTEXT_REPORT_ITEM_DEADLINE_MS),
     });
     drop(initial);
 
@@ -454,7 +450,6 @@ fn build_component_states(
                     completed: state.completed,
                     total,
                     unfinished: state.unfinished.clone(),
-                    item_deadline_ms: Some(CONTEXT_REPORT_ITEM_DEADLINE_MS),
                 };
                 drop(state);
                 progress(event);
@@ -480,7 +475,6 @@ fn build_component_states(
                     completed: state.completed,
                     total,
                     unfinished: state.unfinished.clone(),
-                    item_deadline_ms: Some(CONTEXT_REPORT_ITEM_DEADLINE_MS),
                 };
                 drop(state);
                 progress(event);
@@ -840,10 +834,6 @@ mod tests {
         );
         let progress = progress.into_inner().expect("progress lock");
         assert_eq!(progress[0].unfinished, ["alpha", "beta", "gamma"]);
-        assert_eq!(
-            progress[0].item_deadline_ms,
-            Some(CONTEXT_REPORT_ITEM_DEADLINE_MS)
-        );
         assert_eq!(progress.last().expect("completion event").completed, 3);
         assert!(progress
             .last()

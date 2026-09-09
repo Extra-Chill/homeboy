@@ -180,7 +180,6 @@ fn run_unisolated(
                     completed: Some(progress.completed),
                     total: Some(progress.total),
                     unfinished: progress.unfinished,
-                    item_deadline_ms: progress.item_deadline_ms,
                 };
                 if let Ok(progress) = serde_json::to_string(&progress) {
                     eprintln!("HOMEBOY_PROGRESS {progress}");
@@ -310,17 +309,12 @@ fn run_isolated_probe(
                     .as_deref()
                     .map(|current| format!(" {current}"))
                     .unwrap_or_default();
-                let deadline = progress
-                    .item_deadline_ms
-                    .map(|deadline| format!(" deadline={deadline}ms"))
-                    .unwrap_or_default();
                 eprintln!(
-                    "[status] {PHASE}: {}{}{} ({}ms){}",
+                    "[status] {PHASE}: {}{}{} ({}ms)",
                     progress.phase,
                     current,
                     counts,
                     heartbeat.elapsed.as_millis(),
-                    deadline,
                 );
             } else {
                 eprintln!(
@@ -1605,7 +1599,6 @@ mod tests {
             completed: Some(2),
             total: Some(4),
             unfinished: vec!["slow-component".to_string(), "queued-component".to_string()],
-            item_deadline_ms: Some(25_000),
         };
 
         assert_eq!(
