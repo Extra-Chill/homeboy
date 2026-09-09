@@ -56,13 +56,13 @@ pub fn with_remote_tracking_authority_until<T>(
 }
 
 fn git_common_dir(repository: &Path, deadline: Instant) -> Result<PathBuf> {
-    git_common_dir_with_program(repository, deadline, Path::new("git"))
+    git_common_dir_with_program(repository, Path::new("git"), || deadline)
 }
 
 fn git_common_dir_with_program(
     repository: &Path,
-    deadline: Instant,
     program: &Path,
+    deadline: impl FnOnce() -> Instant,
 ) -> Result<PathBuf> {
     let mut git = Command::new(program);
     git.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
@@ -74,6 +74,7 @@ fn git_common_dir_with_program(
     let mut child = git
         .spawn()
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let deadline = deadline();
     let mut timed_out = false;
     let output = command::wait_with_bounded_output_until_cancelled(
         &mut child,
@@ -105,6 +106,7 @@ fn git_common_dir_with_program(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[cfg(unix)]
     #[test]
@@ -112,22 +114,32 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::TempDir::new().expect("tempdir");
+        let ready_file = dir.path().join("helper-ready");
+        let release_file = dir.path().join("start-stall");
         let pid_file = dir.path().join("descendant.pid");
         let git = dir.path().join("git");
         let script = format!(
-            "#!/bin/sh\nsleep 30 &\necho $! > {}\nwait\n",
-            crate::shell::quote_path(&pid_file.display().to_string())
+            "#!/bin/sh\ntouch {}\nwhile [ ! -f {} ]; do sleep 0.01; done\nsleep 30 &\necho $! > {}\nwait\n",
+            crate::shell::quote_path(&ready_file.display().to_string()),
+            crate::shell::quote_path(&release_file.display().to_string()),
+            crate::shell::quote_path(&pid_file.display().to_string()),
         );
         fs::write(&git, script).expect("write stalled git");
         fs::set_permissions(&git, fs::Permissions::from_mode(0o755))
             .expect("make stalled git executable");
 
-        let started = Instant::now();
-        let error =
-            git_common_dir_with_program(dir.path(), Instant::now() + Duration::from_secs(1), &git)
-                .expect_err("stalled common-directory probe must exhaust its deadline");
+        let mut deadline_started = None;
+        let error = git_common_dir_with_program(dir.path(), &git, || {
+            wait_for_file(&ready_file);
+            fs::write(&release_file, "start stalled helper").expect("release stalled helper");
+            wait_for_file(&pid_file);
+            let started = Instant::now();
+            deadline_started = Some(started);
+            started + Duration::from_secs(1)
+        })
+        .expect_err("stalled common-directory probe must exhaust its deadline");
 
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(deadline_started.expect("deadline started").elapsed() < Duration::from_secs(2));
         assert!(error.message.contains("deadline exhausted"));
         let descendant_pid = fs::read_to_string(&pid_file)
             .expect("descendant pid")
@@ -138,6 +150,19 @@ mod tests {
             !command::process_is_running(descendant_pid),
             "deadline left descendant {descendant_pid} runnable"
         );
+    }
+
+    #[cfg(unix)]
+    fn wait_for_file(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "stalled Git helper did not record {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
