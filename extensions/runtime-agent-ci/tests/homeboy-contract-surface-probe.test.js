@@ -55,13 +55,11 @@ assert.equal(RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id, RUN_OUTC
 assert.deepEqual(runtimeContractConstantsFromHomeboyOutput({
   data: {
     constants: {
-      runnerExecutionRecord: { schema_id: 'homeboy/runner-execution-record/v1' },
       pathMaterializationPlan: { schema_id: 'homeboy/path-materialization-plan/v1' },
       runOutcomeEnvelope: { schema_id: 'homeboy/run-outcome-envelope/v1' },
     },
   },
 }), {
-  runner_execution_record: { schema_id: 'homeboy/runner-execution-record/v1' },
   path_materialization_plan: { schema_id: 'homeboy/path-materialization-plan/v1' },
   run_outcome_envelope: { schema_id: 'homeboy/run-outcome-envelope/v1' },
 });
@@ -98,7 +96,6 @@ const missingPathMaterializationPlan = probeHomeboyContractSurface({
           run_location_index: CORE_PUBLISHED_CONTRACT_CONSTANTS.run_location_index,
           artifact_paths: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_paths,
           runner_artifact_manifest_ref: CORE_PUBLISHED_CONTRACT_CONSTANTS.runner_artifact_manifest_ref,
-          runner_execution_record: CORE_PUBLISHED_CONTRACT_CONSTANTS.runner_execution_record,
           run_outcome_envelope: CORE_PUBLISHED_CONTRACT_CONSTANTS.run_outcome_envelope,
         },
         contract_id: 'all',

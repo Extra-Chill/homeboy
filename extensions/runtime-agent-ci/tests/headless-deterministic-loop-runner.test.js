@@ -12,7 +12,7 @@ const {
 const {
   ARTIFACT_MANIFEST_FILE,
   ARTIFACT_MANIFEST_SCHEMA,
-  RUNNER_EXECUTION_RECORD_SCHEMA,
+  RUNTIME_AGENT_CI_RUNNER_EXECUTION_RECORD_SCHEMA,
   RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
 } = require('../lib/runtime-contracts.cjs');
 
@@ -214,11 +214,41 @@ try {
   assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'runner-execution-record.json'), true);
   assert.equal(manifest.artifacts.every((artifact) => !path.isAbsolute(artifact.path)), true);
   const runnerRecord = JSON.parse(fs.readFileSync(path.join(artifactDir, 'runner-execution-record.json'), 'utf8'));
-  assert.equal(runnerRecord.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
-  assert.equal(runnerRecord.status, 'succeeded');
-  assert.equal(runnerRecord.success, true);
-  assert.equal(runnerRecord.artifacts.files.run_outcome_envelope, 'run-outcome-envelope.json');
-  assert.equal(runnerRecord.artifacts.files.runner_execution_record, 'runner-execution-record.json');
+  assert.deepEqual(runnerRecord, {
+    schema: RUNTIME_AGENT_CI_RUNNER_EXECUTION_RECORD_SCHEMA,
+    compatibility: 'extension-owned; not a Homeboy RunnerExecutionRecord',
+    execution_kind: 'headless-deterministic-loop',
+    loop_id: 'headless-policy-fixture',
+    status: 'succeeded',
+    success: true,
+    exit_code: 0,
+    dry_run: false,
+    started_at: runnerRecord.started_at,
+    completed_at: runnerRecord.completed_at,
+    runtime: { id: 'fixture-runtime', backend: 'fixture' },
+    tasks: [{ task_id: 'build-site', status: 'succeeded', loop_status: 'succeeded', stop_reason: 'accepted' }],
+    artifacts: {
+      manifest: {
+        schema: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+        manifest_schema: ARTIFACT_MANIFEST_SCHEMA,
+        path: path.join(artifactDir, ARTIFACT_MANIFEST_FILE),
+      },
+      files: {
+        status: 'status.json',
+        outcome: 'outcome.json',
+        results: 'results.json',
+        events: 'events.json',
+        loop_result: 'loop-result.json',
+        loop_policy: 'loop-policy.json',
+        run_outcome_envelope: 'run-outcome-envelope.json',
+        runner_execution_record: 'runner-execution-record.json',
+        artifact_manifest: ARTIFACT_MANIFEST_FILE,
+      },
+    },
+  });
+  assert.equal(typeof runnerRecord.started_at, 'string');
+  assert.equal(typeof runnerRecord.completed_at, 'string');
+  assert.notEqual(runnerRecord.schema, 'homeboy/runner-execution-record/v1');
 } finally {
   fs.rmSync(artifactDir, { recursive: true, force: true });
 }

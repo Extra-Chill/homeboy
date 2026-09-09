@@ -9,7 +9,6 @@ const REQUIRED_RUNTIME_CONTRACT_FIELDS = Object.freeze({
   run_location_index: Object.freeze(['schema_id']),
   artifact_paths: Object.freeze(['schema_id']),
   runner_artifact_manifest_ref: Object.freeze(['schema_id']),
-  runner_execution_record: Object.freeze(['schema_id']),
   path_materialization_plan: Object.freeze(['schema_id']),
   run_outcome_envelope: Object.freeze(['schema_id']),
 });
@@ -21,7 +20,8 @@ const ARTIFACT_MANIFEST_FILE = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.file_name;
 const SECRET_ENV_PLAN_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.secret_env_plan.schema_id;
 const RUN_LOCATION_INDEX_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.run_location_index.schema_id;
 const RUN_OUTCOME_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id;
-const RUNNER_EXECUTION_RECORD_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.runner_execution_record.schema_id;
+// This extension's loop summary is not a Homeboy RunnerExecutionRecord.
+const RUNTIME_AGENT_CI_RUNNER_EXECUTION_RECORD_SCHEMA = 'homeboy/runtime-agent-ci-runner-execution-record/v1';
 const ARTIFACT_PATHS_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
 const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
 const {
@@ -89,7 +89,6 @@ function runtimeContractConstantsFromHomeboyOutput(output) {
   copyContractConstants(normalized, 'run_location_index', constants.run_location_index || constants.runLocationIndex, ['schema_id']);
   copyContractConstants(normalized, 'artifact_paths', constants.artifact_paths || constants.artifactPaths, ['schema_id']);
   copyContractConstants(normalized, 'runner_artifact_manifest_ref', constants.runner_artifact_manifest_ref || constants.runnerArtifactManifestRef, ['schema_id']);
-  copyContractConstants(normalized, 'runner_execution_record', constants.runner_execution_record || constants.runnerExecutionRecord, ['schema_id']);
   copyContractConstants(normalized, 'path_materialization_plan', constants.path_materialization_plan || constants.pathMaterializationPlan, ['schema_id']);
   copyContractConstants(normalized, 'run_outcome_envelope', constants.run_outcome_envelope || constants.runOutcomeEnvelope, ['schema_id']);
   return normalized;
@@ -158,7 +157,7 @@ module.exports = {
   REQUIRED_RUNTIME_CONTRACT_FIELDS,
   RUN_LOCATION_INDEX_SCHEMA,
   RUN_OUTCOME_ENVELOPE_SCHEMA,
-  RUNNER_EXECUTION_RECORD_SCHEMA,
+  RUNTIME_AGENT_CI_RUNNER_EXECUTION_RECORD_SCHEMA,
   RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
   RUNTIME_CONTRACT_CONSTANTS,
   SECRET_ENV_PLAN_SCHEMA,

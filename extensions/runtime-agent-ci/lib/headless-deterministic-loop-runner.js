@@ -17,7 +17,7 @@ const {
 const { executeFanoutReconcileRun } = require('./fanout-reconcile-runner');
 const { resolveRuntimeProvider, runtimeIdFromOptions } = require('./runtime-provider-resolver.cjs');
 const { artifactManifestForFiles, artifactManifestRef, runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
-const { RUNNER_EXECUTION_RECORD_SCHEMA } = require('./runtime-contracts.cjs');
+const { RUNTIME_AGENT_CI_RUNNER_EXECUTION_RECORD_SCHEMA } = require('./runtime-contracts.cjs');
 
 async function runHeadlessDeterministicLoop(options = {}) {
   const spec = requiredObject(options.spec || options.config || options.plan, 'spec');
@@ -465,8 +465,8 @@ function writeHeadlessDeterministicLoopArtifacts(options = {}) {
 function runnerExecutionRecord(result, artifactPaths, options = {}) {
   const status = result?.status || 'failed';
   return {
-    schema: RUNNER_EXECUTION_RECORD_SCHEMA,
-    compatibility: 'fixture-compatible-until-homeboy-core-exports-runner-execution-record-contract',
+    schema: RUNTIME_AGENT_CI_RUNNER_EXECUTION_RECORD_SCHEMA,
+    compatibility: 'extension-owned; not a Homeboy RunnerExecutionRecord',
     execution_kind: 'headless-deterministic-loop',
     loop_id: result?.loop_id || '',
     status,
