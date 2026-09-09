@@ -239,6 +239,93 @@ fn compact_doctor_retains_failed_repair_cause_and_remediation() {
 }
 
 #[test]
+fn doctor_failure_projection_lifts_actionable_root_causes_in_compact_and_full_modes() {
+    for (check_id, reason_code, remediation, expected_code) in [
+        (
+            "daemon.recovery",
+            Some("pid_dead"),
+            "homeboy runner connect local --adopt-orphan-lease lease-dead",
+            "runner.doctor.daemon_recovery.pid_dead",
+        ),
+        (
+            "provider.auth",
+            Some("authentication_denied"),
+            "homeboy runner doctor local --scope lab-offload",
+            "runner.doctor.provider_auth.authentication_denied",
+        ),
+        (
+            "daemon.exec",
+            Some("runner_doctor.daemon_timeout"),
+            "homeboy runner doctor local --scope lab-offload",
+            "runner.doctor.daemon_exec.runner_doctor_daemon_timeout",
+        ),
+        (
+            "inventory.stale",
+            Some("stale_inventory"),
+            "homeboy runner doctor local --scope lab-offload",
+            "runner.doctor.inventory_stale.stale_inventory",
+        ),
+    ] {
+        for full in [false, true] {
+            let (mut report, _) = run("local").expect("local doctor report");
+            report.status = RunnerDoctorStatus::Error;
+            report.checks = vec![types::RunnerCheck {
+                id: check_id.to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: format!("{check_id} failed"),
+                remediation: Some(remediation.to_string()),
+                remediation_action: None,
+                details: BTreeMap::from([(
+                    "reason_code".to_string(),
+                    reason_code.expect("fixture reason").to_string(),
+                )]),
+            }];
+
+            let projection = output_projection(report, full);
+            assert_eq!(
+                projection["failure"]["code"], expected_code,
+                "{check_id}, full={full}"
+            );
+            let data = serde_json::to_value(
+                crate::commands::runner::types::RunnerCommandOutput::Doctor(Box::new(projection)),
+            )
+            .expect("doctor output serializes");
+            let envelope = compact_command_run(Ok(data), 1)
+                .with_identity(
+                    &crate::commands::utils::response::CommandIdentity::with_operation(
+                        "runner", "doctor",
+                    ),
+                )
+                .stdout_envelope();
+            let envelope = serde_json::to_value(envelope).expect("envelope serializes");
+            assert_eq!(
+                envelope["diagnostics"]["code"], expected_code,
+                "{check_id}, full={full}"
+            );
+            assert_eq!(
+                envelope["next_actions"][0]["command"], remediation,
+                "{check_id}, full={full}"
+            );
+        }
+    }
+}
+
+#[test]
+fn doctor_failure_projection_names_an_invariant_violation_without_failed_checks() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.status = RunnerDoctorStatus::Error;
+    report.checks.clear();
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(compact["failure"]["code"], "runner.doctor.readiness_error");
+    assert_eq!(
+        compact["failure"]["next_actions"][0]["command"],
+        "homeboy runner doctor local --full"
+    );
+}
+
+#[test]
 fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.runner_id = "runner-".repeat(10_000);

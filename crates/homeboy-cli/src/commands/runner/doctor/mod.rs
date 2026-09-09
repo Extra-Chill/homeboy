@@ -111,6 +111,7 @@ pub(crate) fn run_with_options(
     } else {
         report.status = checks::overall_status(&report.checks);
     }
+    ensure_failure(&mut report);
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
 }
@@ -144,7 +145,8 @@ const COMPACT_PROJECTION_BYTES: usize = 8 * 1024;
 
 /// Keep default doctor output to the facts needed to decide whether the runner
 /// is usable. `--full` remains a lossless, redacted evidence surface.
-pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde_json::Value {
+pub(crate) fn output_projection(mut report: RunnerDoctorOutput, full: bool) -> serde_json::Value {
+    ensure_failure(&mut report);
     let value = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
     if full {
         return homeboy::core::redaction::redact_json(&value);
@@ -229,6 +231,7 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         "runner_id": runner_id,
         "runner": compact_runner_summary(&report.runner),
         "status": report.status,
+        "failure": report.failure.as_ref().map(compact_failure),
         "operator_summary": {
             "identity": "runner doctor",
             "state": match report.status { RunnerDoctorStatus::Ok => "ready", RunnerDoctorStatus::Warning => "degraded", RunnerDoctorStatus::Error => "blocked" },
@@ -251,6 +254,105 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         }
     });
     projection
+}
+
+/// Every nonzero doctor result names one current failed check at the payload
+/// root so the generic command-result envelope can preserve its cause.
+fn ensure_failure(report: &mut RunnerDoctorOutput) {
+    if report.status != RunnerDoctorStatus::Error || report.failure.is_some() {
+        return;
+    }
+    let Some(check) = report
+        .checks
+        .iter()
+        .find(|check| check.status == RunnerDoctorStatus::Error)
+    else {
+        report.failure = Some(types::RunnerDoctorFailure {
+            code: "runner.doctor.readiness_error".to_string(),
+            message: "Runner doctor reported an error without a failed check".to_string(),
+            details: BTreeMap::from([("runner_id".to_string(), bounded_text(&report.runner_id))]),
+            next_actions: vec![crate::commands::utils::response::CommandNextAction::new(
+                "inspect runner doctor evidence",
+                bounded_text(&format!(
+                    "homeboy runner doctor {} --full",
+                    report.runner_id
+                )),
+            )
+            .with_kind(crate::commands::utils::response::CommandNextActionKind::Show)],
+            retryable: None,
+        });
+        return;
+    };
+
+    let reason_code = check.details.get("reason_code").map(String::as_str);
+    let code = format!(
+        "runner.doctor.{}{}",
+        failure_code_segment(&check.id),
+        reason_code
+            .map(|reason| format!(".{}", failure_code_segment(reason)))
+            .unwrap_or_default(),
+    );
+    let mut details = BTreeMap::from([
+        ("runner_id".to_string(), report.runner_id.clone()),
+        ("check_id".to_string(), check.id.clone()),
+    ]);
+    for (key, value) in check.details.iter().take(6) {
+        details.insert(key.clone(), value.clone());
+    }
+    let next_actions = match check.remediation.as_deref() {
+        Some(command) if !command.trim().is_empty() => {
+            vec![crate::commands::utils::response::CommandNextAction::new(
+                format!("repair {}", check.id),
+                bounded_text(command),
+            )
+            .with_kind(crate::commands::utils::response::CommandNextActionKind::Repair)]
+        }
+        _ => vec![crate::commands::utils::response::CommandNextAction::new(
+            format!("inspect {}", check.id),
+            bounded_text(&format!(
+                "homeboy runner doctor {} --full",
+                report.runner_id
+            )),
+        )
+        .with_kind(crate::commands::utils::response::CommandNextActionKind::Show)],
+    };
+    report.failure = Some(types::RunnerDoctorFailure {
+        code: bounded_text(&code),
+        message: bounded_text(&check.message),
+        details: details
+            .into_iter()
+            .map(|(key, value)| (bounded_text(&key), bounded_text(&value)))
+            .collect(),
+        next_actions,
+        retryable: None,
+    });
+}
+
+fn failure_code_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn compact_failure(failure: &types::RunnerDoctorFailure) -> serde_json::Value {
+    serde_json::json!({
+        "code": bounded_text(&failure.code),
+        "message": bounded_text(&failure.message),
+        "details": failure.details.iter().take(8).map(|(key, value)| (bounded_text(key), bounded_text(value))).collect::<BTreeMap<_, _>>(),
+        "next_actions": failure.next_actions.iter().take(1).map(|action| serde_json::json!({
+            "label": bounded_text(&action.label),
+            "command": bounded_text(&action.command),
+            "kind": action.kind.as_ref(),
+        })).collect::<Vec<_>>(),
+        "retryable": failure.retryable,
+    })
 }
 
 fn compact_remediation_action(action: Option<&types::RunnerRepairAction>) -> serde_json::Value {
@@ -299,10 +401,15 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
         .cloned()
         .map(|repair| vec![repair])
         .unwrap_or_default();
+    let failure = projection
+        .get("failure")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": "runner.doctor",
         "status": "error",
+        "failure": failure,
         "operator_summary": {
             "identity": "runner doctor",
             "state": "blocked",

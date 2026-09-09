@@ -428,6 +428,7 @@ pub fn report(
         runner_id: runner_id.to_string(),
         runner: runner_summary("ssh", Some(runner), Some(server)),
         status: checks::overall_status(&checks),
+        failure: None,
         capabilities,
         resources,
         checks,
@@ -462,6 +463,7 @@ pub(super) fn unreachable_report(
     RunnerDoctorOutput {
         variant: "doctor", command: "runner.doctor", runner_id: runner_id.to_string(),
         runner: runner_summary("ssh", Some(runner), Some(server)), status: RunnerDoctorStatus::Error,
+        failure: None,
         capabilities: RunnerCapabilities::default(), resources: RunnerResources::default(),
         checks: vec![checks::error("ssh.execution", format!("SSH runner {} is not reachable", runner_id), Some("Run `homeboy server status <server-id>` and verify host, user, port, identity_file, and network access".to_string()), common::detail_map(&[("stderr", output.stderr.trim()), ("stdout", output.stdout.trim())]))],
         secret_env_migration: None, diagnostics: Some(types::RunnerDoctorDiagnostics { status: "partial", completed_checks: 1, timed_out_probes: Vec::new() }), daemon_recovery: None, admission_summary: None, provider_readiness: None, repairs: Vec::new(),
@@ -479,6 +481,13 @@ pub(super) fn disconnected_report(
     let (message, remediation) = match daemon_recovery.as_ref() {
         Some(recovery) => {
             details.insert("active_jobs".to_string(), recovery.active_jobs.to_string());
+            if let Some(reason_code) = recovery.stale_reason_code {
+                let reason_code = serde_json::to_value(reason_code)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string());
+                details.insert("reason_code".to_string(), reason_code);
+            }
             if let Some(lease_id) = &recovery.lease_id {
                 details.insert("lease_id".to_string(), lease_id.clone());
             }
@@ -517,6 +526,7 @@ pub(super) fn disconnected_report(
         runner_id: runner_id.to_string(),
         runner: runner_summary("ssh", Some(runner), Some(server)),
         status: RunnerDoctorStatus::Error,
+        failure: None,
         capabilities: RunnerCapabilities::default(),
         resources: RunnerResources::default(),
         checks: vec![checks::error(
