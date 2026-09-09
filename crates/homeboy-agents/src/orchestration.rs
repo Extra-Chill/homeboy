@@ -1343,7 +1343,7 @@ fn review_promotion_candidates(
                 .and_then(|outcome| {
                     crate::agent_task_promotion::canonical_recoverable_patch_artifacts_in_observation_store(
                         outcome,
-                        &crate::agent_task_promotion::AgentTaskPromotionOptions {
+                        &crate::agent_task_promotion::AgentTaskPromotionRequest {
                             source: "{}".to_string(),
                             source_run_id: Some(run_id.to_string()),
                             source_path: None,

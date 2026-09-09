@@ -4,7 +4,7 @@
 use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider, select_patch_artifact,
 };
-use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
+use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
@@ -100,7 +100,7 @@ fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
         ..Default::default()
     };
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
@@ -169,7 +169,7 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
         let source = serde_json::to_string(&outcome).expect("serialize outcome");
         std::fs::write(&source_path, &source).expect("write source");
 
-        let report = promote(AgentTaskPromotionOptions {
+        let report = promote(AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run-empty".to_string()),
             source_path: Some(source_path),
@@ -229,7 +229,7 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
     };
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run".to_string()),
             source_path: Some(source_path),
@@ -283,7 +283,7 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
     let (source_path, source) = write_empty_patch_source(&temp);
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: None,
             source_path: Some(source_path),
@@ -363,7 +363,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run-1".to_string()),
             source_path: Some(source_path),
@@ -454,7 +454,7 @@ fn promote_persists_force_added_ignored_git_candidate_paths() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run-8935".to_string()),
             source_path: Some(source_path),
@@ -519,7 +519,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
         };
 
         let report = promote_with_provider(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("run-3771".to_string()),
                 source_path: Some(source_path),
@@ -655,26 +655,4 @@ fn explicit_candidate_adopts_only_durable_pre_provider_transport_failures() {
             error.message
         );
     }
-}
-
-#[test]
-fn promotion_options_deserialize_legacy_flat_gate_payload() {
-    // Payloads authored before the refactor used flat keys; they must still
-    // deserialize into the flattened `gates` field unchanged.
-    let payload = serde_json::json!({
-        "source": "source.json",
-        "to_worktree": "repo@legacy",
-        "verify": ["cargo build"],
-        "private_verify": [],
-        "private_gate_reveal": "full_evidence"
-    });
-
-    let options: AgentTaskPromotionOptions =
-        serde_json::from_value(payload).expect("deserialize legacy flat payload");
-    assert_eq!(options.gates.verify, vec!["cargo build".to_string()]);
-    assert!(options.gates.private_verify.is_empty());
-    assert_eq!(
-        options.gates.private_gate_reveal,
-        AgentTaskGateRevealPolicy::FullEvidence
-    );
 }

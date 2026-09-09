@@ -926,7 +926,7 @@ fn persisted_timeout_candidate_is_admitted_for_continuation() {
 
         let source = serde_json::to_string(&aggregate).expect("serialize persisted aggregate");
         let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
-            &crate::agent_task_promotion::AgentTaskPromotionOptions {
+            &crate::agent_task_promotion::AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("service-timeout-candidate".to_string()),
                 source_path: Some(lifecycle_store.aggregate_path("service-timeout-candidate")),

@@ -32,7 +32,7 @@ use crate::agent_task_promotion::{
     preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -386,7 +386,7 @@ pub(crate) fn promote_attempt_in_store(
     };
     let observation_store = lifecycle_store.open_observation_initialized()?;
     promote_with_checkpoint_in_observation_store(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
@@ -517,7 +517,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
             Some(format!("serialize agent-task aggregate {run_id}")),
         )
     })?;
-    let promotion_options = AgentTaskPromotionOptions {
+    let promotion_options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some(run_id.to_string()),
         source_path: Some(lifecycle_store.aggregate_path(run_id)),
@@ -654,7 +654,7 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
     else {
         return Ok(None);
     };
-    let promotion_options = AgentTaskPromotionOptions {
+    let promotion_options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some(run_id.to_string()),
         source_path,
@@ -1086,7 +1086,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
             let resumed = resume_promoted_patch_in_observation_store(
-                AgentTaskPromotionOptions {
+                AgentTaskPromotionRequest {
                     source,
                     source_run_id: Some(run_id.to_string()),
                     source_path,
@@ -1724,7 +1724,7 @@ fn verify_replacement_gates_owned(
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
@@ -2393,7 +2393,7 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
     let (source, source_path) = promotion_source_in_store(lifecycle_store, &recovery.run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let refreshed = resume_promoted_patch_in_observation_store(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some(recovery.run_id.clone()),
             source_path,
@@ -6190,7 +6190,7 @@ fn ambiguous_promotion_artifact_ids(
     };
     canonical_recoverable_patch_artifacts(
         outcome,
-        &AgentTaskPromotionOptions {
+        &AgentTaskPromotionRequest {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
