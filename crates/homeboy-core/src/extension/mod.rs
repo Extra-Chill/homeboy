@@ -18,6 +18,7 @@ pub mod readiness;
 pub mod recipe_run_api;
 pub mod registry;
 pub mod resolve;
+pub(crate) mod root_manifest;
 pub mod self_check;
 mod setup_env;
 pub mod test;
