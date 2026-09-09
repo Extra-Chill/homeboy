@@ -419,15 +419,14 @@ pub fn default_branch_name(path: &Path) -> Option<String> {
 pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
     let remote = resolve_default_remote(git_root);
     let old_branch = current_branch(git_root);
+    let deadline = Instant::now() + Duration::from_secs(30);
     fetch_remote_tracking_refs_until(
         git_root,
         &["fetch", &remote],
         &format!("git fetch {remote}"),
         &[],
-        Instant::now() + Duration::from_secs(30),
+        deadline,
     )?;
-    let mut detached_default_branch: Option<String> = None;
-
     if let Some(remote_branch) = default_remote_branch(git_root) {
         let local_branch = remote_branch
             .strip_prefix(&format!("{remote}/"))
@@ -447,18 +446,31 @@ pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
                 &["switch", "--detach", &remote_branch],
                 "git switch detached default branch",
             )?;
-            detached_default_branch = Some(local_branch);
         }
-    }
-
-    if let Some(branch) = detached_default_branch {
+        // `pull` fetches again after the authoritative fetch above. Merge the
+        // already-fetched tracking ref instead so linked worktrees do not race.
         run_git(
             git_root,
-            &["pull", "--ff-only", &remote, &branch],
-            "git pull detached default branch --ff-only",
+            &["merge", "--ff-only", &remote_branch],
+            "git merge default branch --ff-only",
         )?;
     } else {
-        run_git(git_root, &["pull", "--ff-only"], "git pull --ff-only")?;
+        // Preserve the prior behavior for repositories whose default branch
+        // cannot be identified. `pull` may fetch, so retain authority for it.
+        with_remote_tracking_authority_until(
+            git_root,
+            "git pull --ff-only",
+            deadline,
+            |remaining| {
+                run_git_with_env_timeout(
+                    git_root,
+                    &["pull", "--ff-only"],
+                    "git pull --ff-only",
+                    &[],
+                    remaining,
+                )
+            },
+        )?;
     }
 
     Ok(())
@@ -566,6 +578,9 @@ pub fn get_component_path_prefix(local_path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+
     use super::*;
 
     use crate::test_support::run_git_command as git;
@@ -716,5 +731,95 @@ mod tests {
             Some("upstream/main")
         );
         assert_eq!(default_branch_name(&clone).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn update_to_remote_default_branch_fast_forwards_from_fetched_tracking_ref() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let remote = tmp.path().join("remote.git");
+        let seed = tmp.path().join("seed");
+        let checkout = tmp.path().join("checkout");
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["config", "user.email", "t@x.test"]);
+        git(&seed, &["config", "user.name", "T"]);
+        std::fs::write(seed.join("f.txt"), "one\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "initial"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(seed.join("f.txt"), "two\n").unwrap();
+        git(&seed, &["commit", "-qam", "advance"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+        let expected = run_git(&seed, &["rev-parse", "HEAD"], "seed head").unwrap();
+
+        update_to_remote_default_branch(&checkout).expect("fast forward checkout");
+
+        assert_eq!(
+            run_git(&checkout, &["rev-parse", "HEAD"], "checkout head").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn update_to_remote_default_branch_waits_for_remote_tracking_authority() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repository = dir.path();
+        git(repository, &["init", "-q", "-b", "main"]);
+        git(repository, &["config", "user.email", "t@x.test"]);
+        git(repository, &["config", "user.name", "T"]);
+        std::fs::write(repository.join("f.txt"), "x\n").unwrap();
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-qm", "initial"]);
+        git(
+            repository,
+            &[
+                "remote",
+                "add",
+                "origin",
+                dir.path().join("missing.git").to_str().unwrap(),
+            ],
+        );
+        let (locked, ready) = mpsc::channel();
+        let locked_repository = repository.to_path_buf();
+        let holder = thread::spawn(move || {
+            with_remote_tracking_authority_until(
+                &locked_repository,
+                "test lock holder",
+                Instant::now() + Duration::from_secs(2),
+                |_| {
+                    locked.send(()).unwrap();
+                    thread::sleep(Duration::from_millis(200));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+        ready.recv().expect("authority acquired");
+
+        let started = Instant::now();
+        let _ = update_to_remote_default_branch(repository).expect_err("missing remote fails");
+
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        holder.join().unwrap();
     }
 }

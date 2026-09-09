@@ -1,6 +1,7 @@
 use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -651,7 +652,14 @@ fn ensure_git_dependency_fresh(
         return Err(terminal_dependency_error(local_path, &freshness, None));
     }
 
-    let fetch_error = run_git(local_path, &["fetch", "--prune", remote]).err();
+    let fetch_error = homeboy_core::git::fetch_remote_tracking_refs_until(
+        local_path,
+        &["fetch", "--prune", remote],
+        "git fetch runner dependency",
+        &[],
+        Instant::now() + Duration::from_secs(30),
+    )
+    .err();
     let upstream_head = git_output(local_path, &["rev-parse", "@{u}"]).ok();
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
@@ -834,6 +842,9 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use homeboy_core::engine::shell;
     use homeboy_core::test_support::GitFixture as GitRepository;
@@ -929,6 +940,36 @@ mod tests {
             git_output(checkout.path(), &["rev-parse", "HEAD"]),
             expected
         );
+    }
+
+    #[test]
+    fn dependency_refresh_waits_for_remote_tracking_authority() {
+        let fixture = GitDependencyFixture::new();
+        fixture.commit_file("initial.txt", "initial");
+        fixture.push();
+        let checkout = fixture.clone_checkout();
+        let (locked, ready) = mpsc::channel();
+        let locked_checkout = checkout.path().to_path_buf();
+        let holder = thread::spawn(move || {
+            homeboy_core::git::with_remote_tracking_authority_until(
+                &locked_checkout,
+                "test lock holder",
+                Instant::now() + Duration::from_secs(2),
+                |_| {
+                    locked.send(()).unwrap();
+                    thread::sleep(Duration::from_millis(200));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+        ready.recv().expect("authority acquired");
+
+        let started = Instant::now();
+        ensure_git_dependency_fresh(checkout.path(), None, false).expect("refresh succeeds");
+
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        holder.join().unwrap();
     }
 
     #[test]
