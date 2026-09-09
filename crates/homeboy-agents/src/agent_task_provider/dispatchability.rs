@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     effective_provider_config, executor::effective_provider_for_request,
-    provider_credential_readiness, readiness_verdict_with_credentials_and_deadline,
-    resolve_provider_for_backend, runtime_readiness::provider_requires_live_auth_validation,
+    provider_credential_readiness, resolve_provider_for_backend,
+    runtime_readiness::provider_requires_live_auth_validation,
     validate_provider_immediate_failure_patterns, AgentTaskProviderCatalog, ProviderResolution,
     ProviderRuntimeReadinessCache,
 };
@@ -226,6 +226,7 @@ fn evaluate_provider_dispatchability_with_config_and_credentials(
         cache,
         runtime_evidence_out,
         None,
+        false,
     )
 }
 
@@ -244,6 +245,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     cache: &mut ProviderRuntimeReadinessCache,
     runtime_evidence_out: &mut Option<AgentTaskProviderRuntimeEvidence>,
     deadline_unix_ms: Option<u64>,
+    generated_fanout_context: bool,
 ) -> AgentTaskProviderDispatchability {
     let candidate_providers = catalog
         .providers()
@@ -354,15 +356,19 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         },
     };
     let mut runtime_remediation = Vec::new();
-    let (runtime, runtime_evidence) =
-        if probe_runtime && model_ready && credentials.dispatchable && configuration.ready {
-            let config = effective_provider_config(config, model);
-            match readiness_verdict_with_credentials_and_deadline(
+    let (runtime, runtime_evidence) = if probe_runtime
+        && model_ready
+        && credentials.dispatchable
+        && configuration.ready
+    {
+        let config = effective_provider_config(config, model);
+        match super::runtime_readiness::readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
                 provider,
                 &config,
                 credential_env,
                 cache,
                 deadline_unix_ms,
+                generated_fanout_context,
             ) {
                 Ok(verdict) => {
                     let remediation = (!verdict.remediation.trim().is_empty())
@@ -429,15 +435,15 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                     )
                 }
             }
-        } else {
-            (
-                AgentTaskProviderDispatchabilityCheck {
-                    ready: !probe_runtime,
-                    reason: (!probe_runtime).then_some("not requested".to_string()),
-                },
-                None,
-            )
-        };
+    } else {
+        (
+            AgentTaskProviderDispatchabilityCheck {
+                ready: !probe_runtime,
+                reason: (!probe_runtime).then_some("not requested".to_string()),
+            },
+            None,
+        )
+    };
     // `runtime.ready` alone conflates two very different situations: a
     // provider-declared probe actually ran and passed, versus no probe being
     // declared at all (in which case `run_provider_readiness_invocation`
@@ -940,7 +946,12 @@ pub fn provider_runtime_readiness_cache_identity_for_plan(
             )
         })?;
     let config = effective_provider_config(&request.executor.config, request.executor.model());
-    super::runtime_readiness::readiness_cache_identity(&provider, &config, &credential_env)
+    super::runtime_readiness::readiness_cache_identity_for_generated_fanout_context(
+        &provider,
+        &config,
+        &credential_env,
+        task.metadata["provider_readiness_generated_fanout_context"] == true,
+    )
 }
 
 pub(crate) fn evaluate_request_dispatchability_with_credentials(
@@ -966,6 +977,7 @@ pub(crate) fn evaluate_request_dispatchability_with_credentials(
         cache,
         &mut runtime_evidence,
         request.limits.execution_deadline_unix_ms,
+        request.metadata["provider_readiness_generated_fanout_context"] == true,
     );
     EvaluatedRequestDispatchability {
         dispatchability,
