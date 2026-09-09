@@ -452,11 +452,10 @@ pub use session::{
     RunnerDaemonGenerationStatus, RunnerDaemonVerification, RunnerDisconnectReport,
     RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerLeaselessRecoveryContract,
     RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
-    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
-    RunnerRetainedJobInconsistency, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerRetainedJobInconsistency,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
     RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
-    RunnerUnresolvedJobOwner,
-    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
+    RunnerUnresolvedJobOwner, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};

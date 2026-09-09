@@ -877,26 +877,26 @@ impl RunnerStatusReport {
             .len();
         let retained_job_inconsistency = (self.active_job_source
             == Some(RunnerActiveJobSource::DirectDaemon))
-            .then(|| {
-                generations.iter().find(|generation| {
-                    generation.admission_owner
-                        && generation.active_job_count_authoritative
-                        && generation.active_job_count != self.active_job_count
-                })
+        .then(|| {
+            generations.iter().find(|generation| {
+                generation.admission_owner
+                    && generation.active_job_count_authoritative
+                    && generation.active_job_count != self.active_job_count
             })
-            .flatten()
-            .map(|generation| RunnerRetainedJobInconsistency {
-                code: "direct_daemon_authoritative_ledger_disagreement",
-                generation: generation.generation.clone(),
-                direct_daemon_active_job_count: self.active_job_count,
-                authoritative_active_job_count: generation.active_job_count,
-                observed_active_job_count: generation.observed_active_job_count,
-                job_ids: owners
-                    .iter()
-                    .find(|owner| owner.generation == generation.generation)
-                    .map(|owner| owner.job_ids.iter().take(20).cloned().collect())
-                    .unwrap_or_default(),
-            });
+        })
+        .flatten()
+        .map(|generation| RunnerRetainedJobInconsistency {
+            code: "direct_daemon_authoritative_ledger_disagreement",
+            generation: generation.generation.clone(),
+            direct_daemon_active_job_count: self.active_job_count,
+            authoritative_active_job_count: generation.active_job_count,
+            observed_active_job_count: generation.observed_active_job_count,
+            job_ids: owners
+                .iter()
+                .find(|owner| owner.generation == generation.generation)
+                .map(|owner| owner.job_ids.iter().take(20).cloned().collect())
+                .unwrap_or_default(),
+        });
         let unresolved_generations = generations
             .iter()
             .filter(|generation| {
@@ -1773,11 +1773,9 @@ mod status_serialization_tests {
         assert!(!summary.safe_to_rotate);
         let availability = report.admission_availability(None);
         assert!(!availability.accepts_jobs);
-        assert!(
-            availability
-                .reasons
-                .contains(&"retained_active_job_count_inconsistent".to_string())
-        );
+        assert!(availability
+            .reasons
+            .contains(&"retained_active_job_count_inconsistent".to_string()));
         assert_eq!(
             summary.next_action.as_deref(),
             Some("homeboy runner reconcile homeboy-lab")
