@@ -326,6 +326,34 @@ fn doctor_failure_projection_names_an_invariant_violation_without_failed_checks(
 }
 
 #[test]
+fn doctor_failure_does_not_promote_prose_or_unredacted_secret_details() {
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+
+    for full in [false, true] {
+        let (mut report, _) = run("local").expect("local doctor report");
+        report.status = RunnerDoctorStatus::Error;
+        report.checks = vec![types::RunnerCheck {
+            id: "tool.required.example".to_string(),
+            status: RunnerDoctorStatus::Error,
+            message: format!("probe failed with token={secret}"),
+            remediation: Some("Fix the shell environment, then rerun doctor.".to_string()),
+            remediation_action: None,
+            details: BTreeMap::from([("probe_error".to_string(), format!("token={secret}"))]),
+        }];
+        let projection = output_projection(report, full);
+        let rendered = projection.to_string();
+
+        assert!(!rendered.contains(secret), "full={full}");
+        assert_eq!(
+            projection["failure"]["next_actions"][0]["command"],
+            "homeboy runner doctor local --full",
+            "full={full}"
+        );
+        assert_eq!(projection["failure"]["next_actions"][0]["kind"], "show");
+    }
+}
+
+#[test]
 fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.runner_id = "runner-".repeat(10_000);

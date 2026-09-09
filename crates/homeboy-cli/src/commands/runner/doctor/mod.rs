@@ -293,23 +293,40 @@ fn ensure_failure(report: &mut RunnerDoctorOutput) {
             .unwrap_or_default(),
     );
     let mut details = BTreeMap::from([
-        ("runner_id".to_string(), report.runner_id.clone()),
-        ("check_id".to_string(), check.id.clone()),
+        ("runner_id".to_string(), redacted_text(&report.runner_id)),
+        ("check_id".to_string(), redacted_text(&check.id)),
     ]);
     for (key, value) in check.details.iter().take(6) {
-        details.insert(key.clone(), value.clone());
+        details.insert(redacted_text(key), redacted_text(value));
     }
-    let next_actions = match check.remediation.as_deref() {
-        Some(command) if !command.trim().is_empty() => {
+    let next_actions = match check
+        .remediation
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| is_homeboy_command(command))
+    {
+        Some(command) => {
+            let kind = remediation_action_kind(command);
             vec![crate::commands::utils::response::CommandNextAction::new(
-                format!("repair {}", check.id),
-                bounded_text(command),
+                format!(
+                    "{} {}",
+                    if matches!(
+                        kind,
+                        crate::commands::utils::response::CommandNextActionKind::Repair
+                    ) {
+                        "repair"
+                    } else {
+                        "inspect"
+                    },
+                    redacted_text(&check.id)
+                ),
+                redacted_text(command),
             )
-            .with_kind(crate::commands::utils::response::CommandNextActionKind::Repair)]
+            .with_kind(kind)]
         }
         _ => vec![crate::commands::utils::response::CommandNextAction::new(
-            format!("inspect {}", check.id),
-            bounded_text(&format!(
+            format!("inspect {}", redacted_text(&check.id)),
+            redacted_text(&format!(
                 "homeboy runner doctor {} --full",
                 report.runner_id
             )),
@@ -317,15 +334,32 @@ fn ensure_failure(report: &mut RunnerDoctorOutput) {
         .with_kind(crate::commands::utils::response::CommandNextActionKind::Show)],
     };
     report.failure = Some(types::RunnerDoctorFailure {
-        code: bounded_text(&code),
-        message: bounded_text(&check.message),
-        details: details
-            .into_iter()
-            .map(|(key, value)| (bounded_text(&key), bounded_text(&value)))
-            .collect(),
+        code: redacted_text(&code),
+        message: redacted_text(&check.message),
+        details: details.into_iter().collect(),
         next_actions,
         retryable: None,
     });
+}
+
+fn is_homeboy_command(value: &str) -> bool {
+    value.trim_start().starts_with("homeboy ")
+}
+
+fn remediation_action_kind(
+    command: &str,
+) -> crate::commands::utils::response::CommandNextActionKind {
+    if command.starts_with("homeboy runner connect ")
+        || (command.contains("homeboy runner doctor ") && command.contains(" --repair"))
+    {
+        crate::commands::utils::response::CommandNextActionKind::Repair
+    } else {
+        crate::commands::utils::response::CommandNextActionKind::Show
+    }
+}
+
+fn redacted_text(value: &str) -> String {
+    homeboy::core::redaction::redact_string(value)
 }
 
 fn failure_code_segment(value: &str) -> String {
