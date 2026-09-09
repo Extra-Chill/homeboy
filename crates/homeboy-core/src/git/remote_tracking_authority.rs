@@ -24,6 +24,7 @@ pub fn with_remote_tracking_authority_until<T>(
     deadline: Instant,
     action: impl FnOnce(Duration) -> Result<T>,
 ) -> Result<T> {
+    report_authority_attempt();
     let common_dir = git_common_dir(repository)?;
     let authority = {
         let mut authorities = AUTHORITIES
@@ -126,7 +127,7 @@ fn acquire_file_guard(
                 return Ok(());
             }
             Ok(false) | Err(_) if Instant::now() < deadline => {
-                report_file_lock_attempt();
+                report_authority_attempt();
                 if !reported_wait {
                     let owner = fs::read_to_string(lock_path)
                         .ok()
@@ -174,14 +175,14 @@ fn acquire_file_guard(
 }
 
 #[cfg(test)]
-fn report_file_lock_attempt() {
+fn report_authority_attempt() {
     if let Some(path) = std::env::var_os("HOMEB0Y_REMOTE_TRACKING_FETCH_LOCK_ATTEMPTED") {
         std::fs::write(path, "attempted\n").expect("write remote-tracking lock attempt");
     }
 }
 
 #[cfg(not(test))]
-fn report_file_lock_attempt() {}
+fn report_authority_attempt() {}
 
 #[cfg(test)]
 mod tests {

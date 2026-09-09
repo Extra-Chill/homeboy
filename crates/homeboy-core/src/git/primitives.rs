@@ -28,6 +28,31 @@ fn git_failure_message(context: &str, detail: &str) -> String {
     }
 }
 
+fn ensure_git_success(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    output: &std::process::Output,
+) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    Err(Error::git_command_failed_with_details(
+        git_failure_message(context, &detail),
+        GitCommandFailedDetails {
+            command: git_command_display(args),
+            cwd: git_cwd_display(git_root),
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            io_error: None,
+        },
+    ))
+}
+
 /// Clone a git repository to a target directory.
 pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
     run_git(
@@ -84,7 +109,14 @@ pub fn clone_repo_at_ref_with_timeout(
 
 /// Pull latest changes in a git repository.
 pub fn pull_repo(repo_dir: &Path) -> Result<()> {
-    run_git(repo_dir, &["pull"], "git pull")?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let output = fetch_and_merge_upstream_ff_only(repo_dir, deadline)?;
+    ensure_git_success(
+        repo_dir,
+        &["merge", "--ff-only", "@{upstream}"],
+        "git merge --ff-only",
+        &output,
+    )?;
     Ok(())
 }
 
@@ -134,24 +166,7 @@ pub fn run_git_with_env(
     env: &[(String, String)],
 ) -> Result<String> {
     let output = run_git_output_with_env(git_root, args, context, env)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(Error::git_command_failed_with_details(
-            git_failure_message(context, &detail),
-            GitCommandFailedDetails {
-                command: git_command_display(args),
-                cwd: git_cwd_display(git_root),
-                exit_code: output.status.code(),
-                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                io_error: None,
-            },
-        ));
-    }
-
+    ensure_git_success(git_root, args, context, &output)?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
@@ -277,6 +292,26 @@ pub fn fetch_remote_tracking_refs_until(
     with_remote_tracking_authority_until(git_root, context, deadline, |remaining| {
         run_git_with_env_timeout(git_root, args, context, env, remaining)
     })
+}
+
+/// Fetch the current repository under remote-tracking authority, then merge its
+/// already-fetched upstream ref without allowing Git to fetch a second time.
+pub fn fetch_and_merge_upstream_ff_only(
+    git_root: &Path,
+    deadline: Instant,
+) -> Result<std::process::Output> {
+    fetch_remote_tracking_refs_until(git_root, &["fetch"], "git fetch", &[], deadline)?;
+    let upstream = run_git(
+        git_root,
+        &["rev-parse", "--abbrev-ref", "@{upstream}"],
+        "git upstream",
+    )?;
+    let upstream = upstream.trim();
+    run_git_output(
+        git_root,
+        &["merge", "--ff-only", upstream],
+        "git merge --ff-only",
+    )
 }
 
 /// Run a git command in a repository and return raw output without treating
@@ -455,21 +490,12 @@ pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
             "git merge default branch --ff-only",
         )?;
     } else {
-        // Preserve the prior behavior for repositories whose default branch
-        // cannot be identified. `pull` may fetch, so retain authority for it.
-        with_remote_tracking_authority_until(
+        let output = fetch_and_merge_upstream_ff_only(git_root, deadline)?;
+        ensure_git_success(
             git_root,
-            "git pull --ff-only",
-            deadline,
-            |remaining| {
-                run_git_with_env_timeout(
-                    git_root,
-                    &["pull", "--ff-only"],
-                    "git pull --ff-only",
-                    &[],
-                    remaining,
-                )
-            },
+            &["merge", "--ff-only", "@{upstream}"],
+            "git merge --ff-only",
+            &output,
         )?;
     }
 
@@ -767,6 +793,29 @@ mod tests {
                 checkout.to_str().unwrap(),
             ],
         );
+        let fetches = tmp.path().join("fetches");
+        let upload_pack = tmp.path().join("count-upload-pack");
+        std::fs::write(
+            &upload_pack,
+            format!(
+                "#!/bin/sh\nprintf fetch >> {}\nexec git upload-pack \"$@\"\n",
+                fetches.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        git(
+            &checkout,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                upload_pack.to_str().unwrap(),
+            ],
+        );
         std::fs::write(seed.join("f.txt"), "two\n").unwrap();
         git(&seed, &["commit", "-qam", "advance"]);
         git(&seed, &["push", "-q", "origin", "main"]);
@@ -774,6 +823,67 @@ mod tests {
 
         update_to_remote_default_branch(&checkout).expect("fast forward checkout");
 
+        assert_eq!(
+            run_git(&checkout, &["rev-parse", "HEAD"], "checkout head").unwrap(),
+            expected
+        );
+        assert_eq!(
+            std::fs::read_to_string(fetches).unwrap().lines().count(),
+            1,
+            "the update must merge the authority-fetched tracking ref without a second fetch"
+        );
+    }
+
+    #[test]
+    fn update_to_remote_default_branch_detaches_when_the_local_default_branch_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let remote = tmp.path().join("remote.git");
+        let seed = tmp.path().join("seed");
+        let checkout = tmp.path().join("checkout");
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["config", "user.email", "t@x.test"]);
+        git(&seed, &["config", "user.name", "T"]);
+        std::fs::write(seed.join("f.txt"), "one\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "initial"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        git(&checkout, &["switch", "--detach"]);
+        let parked = tmp.path().join("parked-main");
+        // Make `main` unavailable in this checkout so the update takes its
+        // detached tracking-ref fallback rather than Git's auto-track path.
+        git(
+            &checkout,
+            &["worktree", "add", "-q", parked.to_str().unwrap(), "main"],
+        );
+        std::fs::write(seed.join("f.txt"), "two\n").unwrap();
+        git(&seed, &["commit", "-qam", "advance"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+        let expected = run_git(&seed, &["rev-parse", "HEAD"], "seed head").unwrap();
+
+        update_to_remote_default_branch(&checkout).expect("detached fallback update");
+
+        assert_eq!(current_branch(&checkout), None);
         assert_eq!(
             run_git(&checkout, &["rev-parse", "HEAD"], "checkout head").unwrap(),
             expected
@@ -800,6 +910,7 @@ mod tests {
             ],
         );
         let (locked, ready) = mpsc::channel();
+        let (release, released) = mpsc::channel();
         let locked_repository = repository.to_path_buf();
         let holder = thread::spawn(move || {
             with_remote_tracking_authority_until(
@@ -808,7 +919,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(2),
                 |_| {
                     locked.send(()).unwrap();
-                    thread::sleep(Duration::from_millis(200));
+                    released.recv().expect("release authority");
                     Ok(())
                 },
             )
@@ -816,10 +927,33 @@ mod tests {
         });
         ready.recv().expect("authority acquired");
 
-        let started = Instant::now();
-        let _ = update_to_remote_default_branch(repository).expect_err("missing remote fails");
+        let attempted = dir.path().join("contender-attempted-authority");
+        let _attempted = crate::test_support::EnvVarGuard::set(
+            "HOMEB0Y_REMOTE_TRACKING_FETCH_LOCK_ATTEMPTED",
+            &attempted,
+        );
+        let (done, completed) = mpsc::channel();
+        let contender_repository = repository.to_path_buf();
+        let contender = thread::spawn(move || {
+            done.send(update_to_remote_default_branch(&contender_repository))
+                .expect("report contender result");
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !attempted.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(attempted.exists(), "contender did not attempt authority");
+        assert!(
+            completed.try_recv().is_err(),
+            "contender proceeded before authority release"
+        );
 
-        assert!(started.elapsed() >= Duration::from_millis(150));
+        release.send(()).expect("release holder");
         holder.join().unwrap();
+        let _ = completed
+            .recv()
+            .expect("contender completes after authority release")
+            .expect_err("missing remote fails");
+        contender.join().unwrap();
     }
 }
