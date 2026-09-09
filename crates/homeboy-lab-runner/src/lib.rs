@@ -453,8 +453,9 @@ pub use session::{
     RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerLeaselessRecoveryContract,
     RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
     RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
-    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, RunnerUnresolvedJobOwner,
+    RunnerRetainedJobInconsistency, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
+    RunnerUnresolvedJobOwner,
     RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};

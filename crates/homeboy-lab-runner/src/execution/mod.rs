@@ -1388,7 +1388,8 @@ fn allows_idle_stale_daemon_refresh(
         .capability_preflight
         .as_ref()
         .is_some_and(|preflight| preflight.command == "runner.refresh-homeboy")
-        && (crate::connection::authoritative_zero_active_jobs(status)
+        && ((crate::connection::authoritative_zero_active_jobs(status)
+            && status.active_job_error.is_none())
             || (status.active_job_state == RunnerActiveJobState::Available
                 && status.active_job_source == Some(RunnerActiveJobSource::DirectDaemon)
                 && status.active_job_count == 0
