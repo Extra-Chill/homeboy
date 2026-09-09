@@ -757,6 +757,12 @@ fn finalize_cook_preview_replay(
                 .to_string(),
         );
     }
+    if preview_placement_policy_from_argv(&replay.argv)["requested"] != "local" {
+        replay.requires.push(
+            "runner placement admission is deferred; replay revalidates connected runner readiness before execution"
+                .to_string(),
+        );
+    }
     replay
 }
 
@@ -1055,12 +1061,16 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
     // Resource and Lab inventory are live execution inputs. Reading either here
     // made a read-only preview wait on the same unavailable control plane it was
     // intended to diagnose. Execution revalidates this admission after preview.
+    if policy["requested"] == "local" {
+        return policy;
+    }
     policy["admission"] = serde_json::json!({
         "schema": "homeboy/cook-preview-placement-admission/v1",
         "state": "indeterminate",
         "revalidate_before_execution": true,
         "blockers": [],
         "deferred_to": "execution_placement_admission",
+        "replay_prerequisite": "connected runner readiness is revalidated before execution",
     });
     policy
 }
@@ -1211,6 +1221,10 @@ mod preview_tests {
             !replay.argv.iter().any(|part| part == "--preview"),
             "{replay:?}"
         );
+        assert!(replay
+            .requires
+            .iter()
+            .any(|requirement| requirement.contains("runner placement admission is deferred")));
         Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
     }
 
@@ -1273,7 +1287,7 @@ mod preview_tests {
         std::fs::write(&credential, r#"{"token":"fallback-token"}"#).expect("credential");
         std::fs::write(
             &readiness,
-            "const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
         )
         .expect("readiness script");
         let catalog = provider::AgentTaskProviderCatalog {
@@ -2023,6 +2037,41 @@ mod preview_tests {
             policy["admission"]["deferred_to"],
             "execution_placement_admission"
         );
+    }
+
+    #[test]
+    fn local_preview_omits_runner_admission_and_replay_prerequisites() {
+        let args = cook(&[
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+        ]);
+        let replay = finalize_cook_preview_replay(
+            [
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "implement the issue",
+            ]
+            .into_iter()
+            .map(str::to_string),
+            &args,
+        );
+        let policy = preview_placement_policy_with_admission(&replay.argv);
+
+        assert!(policy.get("admission").is_none());
+        assert!(!replay
+            .requires
+            .iter()
+            .any(|requirement| requirement.contains("runner placement admission")));
     }
 
     #[test]

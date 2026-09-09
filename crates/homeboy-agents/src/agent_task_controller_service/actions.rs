@@ -752,54 +752,72 @@ where
             let plan = plan_from_controller_request(request)?;
             let run_id =
                 controller_request_run_id(request, &record.loop_id, dedupe_key, &action.action_id);
-            let submitted = if lifecycle::run_record_exists(&run_id)? {
-                lifecycle::status(&run_id)?
-            } else {
-                lifecycle::submit_plan(&plan, Some(&run_id))?
-            };
-            record_controller_spawn(
-                record,
-                action,
-                dedupe_key,
-                entity_id,
-                &submitted.run_id,
-                request,
+            let outcome = crate::agent_task_submission_service::submit_prepared_plan_with_observer(
+                &crate::agent_task_submission_service::prepared_submission_request(
+                    Some(&run_id),
+                    false,
+                    "homeboy-controller",
+                )?,
+                crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan),
+                executor,
+                |submitted| {
+                    record_controller_spawn(
+                        record,
+                        action,
+                        dedupe_key,
+                        entity_id,
+                        &submitted.run_id,
+                        request,
+                    )
+                },
             )?;
-            let run_result = agent_task_service::run_submitted(submitted.run_id.clone(), executor)?;
+            let aggregate = outcome.aggregate.ok_or_else(|| {
+                Error::internal_unexpected("controller run_plan produced no aggregate")
+            })?;
             record_controller_aggregate_evidence(
                 record,
                 entity_id,
-                &submitted.run_id,
-                &run_result.value,
+                &outcome.submitted.run_id,
+                &aggregate,
             )?;
-            let aggregate_value = serde_json::to_value(&run_result.value)
+            let aggregate_value = serde_json::to_value(&aggregate)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             Ok((
                 execution_with_request_workflow_artifacts(
                     serde_json::json!({
                         "mode": mode,
-                        "run_id": submitted.run_id,
-                        "submitted": submitted,
+                        "run_id": outcome.submitted.run_id,
+                        "submitted": outcome.submitted,
                         "aggregate": aggregate_value,
                     }),
                     request,
                 ),
-                run_result.exit_code,
+                outcome.exit_code,
             ))
         }
         "submit" => {
             let plan = plan_from_controller_request(request)?;
             let run_id =
                 controller_request_run_id(request, &record.loop_id, dedupe_key, &action.action_id);
-            let submitted = lifecycle::submit_plan(&plan, Some(&run_id))?;
-            record_controller_spawn(
-                record,
-                action,
-                dedupe_key,
-                entity_id,
-                &submitted.run_id,
-                request,
+            let outcome = crate::agent_task_submission_service::queue_prepared_plan_with_observer(
+                &crate::agent_task_submission_service::prepared_submission_request(
+                    Some(&run_id),
+                    true,
+                    "homeboy-controller",
+                )?,
+                crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan),
+                |submitted| {
+                    record_controller_spawn(
+                        record,
+                        action,
+                        dedupe_key,
+                        entity_id,
+                        &submitted.run_id,
+                        request,
+                    )
+                },
             )?;
+            let submitted = outcome.submitted;
             Ok((
                 execution_with_request_workflow_artifacts(
                     serde_json::json!({

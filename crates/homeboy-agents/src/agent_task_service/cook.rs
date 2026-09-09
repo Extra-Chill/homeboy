@@ -73,7 +73,10 @@ use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
-use super::execution::run_loaded_plan_with_derived_cook_baseline_in_store;
+use super::execution::{
+    run_claimed_loaded_plan_with_derived_cook_baseline_in_store,
+    run_loaded_plan_with_derived_cook_baseline_in_store,
+};
 use super::AgentTaskRunResult;
 
 /// Lease window for a cook promotion operation claim. Long enough that a healthy
@@ -6210,14 +6213,30 @@ fn run_cook_spine(
                                 }
                             }
                         });
-                        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
-                            lifecycle_store,
-                            dispatch_plan,
-                            Some(&run_id),
-                            executor.clone(),
-                            effective_baseline.map(CookFollowUpBaseline::capability),
-                            Some(cook_attempt_harvest_context(&options.harvest_context)),
-                        )
+                        let baseline = effective_baseline.map(CookFollowUpBaseline::capability);
+                        let harvest_context =
+                            Some(cook_attempt_harvest_context(&options.harvest_context));
+                        let result = if lifecycle_store.read_record(&run_id)?.state
+                            == agent_task_lifecycle::AgentTaskRunState::Running
+                        {
+                            run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
+                                lifecycle_store,
+                                dispatch_plan,
+                                &run_id,
+                                executor.clone(),
+                                baseline,
+                                harvest_context,
+                            )
+                        } else {
+                            run_loaded_plan_with_derived_cook_baseline_in_store(
+                                lifecycle_store,
+                                dispatch_plan,
+                                Some(&run_id),
+                                executor.clone(),
+                                baseline,
+                                harvest_context,
+                            )
+                        }
                         .map(|_| ());
                         let _ = heartbeat_stop.send(());
                         result

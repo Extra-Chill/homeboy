@@ -43,12 +43,16 @@ pub use api::invoke_api;
 pub use context::ResolvedExtensionInvocationContext;
 pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
 use environment::build_action_env;
+pub use environment::control_plane_identity_env;
 pub(crate) use environment::{build_exec_env, execute_extension_command, prepare_capability_run};
 pub use environment_api::{
     declared_environment_secret_names as declared_secret_names, resolve_environment_api,
     EnvironmentResolutionContext,
 };
-pub use execute_api::{execute_api, execute_response_result, execute_run_request};
+pub use execute_api::{
+    execute_api, execute_response_result, execute_run_request,
+    execute_run_request_with_control_plane,
+};
 pub(crate) use runner::{read_extension_phase_timings, tail_lines};
 pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub(crate) use runtime_helper::WRITE_TEST_RESULTS_ENV;

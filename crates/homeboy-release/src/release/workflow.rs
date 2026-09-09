@@ -355,6 +355,7 @@ fn run_command_with_workspace_inner(
         },
         preflight_placement: Default::default(),
         readiness: input.readiness.clone(),
+        control_plane: None,
     };
 
     if options.dry_run {
@@ -2485,5 +2486,6 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         bump_policy: Default::default(),
         preflight_placement: Default::default(),
         readiness: None,
+        control_plane: None,
     };
 }

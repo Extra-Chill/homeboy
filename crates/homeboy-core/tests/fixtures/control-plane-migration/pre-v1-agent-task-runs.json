@@ -1,0 +1,63 @@
+{
+  "runs": [
+    {
+      "id": "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751",
+      "kind": "agent-task",
+      "started_at": "2026-01-01T00:00:00Z",
+      "finished_at": "2026-01-01T00:01:00Z",
+      "status": "pass",
+      "metadata": {}
+    },
+    {
+      "id": "agent-task-401a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751",
+      "kind": "agent-task",
+      "started_at": "2026-01-02T00:00:00Z",
+      "status": "running",
+      "metadata": {
+        "agent_task_run": {
+          "metadata": {
+            "fanout": {
+              "id": "portfolio-13697"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "agent-task-malformed",
+      "kind": "agent-task",
+      "started_at": "2026-01-03T00:00:00Z",
+      "status": "fail",
+      "metadata": {}
+    },
+    {
+      "id": "release-unrelated",
+      "kind": "release",
+      "started_at": "2026-01-04T00:00:00Z",
+      "status": "pass",
+      "metadata": {}
+    }
+  ],
+  "mappings": [
+    [
+      "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e",
+      "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751"
+    ],
+    [
+      "portfolio-13697",
+      "agent-task-401a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751"
+    ]
+  ],
+  "missions": [
+    [
+      "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e",
+      "2026-01-01T00:00:00Z",
+      "2026-01-01T00:01:00Z"
+    ],
+    [
+      "portfolio-13697",
+      "2026-01-02T00:00:00Z",
+      "2026-01-02T00:00:00Z"
+    ]
+  ]
+}

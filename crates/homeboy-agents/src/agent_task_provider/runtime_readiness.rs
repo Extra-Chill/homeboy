@@ -751,7 +751,7 @@ mod tests {
         let script = root.path().join("retryable-auth.js");
         std::fs::write(
             &script,
-            "const fs=require('fs');const count=process.argv[2];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:true,remediation:'switch account',reason:'rejected',cache_key:'account',identity:{account:'test'}}));",
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const count=process.argv[2];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:true,remediation:'switch account',reason:'rejected',cache_key:'account',identity:{account:'test'}}));",
         )
         .expect("readiness script");
         let provider = provider(&script, &count);

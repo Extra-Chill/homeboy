@@ -1,8 +1,9 @@
 //! Core service for durable agent-task dispatch.
 //!
 //! The CLI adapter owns clap parsing and JSON rendering. This service owns the
-//! typed dispatch request, plan construction, provider preflight, durable
-//! lifecycle transitions, and scheduler orchestration.
+//! typed dispatch request, plan construction, and provider preflight. Durable
+//! submission, running transitions, and scheduler invocation belong to
+//! [`crate::agent_task_submission_service`].
 
 use serde::Serialize;
 use serde_json::Value;
@@ -11,7 +12,6 @@ use crate::agent_task_dispatch_plan::{
     build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
     preflight_dispatch_provider_secrets,
 };
-use crate::agent_task_lifecycle as lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
     default_backend_for_component, preflight_plan_provider_config_with_providers,
@@ -20,9 +20,12 @@ use crate::agent_task_provider::{
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
-    AgentTaskScheduler, SharedAgentTaskExecutor,
+    SharedAgentTaskExecutor,
 };
-use crate::agent_task_service::{aggregate_exit_code, terminal_run_result, AgentTaskRunResult};
+use crate::agent_task_service::AgentTaskRunResult;
+use crate::agent_task_submission_service::{
+    prepared_submission_request, submit_prepared_plan, PreparedAgentTaskSubmission,
+};
 use homeboy_core::{Error, Result};
 
 pub const DISPATCH_RESULT_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
@@ -333,10 +336,14 @@ fn record_retryable_dispatch_admission_failure(
     mut error: Error,
 ) -> Error {
     let result = (|| {
-        let submitted = lifecycle::submit_plan(plan, requested_run_id)?;
-        lifecycle::record_pre_execution_failure(
-            &submitted.run_id,
-            plan,
+        let request = crate::agent_task_submission_service::prepared_submission_request(
+            requested_run_id,
+            false,
+            "homeboy-typed-dispatch",
+        )?;
+        let submitted = crate::agent_task_submission_service::reject_prepared_plan(
+            &request,
+            crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan.clone()),
             "admit_plan_provider_dispatchability",
             &error,
         )?;
@@ -349,9 +356,6 @@ fn record_retryable_dispatch_admission_failure(
     error
 }
 
-/// The only durable dispatch-to-scheduler path. Both provider-catalog entry
-/// points prepare a plan differently, then share lifecycle transitions,
-/// scheduler execution, aggregate persistence, and report construction here.
 fn run_dispatch_plan(
     execution_plan: AgentTaskPlan,
     requested_run_id: Option<&str>,
@@ -359,47 +363,24 @@ fn run_dispatch_plan(
     backend_selection: Option<BackendSelection>,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
-    let submitted = lifecycle::submit_plan(&execution_plan, requested_run_id)?;
-    let run_id = submitted.run_id.clone();
-
-    if queue_only {
-        return Ok(AgentTaskRunResult {
-            value: dispatch_report(submitted, None, true, backend_selection),
-            exit_code: 0,
-        });
-    }
-
-    if let Some(result) = terminal_run_result(&run_id)? {
-        return Ok(AgentTaskRunResult {
-            value: dispatch_report(submitted, Some(result.value), false, backend_selection),
-            exit_code: result.exit_code,
-        });
-    }
-
-    let harvest_context =
-        match crate::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
-            Ok(context) => context,
-            Err(error) => {
-                lifecycle::record_pre_execution_failure(
-                    &run_id,
-                    &execution_plan,
-                    "validate_harvest_transport",
-                    &error,
-                )?;
-                return Err(error);
-            }
-        };
-    lifecycle::mark_running(&run_id)?;
-    let aggregate = AgentTaskScheduler::new_controller(executor)
-        .with_harvest_context(harvest_context)
-        .with_run_id(run_id.clone())
-        .run(execution_plan.clone());
-    let record = lifecycle::record_run_aggregate(&run_id, &execution_plan, &aggregate)?;
-    let exit_code = aggregate_exit_code(&aggregate);
-
+    let outcome = submit_prepared_plan(
+        &prepared_submission_request(requested_run_id, queue_only, "homeboy-dispatch")?,
+        PreparedAgentTaskSubmission::new(execution_plan),
+        executor,
+    )?;
+    let record = if queue_only {
+        outcome.submitted
+    } else {
+        outcome.record
+    };
     Ok(AgentTaskRunResult {
-        value: dispatch_report(record, Some(aggregate), false, backend_selection),
-        exit_code,
+        value: dispatch_report(
+            record,
+            outcome.aggregate,
+            outcome.acknowledgement.queued,
+            backend_selection,
+        ),
+        exit_code: outcome.exit_code,
     })
 }
 

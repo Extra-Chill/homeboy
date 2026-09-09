@@ -2516,8 +2516,14 @@ pub(crate) fn run_lab_offload_inner(
     }
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
-    lab_metadata["workspace_resource_lifecycle"] =
-        serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
+    lab_metadata["resource_lifecycle_index"] = serde_json::to_value(
+        homeboy_core::resource_lifecycle_index::ResourceLifecycleIndex {
+            schema: homeboy_core::resource_lifecycle_index::RESOURCE_LIFECYCLE_INDEX_SCHEMA
+                .to_string(),
+            resources: vec![workspace_resource_lifecycle.clone()],
+        },
+    )
+    .unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_cleanup"] = serde_json::json!({
         "policy": if request.preserve_workspace_on_failure {
             "preserve-on-failure"

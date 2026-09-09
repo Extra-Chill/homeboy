@@ -2651,6 +2651,10 @@ where
     if let Some(invalidation) = plan.metadata.get("execution_placement_invalidated") {
         metadata["execution_placement_invalidated"] = invalidation.clone();
     }
+    if let Some(fanout) = plan.metadata.get("fanout") {
+        canonical_fanout_mission(&plan.metadata)?;
+        metadata["fanout"] = fanout.clone();
+    }
     // Surface controller-owned worktree convergence in the run record as well
     // as the immutable plan, so status and resumed execution retain the same
     // reviewer-facing evidence.
@@ -2667,6 +2671,9 @@ where
     if let Some(resolution) = homeboy_core::notification_route::current_resolution() {
         resolution.insert_into_metadata(&mut metadata);
     }
+    let replaces_control_plane_submission = submission_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.contains_key("control_plane_submission"));
     if let Some(submission_metadata) = submission_metadata {
         metadata
             .as_object_mut()
@@ -2713,6 +2720,24 @@ where
     let mut pre_execution_recovery = false;
     let mut pre_execution_runtime_recovery = false;
     if let Ok(existing) = lifecycle_store.read_record(&run_id) {
+        let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
+        let submitted_fanout = canonical_fanout_mission(&record.metadata)?;
+        if existing_fanout.is_some()
+            && submitted_fanout.is_some()
+            && existing_fanout != submitted_fanout
+        {
+            return Err(Error::validation_invalid_argument(
+                "fanout.id",
+                "an existing run cannot be rebound to a different fanout mission",
+                Some(run_id.clone()),
+                None,
+            ));
+        }
+        if submitted_fanout.is_none() {
+            if let Some(fanout) = existing.metadata.get("fanout") {
+                record.metadata["fanout"] = fanout.clone();
+            }
+        }
         pre_execution_recovery =
             crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                 &existing,
@@ -2737,6 +2762,11 @@ where
         ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
+            }
+        }
+        if !replaces_control_plane_submission {
+            if let Some(value) = existing.metadata.get("control_plane_submission") {
+                record.metadata["control_plane_submission"] = value.clone();
             }
         }
         if pre_execution_recovery {
@@ -3493,6 +3523,7 @@ pub fn reserve_provider_execution_in_store(
                 "owner_pid": std::process::id(),
                 "owner_linux_starttime_ticks": homeboy_core::process::linux_process_starttime_ticks(std::process::id()).ok().flatten(),
                 "owner_identity": format!("{run_id}:{execution_key}"),
+                "execution_identity": format!("{run_id}:{execution_key}:execution"),
             }));
             let consumed = executions.len();
             metadata.insert("provider_executions_consumed".to_string(), json!(consumed));

@@ -6,6 +6,7 @@ mod checkout_guard;
 // directly and it is pure git plus release metadata.
 pub mod containment;
 mod context;
+mod control_plane;
 mod deployment;
 mod execution_dispatch;
 mod execution_plan;
@@ -65,6 +66,7 @@ pub mod version {
 pub use cascade::{run_cascade, CascadeResult, ReleasedCoordinates};
 pub use containment::{ContainsQuery, ReleaseContainsReport, ReleaseGapReport};
 pub use context::readiness_provenance;
+pub use control_plane::register_action_delegate;
 pub use executor::artifacts::{
     write_artifact_source_authority_manifest, ArtifactSourceAuthorityManifest,
 };

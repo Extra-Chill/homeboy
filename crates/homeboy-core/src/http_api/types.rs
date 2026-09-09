@@ -75,8 +75,60 @@ pub enum HttpEndpoint {
         id: String,
     },
     ControlPlaneCapabilities,
+    ControlPlaneMissions {
+        request: homeboy_control_plane_contract::ControlPlaneMissionListRequest,
+    },
+    ControlPlaneMission {
+        id: String,
+    },
+    ControlPlaneRuns {
+        request: homeboy_control_plane_contract::ControlPlaneRunListRequest,
+    },
+    ControlPlaneRunSubmit,
     ControlPlaneRun {
         id: String,
+    },
+    ControlPlaneRunTasks {
+        id: String,
+        request: homeboy_control_plane_contract::ControlPlaneTaskListRequest,
+    },
+    ControlPlaneRunTask {
+        id: String,
+        task_id: String,
+    },
+    ControlPlaneTaskAttempts {
+        id: String,
+        task_id: String,
+        request: homeboy_control_plane_contract::ControlPlaneAttemptListRequest,
+    },
+    ControlPlaneTaskAttempt {
+        id: String,
+        task_id: String,
+        attempt_number: u32,
+    },
+    ControlPlaneAttemptExecutions {
+        id: String,
+        task_id: String,
+        attempt_number: u32,
+    },
+    ControlPlaneAttemptExecution {
+        id: String,
+        task_id: String,
+        attempt_number: u32,
+        execution_id: String,
+    },
+    ControlPlaneRunReferences {
+        id: String,
+        reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType,
+    },
+    ControlPlaneRunReference {
+        id: String,
+        reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType,
+        reference_id: String,
+    },
+    ControlPlaneRunReferenceRegister {
+        id: String,
+        reference_type: homeboy_control_plane_contract::ControlPlaneReferenceType,
     },
     ControlPlaneRunReview {
         id: String,
@@ -85,6 +137,12 @@ pub enum HttpEndpoint {
     ControlPlaneRunEvents {
         id: String,
         cursor: Option<homeboy_control_plane_contract::EventCursor>,
+    },
+    ControlPlaneRunEventAppend {
+        id: String,
+    },
+    ControlPlaneRunEventRetention {
+        id: String,
     },
     ControlPlaneRunActions {
         id: String,
@@ -174,9 +232,58 @@ impl HttpEndpoint {
             Self::Activity => "activity.list",
             Self::ActivityItem { .. } => "activity.show",
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
+            Self::ControlPlaneMissions { .. } => "control_plane.missions.list",
+            Self::ControlPlaneMission { .. } => "control_plane.missions.show",
+            Self::ControlPlaneRuns { .. } => "control_plane.runs.list",
+            Self::ControlPlaneRunSubmit => "control_plane.runs.submit",
+            Self::ControlPlaneRunEventAppend { .. } => "control_plane.runs.events.append",
             Self::ControlPlaneRun { .. } => "control_plane.runs.show",
+            Self::ControlPlaneRunTasks { .. } => "control_plane.runs.tasks.list",
+            Self::ControlPlaneRunTask { .. } => "control_plane.runs.tasks.show",
+            Self::ControlPlaneTaskAttempts { .. } => "control_plane.runs.tasks.attempts.list",
+            Self::ControlPlaneTaskAttempt { .. } => "control_plane.runs.tasks.attempts.show",
+            Self::ControlPlaneAttemptExecutions { .. } => {
+                "control_plane.runs.tasks.attempts.executions.list"
+            }
+            Self::ControlPlaneAttemptExecution { .. } => {
+                "control_plane.runs.tasks.attempts.executions.show"
+            }
+            Self::ControlPlaneRunReferences { reference_type, .. } => match reference_type {
+                homeboy_control_plane_contract::ControlPlaneReferenceType::Artifact => {
+                    "control_plane.runs.artifacts.list"
+                }
+                homeboy_control_plane_contract::ControlPlaneReferenceType::Evidence => {
+                    "control_plane.runs.evidence.list"
+                }
+                homeboy_control_plane_contract::ControlPlaneReferenceType::ExternalReference => {
+                    "control_plane.runs.external_references.list"
+                }
+            },
+            Self::ControlPlaneRunReference { reference_type, .. } => match reference_type {
+                homeboy_control_plane_contract::ControlPlaneReferenceType::Artifact => {
+                    "control_plane.runs.artifacts.show"
+                }
+                homeboy_control_plane_contract::ControlPlaneReferenceType::Evidence => {
+                    "control_plane.runs.evidence.show"
+                }
+                homeboy_control_plane_contract::ControlPlaneReferenceType::ExternalReference => {
+                    "control_plane.runs.external_references.show"
+                }
+            },
+            Self::ControlPlaneRunReferenceRegister { reference_type, .. } => match reference_type {
+                homeboy_control_plane_contract::ControlPlaneReferenceType::Artifact => {
+                    "control_plane.runs.artifacts.register"
+                }
+                homeboy_control_plane_contract::ControlPlaneReferenceType::Evidence => {
+                    "control_plane.runs.evidence.register"
+                }
+                homeboy_control_plane_contract::ControlPlaneReferenceType::ExternalReference => {
+                    "control_plane.runs.external_references.register"
+                }
+            },
             Self::ControlPlaneRunReview { .. } => "control_plane.runs.review",
             Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",
+            Self::ControlPlaneRunEventRetention { .. } => "control_plane.runs.events.retention",
             Self::ControlPlaneRunActions { .. } => "control_plane.runs.actions",
             Self::Jobs => "jobs.list",
             Self::Job { .. } => "jobs.show",

@@ -174,6 +174,7 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
                 "status": check.status,
                 "message": bounded_text(&check.message),
                 "remediation": check.remediation.as_deref().map(bounded_text),
+                "remediation_action": compact_remediation_action(check.remediation_action.as_ref()),
             })
         })
         .collect::<Vec<_>>();
@@ -250,6 +251,24 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         }
     });
     projection
+}
+
+fn compact_remediation_action(action: Option<&types::RunnerRepairAction>) -> serde_json::Value {
+    match action {
+        Some(types::RunnerRepairAction::RefreshHomeboy {
+            git_ref,
+            allow_downgrade,
+        }) => serde_json::json!({
+            "action": "refresh_homeboy",
+            "git_ref": git_ref.as_deref().map(bounded_text),
+            "allow_downgrade": allow_downgrade,
+        }),
+        Some(types::RunnerRepairAction::Reconnect) => serde_json::json!({ "action": "reconnect" }),
+        Some(types::RunnerRepairAction::RefreshManagedSources) => {
+            serde_json::json!({ "action": "refresh_managed_sources" })
+        }
+        None => serde_json::Value::Null,
+    }
 }
 
 fn compact_runner_summary(runner: &types::RunnerTargetSummary) -> serde_json::Value {

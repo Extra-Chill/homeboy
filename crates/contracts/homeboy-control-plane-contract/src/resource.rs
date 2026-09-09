@@ -5,12 +5,29 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId};
+use crate::identity::{
+    AttemptCursor, AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
+    ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+};
 
 pub const CONTROL_PLANE_RESULT_SCHEMA: &str = "homeboy/control-plane-result/v1";
 pub const CONTROL_PLANE_RUN_SCHEMA: &str = "homeboy/control-plane-run/v1";
+pub const CONTROL_PLANE_RUN_PAGE_SCHEMA: &str = "homeboy/control-plane-run-page/v1";
+pub const CONTROL_PLANE_MISSION_SCHEMA: &str = "homeboy/control-plane-mission/v1";
+pub const CONTROL_PLANE_MISSION_PAGE_SCHEMA: &str = "homeboy/control-plane-mission-page/v1";
+pub const CONTROL_PLANE_TASK_SCHEMA: &str = "homeboy/control-plane-task/v1";
+pub const CONTROL_PLANE_TASK_PAGE_SCHEMA: &str = "homeboy/control-plane-task-page/v1";
+pub const CONTROL_PLANE_ATTEMPT_SCHEMA: &str = "homeboy/control-plane-attempt/v1";
+pub const CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA: &str = "homeboy/control-plane-attempt-page/v1";
+pub const CONTROL_PLANE_EXECUTION_SCHEMA: &str = "homeboy/control-plane-execution/v1";
+pub const CONTROL_PLANE_EXECUTION_PAGE_SCHEMA: &str = "homeboy/control-plane-execution-page/v1";
+pub const CONTROL_PLANE_REFERENCE_SCHEMA: &str = "homeboy/control-plane-reference/v1";
+pub const CONTROL_PLANE_REFERENCE_PAGE_SCHEMA: &str = "homeboy/control-plane-reference-page/v1";
+pub const CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA: &str =
+    "homeboy/control-plane-reference-registration/v1";
 pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
     "homeboy/control-plane-action-eligibility/v1";
+pub const CONTROL_PLANE_RUN_PLACEMENT_ID_BOUND: usize = 128;
 
 /// Shared result envelope for every control-plane operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,11 +96,21 @@ impl ControlPlaneError {
         }
     }
 
+    pub fn cursor_expired(message: impl Into<String>) -> Self {
+        Self {
+            class: ControlPlaneErrorClass::CursorExpired,
+            retryable: false,
+            message: message.into(),
+        }
+    }
+
     pub fn http_status(&self) -> u16 {
         match self.class {
             ControlPlaneErrorClass::NotFound => 404,
             ControlPlaneErrorClass::InvalidArgument => 400,
+            ControlPlaneErrorClass::CursorExpired => 410,
             ControlPlaneErrorClass::Unavailable => 503,
+            ControlPlaneErrorClass::Unknown => 500,
         }
     }
 }
@@ -101,7 +128,10 @@ impl std::error::Error for ControlPlaneError {}
 pub enum ControlPlaneErrorClass {
     NotFound,
     InvalidArgument,
+    CursorExpired,
     Unavailable,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Canonical run resource. Pure, redacted, and non-reconciling.
@@ -112,15 +142,11 @@ pub struct ControlPlaneRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mission: Option<MissionId>,
     pub run: RunId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attempt: Option<AttemptId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attempt_number: Option<u32>,
     pub state: ControlPlaneRunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ControlPlaneLocation>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution: Option<ExecutionId>,
+    pub placement: Option<ControlPlaneRunPlacement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,11 +186,9 @@ impl ControlPlaneRun {
             schema: CONTROL_PLANE_RUN_SCHEMA.to_string(),
             mission: None,
             run: run.clone(),
-            attempt: None,
-            attempt_number: None,
             state: ControlPlaneRunState::Unknown,
             location: None,
-            execution: None,
+            placement: None,
             phase: None,
             blocker: None,
             owner: None,
@@ -183,6 +207,437 @@ impl ControlPlaneRun {
             artifacts: Vec::new(),
         }
     }
+}
+
+/// A runtime-neutral projection of an immutable execution-placement decision.
+/// Routing policy, capacity, workspace, and fallback authorization remain owned
+/// by the runtime that produced the durable decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "ControlPlaneRunPlacementWire")]
+pub struct ControlPlaneRunPlacement {
+    pub decision_id: String,
+    pub requested: ControlPlaneRunPlacementRequested,
+    pub selected: ControlPlaneRunPlacementSelected,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective: Option<ControlPlaneRunPlacementEffective>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+}
+
+impl ControlPlaneRunPlacement {
+    pub fn new(
+        decision_id: impl Into<String>,
+        requested: ControlPlaneRunPlacementRequested,
+        selected: ControlPlaneRunPlacementSelected,
+        effective: Option<ControlPlaneRunPlacementEffective>,
+        runner_id: Option<String>,
+    ) -> Result<Self, ControlPlaneError> {
+        let placement = Self {
+            decision_id: validate_placement_id(decision_id.into())?,
+            requested,
+            selected,
+            effective,
+            runner_id: runner_id.map(validate_placement_id).transpose()?,
+        };
+        placement.validate()?;
+        Ok(placement)
+    }
+
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        match self.selected {
+            ControlPlaneRunPlacementSelected::Controller => {
+                if self.runner_id.is_some()
+                    || self.effective == Some(ControlPlaneRunPlacementEffective::Runner)
+                {
+                    return Err(ControlPlaneError::invalid_argument(
+                        "controller placement cannot identify or execute on a runner",
+                    ));
+                }
+            }
+            ControlPlaneRunPlacementSelected::Runner => {
+                if self.runner_id.is_none() {
+                    return Err(ControlPlaneError::invalid_argument(
+                        "runner placement requires a runner identity",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlPlaneRunPlacementWire {
+    #[serde(deserialize_with = "deserialize_placement_id")]
+    decision_id: String,
+    requested: ControlPlaneRunPlacementRequested,
+    selected: ControlPlaneRunPlacementSelected,
+    #[serde(default)]
+    effective: Option<ControlPlaneRunPlacementEffective>,
+    #[serde(default, deserialize_with = "deserialize_optional_placement_id")]
+    runner_id: Option<String>,
+}
+
+impl TryFrom<ControlPlaneRunPlacementWire> for ControlPlaneRunPlacement {
+    type Error = ControlPlaneError;
+
+    fn try_from(value: ControlPlaneRunPlacementWire) -> Result<Self, Self::Error> {
+        Self::new(
+            value.decision_id,
+            value.requested,
+            value.selected,
+            value.effective,
+            value.runner_id,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneRunPlacementRequested {
+    Automatic,
+    Controller,
+    Runner,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneRunPlacementSelected {
+    Controller,
+    Runner,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneRunPlacementEffective {
+    Controller,
+    Runner,
+}
+
+fn deserialize_placement_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    validate_placement_id(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_placement_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(validate_placement_id)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn validate_placement_id(value: String) -> Result<String, ControlPlaneError> {
+    if value.trim().is_empty() || value.len() > CONTROL_PLANE_RUN_PLACEMENT_ID_BOUND {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "control-plane run placement identity must be nonempty and at most {CONTROL_PLANE_RUN_PLACEMENT_ID_BOUND} bytes"
+        )));
+    }
+    Ok(value)
+}
+
+/// Generic, bounded discovery parameters. Product-specific selectors remain
+/// adapter-owned until they are shared by more than one control-plane client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRunListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission: Option<MissionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<RunCursor>,
+    pub limit: u32,
+}
+
+impl Default for ControlPlaneRunListRequest {
+    fn default() -> Self {
+        Self {
+            mission: None,
+            cursor: None,
+            limit: 50,
+        }
+    }
+}
+
+impl ControlPlaneRunListRequest {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if !(1..=100).contains(&self.limit) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane run page limit must be between 1 and 100",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One stable page of canonical run resources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRunPage {
+    pub schema: String,
+    pub runs: Vec<ControlPlaneRun>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<RunCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneMission {
+    pub schema: String,
+    pub mission: MissionId,
+    pub created_at: String,
+    pub updated_at: String,
+    pub run_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneMissionListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<MissionCursor>,
+    pub limit: u32,
+}
+
+impl Default for ControlPlaneMissionListRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: 50,
+        }
+    }
+}
+
+impl ControlPlaneMissionListRequest {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if !(1..=100).contains(&self.limit) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane mission page limit must be between 1 and 100",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneMissionPage {
+    pub schema: String,
+    pub missions: Vec<ControlPlaneMission>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<MissionCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneTask {
+    pub schema: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission: Option<MissionId>,
+    pub run: RunId,
+    pub task: TaskId,
+    pub state: ControlPlaneState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneTaskListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<TaskCursor>,
+    pub limit: u32,
+}
+
+impl Default for ControlPlaneTaskListRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: 50,
+        }
+    }
+}
+
+impl ControlPlaneTaskListRequest {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if !(1..=100).contains(&self.limit) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane task page limit must be between 1 and 100",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneTaskPage {
+    pub schema: String,
+    pub run: RunId,
+    pub tasks: Vec<ControlPlaneTask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<TaskCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneAttempt {
+    pub schema: String,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub attempt_number: u32,
+    pub state: ControlPlaneState,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneAttemptListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<AttemptCursor>,
+    pub limit: u32,
+}
+
+impl Default for ControlPlaneAttemptListRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: 50,
+        }
+    }
+}
+
+impl ControlPlaneAttemptListRequest {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if !(1..=100).contains(&self.limit) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane attempt page limit must be between 1 and 100",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneAttemptPage {
+    pub schema: String,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempts: Vec<ControlPlaneAttempt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<AttemptCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneExecution {
+    pub schema: String,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub execution: ExecutionId,
+    pub state: ControlPlaneState,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneExecutionPage {
+    pub schema: String,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub executions: Vec<ControlPlaneExecution>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneReferenceType {
+    Artifact,
+    Evidence,
+    ExternalReference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneReferenceRegistration {
+    pub schema: String,
+    pub idempotency_key: String,
+    pub actor: String,
+    pub reference: ReferenceId,
+    pub kind: String,
+    pub uri: String,
+}
+
+impl ControlPlaneReferenceRegistration {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        if self.schema != CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA {
+            return Err(ControlPlaneError::invalid_argument(
+                "unsupported control-plane reference registration schema",
+            ));
+        }
+        for (name, value, limit) in [
+            ("idempotency_key", self.idempotency_key.as_str(), 256),
+            ("actor", self.actor.as_str(), 256),
+            ("reference", self.reference.as_str(), 256),
+            ("kind", self.kind.as_str(), 128),
+            ("uri", self.uri.as_str(), 2048),
+        ] {
+            if value.trim().is_empty() || value.len() > limit {
+                return Err(ControlPlaneError::invalid_argument(format!(
+                    "{name} must contain 1..={limit} bytes"
+                )));
+            }
+        }
+        if !self
+            .reference
+            .as_str()
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err(ControlPlaneError::invalid_argument(
+                "reference must use only ASCII letters, digits, '-', '_', '.', or ':'",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneReference {
+    pub schema: String,
+    pub run: RunId,
+    pub reference_type: ControlPlaneReferenceType,
+    pub reference: ReferenceId,
+    pub kind: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneReferencePage {
+    pub schema: String,
+    pub run: RunId,
+    pub reference_type: ControlPlaneReferenceType,
+    pub references: Vec<ControlPlaneReference>,
 }
 
 /// Bounded live provider evidence. This intentionally carries timestamps and a
@@ -331,8 +786,10 @@ impl ControlPlaneActionEligibilityReport {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ControlPlaneRunState {
+pub enum ControlPlaneState {
     Queued,
+    Blocked,
+    Skipped,
     Running,
     Succeeded,
     CandidateRecoverable,
@@ -346,11 +803,16 @@ pub enum ControlPlaneRunState {
     Unknown,
 }
 
-impl ControlPlaneRunState {
+impl ControlPlaneState {
     pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Queued | Self::Running | Self::Unknown)
+        !matches!(
+            self,
+            Self::Queued | Self::Blocked | Self::Running | Self::Unknown
+        )
     }
 }
+
+pub type ControlPlaneRunState = ControlPlaneState;
 
 /// Where the run is executing. Ids and transport only — never cwd or secrets.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -375,14 +837,29 @@ pub struct ControlPlaneEvidenceRef {
 mod tests {
     use super::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
-        ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
-        ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
-        ControlPlaneLocation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
-        ControlPlaneRun, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneAttempt,
+        ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
+        ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneExecution,
+        ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+        ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
+        ControlPlaneProviderSummary, ControlPlaneReference, ControlPlaneReferencePage,
+        ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneResult,
+        ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunPlacement,
+        ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
+        ControlPlaneRunPlacementSelected, ControlPlaneRunState, ControlPlaneRuntime,
+        ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest,
+        ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
+        CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+        CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+        CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+        CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
     };
-    use crate::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId};
+    use crate::{
+        AttemptCursor, AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
+        ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+    };
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
@@ -392,14 +869,11 @@ mod tests {
         let run = RunId::new(AGENT_TASK_RUN).expect("run");
         let mut resource = ControlPlaneRun::new(run.clone());
         resource.mission = Some(MissionId::new(AGENT_TASK_COOK).expect("mission"));
-        resource.attempt = Some(AttemptId::new(AGENT_TASK_RUN).expect("attempt"));
-        resource.attempt_number = Some(1);
         resource.state = ControlPlaneRunState::Succeeded;
         resource.location = Some(ControlPlaneLocation {
             runner_id: Some("homeboy-lab".to_string()),
             remote_run_id: Some("remote-run-1".to_string()),
         });
-        resource.execution = Some(ExecutionId::new("job-1").expect("execution"));
         resource.phase = Some("terminal".to_string());
         resource.blocker = Some(ControlPlaneBlocker {
             code: Some("stale".to_string()),
@@ -477,8 +951,9 @@ mod tests {
         assert_eq!(value["schema"], CONTROL_PLANE_RUN_SCHEMA);
         assert_eq!(value["mission"], AGENT_TASK_COOK);
         assert_eq!(value["run"], AGENT_TASK_RUN);
-        assert_eq!(value["attempt"], AGENT_TASK_RUN);
-        assert_eq!(value["attempt_number"], 1);
+        assert!(value.get("attempt").is_none());
+        assert!(value.get("attempt_number").is_none());
+        assert!(value.get("execution").is_none());
         assert_eq!(value["state"], "succeeded");
         assert_eq!(value["phase"], "terminal");
         assert_eq!(value["owner"]["kind"], "runner");
@@ -498,6 +973,290 @@ mod tests {
         assert!(value.get("prompt").is_none());
         let decoded: ControlPlaneRun = serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, resource);
+    }
+
+    #[test]
+    fn run_placement_rejects_unbounded_or_unknown_data() {
+        let valid = ControlPlaneRunPlacement::new(
+            "decision-1",
+            ControlPlaneRunPlacementRequested::Runner,
+            ControlPlaneRunPlacementSelected::Runner,
+            Some(ControlPlaneRunPlacementEffective::Runner),
+            Some("runner-1".to_string()),
+        )
+        .expect("valid placement");
+        assert_eq!(valid.decision_id, "decision-1");
+        assert!(ControlPlaneRunPlacement::new(
+            " ",
+            ControlPlaneRunPlacementRequested::Automatic,
+            ControlPlaneRunPlacementSelected::Controller,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<ControlPlaneRunPlacement>(serde_json::json!({
+                "decision_id": "decision-1",
+                "requested": "runner",
+                "selected": "runner",
+                "unexpected": true,
+            }))
+            .is_err()
+        );
+        assert!(ControlPlaneRunPlacement::new(
+            "decision-1",
+            ControlPlaneRunPlacementRequested::Automatic,
+            ControlPlaneRunPlacementSelected::Controller,
+            None,
+            Some("runner-1".to_string()),
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<ControlPlaneRunPlacement>(serde_json::json!({
+                "decision_id": "decision-1",
+                "requested": "runner",
+                "selected": "runner"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ControlPlaneRunPlacement>(serde_json::json!({
+                "decision_id": "decision-1",
+                "requested": "controller",
+                "selected": "controller",
+                "effective": "runner"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn run_page_round_trips_with_a_bounded_typed_cursor() {
+        let page = ControlPlaneRunPage {
+            schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
+            runs: vec![sample_run()],
+            next_cursor: Some(RunCursor::new(AGENT_TASK_RUN).expect("cursor")),
+            has_more: true,
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(value["schema"], CONTROL_PLANE_RUN_PAGE_SCHEMA);
+        assert_eq!(value["next_cursor"], AGENT_TASK_RUN);
+        let decoded: ControlPlaneRunPage = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded, page);
+
+        let request = ControlPlaneRunListRequest {
+            mission: Some(MissionId::new(AGENT_TASK_COOK).expect("mission")),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize request")["mission"],
+            AGENT_TASK_COOK
+        );
+
+        assert!(ControlPlaneRunListRequest {
+            limit: 0,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(ControlPlaneRunListRequest {
+            limit: 101,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn run_page_v1_golden_fixture_remains_compatible() {
+        let fixture = include_str!("../tests/fixtures/run-page-v1.json");
+        let page: ControlPlaneRunPage = serde_json::from_str(fixture).expect("v1 fixture");
+        assert_eq!(page.schema, CONTROL_PLANE_RUN_PAGE_SCHEMA);
+        assert_eq!(page.runs[0].run.as_str(), "run-fixture-1");
+        assert_eq!(page.runs[0].state, ControlPlaneRunState::Running);
+        assert!(page.next_cursor.is_none());
+        assert!(!page.has_more);
+        assert_eq!(
+            serde_json::to_value(&page).expect("serialize fixture"),
+            serde_json::from_str::<serde_json::Value>(fixture).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn run_page_placement_v1_golden_fixture_round_trips() {
+        let fixture = include_str!("../tests/fixtures/run-page-placement-v1.json");
+        let page: ControlPlaneRunPage = serde_json::from_str(fixture).expect("placement fixture");
+        let placement = page.runs[0].placement.as_ref().expect("placement");
+        assert_eq!(placement.decision_id, "epd-fixture-1");
+        assert_eq!(
+            placement.effective,
+            Some(ControlPlaneRunPlacementEffective::Controller)
+        );
+        assert_eq!(placement.runner_id.as_deref(), Some("runner-fixture-1"));
+        assert_eq!(
+            serde_json::to_value(&page).expect("serialize fixture"),
+            serde_json::from_str::<serde_json::Value>(fixture).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn mission_resource_and_page_round_trip() {
+        let mission = ControlPlaneMission {
+            schema: CONTROL_PLANE_MISSION_SCHEMA.to_string(),
+            mission: MissionId::new("mission-1").expect("mission"),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            run_count: 2,
+        };
+        let page = ControlPlaneMissionPage {
+            schema: CONTROL_PLANE_MISSION_PAGE_SCHEMA.to_string(),
+            missions: vec![mission],
+            next_cursor: Some(MissionCursor::new("opaque").expect("cursor")),
+            has_more: true,
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneMissionPage>(value).expect("deserialize"),
+            page
+        );
+        assert!(ControlPlaneMissionListRequest {
+            limit: 101,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn run_scoped_task_resource_and_page_round_trip() {
+        let task = ControlPlaneTask {
+            schema: CONTROL_PLANE_TASK_SCHEMA.to_string(),
+            mission: Some(MissionId::new(AGENT_TASK_COOK).expect("mission")),
+            run: RunId::new(AGENT_TASK_RUN).expect("run"),
+            task: TaskId::new("review").expect("task"),
+            state: ControlPlaneState::Blocked,
+        };
+        let page = ControlPlaneTaskPage {
+            schema: CONTROL_PLANE_TASK_PAGE_SCHEMA.to_string(),
+            run: task.run.clone(),
+            tasks: vec![task],
+            next_cursor: Some(TaskCursor::new("opaque").expect("cursor")),
+            has_more: true,
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneTaskPage>(value).expect("deserialize"),
+            page
+        );
+        assert!(!ControlPlaneState::Blocked.is_terminal());
+        assert!(ControlPlaneState::Skipped.is_terminal());
+        assert!(ControlPlaneTaskListRequest {
+            limit: 0,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn task_scoped_attempt_resource_and_page_round_trip() {
+        let attempt = ControlPlaneAttempt {
+            schema: CONTROL_PLANE_ATTEMPT_SCHEMA.to_string(),
+            run: RunId::new(AGENT_TASK_RUN).expect("run"),
+            task: TaskId::new("review").expect("task"),
+            attempt: AttemptId::new(format!("{AGENT_TASK_RUN}:review:1")).expect("attempt"),
+            attempt_number: 1,
+            state: ControlPlaneState::Running,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: None,
+            execution: None,
+        };
+        let page = ControlPlaneAttemptPage {
+            schema: CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA.to_string(),
+            run: attempt.run.clone(),
+            task: attempt.task.clone(),
+            attempts: vec![attempt],
+            next_cursor: Some(AttemptCursor::new("opaque").expect("cursor")),
+            has_more: true,
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneAttemptPage>(value).expect("deserialize"),
+            page
+        );
+        assert!(ControlPlaneAttemptListRequest {
+            limit: 101,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn attempt_scoped_execution_resource_and_page_round_trip() {
+        let attempt = AttemptId::new(format!("{AGENT_TASK_RUN}:review:1")).expect("attempt");
+        let execution = ControlPlaneExecution {
+            schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
+            run: RunId::new(AGENT_TASK_RUN).expect("run"),
+            task: TaskId::new("review").expect("task"),
+            attempt: attempt.clone(),
+            execution: ExecutionId::new(format!("{attempt}:execution")).expect("execution"),
+            state: ControlPlaneState::Succeeded,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:01:00Z".to_string()),
+        };
+        let page = ControlPlaneExecutionPage {
+            schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
+            run: execution.run.clone(),
+            task: execution.task.clone(),
+            attempt,
+            executions: vec![execution],
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneExecutionPage>(value).expect("deserialize"),
+            page
+        );
+    }
+
+    #[test]
+    fn run_scoped_reference_registration_and_page_round_trip() {
+        let registration = ControlPlaneReferenceRegistration {
+            schema: CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA.to_string(),
+            idempotency_key: "register-patch-1".to_string(),
+            actor: "broker:controller".to_string(),
+            reference: ReferenceId::new("patch-1").expect("reference"),
+            kind: "patch".to_string(),
+            uri: "homeboy://artifact/patch-1".to_string(),
+        };
+        registration.validate().expect("registration");
+        let mut unsafe_registration = registration.clone();
+        unsafe_registration.reference =
+            ReferenceId::new("patch?token=secret").expect("non-empty reference");
+        unsafe_registration
+            .validate()
+            .expect_err("unsafe reference identity");
+        let reference = ControlPlaneReference {
+            schema: CONTROL_PLANE_REFERENCE_SCHEMA.to_string(),
+            run: RunId::new(AGENT_TASK_RUN).expect("run"),
+            reference_type: ControlPlaneReferenceType::Artifact,
+            reference: registration.reference.clone(),
+            kind: registration.kind.clone(),
+            uri: registration.uri.clone(),
+            registered_at: Some("2026-01-01T00:00:00Z".to_string()),
+            actor: Some(registration.actor.clone()),
+        };
+        let page = ControlPlaneReferencePage {
+            schema: CONTROL_PLANE_REFERENCE_PAGE_SCHEMA.to_string(),
+            run: reference.run.clone(),
+            reference_type: ControlPlaneReferenceType::Artifact,
+            references: vec![reference],
+        };
+        let value = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneReferencePage>(value).expect("deserialize"),
+            page
+        );
     }
 
     #[test]

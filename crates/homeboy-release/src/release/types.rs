@@ -464,6 +464,14 @@ pub struct ReleaseOptions {
     pub(crate) preflight_placement: ReleasePreflightPlacement,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) readiness: Option<ReleaseReadinessEnvelope>,
+    #[serde(skip)]
+    pub(crate) control_plane: Option<ReleaseControlPlaneContext>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReleaseControlPlaneContext {
+    pub(crate) mission_id: String,
+    pub(crate) release_run_id: String,
 }
 
 /// Typed placement policy for the portable portion of release preflight.

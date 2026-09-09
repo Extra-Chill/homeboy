@@ -1,0 +1,24 @@
+{
+  "artifact": "legacy-workspace-resource-lifecycle",
+  "resource_lifecycle_index": {
+    "schema": "homeboy/resource-lifecycle-index/v1",
+    "resources": [
+      {
+        "owner": "runner.workspace",
+        "run_id": "run-1",
+        "runner_id": "runner-1",
+        "path": "/tmp/homeboy/run-1/workspace",
+        "kind": "runner_workspace",
+        "cleanup_policy": "preserve",
+        "evidence_retention": "metadata",
+        "cleanup_intent": "dry_run",
+        "status": "active",
+        "migration_provenance": {
+          "schema": "homeboy/resource-lifecycle-migration-provenance/v1",
+          "migration_id": "resource-lifecycle-index-v1",
+          "source_key": "workspace_resource_lifecycle"
+        }
+      }
+    ]
+  }
+}

@@ -511,16 +511,16 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 }
 
 fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
+    if string_value(payload, &["blocker", "retry", "disposition"])
+        == Some("automatic_reconciliation_scheduled")
+    {
+        return format!("homeboy agent-task status {run_id} --watch");
+    }
     if string_value(payload, &["blocker", "code"]) == Some("controller_failure")
         && string_value(payload, &["candidate", "state"]) == Some("verification_pending")
     {
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
         return format!("homeboy agent-task cook-continue {cook_id}");
-    }
-    if string_value(payload, &["blocker", "retry", "disposition"])
-        == Some("automatic_reconciliation_scheduled")
-    {
-        return format!("homeboy agent-task status {run_id} --watch");
     }
     const PREFERRED: [&str; 5] = ["reconcile", "resume", "retry", "review", "promote"];
     let Some(actions) = payload
@@ -600,7 +600,7 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         "patch promoted and verified"
     } else if target_applied {
         "patch promoted"
-    } else if promotable {
+    } else if promotable || metrics.non_empty_patches > 0 {
         "patch produced, not promoted"
     } else if raw_apply_candidates > 0 {
         "no-op: patch artifacts produced but empty"
@@ -648,6 +648,9 @@ fn target_application_line(payload: &Value) -> Option<String> {
     let verification = promotion
         .get("verified")
         .and_then(Value::as_bool)
+        .or_else(|| {
+            (string_value(promotion, &["verification_phase"]) == Some("pre_apply")).then_some(false)
+        })
         .map(|verified| if verified { "verified" } else { "not verified" })
         .unwrap_or("unknown");
     Some(format!(

@@ -310,7 +310,7 @@ impl ObservationStore {
             .run_context
             .clone()
             .with_missing_from(RunContext::subprocess_compatibility_from_env());
-        self.start_run_with_context_and_id(run, context, None)
+        self.start_run_with_context_id_and_mission(run, context, None, None)
     }
 
     /// Start a run under a caller-reserved identifier for a lifecycle that must
@@ -320,7 +320,30 @@ impl ObservationStore {
             .run_context
             .clone()
             .with_missing_from(RunContext::subprocess_compatibility_from_env());
-        self.start_run_with_context_and_id(run, context, Some(id))
+        self.start_run_with_context_id_and_mission(run, context, Some(id), None)
+    }
+
+    /// Atomically start a run and bind it to its canonical mission.
+    pub fn start_run_in_mission(&self, run: NewRunRecord, mission_id: &str) -> Result<RunRecord> {
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        self.start_run_with_context_id_and_mission(run, context, None, Some(mission_id))
+    }
+
+    /// Start a caller-identified run and mission binding in one transaction.
+    pub fn start_run_with_id_in_mission(
+        &self,
+        run: NewRunRecord,
+        id: String,
+        mission_id: &str,
+    ) -> Result<RunRecord> {
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        self.start_run_with_context_id_and_mission(run, context, Some(id), Some(mission_id))
     }
 
     /// Atomically claim a singleton running run. A live lease leaves the
@@ -580,14 +603,15 @@ impl ObservationStore {
         run: NewRunRecord,
         context: RunContext,
     ) -> Result<RunRecord> {
-        self.start_run_with_context_and_id(run, context, None)
+        self.start_run_with_context_id_and_mission(run, context, None, None)
     }
 
-    fn start_run_with_context_and_id(
+    fn start_run_with_context_id_and_mission(
         &self,
         mut run: NewRunRecord,
         context: RunContext,
         requested_id: Option<String>,
+        mission_id: Option<&str>,
     ) -> Result<RunRecord> {
         if let Some(route) = crate::notification_route::current() {
             route.insert_into_metadata(&mut run.metadata_json);
@@ -595,12 +619,16 @@ impl ObservationStore {
         validate_required("kind", &run.kind)?;
         let id = requested_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         validate_required("id", &id)?;
+        if let Some(mission_id) = mission_id {
+            validate_required("mission_id", mission_id)?;
+        }
         let started_at = chrono::Utc::now().to_rfc3339();
         let metadata_json =
             serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
 
         execute_with_retry("insert run record", || {
-            self.connection.execute(
+            let transaction = self.connection.unchecked_transaction()?;
+            transaction.execute(
                 r#"
                 INSERT INTO runs(
                     id,
@@ -629,7 +657,19 @@ impl ObservationStore {
                     run.rig_id,
                     metadata_json,
                 ],
-            )
+            )?;
+            if let Some(mission_id) = mission_id {
+                transaction.execute(
+                    "INSERT INTO control_plane_missions(id, created_at, updated_at) VALUES (?1, ?2, ?2) \
+                     ON CONFLICT(id) DO UPDATE SET updated_at = MAX(updated_at, excluded.updated_at)",
+                    params![mission_id, started_at],
+                )?;
+                transaction.execute(
+                    "INSERT INTO control_plane_mission_runs(mission_id, run_id) VALUES (?1, ?2)",
+                    params![mission_id, id],
+                )?;
+            }
+            transaction.commit()
         })?;
 
         self.get_run(&id)?.ok_or_else(|| {
@@ -702,6 +742,38 @@ impl ObservationStore {
             Error::internal_unexpected(format!(
                 "Finished run record {run_id} but could not read it back"
             ))
+        })
+    }
+
+    /// Reopen one domain-owned terminal run for an explicit resume action.
+    /// The expected kind prevents a domain delegate from adopting another
+    /// subsystem's canonical identity.
+    pub fn resume_run(
+        &self,
+        run_id: &str,
+        expected_kind: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<RunRecord> {
+        validate_required("run_id", run_id)?;
+        validate_required("expected_kind", expected_kind)?;
+        let metadata_json = serialize_metadata(&metadata_json)?;
+        let rows = execute_with_retry("resume run record", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = NULL, status = 'running', metadata_json = ?1 \
+                 WHERE id = ?2 AND kind = ?3 AND status != 'running'",
+                params![metadata_json, run_id, expected_kind],
+            )
+        })?;
+        if rows != 1 {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "run does not exist with the expected kind or is already running",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        self.get_run(run_id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!("Resumed run record {run_id} but could not read it"))
         })
     }
 
@@ -983,6 +1055,72 @@ impl ObservationStore {
 
         let runs = collect_rows(rows, "collect run records")?;
         Ok(run_page_from_probe(runs, limit, offset))
+    }
+
+    pub fn list_mission_runs_page(
+        &self,
+        mission_id: &str,
+        after: Option<&RunCursor>,
+        limit: usize,
+    ) -> Result<RunPage> {
+        validate_required("mission_id", mission_id)?;
+        let limit = limit.clamp(1, MAX_RUN_PAGE_LIMIT as usize);
+        let probe = i64::try_from(limit + 1).expect("bounded mission run page");
+        let started_at = after.map(|cursor| cursor.started_at.as_str());
+        let id = after.map(|cursor| cursor.id.as_str());
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at, r.status,
+                       r.command, r.cwd, r.homeboy_version, r.git_sha, r.rig_id, r.metadata_json
+                FROM control_plane_mission_runs mr
+                INNER JOIN runs r ON r.id = mr.run_id
+                WHERE mr.mission_id = ?1
+                  AND (?2 IS NULL OR r.started_at < ?2 OR (r.started_at = ?2 AND r.id < ?3))
+                ORDER BY r.started_at DESC, r.id DESC
+                LIMIT ?4
+                "#,
+            )
+            .map_err(sqlite_error("prepare control-plane mission run page"))?;
+        let rows = statement
+            .query_map(
+                params![mission_id, started_at, id, probe],
+                row_to_run_record,
+            )
+            .map_err(sqlite_error("list control-plane mission runs"))?;
+        let runs = collect_rows(rows, "collect control-plane mission runs")?;
+        Ok(run_page_from_probe(runs, limit as i64, 0))
+    }
+
+    pub fn list_control_plane_runs_page(
+        &self,
+        after: Option<&RunCursor>,
+        limit: usize,
+    ) -> Result<RunPage> {
+        let limit = limit.clamp(1, MAX_RUN_PAGE_LIMIT as usize);
+        let probe = i64::try_from(limit + 1).expect("bounded control-plane run page");
+        let started_at = after.map(|cursor| cursor.started_at.as_str());
+        let id = after.map(|cursor| cursor.id.as_str());
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at, r.status,
+                       r.command, r.cwd, r.homeboy_version, r.git_sha, r.rig_id, r.metadata_json
+                FROM control_plane_mission_runs mr
+                INNER JOIN runs r ON r.id = mr.run_id
+                WHERE (?1 IS NULL OR r.started_at < ?1 OR (r.started_at = ?1 AND r.id < ?2))
+                ORDER BY r.started_at DESC, r.id DESC
+                LIMIT ?3
+                "#,
+            )
+            .map_err(sqlite_error("prepare canonical control-plane run page"))?;
+        let rows = statement
+            .query_map(params![started_at, id, probe], row_to_run_record)
+            .map_err(sqlite_error("list canonical control-plane runs"))?;
+        let runs = collect_rows(rows, "collect canonical control-plane runs")?;
+        Ok(run_page_from_probe(runs, limit as i64, 0))
     }
 
     /// Walk every run matching `filter`, paginating internally so the answer is
@@ -1344,19 +1482,30 @@ impl ObservationStore {
     }
 
     pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {
-        self.upsert_imported_run_with_terminal_guard(run, false)
+        self.upsert_imported_run_with_terminal_guard(run, false, None)
     }
 
     /// Upsert an imported projection without allowing a stale in-flight writer
     /// to replace a settled observation.
     pub fn upsert_imported_run_preserving_terminal(&self, run: &RunRecord) -> Result<()> {
-        self.upsert_imported_run_with_terminal_guard(run, true)
+        self.upsert_imported_run_with_terminal_guard(run, true, None)
+    }
+
+    pub fn upsert_imported_run_with_mission(
+        &self,
+        run: &RunRecord,
+        mission_id: &str,
+        preserve_terminal: bool,
+    ) -> Result<()> {
+        validate_required("mission_id", mission_id)?;
+        self.upsert_imported_run_with_terminal_guard(run, preserve_terminal, Some(mission_id))
     }
 
     fn upsert_imported_run_with_terminal_guard(
         &self,
         run: &RunRecord,
         preserve_terminal: bool,
+        mission_id: Option<&str>,
     ) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let mut run = run.clone();
@@ -1377,7 +1526,8 @@ impl ObservationStore {
             ""
         };
         execute_with_retry("upsert imported run record", || {
-            self.connection.execute(
+            let transaction = self.connection.unchecked_transaction()?;
+            transaction.execute(
                 &format!(
                     r#"
                 INSERT INTO runs(
@@ -1423,9 +1573,119 @@ impl ObservationStore {
                     run.rig_id,
                     metadata_json,
                 ],
-            )
+            )?;
+            if let Some(mission_id) = mission_id {
+                let updated_at = run.finished_at.as_deref().unwrap_or(&run.started_at);
+                transaction.execute(
+                    r#"
+                    INSERT INTO control_plane_missions(id, created_at, updated_at)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(id) DO UPDATE SET
+                        updated_at = MAX(updated_at, excluded.updated_at)
+                    "#,
+                    params![mission_id, run.started_at, updated_at],
+                )?;
+                transaction.execute(
+                    r#"
+                    INSERT INTO control_plane_mission_runs(mission_id, run_id)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(mission_id, run_id) DO NOTHING
+                    "#,
+                    params![mission_id, run.id],
+                )?;
+            }
+            transaction.commit()
         })?;
         Ok(())
+    }
+
+    pub fn get_mission(&self, mission_id: &str) -> Result<Option<MissionRecord>> {
+        validate_required("mission_id", mission_id)?;
+        self.connection
+            .query_row(
+                r#"
+                SELECT m.id, m.created_at, m.updated_at, COUNT(mr.run_id)
+                FROM control_plane_missions m
+                LEFT JOIN control_plane_mission_runs mr ON mr.mission_id = m.id
+                WHERE m.id = ?1
+                GROUP BY m.id, m.created_at, m.updated_at
+                "#,
+                [mission_id],
+                |row| {
+                    Ok(MissionRecord {
+                        id: row.get(0)?,
+                        created_at: row.get(1)?,
+                        updated_at: row.get(2)?,
+                        run_count: row.get::<_, i64>(3)?.max(0) as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| self.read_error("read control-plane mission", error))
+    }
+
+    pub fn get_run_mission(&self, run_id: &str) -> Result<Option<String>> {
+        validate_required("run_id", run_id)?;
+        self.connection
+            .query_row(
+                "SELECT mission_id FROM control_plane_mission_runs WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| self.read_error("read control-plane run mission", error))
+    }
+
+    pub fn list_missions_page(
+        &self,
+        after: Option<&MissionCursor>,
+        limit: usize,
+    ) -> Result<MissionPage> {
+        let limit = limit.clamp(1, MAX_RUN_PAGE_LIMIT as usize);
+        let probe = i64::try_from(limit + 1).expect("bounded mission page");
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT m.id, m.created_at, m.updated_at, COUNT(mr.run_id)
+                FROM control_plane_missions m
+                LEFT JOIN control_plane_mission_runs mr ON mr.mission_id = m.id
+                WHERE (?1 IS NULL OR m.created_at < ?1 OR (m.created_at = ?1 AND m.id < ?2))
+                GROUP BY m.id, m.created_at, m.updated_at
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT ?3
+                "#,
+            )
+            .map_err(sqlite_error("prepare control-plane mission page"))?;
+        let started_at = after.map(|cursor| cursor.created_at.as_str());
+        let id = after.map(|cursor| cursor.id.as_str());
+        let rows = statement
+            .query_map(params![started_at, id, probe], |row| {
+                Ok(MissionRecord {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    run_count: row.get::<_, i64>(3)?.max(0) as u64,
+                })
+            })
+            .map_err(sqlite_error("list control-plane missions"))?;
+        let mut missions = collect_rows(rows, "collect control-plane missions")?;
+        let truncated = missions.len() > limit;
+        if truncated {
+            missions.truncate(limit);
+        }
+        let next_cursor = truncated.then(|| {
+            let last = missions.last().expect("nonempty truncated mission page");
+            MissionCursor {
+                created_at: last.created_at.clone(),
+                id: last.id.clone(),
+            }
+        });
+        Ok(MissionPage {
+            missions,
+            truncated,
+            next_cursor,
+        })
     }
 }
 
@@ -1433,6 +1693,132 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn mission_index_is_transactional_forward_only_and_keyset_paginated() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = |id: &str, started_at: &str| RunRecord {
+                id: id.to_string(),
+                kind: "agent-task".to_string(),
+                started_at: started_at.to_string(),
+                status: "queued".to_string(),
+                metadata_json: serde_json::json!({}),
+                ..Default::default()
+            };
+            store
+                .upsert_imported_run_with_mission(
+                    &run("run-old", "2026-01-01T00:00:00Z"),
+                    "mission-old",
+                    false,
+                )
+                .expect("old mission");
+            store
+                .upsert_imported_run_with_mission(
+                    &run("run-new", "2026-01-02T00:00:00Z"),
+                    "mission-new",
+                    false,
+                )
+                .expect("new mission");
+
+            let first = store.list_missions_page(None, 1).expect("first page");
+            assert_eq!(first.missions[0].id, "mission-new");
+            assert!(first.truncated);
+            store
+                .upsert_imported_run_with_mission(
+                    &run("run-late-old", "2025-12-01T00:00:00Z"),
+                    "mission-new",
+                    false,
+                )
+                .expect("late older run preserves the mission page key");
+            let second = store
+                .list_missions_page(first.next_cursor.as_ref(), 1)
+                .expect("second page");
+            assert_eq!(second.missions[0].id, "mission-old");
+            assert!(!second.truncated);
+            assert_eq!(
+                store
+                    .get_mission("mission-new")
+                    .expect("mission")
+                    .expect("indexed mission")
+                    .run_count,
+                2
+            );
+            let mission_runs = store
+                .list_mission_runs_page("mission-new", None, 1)
+                .expect("first mission run page");
+            assert_eq!(mission_runs.runs[0].id, "run-new");
+            assert!(mission_runs.truncated);
+            let remaining = store
+                .list_mission_runs_page("mission-new", mission_runs.next_cursor.as_ref(), 1)
+                .expect("second mission run page");
+            assert_eq!(remaining.runs[0].id, "run-late-old");
+            assert!(!remaining.truncated);
+
+            let mut conflicting = run("run-new", "2026-01-02T00:00:00Z");
+            conflicting.status = "failed".to_string();
+            store
+                .upsert_imported_run_with_mission(&conflicting, "mission-other", false)
+                .expect_err("run cannot move missions");
+            assert_eq!(
+                store
+                    .get_run("run-new")
+                    .expect("run")
+                    .expect("persisted run")
+                    .status,
+                "queued"
+            );
+            assert!(store
+                .get_mission("mission-other")
+                .expect("mission lookup")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn run_admission_atomically_binds_canonical_mission() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id_in_mission(
+                    NewRunRecord::builder("release")
+                        .component_id("homeboy")
+                        .build(),
+                    "release-run-13697".to_string(),
+                    "release-mission-13697",
+                )
+                .expect("start mission run");
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("unrelated").build(),
+                    "unrelated-observation".to_string(),
+                )
+                .expect("start unrelated observation");
+
+            assert_eq!(run.id, "release-run-13697");
+            assert_eq!(
+                store
+                    .get_mission("release-mission-13697")
+                    .expect("mission")
+                    .expect("bound mission")
+                    .run_count,
+                1
+            );
+            assert_eq!(
+                store
+                    .list_mission_runs_page("release-mission-13697", None, 10)
+                    .expect("mission runs")
+                    .runs[0]
+                    .id,
+                run.id
+            );
+            let page = store
+                .list_control_plane_runs_page(None, 10)
+                .expect("canonical runs");
+            assert_eq!(page.runs.len(), 1);
+            assert_eq!(page.runs[0].id, "release-run-13697");
+        });
+    }
 
     #[test]
     fn lifecycle_runner_job_identity_can_be_claimed_as_a_recovery_source() {

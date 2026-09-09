@@ -16,7 +16,9 @@ use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::engine::local_files::{
     write_json_file as write_json, write_json_file_owner_only as write_private_json,
 };
-use homeboy_core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
+use homeboy_core::observation::{
+    ObservationStore, RunCursor as ObservationRunCursor, RunListFilter, RunRecord, RunStatus,
+};
 use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
 /// Durable agent-task lifecycle storage bound to immutable filesystem roots.
@@ -195,24 +197,32 @@ impl AgentTaskLifecycleStore {
         plan: &AgentTaskPlan,
         run_id: &str,
     ) -> Result<AgentTaskRunRecord> {
-        self.submit_plan_with_runtime_admission_status(
+        self.submit_plan_with_current_runtime_and_metadata(plan, run_id, None)
+    }
+
+    pub(crate) fn submit_plan_with_current_runtime_and_metadata(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+        submission_metadata: Option<serde_json::Map<String, Value>>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::submit_plan_with_runtime_admission_in_store(
+            self,
             plan,
-            run_id,
+            Some(run_id),
             super::lifecycle_ops::execution_runner_id(),
-            &crate::agent_task_service::cook_pre_execution::store_admission_status(self),
+            submission_metadata,
+            Some(&crate::agent_task_service::cook_pre_execution::store_admission_status(self)),
             |run_id| {
                 let runtime_root =
                     homeboy_core::controller_runtime::runtime_root_in(self.roots().data())?;
                 homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
-                    &runtime_root,
-                    run_id,
-                    || {
+                    &runtime_root, run_id, || {
                         Ok(crate::agent_task_service::cook_pre_execution::runtime_admission_cancellation_requested(
                             &self.read_record(run_id)?,
                         ))
                     },
-                )
-                .map(|admission| admission.runtime)
+                ).map(|admission| admission.runtime)
             },
         )
     }
@@ -811,6 +821,64 @@ impl AgentTaskLifecycleStore {
             kind: Some("agent-task".to_string()),
             ..Default::default()
         })?)
+    }
+
+    /// Read one immutable-keyset page of typed agent-task records without
+    /// loading the full historical registry.
+    pub(crate) fn read_record_page(
+        &self,
+        after: Option<ObservationRunCursor>,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
+        let page = self
+            .open_observation_readonly()?
+            .list_runs_page(RunListFilter {
+                kind: Some("agent-task".to_string()),
+                limit: Some(i64::try_from(limit.clamp(1, 101)).expect("bounded page limit")),
+                after,
+                ..Default::default()
+            })?;
+        let records = page
+            .runs
+            .iter()
+            .map(record_from_run)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((records, page.truncated, page.next_cursor))
+    }
+
+    pub(crate) fn read_mission_record_page(
+        &self,
+        mission_id: &str,
+        after: Option<ObservationRunCursor>,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
+        let page = self.open_observation_readonly()?.list_mission_runs_page(
+            mission_id,
+            after.as_ref(),
+            limit,
+        )?;
+        let records = page
+            .runs
+            .iter()
+            .map(record_from_run)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((records, page.truncated, page.next_cursor))
+    }
+
+    pub(crate) fn read_mission(
+        &self,
+        mission_id: &str,
+    ) -> Result<Option<homeboy_core::observation::MissionRecord>> {
+        self.open_observation_readonly()?.get_mission(mission_id)
+    }
+
+    pub(crate) fn read_mission_page(
+        &self,
+        after: Option<&homeboy_core::observation::MissionCursor>,
+        limit: usize,
+    ) -> Result<homeboy_core::observation::MissionPage> {
+        self.open_observation_readonly()?
+            .list_missions_page(after, limit)
     }
 
     /// Register a Cook attempt using this store's record, lock, index, and
@@ -1416,7 +1484,9 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         rig_id: None,
         metadata_json,
     };
-    if preserve_terminal {
+    if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
+        store.upsert_imported_run_with_mission(&projected, mission.as_str(), preserve_terminal)?;
+    } else if preserve_terminal {
         store.upsert_imported_run_preserving_terminal(&projected)?;
     } else {
         store.upsert_imported_run(&projected)?;

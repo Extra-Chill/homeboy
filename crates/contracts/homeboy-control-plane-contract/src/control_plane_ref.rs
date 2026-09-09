@@ -7,7 +7,7 @@ use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::identity::{
-    AttemptId, ExecutionId, IdentityError, MissionId, ProviderSessionId, RunId, TaskId,
+    AttemptId, ExecutionId, IdentityError, MissionId, ProviderSessionId, ReferenceId, RunId, TaskId,
 };
 
 const KIND_MISSION: &str = "mission";
@@ -16,6 +16,9 @@ const KIND_TASK: &str = "task";
 const KIND_ATTEMPT: &str = "attempt";
 const KIND_EXECUTION: &str = "execution";
 const KIND_PROVIDER_SESSION: &str = "provider-session";
+const KIND_ARTIFACT: &str = "artifact";
+const KIND_EVIDENCE: &str = "evidence";
+const KIND_EXTERNAL_REFERENCE: &str = "external-reference";
 
 /// One of the control-plane identities, tagged so the kind cannot be lost.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,6 +29,9 @@ pub enum ControlPlaneRef {
     Attempt(AttemptId),
     Execution(ExecutionId),
     ProviderSession(ProviderSessionId),
+    Artifact(ReferenceId),
+    Evidence(ReferenceId),
+    ExternalReference(ReferenceId),
 }
 
 impl ControlPlaneRef {
@@ -37,6 +43,9 @@ impl ControlPlaneRef {
             Self::Attempt(_) => KIND_ATTEMPT,
             Self::Execution(_) => KIND_EXECUTION,
             Self::ProviderSession(_) => KIND_PROVIDER_SESSION,
+            Self::Artifact(_) => KIND_ARTIFACT,
+            Self::Evidence(_) => KIND_EVIDENCE,
+            Self::ExternalReference(_) => KIND_EXTERNAL_REFERENCE,
         }
     }
 
@@ -48,6 +57,7 @@ impl ControlPlaneRef {
             Self::Attempt(id) => id.as_str(),
             Self::Execution(id) => id.as_str(),
             Self::ProviderSession(id) => id.as_str(),
+            Self::Artifact(id) | Self::Evidence(id) | Self::ExternalReference(id) => id.as_str(),
         }
     }
 }
@@ -82,6 +92,9 @@ impl FromStr for ControlPlaneRef {
             KIND_ATTEMPT => Ok(Self::Attempt(AttemptId::new(identity)?)),
             KIND_EXECUTION => Ok(Self::Execution(ExecutionId::new(identity)?)),
             KIND_PROVIDER_SESSION => Ok(Self::ProviderSession(ProviderSessionId::new(identity)?)),
+            KIND_ARTIFACT => Ok(Self::Artifact(ReferenceId::new(identity)?)),
+            KIND_EVIDENCE => Ok(Self::Evidence(ReferenceId::new(identity)?)),
+            KIND_EXTERNAL_REFERENCE => Ok(Self::ExternalReference(ReferenceId::new(identity)?)),
             _ => Err(ControlPlaneRefError::Unrecognized {
                 value: value.to_string(),
             }),
@@ -144,7 +157,8 @@ impl From<IdentityError> for ControlPlaneRefError {
 mod tests {
     use super::ControlPlaneRef;
     use crate::{
-        AttemptId, ControlPlaneRefError, ExecutionId, MissionId, ProviderSessionId, RunId, TaskId,
+        AttemptId, ControlPlaneRefError, ExecutionId, MissionId, ProviderSessionId, ReferenceId,
+        RunId, TaskId,
     };
 
     const AGENT_TASK_RUN: &str =
@@ -181,10 +195,19 @@ mod tests {
             AttemptId::new(AGENT_TASK_RUN).expect("attempt"),
         ));
         round_trip(ControlPlaneRef::Execution(
-            ExecutionId::new("accepted-daemon-job").expect("execution"),
+            ExecutionId::new(format!("{AGENT_TASK_RUN}:review:1:execution")).expect("execution"),
         ));
         round_trip(ControlPlaneRef::ProviderSession(
             ProviderSessionId::new("session-123").expect("session"),
+        ));
+        round_trip(ControlPlaneRef::Artifact(
+            ReferenceId::new("patch-1").expect("artifact"),
+        ));
+        round_trip(ControlPlaneRef::Evidence(
+            ReferenceId::new("transcript-1").expect("evidence"),
+        ));
+        round_trip(ControlPlaneRef::ExternalReference(
+            ReferenceId::new("runner-job-1").expect("external reference"),
         ));
     }
 

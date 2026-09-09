@@ -453,6 +453,7 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // behavior through the hook. Moves out with deploy/release when they
     // become the homeboy-release crate.
     crate::release::provider_impl::register();
+    crate::release::register_action_delegate();
     homeboy_core::extension::audit_manifest_provider::register();
     homeboy_core::extension::component_script::register_component_script_runner();
     homeboy_core::extension::build::register_component_build_runner();

@@ -184,6 +184,7 @@ pub(super) fn execute_extension_runtime(
     extension_id: &str,
     project_id: Option<&str>,
     component_id: Option<&str>,
+    control_plane: Option<&homeboy_extension_contract::api::v1::ExtensionApiControlPlaneIdentity>,
     inputs: Vec<(String, String)>,
     args: Vec<String>,
     payload: Option<&serde_json::Value>,
@@ -246,6 +247,10 @@ pub(super) fn execute_extension_runtime(
     );
     let mut env_pairs = build_runtime_env(runtime, &context, &vars, &settings_json, extension_path);
 
+    if let Some(identity) = control_plane {
+        env_pairs.extend(control_plane_identity_env(identity));
+    }
+
     env_pairs.extend(filter.to_env_pairs());
 
     let execution = execute_extension_command(
@@ -260,6 +265,37 @@ pub(super) fn execute_extension_runtime(
         project_id: context.project_id,
         result: execution,
     })
+}
+
+pub fn control_plane_identity_env(
+    identity: &homeboy_extension_contract::api::v1::ExtensionApiControlPlaneIdentity,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            "HOMEBOY_CONTROL_PLANE_MISSION_ID".to_string(),
+            identity.mission.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_RUN_ID".to_string(),
+            identity.run.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_TASK_ID".to_string(),
+            identity.task.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_ATTEMPT_ID".to_string(),
+            identity.attempt.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_ATTEMPT_NUMBER".to_string(),
+            identity.attempt_number.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_EXECUTION_ID".to_string(),
+            identity.execution.to_string(),
+        ),
+    ]
 }
 
 /// Build execution environment variables for a extension.

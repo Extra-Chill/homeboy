@@ -10,6 +10,15 @@ use crate::resource_cleanup_intent::ResourceCleanupIntent;
 use crate::{Error, Result};
 
 pub const RESOURCE_LIFECYCLE_INDEX_SCHEMA: &str = "homeboy/resource-lifecycle-index/v1";
+pub const RESOURCE_LIFECYCLE_MIGRATION_PROVENANCE_SCHEMA: &str =
+    "homeboy/resource-lifecycle-migration-provenance/v1";
+pub const RESOURCE_LIFECYCLE_INDEX_MIGRATION_ID: &str = "resource-lifecycle-index-v1";
+
+// Compatibility window: read support for these two keys is retained while
+// #14365 is the removal tracker. Store-backed resource discovery reconciles
+// them to the canonical index through the explicit store API below.
+const LEGACY_RESOURCE_LIFECYCLE_KEYS: [&str; 2] =
+    ["resource_lifecycle", "workspace_resource_lifecycle"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceLifecycleIndex {
@@ -44,6 +53,15 @@ pub struct ResourceLifecycleRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_command: Option<String>,
     pub status: ResourceLifecycleResourceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_provenance: Option<ResourceLifecycleMigrationProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceLifecycleMigrationProvenance {
+    pub schema: String,
+    pub migration_id: String,
+    pub source_key: String,
 }
 
 pub struct ResourceLifecycle;
@@ -371,7 +389,23 @@ pub fn resource_lifecycle_index_from_artifacts(
             continue;
         }
 
-        for key in ["resource_lifecycle", "workspace_resource_lifecycle"] {
+        let legacy_sources = LEGACY_RESOURCE_LIFECYCLE_KEYS
+            .into_iter()
+            .filter(|key| artifact.metadata_json.get(key).is_some())
+            .collect::<Vec<_>>();
+        if legacy_sources.len() > 1 {
+            return Err(Error::validation_invalid_argument(
+                "artifact.metadata_json",
+                format!(
+                    "artifact {} contains multiple ambiguous legacy resource lifecycle keys",
+                    artifact.id
+                ),
+                None,
+                None,
+            ));
+        }
+
+        for key in LEGACY_RESOURCE_LIFECYCLE_KEYS {
             let Some(value) = artifact.metadata_json.get(key) else {
                 continue;
             };
@@ -395,6 +429,81 @@ pub fn resource_lifecycle_index_from_artifacts(
     };
     index.validate()?;
     Ok(Some(index))
+}
+
+/// Return a full replacement document for one unambiguous legacy record.
+///
+/// This transform deliberately does not write. Callers that need durable
+/// canonical metadata must use `ObservationStore::reconcile_resource_lifecycle_index_metadata`.
+pub fn migrate_resource_lifecycle_index_metadata(
+    metadata: &serde_json::Value,
+) -> Result<Option<serde_json::Value>> {
+    if let Some(value) = metadata.get("resource_lifecycle_index") {
+        let index: ResourceLifecycleIndex =
+            serde_json::from_value(value.clone()).map_err(|err| {
+                Error::internal_json(
+                    err.to_string(),
+                    Some("parse canonical resource lifecycle index metadata".to_string()),
+                )
+            })?;
+        index.validate()?;
+        return Ok(None);
+    }
+
+    let sources = LEGACY_RESOURCE_LIFECYCLE_KEYS
+        .into_iter()
+        .filter_map(|key| metadata.get(key).map(|value| (key, value)))
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    if sources.len() != 1 {
+        return Err(Error::validation_invalid_argument(
+            "artifact.metadata_json",
+            "multiple legacy resource lifecycle keys are ambiguous",
+            None,
+            None,
+        ));
+    }
+
+    let (source_key, value) = sources[0];
+    let mut record: ResourceLifecycleRecord =
+        serde_json::from_value(value.clone()).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some(format!("parse {source_key} metadata")),
+            )
+        })?;
+    record.validate(0)?;
+    record.migration_provenance = Some(ResourceLifecycleMigrationProvenance {
+        schema: RESOURCE_LIFECYCLE_MIGRATION_PROVENANCE_SCHEMA.to_string(),
+        migration_id: RESOURCE_LIFECYCLE_INDEX_MIGRATION_ID.to_string(),
+        source_key: source_key.to_string(),
+    });
+
+    let mut replacement = metadata.as_object().cloned().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact.metadata_json",
+            "resource lifecycle metadata must be an object",
+            None,
+            None,
+        )
+    })?;
+    replacement.remove(source_key);
+    replacement.insert(
+        "resource_lifecycle_index".to_string(),
+        serde_json::to_value(ResourceLifecycleIndex {
+            schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+            resources: vec![record],
+        })
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("serialize migrated resource lifecycle index metadata".to_string()),
+            )
+        })?,
+    );
+    Ok(Some(serde_json::Value::Object(replacement)))
 }
 
 pub fn transition_preserved_runner_workspaces_to_cleanup_pending(
@@ -437,6 +546,20 @@ pub fn validate_resource_lifecycle_record(
 
     if let Some(cleanup_command) = &record.cleanup_command {
         validate_required_field(&format!("{prefix}.cleanup_command"), cleanup_command)?;
+    }
+
+    if let Some(provenance) = &record.migration_provenance {
+        if provenance.schema != RESOURCE_LIFECYCLE_MIGRATION_PROVENANCE_SCHEMA
+            || provenance.migration_id != RESOURCE_LIFECYCLE_INDEX_MIGRATION_ID
+            || !LEGACY_RESOURCE_LIFECYCLE_KEYS.contains(&provenance.source_key.as_str())
+        {
+            return Err(Error::validation_invalid_argument(
+                format!("{prefix}.migration_provenance"),
+                "must identify the fixed resource lifecycle index migration and a supported source key",
+                None,
+                None,
+            ));
+        }
     }
 
     if let Some(ttl) = &record.ttl {
@@ -491,6 +614,7 @@ mod tests {
                 "homeboy runs resources --run-id run-1 --cleanup-plan".to_string(),
             ),
             status: ResourceLifecycleResourceStatus::Active,
+            migration_provenance: None,
         }
     }
 
@@ -582,6 +706,112 @@ mod tests {
     }
 
     #[test]
+    fn migrates_resource_lifecycle_golden_fixture_with_fixed_provenance() {
+        let source: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/resource_lifecycle_migration/resource_lifecycle.json"
+        ))
+        .expect("source fixture");
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/resource_lifecycle_migration/canonical_resource_lifecycle_index.json"
+        ))
+        .expect("canonical fixture");
+
+        assert_eq!(
+            migrate_resource_lifecycle_index_metadata(&source).expect("migrate fixture"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn migrates_workspace_resource_lifecycle_golden_fixture_with_source_key() {
+        let source: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/resource_lifecycle_migration/workspace_resource_lifecycle.json"
+        ))
+        .expect("source fixture");
+
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/resource_lifecycle_migration/canonical_workspace_resource_lifecycle_index.json"
+        ))
+        .expect("canonical fixture");
+
+        assert_eq!(
+            migrate_resource_lifecycle_index_metadata(&source).expect("migrate fixture"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn migration_is_canonical_wins_and_fails_closed_for_ambiguous_or_malformed_legacy() {
+        let canonical = serde_json::json!({
+            "resource_lifecycle_index": index(),
+            "resource_lifecycle": record(),
+            "workspace_resource_lifecycle": { "not": "a record" },
+        });
+        assert_eq!(
+            migrate_resource_lifecycle_index_metadata(&canonical).expect("canonical wins"),
+            None
+        );
+
+        let ambiguous = serde_json::json!({
+            "resource_lifecycle": record(),
+            "workspace_resource_lifecycle": record(),
+        });
+        assert!(migrate_resource_lifecycle_index_metadata(&ambiguous).is_err());
+
+        let malformed = serde_json::json!({ "resource_lifecycle": { "owner": "missing" } });
+        assert!(migrate_resource_lifecycle_index_metadata(&malformed).is_err());
+    }
+
+    #[test]
+    fn legacy_reads_do_not_mutate_artifact_metadata() {
+        let metadata = serde_json::json!({ "resource_lifecycle": record() });
+        let artifact = ArtifactRecord {
+            id: "artifact-1".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "metadata".to_string(),
+            artifact_type: "metadata".to_string(),
+            path: "/tmp/index.json".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: metadata.clone(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        resource_lifecycle_index_from_artifacts(&[artifact.clone()]).expect("legacy read");
+        assert_eq!(artifact.metadata_json, metadata);
+    }
+
+    #[test]
+    fn legacy_reads_fail_closed_for_ambiguous_metadata() {
+        let artifact = ArtifactRecord {
+            id: "artifact-1".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "metadata".to_string(),
+            artifact_type: "metadata".to_string(),
+            path: "/tmp/index.json".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: serde_json::json!({
+                "resource_lifecycle": record(),
+                "workspace_resource_lifecycle": record(),
+            }),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        assert!(resource_lifecycle_index_from_artifacts(&[artifact]).is_err());
+    }
+
+    #[test]
     fn terminal_transition_flips_preserved_runner_workspace_eligibility() {
         let mut index = ResourceLifecycleIndex {
             schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
@@ -598,6 +828,7 @@ mod tests {
                 cleanup_intent: ResourceCleanupIntent::DryRun,
                 cleanup_command: None,
                 status: ResourceLifecycleResourceStatus::Active,
+                migration_provenance: None,
             }],
         };
 

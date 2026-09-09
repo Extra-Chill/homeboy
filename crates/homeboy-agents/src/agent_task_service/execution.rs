@@ -19,8 +19,7 @@ use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskScheduler,
-    SharedAgentTaskExecutor,
+    AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
 use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
@@ -480,6 +479,7 @@ pub(crate) fn run_loaded_plan_with_derived_cook_baseline(
         executor,
         derived_cook_baseline,
         supplied_harvest_context,
+        LoadedPlanExecution::NewDurable,
     )
 }
 
@@ -498,7 +498,34 @@ pub(crate) fn run_loaded_plan_with_derived_cook_baseline_in_store(
         executor,
         derived_cook_baseline,
         supplied_harvest_context,
+        LoadedPlanExecution::NewDurable,
     )
+}
+
+/// Execute the durable attempt whose running claim is already owned by Cook.
+pub(crate) fn run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    plan: AgentTaskPlan,
+    run_id: &str,
+    executor: SharedAgentTaskExecutor,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
+    run_loaded_plan_with_derived_cook_baseline_in_optional_store(
+        Some(lifecycle_store),
+        plan,
+        Some(run_id),
+        executor,
+        derived_cook_baseline,
+        supplied_harvest_context,
+        LoadedPlanExecution::ClaimedCookAttempt,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum LoadedPlanExecution {
+    NewDurable,
+    ClaimedCookAttempt,
 }
 
 fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
@@ -508,114 +535,83 @@ fn run_loaded_plan_with_derived_cook_baseline_in_optional_store(
     executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     supplied_harvest_context: Option<crate::agent_task_scheduler::HarvestExecutionContext>,
+    execution: LoadedPlanExecution,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
-    if let Some(run_id) = record_run_id {
-        // Prepare before persistence so the lifecycle record and scheduler use
-        // the same materialized workspace contract. In particular, Cook's
-        // derived baseline capability must bind the persisted task workspace.
-        if let Err(error) = prepare_plan_for_execution(&mut plan, Some(run_id)) {
-            match lifecycle_store {
-                Some(store) => {
-                    store.submit_plan_with_current_runtime(&plan, run_id)?;
-                    store.record_pre_execution_failure(
-                        run_id,
-                        &plan,
-                        "prepare_plan_for_execution",
-                        &error,
-                    )?;
-                }
-                None => {
-                    agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-                    agent_task_lifecycle::record_pre_execution_failure(
-                        run_id,
-                        &plan,
-                        "prepare_plan_for_execution",
-                        &error,
-                    )?;
-                }
-            }
-            return Err(error);
+    if record_run_id.is_none() {
+        prepare_plan_for_execution(&mut plan, None)?;
+        let mut prepared =
+            crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan);
+        if let Some(store) = lifecycle_store {
+            prepared = prepared.with_lifecycle_store(store.clone());
         }
-        match lifecycle_store {
-            Some(store) => {
-                store.submit_plan_with_current_runtime(&plan, run_id)?;
-            }
-            None => {
-                agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-            }
+        if let Some(harvest_context) = supplied_harvest_context {
+            prepared = prepared.with_harvest_context(harvest_context);
         }
-        let harvest_context = match supplied_harvest_context.clone().map(Ok).unwrap_or_else(
-            crate::agent_task_scheduler::HarvestExecutionContext::from_current_process,
-        ) {
-            Ok(context) => context,
-            Err(error) => {
-                match lifecycle_store {
-                    Some(store) => store.record_pre_execution_failure(
-                        run_id,
-                        &plan,
-                        "validate_harvest_transport",
-                        &error,
-                    )?,
-                    None => agent_task_lifecycle::record_pre_execution_failure(
-                        run_id,
-                        &plan,
-                        "validate_harvest_transport",
-                        &error,
-                    )?,
-                };
-                return Err(error);
-            }
-        };
-        if harvest_context.snapshot_signaled() {
-            bind_runner_snapshot_workspace_attestations(&mut plan)?;
-        }
-        match lifecycle_store {
-            Some(store) => {
-                store.mark_running(run_id)?;
-            }
-            None => {
-                agent_task_lifecycle::mark_running(run_id)?;
-            }
-        }
-        let aggregate = run_plan_with_scheduler(
-            lifecycle_store,
-            plan.clone(),
-            record_run_id,
+        let aggregate = crate::agent_task_submission_service::execute_ephemeral_prepared_plan(
+            prepared,
             executor,
             derived_cook_baseline,
-            harvest_context,
         )?;
-        match lifecycle_store {
-            Some(store) => {
-                store.record_run_aggregate(run_id, &plan, &aggregate)?;
-            }
-            None => {
-                agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
-            }
-        }
         return Ok(AgentTaskRunResult {
             exit_code: aggregate_exit_code(&aggregate),
             value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
         });
-    } else {
-        prepare_plan_for_execution(&mut plan, None)?;
     }
-
-    let harvest_context = supplied_harvest_context
-        .unwrap_or(crate::agent_task_scheduler::HarvestExecutionContext::from_current_process()?);
-    if harvest_context.snapshot_signaled() {
-        bind_runner_snapshot_workspace_attestations(&mut plan)?;
-    }
-    let aggregate = run_plan_with_scheduler(
-        lifecycle_store,
-        plan.clone(),
-        record_run_id,
-        executor,
-        derived_cook_baseline,
-        harvest_context,
+    let run_id = record_run_id.expect("record run id is present after ephemeral execution");
+    let request = crate::agent_task_submission_service::prepared_submission_request(
+        Some(run_id),
+        false,
+        "homeboy-loaded-plan",
     )?;
+    // Prepare before persistence so the lifecycle record and scheduler use the
+    // same materialized workspace contract. In particular, Cook's derived
+    // baseline capability must bind the persisted task workspace.
+    if let Err(error) = prepare_plan_for_execution(&mut plan, Some(run_id)) {
+        let mut prepared =
+            crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan);
+        if let Some(store) = lifecycle_store {
+            prepared = prepared.with_lifecycle_store(store.clone());
+        }
+        crate::agent_task_submission_service::reject_prepared_plan(
+            &request,
+            prepared,
+            "prepare_plan_for_execution",
+            &error,
+        )?;
+        return Err(error);
+    }
+    let mut prepared = crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan);
+    if let Some(store) = lifecycle_store {
+        prepared = prepared.with_lifecycle_store(store.clone());
+    }
+    if let Some(harvest_context) = supplied_harvest_context {
+        prepared = prepared.with_harvest_context(harvest_context);
+    }
+    let outcome = match execution {
+        LoadedPlanExecution::NewDurable => {
+            crate::agent_task_submission_service::submit_prepared_plan_with_cook_baseline(
+                &request,
+                prepared,
+                executor,
+                derived_cook_baseline,
+            )?
+        }
+        // Cook marks its durable attempt running before entering this explicit
+        // claimed-attempt path, so it must execute that existing ownership.
+        LoadedPlanExecution::ClaimedCookAttempt => {
+            crate::agent_task_submission_service::execute_claimed_plan(
+                run_id,
+                prepared,
+                executor,
+                derived_cook_baseline,
+            )?
+        }
+    };
+    let aggregate = outcome.aggregate.ok_or_else(|| {
+        Error::internal_unexpected("durable loaded-plan submission produced no aggregate")
+    })?;
     Ok(AgentTaskRunResult {
-        exit_code: aggregate_exit_code(&aggregate),
+        exit_code: outcome.exit_code,
         value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     })
 }
@@ -652,7 +648,16 @@ pub fn bind_runner_snapshot_workspace_attestations(plan: &mut AgentTaskPlan) -> 
 
 pub fn submit_plan_spec(spec: &str, run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
     let plan = read_plan(spec)?;
-    agent_task_lifecycle::submit_plan(&plan, run_id)
+    let request = crate::agent_task_submission_service::prepared_submission_request(
+        run_id,
+        true,
+        "homeboy-submit",
+    )?;
+    Ok(crate::agent_task_submission_service::queue_prepared_plan(
+        &request,
+        crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan),
+    )?
+    .submitted)
 }
 
 pub fn run_submitted(
@@ -693,47 +698,48 @@ pub(crate) fn run_submitted_with_timeout_and_catalog(
     if let Some(timeout_ms) = timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
+    let request = crate::agent_task_submission_service::prepared_submission_request(
+        Some(&run_id),
+        false,
+        "homeboy-submitted",
+    )?;
     if let Err(error) = preflight_plan_provider_eligibility_with_catalog(&mut plan, catalog) {
-        agent_task_lifecycle::record_pre_execution_failure(
-            &run_id,
-            &plan,
+        crate::agent_task_submission_service::reject_prepared_plan(
+            &request,
+            crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
+                .with_queued_plan_enrichment(),
             "admit_plan_provider_dispatchability",
             &error,
         )?;
         return Err(error);
     }
-    // Admission chooses a concrete provider route and advances its durable
-    // cursor. Persist that exact plan before Running so execution never derives
-    // a second route from the submitted rotation chain.
-    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+    crate::agent_task_submission_service::stage_prepared_plan(
+        &request,
+        crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan.clone())
+            .with_queued_plan_enrichment(),
+    )?;
     if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
-        agent_task_lifecycle::record_pre_execution_failure(
-            &run_id,
-            &plan,
+        crate::agent_task_submission_service::reject_prepared_plan(
+            &request,
+            crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
+                .with_queued_plan_enrichment(),
             "prepare_plan_for_execution",
             &error,
         )?;
         return Err(error);
     }
-    // Preparation enriches the admitted plan with its materialized workspace
-    // and runner-secret contract. Persist that final form before Running so the
-    // scheduler executes exactly the durable plan reviewers can inspect.
-    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
-    let harvest_context =
-        match crate::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
-            Ok(context) => context,
-            Err(error) => {
-                agent_task_lifecycle::record_pre_execution_failure(
-                    &run_id,
-                    &plan,
-                    "validate_harvest_transport",
-                    &error,
-                )?;
-                return Err(error);
-            }
-        };
-    agent_task_lifecycle::mark_running(&run_id)?;
-    run_prepared_claimed(run_id, plan, executor, harvest_context)
+    let outcome = crate::agent_task_submission_service::submit_prepared_plan(
+        &request,
+        crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
+            .with_queued_plan_enrichment(),
+        executor,
+    )?;
+    Ok(AgentTaskRunResult {
+        exit_code: outcome.exit_code,
+        value: outcome.aggregate.ok_or_else(|| {
+            Error::internal_unexpected("submitted-run execution produced no aggregate")
+        })?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2771,48 +2777,31 @@ fn run_claimed(
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     let mut plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
     if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
-        agent_task_lifecycle::record_pre_execution_failure(
-            &run_id,
-            &plan,
+        crate::agent_task_submission_service::reject_prepared_plan(
+            &crate::agent_task_submission_service::prepared_submission_request(
+                Some(&run_id),
+                false,
+                "homeboy-claimed-run",
+            )?,
+            crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
+                .with_claimed_plan_enrichment(),
             "prepare_plan_for_execution",
             &error,
         )?;
         return Err(error);
     }
-    let harvest_context =
-        match crate::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
-            Ok(context) => context,
-            Err(error) => {
-                agent_task_lifecycle::record_pre_execution_failure(
-                    &run_id,
-                    &plan,
-                    "validate_harvest_transport",
-                    &error,
-                )?;
-                return Err(error);
-            }
-        };
-    run_prepared_claimed(run_id, plan, executor, harvest_context)
-}
-
-fn run_prepared_claimed(
-    run_id: String,
-    plan: AgentTaskPlan,
-    executor: SharedAgentTaskExecutor,
-    harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
-) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
-    let aggregate = run_plan_with_scheduler(
-        None,
-        plan.clone(),
-        Some(&run_id),
+    let outcome = crate::agent_task_submission_service::execute_claimed_plan(
+        &run_id,
+        crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
+            .with_claimed_plan_enrichment(),
         executor,
         None,
-        harvest_context,
     )?;
-    agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
-        exit_code: aggregate_exit_code(&aggregate),
-        value: aggregate,
+        exit_code: outcome.exit_code,
+        value: outcome.aggregate.ok_or_else(|| {
+            Error::internal_unexpected("claimed submission produced no aggregate")
+        })?,
     })
 }
 
@@ -2904,28 +2893,6 @@ fn preflight_plan_provider_eligibility_with_catalog(
     )?;
     *plan = admitted;
     Ok(())
-}
-
-fn run_plan_with_scheduler(
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
-    plan: AgentTaskPlan,
-    run_id: Option<&str>,
-    executor: SharedAgentTaskExecutor,
-    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
-    harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
-) -> Result<AgentTaskAggregate> {
-    let scheduler =
-        AgentTaskScheduler::new_controller(executor).with_harvest_context(harvest_context);
-    let scheduler = match lifecycle_store {
-        Some(store) => scheduler.with_lifecycle_store(store.clone()),
-        None => scheduler,
-    };
-    match run_id {
-        Some(run_id) => Ok(scheduler
-            .with_run_id(run_id.to_string())
-            .run_with_derived_cook_baseline(plan, derived_cook_baseline)),
-        None => Ok(scheduler.run_with_derived_cook_baseline(plan, derived_cook_baseline)),
-    }
 }
 
 pub fn aggregate_exit_code(aggregate: &AgentTaskAggregate) -> i32 {
@@ -3560,5 +3527,28 @@ mod tests {
         }
 
         assert_ne!(first_store.run_dir(run_id), second_store.run_dir(run_id));
+    }
+
+    #[test]
+    fn unnamed_local_execution_remains_ephemeral() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        let workspace = tempfile::tempdir().expect("workspace");
+        initialize_workspace(workspace.path());
+
+        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
+            &store,
+            one_task_plan("ephemeral-local-run", workspace.path()),
+            None,
+            Arc::new(SuccessfulExecutor),
+            None,
+            Some(HarvestExecutionContext::default()),
+        )
+        .expect("execute without a durable run id");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(agent_task_lifecycle::list_records_in_store(&store)
+            .expect("list lifecycle records")
+            .is_empty());
     }
 }

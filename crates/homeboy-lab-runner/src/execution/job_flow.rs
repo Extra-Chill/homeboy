@@ -181,7 +181,11 @@ where
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
         if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
-            observed_agent_task_terminal_job_status(run_id, flow.run_id_owns_generic_exec)
+            observed_agent_task_terminal_job_status(
+                run_id,
+                flow.run_id_owns_generic_exec,
+                flow.handoff_endpoint,
+            )
         }) {
             // The agent-task lifecycle owns provider terminality. A stale runner
             // job projection must not hold Cook in dispatch after its aggregate
@@ -462,11 +466,24 @@ pub(super) fn terminal_notification_run_id<'a>(
 fn observed_agent_task_terminal_job_status(
     run_id: &str,
     run_id_owns_generic_exec: bool,
+    control_plane_endpoint: Option<&str>,
 ) -> Option<JobStatus> {
     if run_id_owns_generic_exec {
         return None;
     }
     let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
+    if let Some(endpoint) = control_plane_endpoint {
+        if let Ok(client) = homeboy_control_plane_client::ControlPlaneClient::new_local(
+            endpoint,
+            Duration::from_secs(2),
+        ) {
+            if let Ok(run) = client.run(&run_id) {
+                if let Some(status) = control_plane_terminal_job_status(run.state) {
+                    return Some(status);
+                }
+            }
+        }
+    }
     let store =
         homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
             .ok()?;
@@ -485,12 +502,14 @@ fn control_plane_terminal_job_status(
     match state {
         ControlPlaneRunState::Succeeded
         | ControlPlaneRunState::CandidateRecoverable
-        | ControlPlaneRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        | ControlPlaneRunState::PartialRecoverable
+        | ControlPlaneRunState::Skipped => Some(JobStatus::Succeeded),
         ControlPlaneRunState::PartialFailure
         | ControlPlaneRunState::Failed
         | ControlPlaneRunState::TimedOut => Some(JobStatus::Failed),
         ControlPlaneRunState::Cancelled => Some(JobStatus::Cancelled),
         ControlPlaneRunState::Queued
+        | ControlPlaneRunState::Blocked
         | ControlPlaneRunState::Running
         | ControlPlaneRunState::Stale
         | ControlPlaneRunState::Unknown => None,
@@ -508,6 +527,7 @@ mod tests {
             ControlPlaneRunState::Succeeded,
             ControlPlaneRunState::CandidateRecoverable,
             ControlPlaneRunState::PartialRecoverable,
+            ControlPlaneRunState::Skipped,
         ] {
             assert_eq!(
                 control_plane_terminal_job_status(state),
@@ -530,6 +550,7 @@ mod tests {
         );
         for state in [
             ControlPlaneRunState::Queued,
+            ControlPlaneRunState::Blocked,
             ControlPlaneRunState::Running,
             ControlPlaneRunState::Stale,
             ControlPlaneRunState::Unknown,

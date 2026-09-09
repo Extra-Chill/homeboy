@@ -9088,7 +9088,7 @@ fn retryable_pre_provider_retry_rejects_pending_attempt_owned_by_another_cook() 
         agent_task_lifecycle::record_cook_attempt_in_store(
             &test_lifecycle_store(),
             "another-cook",
-            1,
+            2,
             &pending_run_id,
         )
         .expect("mark conflicting Cook ownership");
@@ -9103,7 +9103,7 @@ fn retryable_pre_provider_retry_rejects_pending_attempt_owned_by_another_cook() 
         let record = agent_task_lifecycle::exact_record(&pending_run_id)
             .expect("conflicting pending record remains intact");
         assert_eq!(record.metadata["cook_id"], "another-cook");
-        assert_eq!(record.metadata["cook_attempt"], 1);
+        assert_eq!(record.metadata["cook_attempt"], 2);
     });
 }
 

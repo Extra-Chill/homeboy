@@ -94,6 +94,76 @@ pub struct ControlPlaneActionRequest {
     pub confirmed: bool,
 }
 
+impl ControlPlaneActionRequest {
+    pub fn validate(&self) -> Result<(), crate::ControlPlaneError> {
+        const INPUT_BOUND: usize = 128;
+        const REASON_BOUND: usize = 1_024;
+
+        if self.schema != CONTROL_PLANE_ACTION_REQUEST_SCHEMA {
+            return Err(crate::ControlPlaneError::invalid_argument(
+                "unsupported control-plane action request schema",
+            ));
+        }
+        for (name, value) in [
+            ("idempotency_key", self.idempotency_key.as_str()),
+            ("actor", self.actor.as_str()),
+        ] {
+            if value.trim().is_empty() || value.len() > INPUT_BOUND {
+                return Err(crate::ControlPlaneError::invalid_argument(format!(
+                    "{name} must contain 1 to {INPUT_BOUND} bytes"
+                )));
+            }
+        }
+        let (name, expected_schema) = match self.action {
+            ControlPlaneAction::Cancel => ("cancel", CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA),
+            ControlPlaneAction::Promote => ("promote", CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA),
+            ControlPlaneAction::Reconcile => {
+                ("reconcile", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA)
+            }
+            ControlPlaneAction::Resume => ("resume", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
+            ControlPlaneAction::Retry => ("retry", CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA),
+        };
+        if self.parameters.schema != expected_schema {
+            return Err(crate::ControlPlaneError::invalid_argument(format!(
+                "{name} requires parameters schema {expected_schema}"
+            )));
+        }
+        if self.action == ControlPlaneAction::Cancel {
+            let parameters: ControlPlaneCancelParameters =
+                serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!(
+                        "cancel parameters: {error}"
+                    ))
+                })?;
+            if parameters
+                .reason
+                .as_ref()
+                .is_some_and(|reason| reason.len() > REASON_BOUND)
+            {
+                return Err(crate::ControlPlaneError::invalid_argument(format!(
+                    "reason exceeds {REASON_BOUND} bytes"
+                )));
+            }
+        }
+        if self.action == ControlPlaneAction::Retry {
+            serde_json::from_value::<ControlPlaneRetryParameters>(self.parameters.data.clone())
+                .map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
+                })?;
+        }
+        if matches!(
+            self.action,
+            ControlPlaneAction::Cancel | ControlPlaneAction::Promote | ControlPlaneAction::Retry
+        ) && !self.confirmed
+        {
+            return Err(crate::ControlPlaneError::invalid_argument(format!(
+                "{name} requires explicit confirmation"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlPlaneActionOutcome {

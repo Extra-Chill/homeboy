@@ -73,7 +73,7 @@ pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use control_plane_identities::{
     canonical_control_plane_identities, canonical_control_plane_identities_for_run,
-    CanonicalControlPlaneIdentities,
+    canonical_fanout_mission, canonical_mission, CanonicalControlPlaneIdentities,
 };
 pub use failure_recording::*;
 pub use health::*;

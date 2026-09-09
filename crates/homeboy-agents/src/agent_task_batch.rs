@@ -34,7 +34,20 @@ pub fn submit_plan_batch(
         plan,
         requested_batch_id,
         agent_task_lifecycle::run_record_exists,
-        |child_plan, run_id| agent_task_lifecycle::submit_plan(child_plan, Some(run_id)),
+        |child_plan, run_id| {
+            let request = crate::agent_task_submission_service::prepared_submission_request(
+                Some(run_id),
+                true,
+                "homeboy-batch",
+            )?;
+            Ok(crate::agent_task_submission_service::queue_prepared_plan(
+                &request,
+                crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(
+                    child_plan.clone(),
+                ),
+            )?
+            .submitted)
+        },
     )
 }
 

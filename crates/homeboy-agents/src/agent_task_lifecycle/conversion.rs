@@ -382,10 +382,8 @@ pub(crate) fn control_plane_event<'a>(
         mission: identities.as_ref().map(|value| value.mission.clone()),
         run,
         task: Some(task),
-        attempt: identities.map(|value| value.attempt),
-        execution: record
-            .runner_job_id()
-            .and_then(|value| homeboy_control_plane_contract::ExecutionId::new(value).ok()),
+        attempt: None,
+        execution: None,
         kind: kind.to_string(),
         source: ControlPlaneEventSource {
             component: source.to_string(),
@@ -423,23 +421,6 @@ fn bounded_event_data(value: Value, depth: usize) -> Value {
         ),
         value => value,
     }
-}
-
-pub(crate) fn control_plane_event_page(
-    record: &AgentTaskRunRecord,
-    events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
-    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
-) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
-    let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
-        Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(record.run_id.clone()),
-            None,
-        )
-    })?;
-    crate::orchestration::event_page(run, events, cursor)
-        .map_err(|error| Error::validation_invalid_argument("cursor", error.message, None, None))
 }
 
 pub(crate) fn artifact_refs_for_outcomes(

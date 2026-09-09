@@ -45,6 +45,7 @@ pub(crate) mod agent_task_schedule;
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;
 pub mod agent_task_service;
+pub mod agent_task_submission_service;
 pub mod agent_task_timeout;
 pub(crate) mod agent_task_timeout_artifacts;
 pub mod agent_task_workspace_identity;

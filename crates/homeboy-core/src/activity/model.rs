@@ -2,7 +2,7 @@
 //! report, plus the small state predicates over them. Extracted from the
 //! `activity` module to keep each file within one responsibility (#9794).
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::run_lifecycle_status::RunLifecycleStatus;
@@ -69,32 +69,13 @@ pub struct ActivityRunnerRefs {
     pub transport: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityCrossRefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     /// Runner-job / execution reference. Not a run-id alias.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_job_id: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for ActivityCrossRefs {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(default)]
-            run_id: Option<String>,
-            #[serde(default)]
-            agent_task_run_id: Option<String>,
-            #[serde(default)]
-            runner_job_id: Option<String>,
-        }
-        let raw = Raw::deserialize(deserializer)?;
-        Ok(Self {
-            run_id: raw.run_id.or(raw.agent_task_run_id),
-            runner_job_id: raw.runner_job_id,
-        })
-    }
 }
 
 /// Task context carried by sources that know the submitted work.

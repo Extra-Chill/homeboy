@@ -2330,6 +2330,7 @@ pub(crate) fn workspace_resource_lifecycle(
         cleanup_command: run_id
             .map(|run_id| format!("homeboy runs resources --run-id {run_id} --cleanup-plan")),
         status: ResourceLifecycleResourceStatus::Active,
+        migration_provenance: None,
     }
 }
 
@@ -4553,6 +4554,7 @@ fn remove_local_workspace_with_lifecycle(root: &Path, path: &Path) -> Result<()>
         cleanup_intent: Default::default(),
         cleanup_command: None,
         status: ResourceLifecycleResourceStatus::CleanupPending,
+        migration_provenance: None,
     };
     let cleanup_path = ResourceLifecycle::cleanup_path(root, &resource).map_err(|reason| {
         Error::validation_invalid_argument(
