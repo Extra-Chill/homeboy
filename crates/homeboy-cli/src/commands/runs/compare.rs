@@ -284,25 +284,6 @@ mod tests {
     use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
         NewRunRecord::builder(kind)
             .component_id(component_id)
@@ -318,7 +299,7 @@ mod tests {
     #[test]
     fn runs_compare_filters_history_and_reports_selected_metrics() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let old = store
                 .start_run(sample_run(

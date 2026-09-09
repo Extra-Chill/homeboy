@@ -288,53 +288,6 @@ mod tests {
     };
     use super::*;
 
-    struct XdgGuard(Option<String>);
-
-    struct EnvGuard {
-        key: &'static str,
-        prior: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prior = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prior }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let prior = std::env::var(key).ok();
-            std::env::remove_var(key);
-            Self { key, prior }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
         NewRunRecord::builder(kind)
             .component_id(component_id)
@@ -350,8 +303,9 @@ mod tests {
     #[test]
     fn evidence_command_reports_registry_artifacts_retention_and_failure_summary() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let _public_artifact_base =
+                homeboy_core::test_support::EnvVarGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
             let store = ObservationStore::open_initialized().expect("store");
@@ -740,7 +694,7 @@ mod tests {
     #[test]
     fn evidence_projection_bounds_large_inventories_and_keeps_the_top_diagnostic() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
@@ -910,7 +864,7 @@ mod tests {
     #[test]
     fn evidence_projection_continues_selected_directory_diagnostics_by_handle() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
@@ -1107,8 +1061,9 @@ mod tests {
     #[test]
     fn evidence_command_derives_a_manifest_when_no_producer_attached_one() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let _public_artifact_base =
+                homeboy_core::test_support::EnvVarGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
             let store = ObservationStore::open_initialized().expect("store");
@@ -1162,8 +1117,9 @@ mod tests {
     #[test]
     fn evidence_command_surfaces_static_html_preview_entrypoints() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let _public_artifact_base =
+                homeboy_core::test_support::EnvVarGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
             let store = ObservationStore::open_initialized().expect("store");
@@ -1207,10 +1163,10 @@ mod tests {
     #[test]
     fn evidence_command_marks_directory_artifacts_as_published_without_local_paths() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
-            let _public_artifact_base = EnvGuard::set(
+            let _public_artifact_base = homeboy_core::test_support::EnvVarGuard::set(
                 PUBLIC_ARTIFACT_BASE_URL_ENV,
                 "https://artifacts.example.test/homeboy",
             );
@@ -1254,7 +1210,7 @@ mod tests {
     #[test]
     fn evidence_links_reject_unvalidated_local_urls() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
@@ -1290,7 +1246,7 @@ mod tests {
     #[test]
     fn evidence_surfaces_generic_matrix_summary_artifact() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
@@ -1359,7 +1315,7 @@ mod tests {
     #[test]
     fn evidence_failure_summary_does_not_mark_running_run_failed() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
@@ -1430,8 +1386,9 @@ mod tests {
     #[test]
     fn evidence_includes_related_lab_fuzz_results_for_runner_failure() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let _public_artifact_base =
+                homeboy_core::test_support::EnvVarGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
             let store = ObservationStore::open_initialized().expect("store");

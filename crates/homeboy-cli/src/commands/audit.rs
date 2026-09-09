@@ -678,33 +678,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    struct XdgGuard {
-        prior: Option<String>,
-    }
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self { prior }
-        }
-
-        fn set(value: &std::path::Path) -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::set_var("XDG_DATA_HOME", value);
-            Self { prior }
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn tmp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1134,7 +1107,7 @@ mod tests {
     #[test]
     fn audit_observation_start_persists_run_record() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
 
             let result = finish_adapted_observed_workflow(
@@ -1179,7 +1152,7 @@ mod tests {
     #[test]
     fn audit_observation_finish_persists_findings() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let workflow = sample_audit_workflow(home.path());
 
@@ -1221,7 +1194,7 @@ mod tests {
     #[test]
     fn audit_full_reports_use_run_scoped_resolvable_artifacts() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let first = ActiveObservation::start(
                 AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args)
@@ -1259,7 +1232,7 @@ mod tests {
     #[test]
     fn required_audit_report_failure_terminalizes_observation() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let adapter =
                 AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args);
@@ -1297,7 +1270,8 @@ mod tests {
         with_isolated_home(|home| {
             let bad_data_home = home.path().join("not-a-dir");
             fs::write(&bad_data_home, "file blocks observation dir").expect("write marker");
-            let _xdg = XdgGuard::set(&bad_data_home);
+            let _xdg =
+                homeboy_core::test_support::EnvVarGuard::set("XDG_DATA_HOME", &bad_data_home);
 
             let result = finish_adapted_observed_workflow(
                 AuditObservationAdapter::new(

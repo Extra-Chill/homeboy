@@ -1928,6 +1928,19 @@ impl EnvVarGuard {
             prior,
         }
     }
+
+    /// Remove `name` for the guard's lifetime, restoring any prior value.
+    ///
+    /// Tests that assert a fallback path need the variable absent rather than
+    /// set, which is the half every hand-rolled copy of this guard existed for.
+    pub fn unset(name: &str) -> Self {
+        let prior = std::env::var_os(name);
+        unsafe { std::env::remove_var(name) };
+        Self {
+            name: name.to_string(),
+            prior,
+        }
+    }
 }
 
 impl Drop for EnvVarGuard {

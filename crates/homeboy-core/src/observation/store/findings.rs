@@ -292,25 +292,6 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
 
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn new_run() -> NewRunRecord {
         NewRunRecord::builder("lint")
             .component_id("homeboy")
@@ -338,7 +319,7 @@ mod tests {
     #[test]
     fn test_record_finding() {
         with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store.start_run(new_run()).expect("start");
 
@@ -353,7 +334,7 @@ mod tests {
     #[test]
     fn test_record_findings() {
         with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store.start_run(new_run()).expect("start");
 
@@ -373,7 +354,7 @@ mod tests {
     #[test]
     fn test_record_findings_rejects_unknown_run_before_insert() {
         with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
 
             let result = store.record_findings(&[
@@ -392,7 +373,7 @@ mod tests {
     #[test]
     fn test_record_findings_requires_one_run_per_batch() {
         with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let first = store.start_run(new_run()).expect("first run");
             let second = store.start_run(new_run()).expect("second run");
@@ -413,7 +394,7 @@ mod tests {
     #[test]
     fn test_list_findings() {
         with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store.start_run(new_run()).expect("start");
             store
@@ -438,7 +419,7 @@ mod tests {
     #[test]
     fn test_latest_finding_uses_filters_and_deterministic_tie_break() {
         with_isolated_home(|_| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store.start_run(new_run()).expect("start");
             let old = store

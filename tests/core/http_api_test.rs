@@ -63,27 +63,6 @@ fn test_run_analysis_job() {
     assert_eq!(output.output["argv"][1], "lint");
 }
 
-struct XdgGuard {
-    prior: Option<String>,
-}
-
-impl XdgGuard {
-    fn unset() -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::remove_var("XDG_DATA_HOME");
-        Self { prior }
-    }
-}
-
-impl Drop for XdgGuard {
-    fn drop(&mut self) {
-        match &self.prior {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-}
-
 #[test]
 fn routes_component_endpoints() {
     assert_eq!(
@@ -1635,7 +1614,7 @@ fn control_plane_run_id_is_bounded_before_the_record_lookup() {
 #[test]
 fn activity_endpoint_exposes_activity_report_and_show() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("test", "homeboy", "studio"))
@@ -1961,7 +1940,7 @@ fn generic_job_cancel_is_idempotent_without_duplicating_events() {
 #[test]
 fn runs_list_includes_active_runner_jobs() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         ObservationStore::open_initialized().expect("store");
         let store = JobStore::default();
         let job = store
@@ -2044,7 +2023,7 @@ fn runs_list_includes_active_runner_jobs() {
 #[test]
 fn active_runner_job_run_lookup_preserves_daemon_identity_when_hydration_is_partial() {
     with_isolated_home(|_| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let observations = ObservationStore::open_initialized().expect("store");
 
         for (run_id, persisted) in [
@@ -2123,7 +2102,7 @@ fn active_runner_job_run_lookup_preserves_daemon_identity_when_hydration_is_part
 #[test]
 fn test_handle() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let bench = store
             .start_run(sample_run("bench", "homeboy", "studio"))
@@ -2212,7 +2191,7 @@ fn test_handle() {
 #[test]
 fn run_artifacts_keeps_legacy_http_clients_exhaustive_and_pages_explicit_requests() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "artifact-pagination"))
@@ -2249,7 +2228,7 @@ fn run_artifacts_keeps_legacy_http_clients_exhaustive_and_pages_explicit_request
 #[test]
 fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let mut run = sample_imported_running_run("agent-task", "homeboy", "homeboy-lab");
         run.id = "legacy-ownerless-run".to_string();
@@ -2283,7 +2262,7 @@ fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
 #[test]
 fn artifact_content_serves_encoded_artifact_store_locator() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio"))
@@ -2344,7 +2323,7 @@ fn artifact_content_serves_encoded_artifact_store_locator() {
 #[test]
 fn artifact_content_serves_percent_encoded_stored_artifact_ids() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio"))

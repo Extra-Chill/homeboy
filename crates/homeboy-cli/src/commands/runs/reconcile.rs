@@ -520,25 +520,6 @@ mod tests {
     use homeboy::core::observation::{NewRunRecord, RunRecord};
     use homeboy::test_support::with_isolated_home;
 
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
         NewRunRecord::builder(kind)
             .component_id(component_id)
@@ -588,7 +569,7 @@ mod tests {
     #[test]
     fn reconcile_marks_dead_owner_stale_and_preserves_artifacts() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
@@ -635,7 +616,7 @@ mod tests {
     #[test]
     fn reconcile_keeps_fresh_ownerless_running_records_running() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             store
                 .import_run(&ownerless_running_run(
@@ -670,7 +651,7 @@ mod tests {
     #[test]
     fn reconcile_keeps_a_recent_runner_backed_running_record_running() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             store
                 .import_run(&phantom_handoff_run("recent-handoff-run", minutes_ago(90)))
@@ -696,7 +677,7 @@ mod tests {
     #[test]
     fn authoritative_terminal_runner_job_outranks_live_daemon_owner() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let mut run = phantom_handoff_run("terminal-runner-job", minutes_ago(1));
             run.metadata_json = serde_json::json!({
@@ -744,7 +725,7 @@ mod tests {
     #[test]
     fn authoritative_active_runner_job_remains_running() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let mut run = phantom_handoff_run(
                 "active-runner-job",
@@ -774,7 +755,7 @@ mod tests {
     #[test]
     fn unavailable_runner_job_status_remains_fail_closed() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let mut run = phantom_handoff_run(
                 "unavailable-runner-job",
@@ -812,7 +793,7 @@ mod tests {
     #[test]
     fn reconcile_marks_a_runner_backed_running_record_stale_past_the_ceiling() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             store
                 .import_run(&phantom_handoff_run(
@@ -885,7 +866,7 @@ mod tests {
     #[test]
     fn targeted_reconcile_preserves_a_terminal_refresh() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
@@ -916,7 +897,7 @@ mod tests {
     #[test]
     fn reconcile_preserves_run_dir_child_metadata_when_parent_was_killed() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run_dir = home.path().join("homeboy-run-fixture");
             let children_dir = run_dir.join(run_dir::files::EXTENSION_CHILDREN_DIR);
@@ -973,7 +954,7 @@ mod tests {
     #[test]
     fn reconcile_dry_run_reports_without_mutating() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
@@ -1001,7 +982,7 @@ mod tests {
     #[test]
     fn reconcile_dry_run_leaves_unrelated_running_records_unchanged() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let selected = store
                 .start_run(sample_run(
@@ -1049,7 +1030,7 @@ mod tests {
     #[test]
     fn reconcile_apply_changes_only_selected_candidate_ids() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let selected = store
                 .start_run(sample_run(
@@ -1105,7 +1086,7 @@ mod tests {
     #[test]
     fn live_owned_child_run_remains_running_when_parent_reports_no_active_jobs() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(
