@@ -3223,8 +3223,6 @@ fn orphaned_child_run_job(runner_id: &str, run: RunSummary) -> ActiveRunnerJobSu
         lifecycle: None,
         durable_run_id: Some(run.id),
         stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
-        lifecycle_state: Some("recoverable_orphan".to_string()),
-        retryable: Some(true),
         active_child_count: None,
         active_cell_count: None,
     }

@@ -579,8 +579,6 @@ mod tests {
             lifecycle: None,
             durable_run_id: Some("bench-run-123".to_string()),
             stale_reason: None,
-            lifecycle_state: Some("active".to_string()),
-            retryable: Some(true),
             active_child_count: None,
             active_cell_count: None,
         };

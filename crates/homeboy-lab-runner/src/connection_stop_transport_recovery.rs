@@ -211,6 +211,7 @@ pub(crate) fn disconnect_with_session_in_roots(
         let authoritative_session = match reconcile_authoritative_idle_stale_generations(
             runner_id,
             &retained_generations,
+            &authoritative_status,
         ) {
             Ok(session) => session,
             Err(error) => {
@@ -327,6 +328,7 @@ fn probe_authoritative_daemon_status(runner_id: &str) -> Result<remote_daemon::R
 fn reconcile_authoritative_idle_stale_generations(
     runner_id: &str,
     generations: &[RunnerSession],
+    status: &remote_daemon::RemoteDaemonStatus,
 ) -> Result<Option<RunnerSession>> {
     let Some(persisted_leases) = eligible_stale_generation_leases(generations) else {
         return Ok(None);
@@ -334,22 +336,24 @@ fn reconcile_authoritative_idle_stale_generations(
     if persisted_leases.is_empty() {
         return Ok(None);
     }
-    let status = probe_authoritative_daemon_status(runner_id)?;
     let Some(lease_id) =
-        remote_daemon::authoritative_idle_lease_for_stale_generations(&status, &persisted_leases)
+        remote_daemon::authoritative_idle_lease_for_stale_generations(status, &persisted_leases)
             .map_err(|error| {
-            Error::validation_invalid_argument(
-                "disconnect",
-                format!("{error}; stale generations were retained"),
-                Some(runner_id.to_string()),
-                None,
-            )
-        })?
+                Error::validation_invalid_argument(
+                    "disconnect",
+                    format!("{error}; stale generations were retained"),
+                    Some(runner_id.to_string()),
+                    None,
+                )
+            })?
     else {
         return Ok(None);
     };
-    let daemon = status.daemon.expect("authoritative lease requires daemon");
-    Ok(rebind_idle_generation_owner(generations, &daemon, lease_id))
+    let daemon = status
+        .daemon
+        .as_ref()
+        .expect("authoritative lease requires daemon");
+    Ok(rebind_idle_generation_owner(generations, daemon, lease_id))
 }
 
 pub(in crate::connection) fn rebind_idle_generation_owner(
@@ -917,6 +921,33 @@ mod tests {
             .expect("same snapshot accepts a stale persisted lease"),
             Some("lease-live".to_string())
         );
+    }
+
+    #[test]
+    fn stale_generation_reconcile_uses_the_same_idle_observation_as_rotation() {
+        let stale = direct_ssh_session("lease-stale");
+        let mut idle = remote_daemon_status(true, 0, "lease-live", 4242, None);
+        idle.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle;
+
+        let rebound =
+            reconcile_authoritative_idle_stale_generations("homeboy-lab", &[stale], &idle)
+                .expect("the idle observation reconciles stale ownership")
+                .expect("a different live lease is rebound");
+        assert_eq!(
+            rebound.remote_daemon_lease_id.as_deref(),
+            Some("lease-live")
+        );
+
+        let mut active = idle;
+        active.active_jobs = 1;
+        active.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::ActiveOrUnresolved(1);
+        let error = reconcile_authoritative_idle_stale_generations(
+            "homeboy-lab",
+            &[direct_ssh_session("lease-stale")],
+            &active,
+        )
+        .expect_err("active user work must still reject rotation");
+        assert!(error.message.contains("zero typed active jobs"));
     }
 
     #[test]

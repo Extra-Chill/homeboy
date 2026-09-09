@@ -213,8 +213,6 @@ fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSumm
         lifecycle: None,
         durable_run_id: None,
         stale_reason: None,
-        lifecycle_state: Some("active".to_string()),
-        retryable: Some(false),
         active_child_count: None,
         active_cell_count: None,
     }

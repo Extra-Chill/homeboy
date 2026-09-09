@@ -449,29 +449,27 @@ pub(crate) fn execute_upgrade(
     // false-negative `upgraded: false` / `new_version: null` on a successful
     // upgrade. Retry the read-back until it reports a verifiable version before
     // giving up. See issue #3463.
-    let (success, active_binary) = if let Some(selected_version) = selected_binary_version {
-        let destination = binary_destination
-            .as_deref()
-            .expect("release upgrades capture a PATH destination");
-        verify_binary_upgrade_with_retry(
-            destination,
-            selected_version,
-            VERIFY_READBACK_ATTEMPTS,
-            VERIFY_READBACK_DELAY,
-            std::thread::sleep,
-        )
-    } else {
-        verify_upgrade_with_retry(
-            method,
-            force,
-            current_version(),
-            previous_build_identity,
-            VERIFY_READBACK_ATTEMPTS,
-            VERIFY_READBACK_DELAY,
-            || active_binary_info().ok().flatten(),
-            std::thread::sleep,
-        )
-    };
+    let (success, active_binary, binary_destination) =
+        if let Some(selected_version) = selected_binary_version {
+            verify_binary_upgrade_with_retry(
+                selected_version,
+                VERIFY_READBACK_ATTEMPTS,
+                VERIFY_READBACK_DELAY,
+                std::thread::sleep,
+            )
+        } else {
+            let (success, active_binary) = verify_upgrade_with_retry(
+                method,
+                force,
+                current_version(),
+                previous_build_identity,
+                VERIFY_READBACK_ATTEMPTS,
+                VERIFY_READBACK_DELAY,
+                || active_binary_info().ok().flatten(),
+                std::thread::sleep,
+            );
+            (success, active_binary, None)
+        };
 
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
     let new_build_identity = active_binary
@@ -1661,22 +1659,51 @@ where
 }
 
 fn verify_binary_upgrade_with_retry<S>(
-    destination: &Path,
     selected_version: &str,
     attempts: u32,
     delay: Duration,
     sleep: S,
-) -> (bool, Option<ActiveBinaryInfo>)
+) -> (bool, Option<ActiveBinaryInfo>, Option<PathBuf>)
 where
     S: FnMut(Duration),
 {
-    verify_binary_upgrade_with_retry_reader(
+    verify_binary_upgrade_with_retry_at(
         selected_version,
         attempts,
         delay,
-        || active_binary_info_at(destination).ok().flatten(),
+        || active_binary_path().ok(),
         sleep,
     )
+}
+
+/// Resolve the executable after promotion rather than retaining a pre-install
+/// launcher path: installers may replace a symlink or retire a launcher while
+/// preserving a PATH-visible installed binary elsewhere.
+fn verify_binary_upgrade_with_retry_at<R, S>(
+    selected_version: &str,
+    attempts: u32,
+    delay: Duration,
+    mut resolve_destination: R,
+    sleep: S,
+) -> (bool, Option<ActiveBinaryInfo>, Option<PathBuf>)
+where
+    R: FnMut() -> Option<PathBuf>,
+    S: FnMut(Duration),
+{
+    let mut destination = None;
+    let (success, active) = verify_binary_upgrade_with_retry_reader(
+        selected_version,
+        attempts,
+        delay,
+        || {
+            let path = resolve_destination()?;
+            let info = active_binary_info_at(&path).ok().flatten();
+            destination = Some(path);
+            info
+        },
+        sleep,
+    );
+    (success, active, destination)
 }
 
 fn verify_binary_upgrade_with_retry_reader<R, S>(

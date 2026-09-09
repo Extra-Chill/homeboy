@@ -2899,20 +2899,26 @@ fn capture_declared_base_with_git_and_timeout(
             )
         })?
         .to_string();
-    let fetch = run_declared_base_git(
+    let fetch = homeboy_core::git::with_remote_tracking_authority(
         worktree_path,
-        git,
-        &[
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &sha,
-        ],
-        environment,
-        base_ref,
-        "fetch",
-        timeout,
+        "fetch declared promotion base",
+        || {
+            run_declared_base_git(
+                worktree_path,
+                git,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    &sha,
+                ],
+                environment,
+                base_ref,
+                "fetch",
+                timeout,
+            )
+        },
     )?;
     if !fetch.status.success() {
         return Err(declared_base_git_failure(

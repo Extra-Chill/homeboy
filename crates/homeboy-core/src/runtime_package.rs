@@ -1,3 +1,4 @@
+use crate::extension::root_manifest::{ExtensionRootManifest, SharedAssetDeclaration};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -34,27 +35,6 @@ pub struct RuntimePackageRefreshResult {
     pub manifest_path: PathBuf,
     pub source_revision: Option<String>,
     pub replaced_existing: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct RootManifest {
-    #[serde(default)]
-    shared_assets: Vec<SharedAssetDeclaration>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum SharedAssetDeclaration {
-    Path(String),
-    Object { path: String },
-}
-
-impl SharedAssetDeclaration {
-    fn path(self) -> String {
-        match self {
-            Self::Path(path) | Self::Object { path } => path,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -454,7 +434,7 @@ fn materialize_declared_assets(root: &Path, stage: &Path, runtime_id: &str) -> R
     let Ok(raw) = fs::read_to_string(&manifest) else {
         return Ok(Vec::new());
     };
-    let parsed: RootManifest = serde_json::from_str(&raw).map_err(|error| {
+    let parsed: ExtensionRootManifest = serde_json::from_str(&raw).map_err(|error| {
         Error::validation_invalid_argument(
             "source",
             format!("invalid shared asset manifest: {error}"),
@@ -497,7 +477,7 @@ fn materialize_declared_assets(root: &Path, stage: &Path, runtime_id: &str) -> R
 fn materialize_all_declared_runtime_assets(root: &Path, stage: &Path) -> Result<()> {
     let manifest = root.join(ROOT_MANIFEST);
     let raw = fs::read_to_string(&manifest).map_err(io("read linked runtime asset manifest"))?;
-    let parsed: RootManifest = serde_json::from_str(&raw).map_err(|error| {
+    let parsed: ExtensionRootManifest = serde_json::from_str(&raw).map_err(|error| {
         Error::validation_invalid_argument(
             "source",
             format!("invalid shared asset manifest: {error}"),
@@ -1093,7 +1073,7 @@ mod tests {
                 staged_source.path().join(ROOT_MANIFEST),
             )
             .unwrap();
-            let manifest: RootManifest =
+            let manifest: ExtensionRootManifest =
                 serde_json::from_slice(&fs::read(source.join(ROOT_MANIFEST)).unwrap()).unwrap();
             for asset in manifest.shared_assets {
                 let asset = asset.path();

@@ -198,6 +198,15 @@ Homeboy projects that terminal non-success result instead of claiming the remote
 command continues. Unset `cancel_on_wait_timeout` cancels agent-task workloads
 and leaves other workloads in flight; set it explicitly to override that default.
 
+## Runner execution record identity
+
+`homeboy/runner-execution-record/v1` uses `mirror_run_id` as its sole durable
+Homeboy observation/run identity. Newly written records omit `remote_run_id`.
+Readers accept historical records containing only `remote_run_id` or both keys,
+normalize the former into `mirror_run_id`, and prefer `mirror_run_id` when the
+two values differ. This does not change provider-facing remote run IDs or
+control-plane location IDs, which have separate semantics.
+
 ## Detached handoff evidence
 
 Detached Lab offload handoffs return a `homeboy/runner-exec-handoff/v1`

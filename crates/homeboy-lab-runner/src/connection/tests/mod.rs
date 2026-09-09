@@ -706,8 +706,6 @@ pub(super) fn sample_active_job(
         lifecycle: None,
         durable_run_id: durable_run_id.map(str::to_string),
         stale_reason: None,
-        lifecycle_state: Some("running".to_string()),
-        retryable: Some(false),
         active_child_count: None,
         active_cell_count: None,
     }
