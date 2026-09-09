@@ -28,6 +28,100 @@ fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
     );
 }
 
+fn compact_daemon_status(
+    fresh: bool,
+    active_jobs: usize,
+    build_identity: Option<&str>,
+) -> RemoteDaemonStatus {
+    let mut daemon = serde_json::json!({
+        "lease_id": "lease-live",
+        "pid": 4646,
+        "address": "127.0.0.1:49152",
+        "active_version": "0.367.13",
+    });
+    if let Some(build_identity) = build_identity {
+        daemon["active_build"] = serde_json::Value::String(build_identity.to_string());
+    }
+    let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
+        "running": true,
+        "fresh": fresh,
+        "reachable": true,
+        "freshness": {
+            "active_jobs": active_jobs,
+            "stale_reason_code": fresh.then_some(serde_json::Value::Null).unwrap_or(serde_json::json!("version_mismatch")),
+        },
+        "daemon": daemon,
+    }));
+    assert_eq!(
+        status.daemon.as_ref().and_then(|daemon| daemon.pid),
+        Some(4646)
+    );
+    assert_eq!(
+        status
+            .daemon
+            .as_ref()
+            .and_then(|daemon| daemon.lease_id.as_deref()),
+        Some("lease-live")
+    );
+    status
+}
+
+#[test]
+fn compact_live_lease_replaces_an_idle_stale_daemon_instead_of_starting_a_second_one() {
+    let session = direct_ssh_session("lease-recorded");
+    let mut status = compact_daemon_status(false, 0, Some("homeboy 0.367.13+stale"));
+    status.work_evidence = RemoteDaemonWorkEvidence::idle();
+
+    assert_eq!(
+        remote_daemon::remote_daemon_connect_action_for_runner(
+            Some(&session),
+            &status,
+            "homeboy 0.370.1+configured",
+            "runner-a",
+            None,
+        )
+        .expect("idle live lease has a bounded replacement path"),
+        RemoteDaemonConnectAction::ReplaceIdleStale
+    );
+}
+
+#[test]
+fn compact_live_lease_with_active_jobs_refuses_replacement_when_session_is_stale() {
+    let session = direct_ssh_session("lease-recorded");
+    let mut status = compact_daemon_status(false, 1, Some("homeboy 0.367.13+stale"));
+    status.work_evidence = RemoteDaemonWorkEvidence::ActiveOrUnresolved(1);
+
+    let error = remote_daemon::remote_daemon_connect_action_for_runner(
+        Some(&session),
+        &status,
+        "homeboy 0.370.1+configured",
+        "runner-a",
+        None,
+    )
+    .expect_err("active work cannot be replaced through a stale session");
+
+    assert!(error.contains("lease-live"));
+    assert!(error.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+}
+
+#[test]
+fn compact_live_lease_without_binary_identity_remains_unadoptable() {
+    let session = direct_ssh_session("lease-recorded");
+    let status = compact_daemon_status(true, 0, None);
+
+    let error = remote_daemon::remote_daemon_connect_action_for_runner(
+        Some(&session),
+        &status,
+        "homeboy 0.370.1+configured",
+        "runner-a",
+        None,
+    )
+    .expect_err("an unknown live binary cannot be adopted from a stale session");
+
+    assert!(error.contains("lease-live"));
+    assert!(error.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+}
+
 #[test]
 fn active_generation_fence_allows_reattach_but_rejects_new_admission() {
     let fence = crate::generation_store::AdmissionFence {
@@ -1510,17 +1604,12 @@ fn parses_remote_daemon_status_lease_as_single_source_of_truth() {
     )
     .expect("parse envelope");
     let data = envelope.data.expect("status data");
-    let state = data.get("state").expect("lease state");
+    let status = remote_daemon::remote_daemon_status_from_data(&data);
+    let daemon = status.daemon.expect("lease state");
 
-    assert!(data.get("running").and_then(Value::as_bool).unwrap());
-    assert_eq!(
-        state.get("lease_id").and_then(Value::as_str),
-        Some("lease-1")
-    );
-    assert_eq!(
-        state.get("address").and_then(Value::as_str),
-        Some("127.0.0.1:49152")
-    );
+    assert_eq!(daemon.lease_id.as_deref(), Some("lease-1"));
+    assert_eq!(daemon.address, "127.0.0.1:49152");
+    assert_eq!(daemon.pid, Some(123));
 }
 
 #[test]
