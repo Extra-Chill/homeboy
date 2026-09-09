@@ -10,6 +10,7 @@ mod claim;
 mod discovery;
 pub mod env_materialization_plan;
 mod execution_context;
+mod heartbeat;
 mod lifecycle;
 pub mod path_materialization;
 mod resource;
@@ -49,6 +50,10 @@ pub use execution_context::{
     RunnerJobExecutionVerification, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
     RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
     RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA, RUNNER_PLACEMENT_RESOLVED_ENV,
+};
+pub use heartbeat::{
+    RunnerApiHeartbeatOutcome, RunnerApiHeartbeatRequest, RunnerApiHeartbeatResponse,
+    RUNNER_API_HEARTBEAT_REQUEST_SCHEMA, RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA,
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
