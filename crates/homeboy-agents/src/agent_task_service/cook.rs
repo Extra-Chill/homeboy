@@ -666,6 +666,53 @@ fn report_cook_progress_with_activity(
     Ok(())
 }
 
+/// Run one controller startup phase while keeping its already-admitted Cook
+/// observable. Startup work can block on Git, filesystem capacity, or a shared
+/// base-capture lock, so it receives a bounded durable heartbeat before any
+/// provider execution starts.
+fn run_cook_startup_phase<T>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+    phase: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let started = Instant::now();
+    report_cook_progress(
+        lifecycle_store,
+        observer,
+        cook_id,
+        run_id,
+        phase,
+        1,
+        Some("starting; elapsed=0s"),
+    )?;
+    let (stop, wait) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || loop {
+            match wait.recv_timeout(COOK_HEARTBEAT_INTERVAL) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let detail = format!("still running; elapsed={}s", started.elapsed().as_secs());
+                    let _ = report_cook_progress(
+                        lifecycle_store,
+                        observer,
+                        cook_id,
+                        run_id,
+                        phase,
+                        1,
+                        Some(&detail),
+                    );
+                }
+            }
+        });
+        let result = operation();
+        let _ = stop.send(());
+        result
+    })
+}
+
 /// Durable operation key for finalizing one cook candidate. Keyed by the run id
 /// plus the promoted candidate fingerprint (patch SHA), so re-finalizing the
 /// same candidate is idempotent while a genuinely different candidate finalizes
@@ -5332,6 +5379,34 @@ fn run_cook_spine(
             Value::String(options.identity.initial_run_id.clone());
         error
     })?;
+    // Admission completed the recipe/lifecycle saga. Verify the exact record
+    // before publishing it, then make the handle visible before any local
+    // workspace, base, or capacity work can block the foreground client.
+    let materialized_run = lifecycle_store.read_record(&options.identity.initial_run_id)?;
+    if materialized_run.run_id != options.identity.initial_run_id {
+        return Err(Error::internal_unexpected(
+            "materialized Cook lifecycle record does not match its initial run id",
+        ));
+    }
+    report_cook_progress(
+        lifecycle_store,
+        durable_observer,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        "durable_identity",
+        1,
+        None,
+    )?;
+    let notify_component = cook_component(&options);
+    crate::agent_task_notify::cook_started(
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        &options.finalization.title,
+        notify_component.as_deref(),
+        &options.finalization.base,
+        options.retry_policy.max_attempts,
+        &options.ai_disclosure.ai_tool,
+    );
     // Reject a known-invalid managed workspace before base capture reaches its
     // remote. Detached first handoffs have no local source path and remain
     // eligible for runner-owned materialization below.
@@ -5340,11 +5415,20 @@ fn run_cook_spine(
         && (options.provider_transport.attempt_dispatcher.is_none()
             || options.workspace.source_worktree_path.is_some())
     {
-        let workspace_base = validate_cook_workspace_with_adopted_candidate(
-            &options,
-            verification_pending_continuation
-                || (options.workspace.source_worktree_path.is_some()
-                    && !cook_uses_explicit_cwd_workspace(&options)),
+        let workspace_base = run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &options.identity.cook_id,
+            &options.identity.initial_run_id,
+            "workspace_base_preflight",
+            || {
+                validate_cook_workspace_with_adopted_candidate(
+                    &options,
+                    verification_pending_continuation
+                        || (options.workspace.source_worktree_path.is_some()
+                            && !cook_uses_explicit_cwd_workspace(&options)),
+                )
+            },
         )
         .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
@@ -5359,13 +5443,26 @@ fn run_cook_spine(
     }
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.
-    pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
-        |error| {
-            let mut error = error;
-            error.details["cook_materialized_by_invocation"] = Value::Bool(true);
-            error
-        },
-    )?;
+    let has_startup_workspace = cook_startup_workspace(&options).is_some();
+    let cook_id = options.identity.cook_id.clone();
+    let run_id = options.identity.initial_run_id.clone();
+    let base_capture = if has_startup_workspace {
+        run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &cook_id,
+            &run_id,
+            "workspace_base_capture",
+            || pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options),
+        )
+    } else {
+        pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options)
+    };
+    base_capture.map_err(|error| {
+        let mut error = error;
+        error.details["cook_materialized_by_invocation"] = Value::Bool(true);
+        error
+    })?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -5377,11 +5474,20 @@ fn run_cook_spine(
         && (options.provider_transport.attempt_dispatcher.is_none()
             || options.workspace.source_worktree_path.is_some())
     {
-        let workspace_base = validate_cook_workspace_with_adopted_candidate(
-            &options,
-            verification_pending_continuation
-                || (options.workspace.source_worktree_path.is_some()
-                    && !cook_uses_explicit_cwd_workspace(&options)),
+        let workspace_base = run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &options.identity.cook_id,
+            &options.identity.initial_run_id,
+            "workspace_base_convergence",
+            || {
+                validate_cook_workspace_with_adopted_candidate(
+                    &options,
+                    verification_pending_continuation
+                        || (options.workspace.source_worktree_path.is_some()
+                            && !cook_uses_explicit_cwd_workspace(&options)),
+                )
+            },
         )
         .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
@@ -5412,21 +5518,17 @@ fn run_cook_spine(
     // controller scratch lease or detached workspace. This includes dependency
     // trees (for example node_modules and vendor), whose inode demand can be
     // decisive even when their byte footprint is small.
-    let _materialization_capacity = options
-        .workspace
-        .source_worktree_path
-        .as_deref()
-        .map(std::path::Path::new)
-        .or_else(|| {
-            options
-                .identity
-                .initial_plan
-                .tasks
-                .first()
-                .and_then(|task| task.workspace.root.as_deref())
-                .map(std::path::Path::new)
+    let _materialization_capacity = cook_startup_workspace(&options)
+        .map(|workspace| {
+            run_cook_startup_phase(
+                lifecycle_store,
+                durable_observer,
+                &options.identity.cook_id,
+                &options.identity.initial_run_id,
+                "workspace_capacity_reservation",
+                || reserve_cook_materialization_capacity(lifecycle_store, workspace),
+            )
         })
-        .map(|workspace| reserve_cook_materialization_capacity(lifecycle_store, workspace))
         .transpose()?;
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.identity.cook_id)?;
     if cook_workspace_lookup_pending(&options.identity.initial_plan) {
@@ -5539,34 +5641,6 @@ fn run_cook_spine(
         }
     }
     record_active_cook_worktree_warning(&options)?;
-    // Durable identity now exists and resolves through the Cook alias. Publish
-    // it before every remaining long controller phase — gate toolchain
-    // preflight, transport preparation, and Lab materialization — so a caller
-    // interrupted at any later point can still answer "what did I just start?"
-    // from the first identity-bearing bytes it received. `provider_ready` used
-    // to be the first identity-bearing observer event, which put the operator
-    // handle behind work that can outlive a client timeout (#10419, #9163).
-    report_cook_progress(
-        lifecycle_store,
-        durable_observer,
-        &options.identity.cook_id,
-        &options.identity.initial_run_id,
-        "durable_identity",
-        1,
-        None,
-    )?;
-    // The same boundary, delivered to the operator's destination: this is the
-    // first moment the cook can be watched, diagnosed, or cancelled by id.
-    let notify_component = cook_component(&options);
-    crate::agent_task_notify::cook_started(
-        &options.identity.cook_id,
-        &options.identity.initial_run_id,
-        &options.finalization.title,
-        notify_component.as_deref(),
-        &options.finalization.base,
-        options.retry_policy.max_attempts,
-        &options.ai_disclosure.ai_tool,
-    );
     if options.gates.has_npm_run_declaration() {
         let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
             .or_else(|| options.workspace.source_worktree_path.clone())
@@ -5671,15 +5745,6 @@ fn run_cook_spine(
             &latest_attempt.run_id,
             &plan,
         )?;
-    }
-    // The recipe alone is resumable input, not a status-addressable run. Publish
-    // the run identity only after initial materialization and a lifecycle read
-    // prove status/log recovery resolves for this exact attempt.
-    let materialized_run = lifecycle_store.read_record(&options.identity.initial_run_id)?;
-    if materialized_run.run_id != options.identity.initial_run_id {
-        return Err(Error::internal_unexpected(
-            "materialized Cook lifecycle record does not match its initial run id",
-        ));
     }
     report_cook_progress(
         lifecycle_store,
@@ -7668,14 +7733,24 @@ fn pin_initial_cook_workspace_base(options: &mut CookRequest) -> Result<()> {
     if options.workspace.task_base_sha.is_some() {
         return Ok(());
     }
-    let workspace = options
+    let workspace = cook_startup_workspace(options);
+    let Some(workspace) = workspace.map(Path::to_path_buf) else {
+        return Ok(());
+    };
+    pin_cook_workspace_base_at(options, &workspace)
+}
+
+/// The local tree whose base and projected capacity Cook validates before it
+/// dispatches. A pending runner-owned workspace intentionally has no local path.
+fn cook_startup_workspace(options: &CookRequest) -> Option<&Path> {
+    options
         .workspace
         .source_worktree_path
         .as_deref()
         .or_else(|| {
-            std::path::Path::new(&options.workspace.to_worktree)
+            Path::new(&options.workspace.to_worktree)
                 .is_dir()
-                .then_some(std::path::Path::new(&options.workspace.to_worktree))
+                .then_some(Path::new(&options.workspace.to_worktree))
         })
         .or_else(|| {
             options
@@ -7684,12 +7759,8 @@ fn pin_initial_cook_workspace_base(options: &mut CookRequest) -> Result<()> {
                 .tasks
                 .first()
                 .and_then(|task| task.workspace.root.as_deref())
-                .map(std::path::Path::new)
-        });
-    let Some(workspace) = workspace.map(Path::to_path_buf) else {
-        return Ok(());
-    };
-    pin_cook_workspace_base_at(options, &workspace)
+                .map(Path::new)
+        })
 }
 
 fn pin_and_persist_initial_cook_workspace_base(
