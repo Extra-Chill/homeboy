@@ -132,10 +132,11 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn resolve_base(&mut self, path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
         let reference = format!("refs/homeboy/finalization/base/{base}");
-        let output = homeboy_core::git::with_remote_tracking_authority(
+        let output = homeboy_core::git::with_remote_tracking_authority_until(
             Path::new(path),
             "fetch requested finalization base",
-            || {
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            |_| {
                 std::process::Command::new("git")
                     .args([
                         "fetch",
@@ -188,10 +189,11 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             ],
         )
         .or_else(|_| {
-            let fetch = homeboy_core::git::with_remote_tracking_authority(
+            let fetch = homeboy_core::git::with_remote_tracking_authority_until(
                 Path::new(path),
                 "materialize verified finalization base",
-                || {
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+                |_| {
                     std::process::Command::new("git")
                         .args([
                             "fetch",
@@ -775,10 +777,11 @@ fn remote_head_is_ancestor_of_candidate(path: &str, remote_head: &str, local_hea
     // Best-effort: bring the remote-only commit into the local object database
     // so ancestry can be evaluated. Ignore failure; the ancestry check below
     // fails closed when the object is unavailable.
-    let _ = homeboy_core::git::with_remote_tracking_authority(
+    let _ = homeboy_core::git::with_remote_tracking_authority_until(
         Path::new(path),
         "materialize finalization remote head",
-        || {
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        |_| {
             std::process::Command::new("git")
                 .args(["fetch", "--no-tags", "origin", remote_head])
                 .current_dir(path)

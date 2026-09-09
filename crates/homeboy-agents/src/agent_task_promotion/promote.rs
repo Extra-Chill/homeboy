@@ -2899,10 +2899,11 @@ fn capture_declared_base_with_git_and_timeout(
             )
         })?
         .to_string();
-    let fetch = homeboy_core::git::with_remote_tracking_authority(
+    let fetch = homeboy_core::git::with_remote_tracking_authority_until(
         worktree_path,
         "fetch declared promotion base",
-        || {
+        std::time::Instant::now() + timeout,
+        |_| {
             run_declared_base_git(
                 worktree_path,
                 git,

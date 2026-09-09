@@ -2710,10 +2710,11 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
             )
         })?
         .to_string();
-    let fetched = homeboy_core::git::with_remote_tracking_authority(
+    let fetched = homeboy_core::git::with_remote_tracking_authority_until(
         Path::new(path),
         "materialize refreshed destination base",
-        || {
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        |_| {
             std::process::Command::new("git")
                 .args([
                     "fetch",

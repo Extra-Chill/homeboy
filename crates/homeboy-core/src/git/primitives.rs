@@ -6,6 +6,7 @@ use crate::engine::command;
 use crate::error::{Error, GitCommandFailedDetails, Result};
 
 use super::primitives_query::current_branch;
+use super::with_remote_tracking_authority_until;
 
 fn git_command_display(args: &[&str]) -> String {
     if args.is_empty() {
@@ -240,6 +241,21 @@ pub fn run_git_with_env_timeout(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Fetch remote refs while serializing the shared remote-tracking namespace of
+/// linked worktrees. Waiting and Git execution consume one caller-owned budget.
+pub fn fetch_remote_tracking_refs_until(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+    deadline: Instant,
+) -> Result<String> {
+    debug_assert_eq!(args.first(), Some(&"fetch"));
+    with_remote_tracking_authority_until(git_root, context, deadline, |remaining| {
+        run_git_with_env_timeout(git_root, args, context, env, remaining)
+    })
+}
+
 /// Run a git command in a repository and return raw output without treating
 /// non-zero exit status as an error.
 pub fn run_git_output(
@@ -380,10 +396,12 @@ pub fn default_branch_name(path: &Path) -> Option<String> {
 pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
     let remote = resolve_default_remote(git_root);
     let old_branch = current_branch(git_root);
-    run_git(
+    fetch_remote_tracking_refs_until(
         git_root,
         &["fetch", &remote],
         &format!("git fetch {remote}"),
+        &[],
+        Instant::now() + Duration::from_secs(30),
     )?;
     let mut detached_default_branch: Option<String> = None;
 

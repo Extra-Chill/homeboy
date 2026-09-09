@@ -113,10 +113,12 @@ pub fn pr_reconcile_mergeability(
 }
 
 fn fetch_ref_sha(repo_path: &Path, remote_ref: &str) -> Result<String> {
-    run_git(
+    super::super::fetch_remote_tracking_refs_until(
         repo_path,
         &["fetch", "--quiet", "origin", remote_ref],
         "git fetch",
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
     )?;
     Ok(
         run_git(repo_path, &["rev-parse", "FETCH_HEAD"], "git rev-parse")?
