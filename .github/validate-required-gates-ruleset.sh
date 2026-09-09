@@ -33,7 +33,37 @@ else
 fi
 
 project_contract() {
-  jq -cS '{name, target, enforcement, bypass_actors: (.bypass_actors // []), conditions, rules}'
+  jq -cS '
+    {
+      name,
+      target,
+      enforcement,
+      bypass_actors: [(.bypass_actors // [])[] | {actor_id, actor_type, bypass_mode}] | sort_by(.actor_id, .actor_type, .bypass_mode),
+      conditions: {
+        ref_name: {
+          include: (.conditions.ref_name.include // [] | sort),
+          exclude: (.conditions.ref_name.exclude // [] | sort)
+        }
+      },
+      rules: [
+        .rules[] |
+        if .type == "required_status_checks" then
+          {
+            type,
+            parameters: {
+              do_not_enforce_on_create: .parameters.do_not_enforce_on_create,
+              strict_required_status_checks_policy: .parameters.strict_required_status_checks_policy,
+              required_status_checks: [
+                .parameters.required_status_checks[]? | {context, integration_id}
+              ] | sort_by(.context, .integration_id)
+            }
+          }
+        else
+          {type}
+        end
+      ] | sort_by(.type)
+    }
+  '
 }
 
 expected_contract="$(project_contract < "${config}")"

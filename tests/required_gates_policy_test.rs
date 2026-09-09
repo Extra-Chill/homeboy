@@ -62,6 +62,10 @@ fn terminal_job_checks_out_the_pr_head_before_running_its_script() {
         .split("  required-gates-executed:")
         .nth(1)
         .expect("terminal job");
+    assert!(
+        terminal_job.contains("needs: [rustfmt, lint, homeboy]"),
+        "the terminal job must depend only on the gates it evaluates"
+    );
     let checkout = terminal_job
         .find("- uses: actions/checkout@v6")
         .expect("terminal job checkout");
@@ -72,6 +76,28 @@ fn terminal_job_checks_out_the_pr_head_before_running_its_script() {
         checkout < script,
         "the repository script must be checked out first"
     );
+}
+
+#[test]
+fn live_ruleset_validation_ignores_status_check_order_and_response_metadata() {
+    let live = divergent_live_ruleset(|ruleset| {
+        ruleset["node_id"] = serde_json::json!("RRS_kwDOExample");
+        ruleset["updated_at"] = serde_json::json!("2026-09-09T13:00:00Z");
+        let checks = ruleset["rules"][2]["parameters"]["required_status_checks"]
+            .as_array_mut()
+            .expect("required status checks");
+        checks.reverse();
+        checks[0]["url"] = serde_json::json!("https://api.github.com/checks/1");
+        checks[0]["node_id"] = serde_json::json!("RSC_kwDOExample");
+    });
+
+    let output = run_validator(&live);
+    assert!(
+        output.status.success(),
+        "reordered checks and GitHub response metadata must not cause divergence: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("outcome=enforced"));
 }
 
 #[test]
