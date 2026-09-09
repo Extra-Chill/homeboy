@@ -10,6 +10,7 @@ use super::{
 use crate::agent_task_scheduler::{
     AgentTaskPlan, AgentTaskScheduleSupport, ProviderRouteDiagnosticData, ProviderRouteEvidence,
 };
+use homeboy_core::Error;
 use serde_json::Value;
 
 /// One redacted, precedence-ordered answer to whether a provider can accept
@@ -883,6 +884,63 @@ pub(crate) fn evaluate_request_dispatchability(
         &credential_env,
         cache,
     )
+}
+
+/// Returns the runtime-readiness cache identity for a plan's first selected
+/// route, using the same route candidate and secret normalization as admission.
+pub fn provider_runtime_readiness_cache_identity_for_plan(
+    catalog: &AgentTaskProviderCatalog,
+    plan: &AgentTaskPlan,
+) -> homeboy_core::Result<String> {
+    let task = plan.tasks.first().ok_or_else(|| {
+        Error::internal_unexpected("provider readiness identity requires a provider task")
+    })?;
+    let (mut request, _) =
+        AgentTaskScheduleSupport::provider_route_candidates(task, plan.options.rotation.as_ref())
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                Error::internal_unexpected("provider readiness identity requires a route")
+            })?;
+    let provider = effective_provider_for_request(&request, catalog.providers())
+        .map_err(|reason| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                reason,
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                "no provider satisfies the effective route and required capabilities",
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?;
+    let base_secret_env = request
+        .metadata
+        .get("provider_admission")
+        .and_then(|value| value.get("base_secret_env"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+        .unwrap_or_else(|| request.executor.secret_env.clone());
+    super::secrets::apply_provider_runner_secret_env_contract_for_request(
+        &mut request,
+        &provider,
+        &base_secret_env,
+    );
+    let credential_env = super::secrets::provider_request_credential_env(&request, &provider)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                error.message,
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?;
+    let config = effective_provider_config(&request.executor.config, request.executor.model());
+    super::runtime_readiness::readiness_cache_identity(&provider, &config, &credential_env)
 }
 
 pub(crate) fn evaluate_request_dispatchability_with_credentials(

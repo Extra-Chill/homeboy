@@ -200,7 +200,7 @@ thread_local! {
 /// #10019 remains the owner of foreground execution progress.
 struct DryRunPlanner {
     phase: &'static str,
-    started_at: Instant,
+    deadline: Instant,
     phase_started_at: Instant,
     phase_timeout: Duration,
     replay_command: String,
@@ -211,7 +211,11 @@ impl DryRunPlanner {
     fn new(args: &AgentTaskFanoutCookBatchArgs, placement: Placement) -> Self {
         Self {
             phase: "initializing",
-            started_at: Instant::now(),
+            deadline: Instant::now()
+                + Duration::from_secs(
+                    args.dry_run_planner_timeout_seconds
+                        .unwrap_or(DRY_RUN_PHASE_TIMEOUT.as_secs()),
+                ),
             phase_started_at: Instant::now(),
             phase_timeout: Duration::from_secs(
                 args.dry_run_planner_timeout_seconds
@@ -251,19 +255,7 @@ impl DryRunPlanner {
         operation: impl FnOnce() -> Result<T> + Send + 'static,
     ) -> Result<T> {
         self.begin(phase);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let worker = std::thread::Builder::new()
-            .name(format!("homeboy-dry-run-{phase}"))
-            .spawn(move || {
-                let _ = sender.send(operation());
-            })
-            .map_err(|error| {
-                self.failure(
-                    Error::internal_unexpected(format!("start dry-run planner worker: {error}")),
-                    unresolved_dependency,
-                )
-            })?;
-        let Some(mut remaining) = self.phase_timeout.checked_sub(self.started_at.elapsed()) else {
+        let Some(mut remaining) = self.deadline.checked_duration_since(Instant::now()) else {
             let error = self.timeout_error(unresolved_dependency, self.phase_started_at.elapsed());
             self.record_progress("failed", Some(unresolved_dependency));
             return Err(error);
@@ -276,6 +268,18 @@ impl DryRunPlanner {
             self.record_progress("failed", Some(unresolved_dependency));
             return Err(error);
         }
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name(format!("homeboy-dry-run-{phase}"))
+            .spawn(move || {
+                let _ = sender.send(operation());
+            })
+            .map_err(|error| {
+                self.failure(
+                    Error::internal_unexpected(format!("start dry-run planner worker: {error}")),
+                    unresolved_dependency,
+                )
+            })?;
         let result = match receiver.recv_timeout(remaining) {
             Ok(result) => {
                 worker.join().map_err(|_| {
@@ -305,7 +309,7 @@ impl DryRunPlanner {
 
     fn finish(&mut self, unresolved_dependency: &'static str) -> Result<()> {
         let elapsed = self.phase_started_at.elapsed();
-        if self.started_at.elapsed() > self.phase_timeout
+        if Instant::now() > self.deadline
             || current_cook_deadline().is_some_and(|deadline| deadline.is_expired())
         {
             let error = self.timeout_error(unresolved_dependency, elapsed);
@@ -4110,23 +4114,20 @@ fn preview_provider_dispatchability_evidence(
             .ok_or_else(|| {
                 Error::internal_unexpected("compiled fanout cook has no provider task")
             })?;
-        // Equivalent routes have the same selected provider request. Admit the
-        // first one live, then project that provider-owned result to siblings.
-        let route_key = serde_json::to_string(&(
-            &static_task.executor.backend,
-            &static_task.executor.selector,
-            static_task.executor.model(),
-        ))
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        // The compiled Cook may contain controller follow-up tasks. This
+        // preview admission is for the selected provider route, not every
+        // future task in that Cook; admitting the full plan would probe the
+        // same route again before execution-side deduplication applies.
+        let mut route_plan = static_options.identity.initial_plan.clone();
+        route_plan.tasks.truncate(1);
+        // Share a verdict only when the selected provider would use the same
+        // runtime-readiness cache entry, including effective config and secret
+        // value identities.
+        let route_key =
+            provider::provider_runtime_readiness_cache_identity_for_plan(catalog, &route_plan)?;
         let admission = if let Some(admission) = admitted_routes.get(&route_key) {
             admission.clone()
         } else {
-            // The compiled Cook may contain controller follow-up tasks. This
-            // preview admission is for the selected provider route, not every
-            // future task in that Cook; admitting the full plan would probe the
-            // same route again before execution-side deduplication applies.
-            let mut route_plan = static_options.identity.initial_plan.clone();
-            route_plan.tasks.truncate(1);
             let admitted_plan = homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
                 &route_plan,
                 catalog,
@@ -6540,6 +6541,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use serde_json::json;
     use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn cook_batch_help_documents_the_complete_verification_profile_contract() {
@@ -10095,6 +10097,70 @@ fi
     }
 
     #[test]
+    fn preview_readiness_probes_children_with_distinct_provider_configurations() {
+        let root = tempfile::tempdir().expect("fixture directory");
+        let invoked = root.path().join("invoked");
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "configured-provider",
+                "backend": "configured",
+                "readiness_invocation": {
+                    "argv": [
+                        "sh",
+                        "-c",
+                        format!(
+                            "count=$(cat {0} 2>/dev/null || printf 0); printf '%s' \"$((count + 1))\" > {0}; cat >/dev/null; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"ready\",\"identity\":{{}}}}'",
+                            invoked.display()
+                        )
+                    ],
+                    "timeout_ms": 5_000
+                }
+            }))
+            .expect("provider fixture")],
+            ..AgentTaskProviderCatalog::default()
+        };
+        let mut invocation_args = args();
+        invocation_args.backend = Some("configured".to_string());
+        invocation_args.selector = None;
+        let plan = BatchCookFanoutPlan::from_value(
+            json!({
+                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                "fanout_id": "configured-preview",
+                "cooks": [{
+                    "cook_id": "first",
+                    "prompt": "fix the first issue",
+                    "to_worktree": "homeboy@configured-preview-first",
+                    "backend": "configured",
+                    "provider_config": "{\"account\":\"first\"}",
+                    "verify": ["true"]
+                }, {
+                    "cook_id": "second",
+                    "prompt": "fix the second issue",
+                    "to_worktree": "homeboy@configured-preview-second",
+                    "backend": "configured",
+                    "provider_config": "{\"account\":\"second\"}",
+                    "verify": ["true"]
+                }]
+            }),
+            &invocation_args,
+        )
+        .expect("fanout plan");
+
+        let evidence = preview_provider_dispatchability_evidence(
+            &plan,
+            &catalog,
+            &json!({"fanout_id": plan.fanout_id}),
+        )
+        .expect("each configured route is ready");
+
+        assert_eq!(evidence["children"].as_array().expect("children").len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(invoked).expect("readiness count"),
+            "2"
+        );
+    }
+
+    #[test]
     fn preview_readiness_deadline_terminates_the_provider_process() {
         let root = tempfile::tempdir().expect("fixture directory");
         let pid_file = root.path().join("pid");
@@ -10526,32 +10592,35 @@ fi
 
     #[test]
     fn dry_run_planner_uses_one_deadline_across_static_phases_and_marks_live_progress() {
-        let args = cook_batch_args();
-        let mut planner = DryRunPlanner::new(&args, Placement::Auto);
-        planner.phase_timeout = Duration::from_millis(30);
+        for _ in 0..10 {
+            let args = cook_batch_args();
+            let mut planner = DryRunPlanner::new(&args, Placement::Auto);
+            // Both phases consult this one absolute deadline before starting a worker.
+            planner.deadline = Instant::now() - Duration::from_secs(1);
+            let started = Arc::new(AtomicUsize::new(0));
 
-        planner
-            .run_bounded("repository", "registered primary repository", || {
-                std::thread::sleep(Duration::from_millis(20));
-                Ok(())
-            })
-            .expect("first phase fits the shared deadline");
-        let error = planner
-            .run_bounded(
-                "issues_and_gates",
-                "supplied issue URLs and gate declarations",
-                || {
-                    std::thread::sleep(Duration::from_millis(20));
-                    Ok(())
-                },
-            )
-            .expect_err("second phase receives only the remaining shared budget");
-
-        assert_eq!(error.details["reason"], "planner_deadline_exceeded");
-        assert_eq!(error.details["phase"], "issues_and_gates");
-        planner.begin("provider_readiness");
-        planner.record_live_progress("started", Some("provider-owned readiness admission"));
-        assert_eq!(planner.progress().last().expect("live event")["live"], true);
+            for (phase, dependency) in [
+                ("repository", "registered primary repository"),
+                (
+                    "issues_and_gates",
+                    "supplied issue URLs and gate declarations",
+                ),
+            ] {
+                let started = Arc::clone(&started);
+                let error = planner
+                    .run_bounded(phase, dependency, move || {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .expect_err("an expired shared deadline must prevent every static phase");
+                assert_eq!(error.details["reason"], "planner_deadline_exceeded");
+                assert_eq!(error.details["phase"], phase);
+            }
+            assert_eq!(started.load(Ordering::SeqCst), 0);
+            planner.begin("provider_readiness");
+            planner.record_live_progress("started", Some("provider-owned readiness admission"));
+            assert_eq!(planner.progress().last().expect("live event")["live"], true);
+        }
     }
 
     #[test]
