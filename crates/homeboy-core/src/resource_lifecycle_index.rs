@@ -1,3 +1,4 @@
+use crate::validation::validate_required_field;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -568,19 +569,6 @@ pub fn validate_resource_lifecycle_record(
         return Err(Error::validation_invalid_argument(
             format!("{prefix}.ttl"),
             "delete_after_ttl cleanup policy requires ttl",
-            None,
-            None,
-        ));
-    }
-
-    Ok(())
-}
-
-fn validate_required_field(field: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            field,
-            "must not be blank",
             None,
             None,
         ));
