@@ -18,7 +18,7 @@ use homeboy::core::scope::{self, Scope};
 use homeboy::runner::runners as runner;
 use homeboy_deploy::ReleaseStateStatus;
 use homeboy_engine_primitives::command::{
-    wait_with_bounded_output_supervised_with_progress, ControllerChildGuard,
+    wait_with_bounded_output_supervised_with_progress, CommandProgress, ControllerChildGuard,
     SupervisedCommandTermination,
 };
 use homeboy_release::release::version;
@@ -172,7 +172,21 @@ fn run_unisolated(
 
     if args.full {
         timer.begin("build_full_context");
-        let mut report = context::build_report(args.all, "status")?;
+        let mut report = context::build_report_with_progress(args.all, "status", |progress| {
+            if std::env::var_os("HOMEBOY_STATUS_PROBE_CHILD").is_some() {
+                let progress = CommandProgress {
+                    phase: progress.phase.to_string(),
+                    current: progress.current,
+                    completed: Some(progress.completed),
+                    total: Some(progress.total),
+                    unfinished: progress.unfinished,
+                    item_deadline_ms: progress.item_deadline_ms,
+                };
+                if let Ok(progress) = serde_json::to_string(&progress) {
+                    eprintln!("HOMEBOY_PROGRESS {progress}");
+                }
+            }
+        })?;
         timer.finish("build_full_context");
         report.command = "status".to_string();
         return Ok((StatusResult::Full(Box::new(report)), 0));
@@ -276,6 +290,7 @@ fn run_isolated_probe(
         .global
         .then_some(remaining.min(GLOBAL_STATUS_PROBE_BUDGET))
         .unwrap_or(remaining);
+    let mut latest_progress = None;
     let supervised = wait_with_bounded_output_supervised_with_progress(
         &mut child,
         STATUS_PROBE_CAPTURE_LIMIT,
@@ -285,7 +300,28 @@ fn run_isolated_probe(
         || false,
         |heartbeat| {
             if let Some(progress) = heartbeat.progress {
-                eprintln!("[status] {PHASE}: {}", progress.phase);
+                latest_progress = Some(progress.clone());
+                let counts = progress
+                    .total
+                    .map(|total| format!(" {}/{}", progress.completed.unwrap_or_default(), total))
+                    .unwrap_or_default();
+                let current = progress
+                    .current
+                    .as_deref()
+                    .map(|current| format!(" {current}"))
+                    .unwrap_or_default();
+                let deadline = progress
+                    .item_deadline_ms
+                    .map(|deadline| format!(" deadline={deadline}ms"))
+                    .unwrap_or_default();
+                eprintln!(
+                    "[status] {PHASE}: {}{}{} ({}ms){}",
+                    progress.phase,
+                    current,
+                    counts,
+                    heartbeat.elapsed.as_millis(),
+                    deadline,
+                );
             } else {
                 eprintln!(
                     "[status] {PHASE}: waiting ({}ms)",
@@ -304,11 +340,21 @@ fn run_isolated_probe(
                 controller,
                 partial: StatusPartial {
                     reason,
-                    phase: PHASE,
-                    omitted_components: Vec::new(),
+                    phase: status_probe_partial_phase(latest_progress.as_ref()),
+                    omitted_components: latest_progress
+                        .as_ref()
+                        .map(|progress| progress.unfinished.clone())
+                        .unwrap_or_default(),
                     degraded_components: Vec::new(),
                     degraded_component_phases: Vec::new(),
-                    replay_commands: status_probe_replay_commands(args),
+                    unfinished_probes: latest_progress
+                        .as_ref()
+                        .map(|progress| progress.unfinished.clone())
+                        .unwrap_or_default(),
+                    current_probe: latest_progress
+                        .as_ref()
+                        .and_then(|progress| progress.current.clone()),
+                    replay_commands: status_probe_replay_commands(args, latest_progress.as_ref()),
                 },
                 diagnostic,
             }),
@@ -384,7 +430,10 @@ fn status_probe_replay(args: &StatusArgs) -> String {
     status_probe_argv(args).join(" ")
 }
 
-fn status_probe_replay_commands(args: &StatusArgs) -> Vec<String> {
+fn status_probe_replay_commands(
+    args: &StatusArgs,
+    progress: Option<&CommandProgress>,
+) -> Vec<String> {
     if args.global {
         return vec![
             "homeboy daemon status".to_string(),
@@ -395,7 +444,35 @@ fn status_probe_replay_commands(args: &StatusArgs) -> Vec<String> {
         ];
     }
 
+    let unfinished = progress
+        .map(|progress| progress.unfinished.as_slice())
+        .unwrap_or_default();
+    if !unfinished.is_empty() {
+        return unfinished
+            .iter()
+            .map(|component_id| format!("homeboy status --component {component_id} --timings"))
+            .collect();
+    }
+    if let Some(progress) = progress {
+        return match progress.phase.as_str() {
+            "resolve_context_target" => vec![
+                "homeboy status --global".to_string(),
+                "homeboy component list".to_string(),
+            ],
+            "build_component_inventory" => vec!["homeboy component list".to_string()],
+            _ => vec![status_probe_replay(args)],
+        };
+    }
     vec![status_probe_replay(args)]
+}
+
+fn status_probe_partial_phase(progress: Option<&CommandProgress>) -> &'static str {
+    match progress.map(|progress| progress.phase.as_str()) {
+        Some("resolve_context_target") => "resolve_context_target",
+        Some("build_component_inventory") => "build_component_inventory",
+        Some("calculate_release_state") => "calculate_release_state",
+        _ => "probe_context_inventory_scope",
+    }
 }
 
 /// Entry point used only by the private same-binary child protocol.
@@ -698,6 +775,8 @@ fn summarize_components(
                 reason: "component_git_probe_degraded",
                 phase: "component_git_probe",
                 omitted_components: Vec::new(),
+                unfinished_probes: Vec::new(),
+                current_probe: None,
                 replay_commands: replay_component_commands(&git_cache.degraded_components, args),
                 degraded_components: sorted_component_ids(git_cache.degraded_components),
                 degraded_component_phases: sorted_degraded_component_phases(
@@ -840,6 +919,8 @@ fn partial_status(
                 degraded_component_phases: sorted_degraded_component_phases(
                     degraded_component_phases,
                 ),
+                unfinished_probes: Vec::new(),
+                current_probe: None,
                 replay_commands,
             }),
             controller,
@@ -981,6 +1062,8 @@ fn run_project_dashboard(
                         .collect(),
                     degraded_components: Vec::new(),
                     degraded_component_phases: Vec::new(),
+                    unfinished_probes: Vec::new(),
+                    current_probe: None,
                     replay_commands: vec![format!(
                         "homeboy status {project_id}{}",
                         replay_status_flags(args)
@@ -1206,6 +1289,8 @@ fn run_project_dashboard(
                     git_cache.degraded_component_phases,
                     &remote_diagnostics,
                 ),
+                unfinished_probes: Vec::new(),
+                current_probe: None,
                 replay_commands: vec![format!(
                     "homeboy status {project_id}{}",
                     replay_status_flags(args)
@@ -1500,7 +1585,7 @@ mod tests {
 
         assert_eq!(status_probe_argv(&args), ["homeboy", "status", "--global"]);
         assert_eq!(
-            status_probe_replay_commands(&args),
+            status_probe_replay_commands(&args, None),
             [
                 "homeboy daemon status",
                 "homeboy runner status --full",
@@ -1508,6 +1593,71 @@ mod tests {
                 "homeboy runs list --limit 100",
                 "homeboy component list",
             ]
+        );
+    }
+
+    #[test]
+    fn timed_out_full_probe_replays_only_unfinished_components() {
+        let args = parse_status(&["homeboy", "status", "--full"]);
+        let progress = CommandProgress {
+            phase: "calculate_release_state".to_string(),
+            current: Some("slow-component".to_string()),
+            completed: Some(2),
+            total: Some(4),
+            unfinished: vec!["slow-component".to_string(), "queued-component".to_string()],
+            item_deadline_ms: Some(25_000),
+        };
+
+        assert_eq!(
+            status_probe_replay_commands(&args, Some(&progress)),
+            [
+                "homeboy status --component slow-component --timings",
+                "homeboy status --component queued-component --timings",
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_out_context_target_probe_names_provider_and_avoids_full_replay() {
+        let args = parse_status(&["homeboy", "status", "--full"]);
+        let progress = CommandProgress {
+            phase: "resolve_context_target".to_string(),
+            current: Some("/workspace/blocked".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            status_probe_partial_phase(Some(&progress)),
+            "resolve_context_target"
+        );
+        assert_eq!(
+            status_probe_replay_commands(&args, Some(&progress)),
+            ["homeboy status --global", "homeboy component list"]
+        );
+    }
+
+    #[test]
+    fn status_partial_serializes_exact_unfinished_probe_diagnostics() {
+        let partial = StatusPartial {
+            reason: "status_probe_timeout",
+            phase: "probe_context_inventory_scope",
+            omitted_components: vec!["slow-component".to_string()],
+            degraded_components: Vec::new(),
+            degraded_component_phases: Vec::new(),
+            unfinished_probes: vec!["slow-component".to_string()],
+            current_probe: Some("slow-component".to_string()),
+            replay_commands: vec!["homeboy status --component slow-component --timings".to_string()],
+        };
+
+        let value = serde_json::to_value(partial).expect("serialize partial status");
+        assert_eq!(
+            value["unfinished_probes"],
+            serde_json::json!(["slow-component"])
+        );
+        assert_eq!(value["current_probe"], "slow-component");
+        assert_eq!(
+            value["replay_commands"],
+            serde_json::json!(["homeboy status --component slow-component --timings"])
         );
     }
 
