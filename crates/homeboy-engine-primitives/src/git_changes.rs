@@ -14,8 +14,11 @@
 
 use std::collections::BTreeSet;
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use homeboy_error::{Error, Result};
+
+use crate::git_remote_tracking_authority::with_remote_tracking_authority_until;
 
 /// Run a git subcommand in `path`, returning the raw process output.
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<Output> {
@@ -167,32 +170,38 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     }
 
     eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
+    with_remote_tracking_authority_until(
+        std::path::Path::new(path),
+        "deepen shallow clone",
+        Instant::now() + Duration::from_secs(30),
+        |_| {
+            // Fetch the ref itself if it's not already present.
+            let remote = resolve_default_remote(path);
+            let _ = execute_git(path, &["fetch", &remote, git_ref, "--depth=50"]);
 
-    // Fetch the ref itself if it's not already present.
-    let remote = resolve_default_remote(path);
-    let _ = execute_git(path, &["fetch", &remote, git_ref, "--depth=50"]);
+            // Progressive deepening: try increasingly generous depths.
+            for depth in &["50", "200"] {
+                let _ = execute_git(path, &["fetch", "--deepen", depth]);
+                if has_merge_base(path, git_ref) {
+                    eprintln!("Merge base found after deepening by {depth} commits");
+                    return Ok(());
+                }
+            }
 
-    // Progressive deepening: try increasingly generous depths.
-    for depth in &["50", "200"] {
-        let _ = execute_git(path, &["fetch", "--deepen", depth]);
-        if has_merge_base(path, git_ref) {
-            eprintln!("Merge base found after deepening by {depth} commits");
-            return Ok(());
-        }
-    }
+            // Last resort: full unshallow.
+            eprintln!("Merge base not found with depth 200, unshallowing repository");
+            let _ = execute_git(path, &["fetch", "--unshallow"]);
 
-    // Last resort: full unshallow.
-    eprintln!("Merge base not found with depth 200, unshallowing repository");
-    let _ = execute_git(path, &["fetch", "--unshallow"]);
-
-    if has_merge_base(path, git_ref) {
-        eprintln!("Merge base found after full unshallow");
-        Ok(())
-    } else {
-        Err(Error::git_command_failed(format!(
-            "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
-        )))
-    }
+            if has_merge_base(path, git_ref) {
+                eprintln!("Merge base found after full unshallow");
+                Ok(())
+            } else {
+                Err(Error::git_command_failed(format!(
+                    "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
+                )))
+            }
+        },
+    )
 }
 
 /// Parse newline-delimited `git diff --name-only` output into a file list.

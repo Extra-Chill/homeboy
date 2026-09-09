@@ -1001,6 +1001,7 @@ dependencies = [
 name = "homeboy-engine-primitives"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "homeboy-error",
  "homeboy-paths",
  "inventory",
