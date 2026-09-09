@@ -821,11 +821,15 @@ pub(crate) struct PreparedRunnerProcess {
     pub require_paths: Vec<String>,
 }
 
+/// The daemon's JSON response envelope.
+///
+/// Every daemon endpoint answers in this shape, so it is declared once here
+/// rather than restated per caller.
 #[derive(Debug, Deserialize)]
-pub(super) struct DaemonEnvelope {
-    pub(super) success: bool,
-    pub(super) data: Option<Value>,
-    pub(super) error: Option<Value>,
+pub(crate) struct DaemonEnvelope {
+    pub(crate) success: bool,
+    pub(crate) data: Option<Value>,
+    pub(crate) error: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
