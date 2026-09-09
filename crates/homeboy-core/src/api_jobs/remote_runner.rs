@@ -40,6 +40,19 @@ const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
 const MAX_CREDENTIAL_DELIVERY_BYTES: usize = 65_536;
 const CREDENTIAL_DELIVERY_TTL_MS: u64 = 60_000;
 
+fn controller_owned_secret_env_names(plan: &SecretEnvPlan) -> std::collections::BTreeSet<String> {
+    plan.env_materialization
+        .as_ref()
+        .map(|plan| {
+            plan.secret_refs
+                .iter()
+                .filter(|secret| secret.owner.as_deref() == Some("controller"))
+                .map(|secret| secret.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Plaintext is accepted only over the authenticated submission transport and
 /// retained in process memory until the matching live claim consumes it.
 #[derive(Clone)]
@@ -47,7 +60,9 @@ pub(super) struct EphemeralCredentialDelivery {
     id: String,
     env: std::collections::BTreeMap<String, String>,
     claim_id: Option<String>,
-    expires_at_ms: u64,
+    // Queued work has no delivery expiry. The short lifetime starts only once a
+    // live claim binds the value to its intended runner.
+    expires_at_ms: Option<u64>,
     consumed: bool,
 }
 
@@ -772,6 +787,7 @@ impl<'de> Deserialize<'de> for StoredRemoteRunnerJob {
 }
 
 struct RemoteRunnerAdmission {
+    job_id: Option<Uuid>,
     operation: String,
     runner_id: String,
     project_id: Option<String>,
@@ -1109,9 +1125,17 @@ impl JobStore {
                     Some("decode envelope path materialization plan".to_string()),
                 )
             })?;
+        let provisional_delivery = credential_delivery
+            .map(|delivery| {
+                let job_id = Uuid::new_v4();
+                self.attach_ephemeral_credential_delivery(job_id, delivery, &secret_env_plan)?;
+                Ok::<_, Error>(job_id)
+            })
+            .transpose()?;
         let now = timestamp_ms();
         let job = self.admit_remote_runner_job(
             RemoteRunnerAdmission {
+                job_id: provisional_delivery,
                 operation: dispatch.operation.clone(),
                 runner_id: dispatch.runner_id.clone(),
                 project_id: dispatch.project_id.clone(),
@@ -1132,11 +1156,17 @@ impl JobStore {
                 },
             },
             now,
-        )?;
-        if let Some(delivery) = credential_delivery {
-            self.attach_ephemeral_credential_delivery(job.id, delivery, &secret_env_plan)?;
+        );
+        if let Some(provisional_delivery) = provisional_delivery {
+            if job
+                .as_ref()
+                .map(|job| job.id != provisional_delivery)
+                .unwrap_or(true)
+            {
+                self.discard_ephemeral_credential_delivery(provisional_delivery);
+            }
         }
-        Ok(job)
+        job
     }
 
     fn attach_ephemeral_credential_delivery(
@@ -1156,7 +1186,7 @@ impl JobStore {
                 id: Uuid::new_v4().to_string(),
                 env: delivery.env,
                 claim_id: None,
-                expires_at_ms: timestamp_ms().saturating_add(CREDENTIAL_DELIVERY_TTL_MS),
+                expires_at_ms: None,
                 consumed: false,
             });
         Ok(())
@@ -1167,8 +1197,13 @@ impl JobStore {
         plan: &SecretEnvPlan,
     ) -> Result<()> {
         let names = plan.secret_env_names();
+        let controller_owned = controller_owned_secret_env_names(plan);
         if delivery.env.is_empty()
             || delivery.env.keys().any(|name| !names.contains(name))
+            || delivery
+                .env
+                .keys()
+                .any(|name| !controller_owned.contains(name))
             || delivery
                 .env
                 .iter()
@@ -1182,7 +1217,7 @@ impl JobStore {
         {
             return Err(Error::validation_invalid_argument(
                 "credential_delivery",
-                "credential delivery must contain only planned, bounded non-empty secret values",
+                "credential delivery must contain only controller-owned planned, bounded non-empty secret values",
                 None,
                 None,
             ));
@@ -1213,7 +1248,9 @@ impl JobStore {
         if delivery.id != delivery_id
             || delivery.claim_id.as_deref() != Some(claim_id)
             || delivery.consumed
-            || delivery.expires_at_ms <= timestamp_ms()
+            || delivery
+                .expires_at_ms
+                .is_some_and(|expires_at_ms| expires_at_ms <= timestamp_ms())
         {
             return Err(Error::validation_invalid_argument(
                 "credential_delivery",
@@ -1282,6 +1319,7 @@ impl JobStore {
             .transpose()?;
         let envelope = public_request.execution_envelope();
         let admission = RemoteRunnerAdmission {
+            job_id: None,
             operation: request.operation.clone(),
             runner_id: request.runner_id.clone(),
             project_id: request.project_id.clone(),
@@ -1312,6 +1350,7 @@ impl JobStore {
             submission_key,
             submission_fingerprint,
             stored_remote_runner,
+            job_id,
         } = admission;
         self.durable_transaction(|inner| {
         if let Some(submission_key) = submission_key.as_deref() {
@@ -1400,7 +1439,7 @@ impl JobStore {
             }
         }
         let mut job = Job {
-            id: Uuid::new_v4(),
+            id: job_id.unwrap_or_else(Uuid::new_v4),
             operation,
             status: JobStatus::Queued,
             created_at_ms: now,
@@ -1556,6 +1595,14 @@ impl JobStore {
 
         let now = timestamp_ms();
         let lease_ms = lease_ms.max(1);
+        // Hold the sidecar registry lock through durable claim admission. A
+        // controller installs the entry before publishing the job, so a worker
+        // observes either a complete claim or no claim, never a claim missing
+        // its controller-owned capability.
+        let mut deliveries = self
+            .credential_deliveries
+            .lock()
+            .expect("credential delivery mutex poisoned");
         let claimed = self.durable_transaction(|inner| {
             if let Some(limit) = concurrency_limit {
                 let running = inner
@@ -1619,6 +1666,19 @@ impl JobStore {
                         workspace_owner_lease,
                     )
                 };
+                let controller_owned = envelope
+                    .secret_env
+                    .as_ref()
+                    .map(controller_owned_secret_env_names)
+                    .unwrap_or_default();
+                if !controller_owned.is_empty() && !deliveries.contains_key(&job_id) {
+                    return Err(Error::validation_invalid_argument(
+                        "credential_delivery",
+                        "controller credential delivery is unavailable after broker restart or revocation",
+                        Some(job_id.to_string()),
+                        None,
+                    ));
+                }
                 match execution_protocol {
                     Some(protocol) => {
                         if !protocol.is_supported() {
@@ -1731,21 +1791,23 @@ impl JobStore {
             .is_some()
             .then(crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current);
         let credential_delivery = {
-            let mut deliveries = self
-                .credential_deliveries
-                .lock()
-                .expect("credential delivery mutex poisoned");
             deliveries.get_mut(&job.id).and_then(|delivery| {
-                if delivery.expires_at_ms <= timestamp_ms() || delivery.consumed {
+                if delivery
+                    .expires_at_ms
+                    .is_some_and(|expires_at_ms| expires_at_ms <= timestamp_ms())
+                    || delivery.consumed
+                {
                     return None;
                 }
                 delivery.claim_id = job.claim_id.clone();
+                let expires_at_ms = timestamp_ms()
+                    .saturating_add(CREDENTIAL_DELIVERY_TTL_MS)
+                    .min(job.claim_expires_at_ms.unwrap_or_default());
+                delivery.expires_at_ms = Some(expires_at_ms);
                 Some(RunnerCredentialDeliveryDescriptor {
                     delivery_id: delivery.id.clone(),
                     env_names: delivery.env.keys().cloned().collect(),
-                    expires_at_ms: delivery
-                        .expires_at_ms
-                        .min(job.claim_expires_at_ms.unwrap_or_default()),
+                    expires_at_ms,
                 })
             })
         };

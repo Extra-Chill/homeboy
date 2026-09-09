@@ -9,13 +9,28 @@ use super::*;
 use crate::observation::{ArtifactRecord, RunRecord};
 use crate::secret_env_plan::SecretEnvPlan;
 
+fn controller_owned_secret_plan(name: &str) -> SecretEnvPlan {
+    let mut plan = SecretEnvPlan::from_secret_env_names(vec![name.to_string()]);
+    plan.env_materialization = Some(
+        homeboy_runner_contract::env_materialization_plan::EnvMaterializationPlan {
+            secret_refs: vec![
+                homeboy_runner_contract::env_materialization_plan::EnvSecretRef {
+                    name: name.to_string(),
+                    owner: Some("controller".to_string()),
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    plan
+}
+
 #[test]
 fn controller_credential_delivery_is_claim_bound_one_time_and_not_durable() {
     let store = JobStore::default();
     let sentinel = "controller-secret-sentinel-do-not-persist";
     let mut request = remote_runner_request("homeboy-lab", None);
-    request.secret_env_plan =
-        SecretEnvPlan::from_secret_env_names(vec!["PROVIDER_TOKEN".to_string()]);
+    request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
     let job = store
         .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
             schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
@@ -77,8 +92,7 @@ fn controller_credential_delivery_is_claim_bound_one_time_and_not_durable() {
         .is_err());
 
     let mut cancelled_request = remote_runner_request("homeboy-lab", None);
-    cancelled_request.secret_env_plan =
-        SecretEnvPlan::from_secret_env_names(vec!["PROVIDER_TOKEN".to_string()]);
+    cancelled_request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
     let cancelled = store
         .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
             schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
@@ -110,6 +124,49 @@ fn controller_credential_delivery_is_claim_bound_one_time_and_not_durable() {
             &cancelled_delivery.delivery_id,
         )
         .is_err());
+}
+
+#[test]
+fn controller_delivery_requires_explicit_controller_ownership_and_fails_after_loss() {
+    let store = JobStore::default();
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
+    let submit = |plan: SecretEnvPlan, key: &str| {
+        store.submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: key.to_string(),
+            envelope: {
+                let mut request = request.clone();
+                request.secret_env_plan = plan;
+                request.execution_envelope()
+            },
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), "sentinel".to_string())]),
+            }),
+        })
+    };
+    let mut runner_owned = controller_owned_secret_plan("PROVIDER_TOKEN");
+    runner_owned
+        .env_materialization
+        .as_mut()
+        .unwrap()
+        .secret_refs[0]
+        .owner = Some("runner".to_string());
+    assert!(submit(runner_owned, "runner-owned-delivery").is_err());
+
+    let job = submit(request.secret_env_plan.clone(), "controller-delivery").expect("submit");
+    // This models a controller restart: durable ownership survives while the
+    // process-local plaintext registry is intentionally lost.
+    store.discard_ephemeral_credential_delivery(job.id);
+    let error = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect_err("missing controller sidecar must reject the claim");
+    assert!(error
+        .message
+        .contains("controller credential delivery is unavailable"));
 }
 
 #[test]

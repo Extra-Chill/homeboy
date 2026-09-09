@@ -200,7 +200,20 @@ fn reverse_worker_receives_controller_credential_over_authenticated_broker_witho
             cwd: Some("/tmp".to_string()),
             env: Default::default(),
             secret_env_names: vec!["PROVIDER_TOKEN".to_string()],
-            secret_env_plan: SecretEnvPlan::from_secret_env_names(["PROVIDER_TOKEN".to_string()]),
+            secret_env_plan: SecretEnvPlan {
+                env_materialization: Some(
+                    homeboy_runner_contract::env_materialization_plan::EnvMaterializationPlan {
+                        secret_refs: vec![
+                            homeboy_runner_contract::env_materialization_plan::EnvSecretRef {
+                                name: "PROVIDER_TOKEN".to_string(),
+                                owner: Some("controller".to_string()),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ),
+                ..SecretEnvPlan::from_secret_env_names(["PROVIDER_TOKEN".to_string()])
+            },
             env_materialization: None,
             capture_patch: false,
             source_snapshot: None,

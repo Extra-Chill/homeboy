@@ -63,10 +63,23 @@ pub(super) fn exec_via_reverse_broker(
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
     let controller_credential_delivery = {
-        let planned = secret_env_plan.secret_env_names();
+        // SecretEnvPlan is intentionally name-only. The materialization plan is
+        // the durable ownership authority, so an ambient controller value never
+        // overrides a runner-owned reference with the same name.
+        let controller_owned = secret_env_plan
+            .env_materialization
+            .as_ref()
+            .map(|plan| {
+                plan.secret_refs
+                    .iter()
+                    .filter(|secret| secret.owner.as_deref() == Some("controller"))
+                    .map(|secret| secret.name.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         let env: BTreeMap<_, _> = redaction_env
             .iter()
-            .filter(|(name, _)| planned.contains(*name))
+            .filter(|(name, _)| controller_owned.contains(name.as_str()))
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
         (!env.is_empty()).then_some(homeboy_runner_contract::RunnerCredentialDelivery { env })
