@@ -8085,16 +8085,23 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
     ) {
         return Ok(resolved.trim().to_string());
     }
-    homeboy_core::git::run_git(
+    homeboy_core::git::with_remote_tracking_authority(
         target,
-        &[
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            base_sha,
-        ],
         "materialize prepared Cook base",
+        || {
+            homeboy_core::git::run_git(
+                target,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    base_sha,
+                ],
+                "materialize prepared Cook base",
+            )
+            .map(|_| ())
+        },
     )?;
     Ok(homeboy_core::git::run_git(
         target,

@@ -160,11 +160,14 @@ fn materialize_configured_ref(
     let checkout =
         materialized_checkout_path(data_root, &configured_ref.repo, &configured_ref.ref_name);
     if checkout.join(".git").exists() {
-        git::run_git(
-            &checkout,
-            &["fetch", "--prune", "origin"],
-            "git fetch provider ref",
-        )?;
+        git::with_remote_tracking_authority(&checkout, "git fetch provider ref", || {
+            git::run_git(
+                &checkout,
+                &["fetch", "--prune", "origin"],
+                "git fetch provider ref",
+            )
+            .map(|_| ())
+        })?;
     } else {
         if let Some(parent) = checkout.parent() {
             fs::create_dir_all(parent).map_err(|err| {
