@@ -406,7 +406,13 @@ fn checkout_hygiene_snapshot(
     let branch = git_output(&path, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let upstream = git_output(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if upstream.is_some() {
-        let _ = git_output(&path, &["fetch", "--quiet"]);
+        let _ = crate::git::fetch_remote_tracking_refs_until(
+            &path,
+            &["fetch", "--quiet"],
+            "git fetch checkout hygiene",
+            &[],
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
     }
     let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
     let (mut behind, mut ahead) = git_ahead_behind(&path);

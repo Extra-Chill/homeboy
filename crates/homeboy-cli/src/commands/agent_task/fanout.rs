@@ -832,10 +832,14 @@ impl DependencyActionExecutor for LocalDependencyActionExecutor {
     }
 
     fn fetch(&mut self, action: &DependencyAction) -> Result<()> {
-        run_dependency_command(
-            &action.worktree,
+        homeboy::core::git::fetch_remote_tracking_refs_until(
+            Path::new(&action.worktree),
             &["fetch", "--no-tags", "origin", &action.upstream_revision],
+            "git fetch dependency upstream revision",
+            &[],
+            Instant::now() + Duration::from_secs(30),
         )
+        .map(|_| ())
     }
 
     fn rebase(&mut self, action: &DependencyAction) -> Result<()> {
