@@ -632,8 +632,7 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
                 runner_id,
                 "daemon",
                 1,
-            )
-            .with_agent_task_run_id(record_run_id),
+            ),
         )
         .unwrap_or(Value::Null),
     );
@@ -799,7 +798,6 @@ pub(crate) fn apply_runner_job_terminal_state(
         .runner_id()
         .zip(record.runner_job_id())
         .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string()));
-    let agent_task_run_id = record.run_id.clone();
     let metadata = record.ensure_metadata_object();
     metadata.insert("runner_job_status".to_string(), json!(status));
     metadata.insert("runner_job_events".to_string(), json!(events));
@@ -817,8 +815,7 @@ pub(crate) fn apply_runner_job_terminal_state(
                         1
                     },
                 )
-                .with_job_id(&runner_job_id)
-                .with_agent_task_run_id(agent_task_run_id),
+                .with_job_id(&runner_job_id),
             )
             .unwrap_or(Value::Null),
         );
@@ -840,7 +837,6 @@ pub(crate) fn record_runner_job_terminal_metadata(
         .runner_id()
         .zip(record.runner_job_id())
         .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string()));
-    let agent_task_run_id = record.run_id.clone();
     let metadata = record.ensure_metadata_object();
     metadata.insert("runner_job_status".to_string(), json!(status));
     metadata.insert("runner_job_events".to_string(), json!(events));
@@ -858,8 +854,7 @@ pub(crate) fn record_runner_job_terminal_metadata(
                         1
                     },
                 )
-                .with_job_id(&runner_job_id)
-                .with_agent_task_run_id(agent_task_run_id),
+                .with_job_id(&runner_job_id),
             )
             .unwrap_or(Value::Null),
         );

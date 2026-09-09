@@ -2176,7 +2176,6 @@ fn diagnose_surfaces_queued_runner_ownership_before_a_job_id_is_recorded() {
             record.metadata["runner_id"] = json!("homeboy-lab");
             record.metadata["runner_execution_record"] = json!({
                 "status": "planned",
-                "agent_task_run_id": run_id,
                 "runner_id": "homeboy-lab"
             });
             record.metadata["cook_progress"] = json!({ "phase": "provider_start" });

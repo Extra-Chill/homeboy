@@ -1631,8 +1631,15 @@ impl AgentTaskBatchStore {
         batch_id: &str,
         child_run_id: &str,
         finalization: Value,
+        terminal_state: Option<AgentTaskRunState>,
     ) -> Result<()> {
-        record_child_finalization_in_store(self, batch_id, child_run_id, finalization)
+        record_child_finalization_in_store(
+            self,
+            batch_id,
+            child_run_id,
+            finalization,
+            terminal_state,
+        )
     }
 
     /// Read the persisted durable batch record.
@@ -2016,11 +2023,13 @@ pub(crate) fn record_child_finalization(
     batch_id: &str,
     child_run_id: &str,
     finalization: Value,
+    terminal_state: Option<AgentTaskRunState>,
 ) -> Result<()> {
     AgentTaskBatchStore::from_current_data_root()?.record_child_finalization(
         batch_id,
         child_run_id,
         finalization,
+        terminal_state,
     )
 }
 
@@ -2029,38 +2038,9 @@ pub fn record_child_finalization_in_store(
     batch_id: &str,
     child_run_id: &str,
     finalization: Value,
+    terminal_state: Option<AgentTaskRunState>,
 ) -> Result<()> {
     store.mutate_batch(batch_id, |batch| {
-        let terminal_state = finalization
-            .get("terminal")
-            .and_then(Value::as_bool)
-            .filter(|terminal| *terminal)
-            .and_then(|_| finalization.get("lifecycle_status"))
-            .cloned()
-            .and_then(|state| {
-                serde_json::from_value::<homeboy_core::run_lifecycle_status::RunLifecycleStatus>(
-                    state,
-                )
-                .ok()
-            })
-            .and_then(|state| {
-                use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
-                Some(match state {
-                    RunLifecycleStatus::Succeeded => AgentTaskRunState::Succeeded,
-                    RunLifecycleStatus::CandidateRecoverable => {
-                        AgentTaskRunState::CandidateRecoverable
-                    }
-                    RunLifecycleStatus::PartialRecoverable => AgentTaskRunState::PartialRecoverable,
-                    RunLifecycleStatus::PartialFailure => AgentTaskRunState::PartialFailure,
-                    RunLifecycleStatus::Cancelled => AgentTaskRunState::Cancelled,
-                    RunLifecycleStatus::Failed
-                    | RunLifecycleStatus::TimedOut
-                    | RunLifecycleStatus::Stale => AgentTaskRunState::Failed,
-                    RunLifecycleStatus::Queued
-                    | RunLifecycleStatus::Running
-                    | RunLifecycleStatus::Unknown => return None,
-                })
-            });
         let metadata = match &mut batch.metadata {
             Value::Object(map) => map,
             other => {
@@ -2981,6 +2961,7 @@ mod tests {
                 "batch/converge",
                 "batch_converge-a",
                 json!({ "status": "review_ready", "attempt": 1 }),
+                None,
             )
             .expect("first finalization recorded");
         // A repeated resume overwrites the same key rather than accumulating.
@@ -2989,6 +2970,7 @@ mod tests {
                 "batch/converge",
                 "batch_converge-a",
                 json!({ "status": "review_ready", "attempt": 2 }),
+                None,
             )
             .expect("second finalization overwrites");
 
@@ -3875,10 +3857,20 @@ mod tests {
             .expect("persist planning record");
         std::thread::scope(|scope| {
             let first = scope.spawn(|| {
-                store.record_child_finalization("finalize-wave", "a-run", json!({ "attempt": 1 }))
+                store.record_child_finalization(
+                    "finalize-wave",
+                    "a-run",
+                    json!({ "attempt": 1 }),
+                    None,
+                )
             });
             let second = scope.spawn(|| {
-                store.record_child_finalization("finalize-wave", "b-run", json!({ "attempt": 1 }))
+                store.record_child_finalization(
+                    "finalize-wave",
+                    "b-run",
+                    json!({ "attempt": 1 }),
+                    None,
+                )
             });
             first
                 .join()

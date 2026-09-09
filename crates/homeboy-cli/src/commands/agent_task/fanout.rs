@@ -2457,7 +2457,6 @@ fn batch_cook_result(
                 .as_ref()
                 .map(|result| serde_json::to_value(result).unwrap_or(Value::Null))
                 .unwrap_or_else(|| serde_json::json!({ "error": cell.error }));
-            let lifecycle = cell.lifecycle();
             serde_json::json!({
                 "cook_id": cook.cook_id,
                 "run_id": cook.run_id(),
@@ -2465,12 +2464,6 @@ fn batch_cook_result(
                 "head": cook.head,
                 "workspace_materialization": cook.workspace_materialization,
                 "exit_code": cell.exit_code,
-                // The closed-vocabulary classification, so a caller reading
-                // this envelope out of a file or an HTTP response can decide
-                // completion and retry without a process exit code.
-                "lifecycle_status": lifecycle.lifecycle_status,
-                "terminal": lifecycle.terminal,
-                "retryable": lifecycle.retryable,
                 "result": cell_result,
             })
         })
@@ -11011,6 +11004,11 @@ fi
         active_failed_report.failed = 1;
         active_failed_report.cooks[0].status = "in_flight".to_string();
         let (data, exit_code) = batch_cook_result(&plan, result, &test_concurrency_decision());
+        for cook in data["cooks"].as_array().expect("batch cooks") {
+            assert!(cook.get("lifecycle_status").is_none());
+            assert!(cook.get("terminal").is_none());
+            assert!(cook.get("retryable").is_none());
+        }
         let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
             &Ok(data),
             exit_code,

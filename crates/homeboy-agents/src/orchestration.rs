@@ -14,12 +14,12 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionRequest, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
     ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
-    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneCompatibilityWindow,
-    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEventAppendRequest,
-    ControlPlaneEventRetention, ControlPlaneEventSource, ControlPlaneEvidenceRef,
-    ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation,
-    ControlPlaneMission, ControlPlaneMissionListRequest, ControlPlaneMissionPage,
-    ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEventSource,
+    ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
+    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
@@ -1477,20 +1477,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
         capabilities
             .operations
             .push(ControlPlaneOperation::ExecuteRunAction);
-        capabilities.compatibility_windows = vec![
-            ControlPlaneCompatibilityWindow {
-                projection: "homeboy/agent-task-cook/v1#lifecycle_status,terminal,retryable"
-                    .to_string(),
-                replacement_schema: "homeboy/control-plane-run/v1#state,action_eligibility"
-                    .to_string(),
-                remove_in: "0.371.0".to_string(),
-            },
-            ControlPlaneCompatibilityWindow {
-                projection: "homeboy/runner-execution-record/v1#agent_task_run_id".to_string(),
-                replacement_schema: "homeboy/control-plane-run/v1#run".to_string(),
-                remove_in: "0.371.0".to_string(),
-            },
-        ];
         capabilities
     }
 
@@ -5669,20 +5655,7 @@ mod tests {
             ]
         );
         assert!(!capabilities.operations.is_empty());
-        assert_eq!(capabilities.compatibility_windows.len(), 2);
-        assert!(capabilities
-            .compatibility_windows
-            .iter()
-            .all(|window| window.remove_in == "0.371.0"));
-        assert!(capabilities.compatibility_windows.iter().any(|window| {
-            window.projection == "homeboy/agent-task-cook/v1#lifecycle_status,terminal,retryable"
-                && window.replacement_schema
-                    == "homeboy/control-plane-run/v1#state,action_eligibility"
-        }));
-        assert!(capabilities.compatibility_windows.iter().any(|window| {
-            window.projection == "homeboy/runner-execution-record/v1#agent_task_run_id"
-                && window.replacement_schema == "homeboy/control-plane-run/v1#run"
-        }));
+        assert!(capabilities.compatibility_windows.is_empty());
     }
 
     #[test]

@@ -216,8 +216,6 @@ pub struct RunnerExecutionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_task_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     /// Flattened runtime view of `path_materialization_plan`, populated only by
     /// [`RunnerExecutionRecord::projection`]. Always empty on a stored record,
@@ -358,7 +356,6 @@ impl RunnerExecutionRecord {
             job_id: None,
             local_run_id: None,
             remote_run_id: None,
-            agent_task_run_id: None,
             mirror_run_id: None,
             materialized_paths: Vec::new(),
             path_materialization_plan: None,
@@ -410,11 +407,6 @@ impl RunnerExecutionRecord {
     pub fn with_mirror_run_id(mut self, mirror_run_id: Option<String>) -> Self {
         self.mirror_run_id = mirror_run_id.clone();
         self.remote_run_id = mirror_run_id;
-        self
-    }
-
-    pub fn with_agent_task_run_id(mut self, agent_task_run_id: impl Into<String>) -> Self {
-        self.agent_task_run_id = Some(agent_task_run_id.into());
         self
     }
 
@@ -725,6 +717,22 @@ mod tests {
         assert_eq!(record.status, "planned");
         assert!(record.job_id.is_none());
         assert!(record.artifact_refs.is_empty());
+    }
+
+    #[test]
+    fn retired_agent_task_run_id_is_accepted_but_not_reemitted() {
+        let record: RunnerExecutionRecord = serde_json::from_value(serde_json::json!({
+            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+            "execution_id": "execution-1",
+            "runner_id": "runner-1",
+            "transport": "daemon",
+            "status": "planned",
+            "agent_task_run_id": "legacy-run"
+        }))
+        .expect("legacy runner record");
+
+        let value = serde_json::to_value(record).expect("runner record");
+        assert!(value.get("agent_task_run_id").is_none());
     }
 
     #[test]
