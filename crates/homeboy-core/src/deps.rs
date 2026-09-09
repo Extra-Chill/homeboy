@@ -1113,9 +1113,9 @@ mod tests {
                 "ecosystem":"nodejs",
                 "project_signals":{"root_files":["package.json"]},
                 "package_managers":[
-                    {"id":"pnpm","selection":{"priority":1,"files":["pnpm-lock.yaml"]},"commands":{"install":{"command":"pnpm install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
-                    {"id":"yarn","selection":{"priority":2,"files":["yarn.lock"]},"commands":{"install":{"command":"yarn install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
-                    {"id":"npm","selection":{"priority":3,"files":["package-lock.json"],"default":true},"commands":{"install":{"command":"npm ci"}},"outputs":[{"path":"node_modules","kind":"directory"}]}
+                    {"id":"pnpm","selection":{"priority":1,"files":["pnpm-lock.yaml"]},"commands":{"install":{"command":"pnpm install --frozen-lockfile"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"yarn","selection":{"priority":2,"files":["yarn.lock"]},"commands":{"install":{"command":"yarn install --frozen-lockfile"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"npm","selection":{"priority":3,"files":["package-lock.json"],"default":true},"commands":{"install":{"command":"npm ci"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]}
                 ]
             }"#,
         )
@@ -1240,7 +1240,11 @@ mod tests {
                 ("npm", "package-lock.json"),
             ] {
                 let project = tempfile::tempdir().expect("node project");
-                std::fs::write(project.path().join("package.json"), "{}").expect("package");
+                std::fs::write(
+                    project.path().join("package.json"),
+                    r#"{"name":"fixture","dependencies":{"fixture-dependency":"1.0.0"}}"#,
+                )
+                .expect("package");
                 std::fs::write(project.path().join(lockfile), "").expect("lockfile");
 
                 let plan = dependency_install_plan(project.path()).expect("detected node plan");
@@ -1274,6 +1278,30 @@ mod tests {
                     },
                 ]
             );
+        });
+    }
+
+    #[test]
+    fn adapter_hydration_skips_explicitly_dependency_free_project() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+            let project = tempfile::tempdir().expect("node project");
+            std::fs::write(
+                project.path().join("package.json"),
+                r#"{"name":"dependency-free-fixture","private":true}"#,
+            )
+            .expect("package");
+
+            let outcomes = hydrate_declared_dependencies(
+                project.path(),
+                "destination_gate_workspace",
+                "",
+                &DependencyHydrationPolicy::default(),
+            )
+            .expect("dependency-free package needs no hydration");
+
+            assert!(outcomes.is_empty());
+            assert!(!project.path().join("node_modules").exists());
         });
     }
 

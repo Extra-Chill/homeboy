@@ -4,6 +4,49 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.370.0] - 2026-09-08
+
+### Added
+- inspect durable jobs
+
+### Changed
+- Rotate local daemon generations
+
+### Fixed
+- honor managed extension snapshots
+
+## [0.369.10] - 2026-09-08
+
+### Fixed
+- refresh managed extension caches before admission
+- retain explicit runner for provider readiness
+- protect reachable stale owners
+- stage the materialized Cook workspace
+- compact default status output
+- stop summarizing an unexecuted test gate as "Tests failed"
+
+## [0.369.9] - 2026-09-08
+
+### Fixed
+- hydrate historical adoption base
+- authenticate adoption reuse fingerprint
+- reap detached descendants on runner cancellation
+- bind adoption promotion reuse
+
+## [0.369.8] - 2026-09-08
+
+### Fixed
+- skip empty package hydration
+- surface apply-ready candidates
+
+## [0.369.7] - 2026-09-08
+
+### Changed
+- Distinguish unverified provider authentication in runner doctor
+
+### Fixed
+- project admission retry status
+
 ## [0.369.6] - 2026-09-08
 
 ### Fixed

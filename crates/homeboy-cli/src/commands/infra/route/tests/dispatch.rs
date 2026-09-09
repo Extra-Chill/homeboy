@@ -826,12 +826,14 @@ fn lab_cook_child_invocation_consumes_controller_runner_placement() {
 #[test]
 fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
     crate::test_support::with_isolated_home(|_| {
+        let materialized_workspace = tempfile::tempdir().expect("materialized workspace");
         let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "cook-preacceptance-order",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
                 "executor": { "backend": "fixture" },
-                "instructions": "exercise controller handoff staging"
+                "instructions": "exercise controller handoff staging",
+                "workspace": { "root": materialized_workspace.path() }
             }))
             .expect("task")],
         );
@@ -856,7 +858,7 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
         let error =
             crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher::dispatch_attempt(
                 &dispatcher,
-                plan,
+                plan.clone(),
                 "cook-preacceptance-order",
                 None,
             )
@@ -885,14 +887,71 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
             record.metadata["pre_execution_failure"]["provider_executions_consumed"],
             0
         );
-        assert!(record
-            .metadata
-            .get("execution_placement_invalidated")
-            .is_none());
+        assert!(
+            record.metadata["execution_placement_invalidated"]["reasons"]
+                .as_array()
+                .expect("placement invalidation reasons")
+                .contains(&serde_json::json!("workspace_changed")),
+            "materializing the planned destination replaces the pre-admission placement identity"
+        );
         assert_eq!(
             record.metadata["execution_placement_decision"]["identity"]["task"],
             "task"
         );
+        assert_eq!(
+            record.metadata["execution_placement_decision"]["identity"]["workspace"],
+            materialized_workspace.path().display().to_string(),
+            "the dispatch plan's post-admission workspace is the ordinary Lab staging source"
+        );
+
+        let serialized_plan = serde_json::to_string(&plan).expect("serialize materialized plan");
+        let provider_args = lab_cook_attempt_args(serialized_plan, "cook-preacceptance-order");
+        let provider_cli = Cli::try_parse_from(&provider_args).expect("parse provider attempt");
+        let placement_decision =
+            serde_json::from_value(record.metadata["execution_placement_decision"].clone())
+                .expect("materialized placement decision");
+        let staged_source = PathBuf::from(
+            record.metadata["execution_placement_decision"]["identity"]["workspace"]
+                .as_str()
+                .expect("materialized placement workspace"),
+        );
+        let staging_request = homeboy_lab_runner::LabOffloadRequest {
+            placement_decision,
+            command: Some(
+                lab_offload_command(&provider_cli.command)
+                    .expect("resolve provider Lab command")
+                    .expect("portable provider Lab command"),
+            ),
+            normalized_args: &provider_args,
+            explicit_runner: Some("missing-homeboy-lab"),
+            placement: homeboy::cli_surface::Placement::Lab,
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace: false,
+            skip_deps_hydration: false,
+            preserve_workspace_on_failure: false,
+            capture_patch: false,
+            mutation_flag: None,
+            placement_outcome_target: None,
+            detach_after_handoff: false,
+            output_file_requested: false,
+            read_only_polling: false,
+            local_output_file: None,
+            durable_agent_task_plan: Some(&plan),
+            durable_run_id: None,
+            source_path: Some(&staged_source),
+            expected_source_snapshot_identity: None,
+            verified_cook_baseline: None,
+            require_controller_git_bundle: false,
+            reuse_compatible_snapshot: false,
+            job_overrides: runners::LabJobOverrides::default(),
+        };
+        let recipe = homeboy_lab_runner::LabStagingRecipe::from_request(
+            "cook-preacceptance-order",
+            "missing-homeboy-lab",
+            &staging_request,
+        )
+        .expect("Lab staging recipe accepts the materialized source path");
+        assert_eq!(recipe.source_path, Some(staged_source));
     });
 }
 
@@ -1831,32 +1890,61 @@ fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
 
 #[test]
 fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() {
-    let baseline = tempfile::tempdir().expect("baseline");
-    let controller = tempfile::tempdir().expect("controller");
-    let capability = crate::agents::agent_task_service::test_derived_cook_baseline_capability(
-        baseline.path().to_path_buf(),
-        "baseline-commit".to_string(),
-        "baseline-tree".to_string(),
-        "task",
-        Some(serde_json::json!({"workspace_snapshot_identity": "snapshot:parent"})),
-    );
+    crate::test_support::with_isolated_home(|_| {
+        let baseline = tempfile::tempdir().expect("derived baseline");
+        let ordinary_workspace = tempfile::tempdir().expect("materialized workspace");
+        let controller = tempfile::tempdir().expect("controller workspace");
+        let capability = crate::agents::agent_task_service::test_derived_cook_baseline_capability(
+            baseline.path().to_path_buf(),
+            "baseline-commit".to_string(),
+            "baseline-tree".to_string(),
+            "task",
+            Some(serde_json::json!({"workspace_snapshot_identity": "snapshot:parent"})),
+        );
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "cook-derived-baseline",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "task",
+                "executor": { "backend": "fixture" },
+                "instructions": "continue from derived baseline",
+                "workspace": { "root": ordinary_workspace.path() }
+            }))
+            .expect("materialized ordinary workspace")],
+        );
+        let dispatcher = LabCookAttemptDispatcher {
+            runner_id: "missing-homeboy-lab".to_string(),
+            placement_decision: fixture_preflight_decision(
+                &Cli::parse_from(["homeboy", "status"]),
+                Some("missing-homeboy-lab"),
+                "task",
+                Some(controller.path()),
+            )
+            .expect("test placement decision"),
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace: false,
+            skip_deps_hydration: false,
+            detach_after_handoff: false,
+            source_path: Some(controller.path().to_path_buf()),
+            job_overrides: runners::LabJobOverrides::default(),
+            progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
+        };
 
-    assert_eq!(
-        super::cook_attempt_source_path(Some(&capability), Some(controller.path())),
-        Some(capability.canonical_path())
-    );
-    assert_eq!(
-        capability.verified_baseline_provenance(),
-        serde_json::json!({
-            "source_run_id": "test-source-run",
-            "source_task_id": "task",
-            "promoted_patch_artifact_sha256": "test-artifact-sha256",
-            "baseline_commit": "baseline-commit",
-            "baseline_tree": "baseline-tree",
-            "parent_snapshot_identity": "snapshot:parent",
-            "preexisting_candidate": false,
-        })
-    );
+        crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher::dispatch_attempt(
+            &dispatcher,
+            plan,
+            "cook-derived-baseline",
+            Some(&capability),
+        )
+        .expect_err("missing Lab target rejects after source selection");
+        let record = agent_task_lifecycle::reconcile_status("cook-derived-baseline")
+            .expect("durable attempt");
+
+        assert_eq!(
+            record.metadata["execution_placement_decision"]["identity"]["workspace"],
+            capability.canonical_path().display().to_string(),
+            "derived baseline takes priority over the materialized plan and controller sources"
+        );
+    });
 }
 
 #[test]

@@ -2557,15 +2557,6 @@ fn decode_cook_dispatch_field<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn cook_attempt_source_path<'a>(
-    derived_cook_baseline: Option<&'a DerivedCookBaselineCapability>,
-    controller_source_path: Option<&'a Path>,
-) -> Option<&'a Path> {
-    derived_cook_baseline
-        .map(|capability| capability.canonical_path())
-        .or(controller_source_path)
-}
-
 impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
     for LabCookAttemptDispatcher
 {
@@ -2604,8 +2595,16 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // Preserve the controller's canonical decision across ordinary retry,
         // continuation, and fanout replay. A derived baseline is the declared
         // pre-staging transition where a changed candidate may replace it.
-        let source_path =
-            cook_attempt_source_path(derived_cook_baseline, self.source_path.as_deref());
+        let source_path = derived_cook_baseline
+            .map(|capability| capability.canonical_path())
+            .or_else(|| {
+                plan.tasks
+                    .first()
+                    .and_then(|task| task.workspace.root.as_deref())
+                    .map(Path::new)
+            })
+            .or(self.source_path.as_deref())
+            .map(PathBuf::from);
         let task = plan
             .tasks
             .first()
@@ -2617,7 +2616,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             &self.placement_decision,
             &self.runner_id,
             &task,
-            source_path,
+            source_path.as_deref(),
         )?;
         // The capability has already bound the promoted artifact and exact
         // baseline to this retry; only its evidence crosses the Lab boundary.
@@ -2708,7 +2707,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     // A retry's baseline is controller-owned capability, not plan
                     // data. Stage that exact clean checkout; never substitute the
                     // controller's original workspace during nested Lab dispatch.
-                    source_path,
+                    source_path: source_path.as_deref(),
                     expected_source_snapshot_identity: None,
                     verified_cook_baseline: verified_cook_baseline.as_ref(),
                     job_overrides: self.job_overrides.clone(),

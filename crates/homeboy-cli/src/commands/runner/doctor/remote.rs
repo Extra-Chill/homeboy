@@ -313,11 +313,18 @@ pub fn report(
             .collect::<BTreeSet<_>>();
         checks.extend(parity_checks);
         if !global_parity_blocked {
-            let readiness_contracts =
-                homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts()
-                    .into_iter()
-                    .filter(|contract| !blocked_providers.contains(&contract.provider_id))
-                    .collect::<Vec<_>>();
+            let selected_provider_ids = probes::eligible_provider_ids(
+                catalog.providers(),
+                options.agent_backend.as_deref(),
+                options.agent_selector.as_deref(),
+            );
+            let readiness_contracts = probes::selected_provider_readiness_contracts(
+                homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
+                &selected_provider_ids,
+            )
+            .into_iter()
+            .filter(|contract| !blocked_providers.contains(&contract.provider_id))
+            .collect::<Vec<_>>();
             checks.extend(probes::provider_readiness_checks(
                 client,
                 &readiness_contracts,

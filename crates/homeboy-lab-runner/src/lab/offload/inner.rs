@@ -427,6 +427,20 @@ fn lab_runner_exec_options(
     mut env: std::collections::HashMap<String, String>,
     secret_env_names: Vec<String>,
 ) -> RunnerExecOptions {
+    let mut command = context.command.clone();
+    let executable = context
+        .lab_metadata
+        .pointer("/execution_bundle/binary/path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            command
+                .first()
+                .expect("Lab dispatch command has an admitted executable")
+                .clone()
+        });
+    command[0] = executable.clone();
     env.insert(
         super::super::super::RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
         "1".to_string(),
@@ -453,12 +467,12 @@ fn lab_runner_exec_options(
     env.extend(lab_rig_registry_env(context.rig_registry_root.as_deref()));
     RunnerExecOptions {
         execution_context:
-            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(executable),
         cwd: Some(context.remote_cwd.clone()),
         project_id: None,
         allow_diagnostic_ssh: false,
         diagnostic_ssh_timeout: None,
-        command: context.command.clone(),
+        command,
         env,
         secret_env_names,
         secret_env_plan: Some(context.secret_env_handoff.secret_env_plan.clone()),
@@ -1790,7 +1804,7 @@ pub(crate) fn run_lab_offload_inner(
             plan,
             messages,
             &runner_workspace_root,
-            remote_runner_homeboy_path(&runner, "Lab offload preflight")?,
+            final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?,
             &runner_status,
             overhead,
         );
@@ -3449,6 +3463,14 @@ mod tests {
         assert_eq!(
             options.env.get("HOME"),
             Some(&"/runner/job/home".to_string())
+        );
+        assert_eq!(
+            options.command,
+            vec!["/runner/admitted-homeboy".to_string(), "bench".to_string()]
+        );
+        assert_eq!(
+            options.execution_context.runtime_id(),
+            "/runner/admitted-homeboy"
         );
         assert!(crate::execution_bundle::validate_bundle_env(
             &options.env,

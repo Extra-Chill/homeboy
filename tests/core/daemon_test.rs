@@ -1317,7 +1317,7 @@ fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
     assert_eq!(evidence.operation, "runner.exec");
     assert_eq!(
         evidence.disposition,
-        crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+        crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
     );
 }
 
@@ -1339,8 +1339,47 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     assert_eq!(status.active_job_recovery_evidence.len(), 1);
     assert_eq!(
         status.active_job_recovery_evidence[0].disposition,
-        crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+        crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
     );
+}
+
+#[test]
+fn stale_binary_candidate_owns_only_the_matching_live_lease_coordinates() {
+    let mut state = daemon_state_for_test(4242, "127.0.0.1:49152");
+    state.startup_token = "recorded-token".to_string();
+    let jobs_path = std::path::PathBuf::from("/tmp/homeboy-daemon/jobs.json");
+    let candidate = DaemonProcessCandidate {
+        pid: state.pid,
+        process_start_identity: None,
+        executable: "/opt/homeboy-previous".to_string(),
+        executable_digest: None,
+        cmdline: "daemon serve".to_string(),
+        bind_endpoint: Some(state.address.clone()),
+        durable_store_path: Some(jobs_path.display().to_string()),
+        build_identity: None,
+        startup_token: Some(state.startup_token.clone()),
+        ownership: DaemonProcessOwnership::Ambiguous,
+    };
+
+    assert!(candidate_matches_live_lease(&candidate, &state, &jobs_path));
+    for candidate in [
+        DaemonProcessCandidate {
+            pid: 4243,
+            ..candidate.clone()
+        },
+        DaemonProcessCandidate {
+            bind_endpoint: Some("127.0.0.1:49153".to_string()),
+            ..candidate.clone()
+        },
+        DaemonProcessCandidate {
+            startup_token: Some("other-token".to_string()),
+            ..candidate
+        },
+    ] {
+        assert!(!candidate_matches_live_lease(
+            &candidate, &state, &jobs_path
+        ));
+    }
 }
 
 fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::PathBuf, String) {

@@ -58,8 +58,15 @@ pub struct RunnerDoctorDiagnostics {
 
 #[derive(Debug, Serialize)]
 pub struct RunnerDoctorProviderReadiness {
+    /// Providers with a selected, successful provider-owned live auth check.
     pub ready_for: Vec<String>,
+    /// Providers whose selected live auth check failed or whose runner substrate failed.
     pub blocked_for: Vec<String>,
+    /// Providers whose runtime/load checks may have passed but did not run a
+    /// provider-owned live auth check, so they are not dispatch-ready.
+    pub unverified_for: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unverified_remediation: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

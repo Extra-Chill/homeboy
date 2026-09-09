@@ -178,27 +178,38 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>();
-    let (ready_for, blocked_for) = report.provider_readiness.as_ref().map_or_else(
-        || (Vec::new(), Vec::new()),
-        |readiness| {
-            (
-                readiness
-                    .ready_for
-                    .iter()
-                    .take(COMPACT_PROVIDER_LIMIT)
-                    .map(|value| bounded_text(value))
-                    .collect::<Vec<_>>(),
-                readiness
-                    .blocked_for
-                    .iter()
-                    .take(COMPACT_PROVIDER_LIMIT)
-                    .map(|value| bounded_text(value))
-                    .collect::<Vec<_>>(),
-            )
-        },
-    );
+    let (ready_for, blocked_for, unverified_for, unverified_remediation) =
+        report.provider_readiness.as_ref().map_or_else(
+            || (Vec::new(), Vec::new(), Vec::new(), None),
+            |readiness| {
+                (
+                    readiness
+                        .ready_for
+                        .iter()
+                        .take(COMPACT_PROVIDER_LIMIT)
+                        .map(|value| bounded_text(value))
+                        .collect::<Vec<_>>(),
+                    readiness
+                        .blocked_for
+                        .iter()
+                        .take(COMPACT_PROVIDER_LIMIT)
+                        .map(|value| bounded_text(value))
+                        .collect::<Vec<_>>(),
+                    readiness
+                        .unverified_for
+                        .iter()
+                        .take(COMPACT_PROVIDER_LIMIT)
+                        .map(|value| bounded_text(value))
+                        .collect::<Vec<_>>(),
+                    readiness
+                        .unverified_remediation
+                        .as_deref()
+                        .map(bounded_text),
+                )
+            },
+        );
     let provider_total = report.provider_readiness.as_ref().map_or(0, |readiness| {
-        readiness.ready_for.len() + readiness.blocked_for.len()
+        readiness.ready_for.len() + readiness.blocked_for.len() + readiness.unverified_for.len()
     });
     let runner_id = bounded_text(&report.runner_id);
     let failed_repairs = report
@@ -232,10 +243,10 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         },
         "checks": checks,
         "repairs": failed_repairs,
-        "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for }) },
+        "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for, "unverified_for": unverified_for, "guidance": unverified_remediation }) },
         "truncation": {
             "checks": { "shown": checks.len(), "omitted": report.checks.len().saturating_sub(checks.len()), "evidence_ref": "runner:doctor:checks", "full_command": format!("homeboy runner doctor {runner_id} --full") },
-            "provider_readiness": { "shown": ready_for.len() + blocked_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {runner_id} --full") },
+            "provider_readiness": { "shown": ready_for.len() + blocked_for.len() + unverified_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len() + unverified_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {runner_id} --full") },
             "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "secret_env_migration", "daemon_recovery", "admission_summary"],
         }
     });
