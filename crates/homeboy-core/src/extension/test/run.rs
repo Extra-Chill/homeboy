@@ -3217,6 +3217,75 @@ mod tests {
         });
     }
 
+    /// Release resolves the component from its persisted `homeboy.json`
+    /// (portable discovery or the standalone overlay), not from an in-memory
+    /// fixture. The projection `when` must therefore be satisfied by settings
+    /// declared in the component config file — including when flat extension
+    /// keys sit beside the nested `settings` object, which is the shape
+    /// components like `data-machine-events` ship. (#14449)
+    #[test]
+    fn declared_secret_env_names_resolve_from_persisted_component_extension_settings() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = conditional_secret_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            conditional_test_component(home.path(), source.path(), "remote");
+
+            std::fs::write(
+                source.path().join("homeboy.json"),
+                r#"{
+                    "id": "conditional-secret-consumer",
+                    "extensions": {
+                        "conditional-secret-fixture": {
+                            "toolchain": "fixture",
+                            "settings": {
+                                "service": {
+                                    "mode": "remote",
+                                    "secret_env": {
+                                        "first": "FIRST_PROJECTED_SECRET",
+                                        "second": "SECOND_PROJECTED_SECRET"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .expect("persisted homeboy.json");
+
+            let component = crate::component::portable::try_discover_from_portable(source.path())
+                .expect("portable discovery")
+                .expect("component from persisted config");
+            assert_eq!(
+                component
+                    .extensions
+                    .as_ref()
+                    .and_then(|extensions| extensions
+                        .get("conditional-secret-fixture")
+                        .map(|config| config.settings.contains_key("service"))),
+                Some(true),
+                "fixture must model persisted extension settings"
+            );
+
+            let marker = source.path().join("declared-names-child-ran");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .expect("marker script");
+            let names = crate::extension::test::declared_secret_env_names(&component)
+                .expect("persisted-settings declaration");
+            assert_eq!(
+                names,
+                vec!["FIRST_PROJECTED_SECRET", "SECOND_PROJECTED_SECRET"]
+            );
+            assert!(
+                !marker.exists(),
+                "resolving declared names must not spawn the test child"
+            );
+        });
+    }
+
     #[test]
     fn review_test_missing_projected_secret_fails_before_spawn() {
         homeboy_core::test_support::with_isolated_home(|home| {
