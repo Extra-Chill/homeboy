@@ -22,7 +22,7 @@ homeboy cleanup artifacts --min-age-days 7
 homeboy cleanup artifacts --apply
 ```
 
-Use `--sort size` to review the largest artifacts first, `--limit N` to bound the reported or removed candidates after sorting, and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream.
+Use `--sort size` to rank the inspected artifacts by size and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream. With `--all-worktrees`, `--limit N` bounds declaration inspections for either sort order and returns a filter-bound cursor when more inventory remains; resume it with `--cursor` and the same eligibility filters. Size order is therefore largest-first within that bounded page, not a claim about uninspected worktrees. A dry-run continuation remains a dry run; add `--apply` explicitly when ready to remove candidates.
 
 The JSON output includes worktree identity, candidate paths, estimated bytes, skipped reasons, applied rows, a per-worktree `worktrees` roll-up, and a `summary` object. The terminal summary shows bounded candidate rows and points to the JSON output for full large reviews. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe path declarations and skips artifact paths that contain tracked or staged source changes, files Git tracks at all (a repository that commits its generated output keeps it), or untracked work that Git does not ignore.
 

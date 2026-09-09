@@ -173,6 +173,11 @@ struct ArtifactInventoryBounds {
 pub struct ArtifactCleanupCursor {
     pub root: String,
     pub worktree: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_relative_path: Option<String>,
+    pub merged_only: bool,
+    pub min_age_days: Option<u64>,
+    pub include_active_worktrees: bool,
 }
 
 pub fn parse_artifact_cleanup_cursor(value: &str) -> Result<ArtifactCleanupCursor> {
@@ -1037,6 +1042,7 @@ struct WorktreeCandidateScan {
     skipped: Vec<ArtifactCleanupSkipped>,
     inspected_count: usize,
     scan_complete: bool,
+    next_relative_path: Option<String>,
 }
 
 /// Scan one worktree for artifact-cleanup candidates. Fallible git/inventory
@@ -1050,6 +1056,7 @@ fn collect_worktree_candidates(
     deadline: Option<Instant>,
     inspection_limit: Option<usize>,
     automatic_policy: Option<AutomaticArtifactRetentionPolicy>,
+    next_relative_path: Option<&str>,
 ) -> Result<WorktreeCandidateScan> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
@@ -1057,8 +1064,23 @@ fn collect_worktree_candidates(
 
     let safety = git_safety(&worktree.path)?;
     let liveness = active.liveness(&worktree.path);
+    let declarations = artifact_declarations(&worktree.path)?;
+    let start = next_relative_path.map_or(Ok(0), |next_relative_path| {
+        declarations
+            .iter()
+            .position(|declaration| declaration.relative_path == next_relative_path)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cursor",
+                    "artifact cleanup cursor declaration is no longer present in the selected worktree",
+                    None,
+                    None,
+                )
+            })
+    })?;
+    let declarations = &declarations[start..];
     if options.merged_only && !branch_is_merged(&worktree.path) {
-        for declaration in artifact_declarations(&worktree.path)? {
+        for declaration in declarations {
             let artifact_path = worktree.path.join(&declaration.relative_path);
             if !artifact_path.exists() {
                 continue;
@@ -1075,9 +1097,10 @@ fn collect_worktree_candidates(
             skipped,
             inspected_count,
             scan_complete: true,
+            next_relative_path: None,
         });
     }
-    for declaration in artifact_declarations(&worktree.path)? {
+    for declaration in declarations {
         let artifact_path = worktree.path.join(&declaration.relative_path);
         let display_path = artifact_path.to_string_lossy().to_string();
         if !artifact_path.exists() {
@@ -1125,6 +1148,7 @@ fn collect_worktree_candidates(
                 skipped,
                 inspected_count,
                 scan_complete: false,
+                next_relative_path: Some(declaration.relative_path.clone()),
             });
         }
         inspected_count += 1;
@@ -1195,7 +1219,19 @@ fn collect_worktree_candidates(
                 newest_modified: None,
             }
         } else {
-            path_usage_with_deadline(&artifact_path, deadline)?
+            match path_usage_with_deadline(&artifact_path, deadline) {
+                Ok(usage) => usage,
+                Err(_error) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
+                    return Ok(WorktreeCandidateScan {
+                        candidates,
+                        skipped,
+                        inspected_count,
+                        scan_complete: false,
+                        next_relative_path: Some(declaration.relative_path.clone()),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
         };
         let usage_measurement = if pressure_eligible {
             USAGE_NOT_MEASURED_PRESSURE
@@ -1250,6 +1286,7 @@ fn collect_worktree_candidates(
         skipped,
         inspected_count,
         scan_complete: true,
+        next_relative_path: None,
     })
 }
 
@@ -1343,10 +1380,13 @@ fn cleanup_artifacts_in_worktrees(
     let start = if let Some(cursor) = &options.cursor {
         if options.scope != ArtifactCleanupScope::RepositoryWorktrees
             || cursor.root != root.to_string_lossy()
+            || cursor.merged_only != options.merged_only
+            || cursor.min_age_days != options.min_age_days
+            || cursor.include_active_worktrees != options.include_active_worktrees
         {
             return Err(Error::validation_invalid_argument(
                 "cursor",
-                "artifact cleanup cursor does not match the selected repository worktrees",
+                "artifact cleanup cursor does not match the selected repository worktrees or filters",
                 None,
                 None,
             ));
@@ -1367,12 +1407,17 @@ fn cleanup_artifacts_in_worktrees(
     };
     let total_worktree_count = worktrees.len();
     let worktrees = &worktrees[start..];
-    // Discovery order can resume only at a worktree boundary. Bound the number
-    // of visited worktrees rather than stopping partway through a worktree,
-    // which would make a cursor repeat its already inspected declarations.
-    let worktree_limit = (options.sort == ArtifactCleanupSort::Discovery)
+    // Repository-wide pages bound declaration inspections, independent of sort.
+    // The cursor records the next declaration, so no inspected candidate is
+    // hidden by a post-scan candidate cap.
+    let page_limit = (options.scope == ArtifactCleanupScope::RepositoryWorktrees)
         .then_some(options.limit)
         .flatten();
+    let inspection_limit = match (inspection_limit, page_limit) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(limit), None) | (None, Some(limit)) => Some(limit),
+        (None, None) => None,
+    };
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
     let mut inspected_count = 0;
@@ -1385,30 +1430,16 @@ fn cleanup_artifacts_in_worktrees(
 
     let mut next_cursor = None;
     for (index, worktree) in worktrees.iter().enumerate() {
-        if worktree_limit.is_some_and(|limit| index >= limit) {
-            scan_complete = false;
-            next_cursor = Some(ArtifactCleanupCursor {
-                root: root.to_string_lossy().to_string(),
-                worktree: worktree.path.to_string_lossy().to_string(),
-            });
-            break;
-        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             scan_complete = false;
-            next_cursor = Some(ArtifactCleanupCursor {
-                root: root.to_string_lossy().to_string(),
-                worktree: worktree.path.to_string_lossy().to_string(),
-            });
+            next_cursor = repository_artifact_cursor(&root, worktree, None, options);
             break;
         }
         let remaining_inspections =
             inspection_limit.map(|limit| limit.saturating_sub(inspected_count));
         if remaining_inspections == Some(0) {
             scan_complete = false;
-            next_cursor = Some(ArtifactCleanupCursor {
-                root: root.to_string_lossy().to_string(),
-                worktree: worktree.path.to_string_lossy().to_string(),
-            });
+            next_cursor = repository_artifact_cursor(&root, worktree, None, options);
             break;
         }
         // A single stale/non-Git/vanished worktree candidate must not abort the
@@ -1422,32 +1453,35 @@ fn cleanup_artifacts_in_worktrees(
             deadline,
             remaining_inspections,
             automatic_policy,
+            options
+                .cursor
+                .as_ref()
+                .filter(|cursor| cursor.worktree == worktree.path.to_string_lossy())
+                .and_then(|cursor| cursor.next_relative_path.as_deref()),
         ) {
             Ok(WorktreeCandidateScan {
                 candidates: worktree_candidates,
                 skipped: worktree_skipped,
                 inspected_count: worktree_inspected_count,
                 scan_complete: worktree_scan_complete,
+                next_relative_path,
             }) => {
                 inspected_count = inspected_count.saturating_add(worktree_inspected_count);
                 candidates.extend(worktree_candidates);
                 skipped.extend(worktree_skipped);
                 if !worktree_scan_complete {
                     scan_complete = false;
-                    next_cursor = Some(ArtifactCleanupCursor {
-                        root: root.to_string_lossy().to_string(),
-                        worktree: worktree.path.to_string_lossy().to_string(),
-                    });
+                    next_cursor =
+                        repository_artifact_cursor(&root, worktree, next_relative_path, options);
                     break;
                 }
                 if inspection_limit.is_some_and(|limit| inspected_count >= limit)
                     && index + 1 < worktrees.len()
                 {
                     scan_complete = false;
-                    next_cursor = worktrees.get(index + 1).map(|next| ArtifactCleanupCursor {
-                        root: root.to_string_lossy().to_string(),
-                        worktree: next.path.to_string_lossy().to_string(),
-                    });
+                    next_cursor = worktrees
+                        .get(index + 1)
+                        .and_then(|next| repository_artifact_cursor(&root, next, None, options));
                     break;
                 }
             }
@@ -1458,10 +1492,9 @@ fn cleanup_artifacts_in_worktrees(
                 ));
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     scan_complete = false;
-                    next_cursor = worktrees.get(index + 1).map(|next| ArtifactCleanupCursor {
-                        root: root.to_string_lossy().to_string(),
-                        worktree: next.path.to_string_lossy().to_string(),
-                    });
+                    next_cursor = worktrees
+                        .get(index + 1)
+                        .and_then(|next| repository_artifact_cursor(&root, next, None, options));
                     break;
                 }
             }
@@ -1482,8 +1515,13 @@ fn cleanup_artifacts_in_worktrees(
     candidates
         .retain(|candidate| seen_artifacts.insert(canonical_or_owned(Path::new(&candidate.path))));
 
-    let bounded_candidates =
-        order_and_limit_candidates(&mut candidates, options.sort, options.limit);
+    let bounded_candidates = order_and_limit_candidates(
+        &mut candidates,
+        options.sort,
+        (options.scope == ArtifactCleanupScope::ExactCheckout)
+            .then_some(options.limit)
+            .flatten(),
+    );
 
     let cleanup_run = options
         .apply
@@ -1562,7 +1600,7 @@ fn cleanup_artifacts_in_worktrees(
         reclaimed_allocated_bytes,
         size_estimates_complete,
         observed_filesystem_available_delta_bytes,
-        next_command: (remaining_count > 0 || !scan_complete)
+        next_command: (!scan_complete || (options.apply && remaining_count > 0))
             .then(|| artifact_cleanup_apply_command(options, next_cursor.as_ref())),
         summary,
         worktrees: worktree_rows,
@@ -1590,6 +1628,32 @@ fn cleanup_artifacts_in_worktrees(
         )?;
     }
     Ok(output)
+}
+
+fn artifact_cleanup_cursor(
+    root: &Path,
+    worktree: &WorktreeInfo,
+    next_relative_path: Option<String>,
+    options: &ArtifactCleanupOptions,
+) -> ArtifactCleanupCursor {
+    ArtifactCleanupCursor {
+        root: root.to_string_lossy().to_string(),
+        worktree: worktree.path.to_string_lossy().to_string(),
+        next_relative_path,
+        merged_only: options.merged_only,
+        min_age_days: options.min_age_days,
+        include_active_worktrees: options.include_active_worktrees,
+    }
+}
+
+fn repository_artifact_cursor(
+    root: &Path,
+    worktree: &WorktreeInfo,
+    next_relative_path: Option<String>,
+    options: &ArtifactCleanupOptions,
+) -> Option<ArtifactCleanupCursor> {
+    (options.scope == ArtifactCleanupScope::RepositoryWorktrees)
+        .then(|| artifact_cleanup_cursor(root, worktree, next_relative_path, options))
 }
 
 fn artifact_cleanup_apply_command(
@@ -1633,7 +1697,9 @@ fn artifact_cleanup_apply_command(
             command.push_str(&format!(" --cursor {}", quote_arg(&cursor)));
         }
     }
-    command.push_str(" --apply");
+    if options.apply {
+        command.push_str(" --apply");
+    }
     command
 }
 
@@ -3151,6 +3217,7 @@ mod tests {
                     min_age_days: 30,
                     reserve_bytes: u64::MAX,
                 }),
+                None,
             )
             .expect("pressure collection must not enter size traversal");
 
@@ -3307,6 +3374,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("candidate discovery");
             let candidate = scan
@@ -3344,6 +3412,7 @@ mod tests {
                 &ArtifactCleanupOptions::default(),
                 &ActiveWorktrees::default(),
                 &ProtectedControllerExecutables::default(),
+                None,
                 None,
                 None,
                 None,
@@ -3399,6 +3468,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("candidate discovery");
             let mut candidate = scan
@@ -3435,6 +3505,7 @@ mod tests {
                 &ArtifactCleanupOptions::default(),
                 &ActiveWorktrees::default(),
                 &ProtectedControllerExecutables::default(),
+                None,
                 None,
                 None,
                 None,
@@ -4802,7 +4873,7 @@ mod tests {
         let options = ArtifactCleanupOptions {
             path: Some(PathBuf::from("/tmp/review scope")),
             scope: ArtifactCleanupScope::ExactCheckout,
-            apply: false,
+            apply: true,
             self_artifacts: false,
             temp_roots: vec![
                 PathBuf::from("/tmp/first root"),
@@ -4952,6 +5023,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(
             scan.is_err(),
@@ -4960,11 +5032,19 @@ mod tests {
     }
 
     #[test]
-    fn discovery_limit_returns_a_valid_cursor_and_resumes_at_the_next_worktree() {
+    fn repository_limit_pages_every_artifact_for_size_sort_without_mutating_dry_runs() {
         crate::test_support::with_isolated_home(|_| {
             let first = git_repo();
             let second = git_repo();
             write_file(&first.path().join("target/first"), "artifact");
+            write_file(
+                &first.path().join("node_modules/first"),
+                "artifact artifact",
+            );
+            write_file(
+                &first.path().join("dist/first"),
+                "artifact artifact artifact",
+            );
             write_file(&second.path().join("target/second"), "artifact");
             let worktrees = vec![
                 WorktreeInfo {
@@ -4976,7 +5056,7 @@ mod tests {
             ];
             let options = ArtifactCleanupOptions {
                 scope: ArtifactCleanupScope::RepositoryWorktrees,
-                sort: ArtifactCleanupSort::Discovery,
+                sort: ArtifactCleanupSort::Size,
                 limit: Some(1),
                 ..ArtifactCleanupOptions::default()
             };
@@ -4997,28 +5077,83 @@ mod tests {
                     .next_cursor
                     .as_ref()
                     .map(|cursor| cursor.worktree.as_str()),
-                Some(second.path().to_string_lossy().as_ref())
+                Some(first.path().to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                first_page
+                    .next_cursor
+                    .as_ref()
+                    .and_then(|cursor| cursor.next_relative_path.as_deref()),
+                Some("node_modules")
+            );
+            assert_eq!(first_page.candidates.len(), 1);
+            assert!(!first_page
+                .next_command
+                .as_deref()
+                .unwrap_or_default()
+                .contains("--apply"));
+
+            let mut cursor = first_page.next_cursor.clone();
+            let mut paths = first_page
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>();
+            for _ in 0..3 {
+                let page = cleanup_artifacts_in_worktrees(
+                    first.path().to_path_buf(),
+                    worktrees.clone(),
+                    &ArtifactCleanupOptions {
+                        cursor: cursor.clone(),
+                        ..options.clone()
+                    },
+                    false,
+                    Vec::new(),
+                    ArtifactInventoryBounds::default(),
+                )
+                .expect("resumed page");
+                paths.extend(
+                    page.candidates
+                        .iter()
+                        .map(|candidate| candidate.path.clone()),
+                );
+                cursor = page.next_cursor;
+            }
+            assert!(cursor.is_none());
+            assert_eq!(paths.len(), 4);
+            assert!(paths.iter().any(|path| path.ends_with("node_modules")));
+            assert!(paths.iter().any(|path| path.ends_with("dist")));
+            assert_eq!(
+                paths.iter().filter(|path| path.ends_with("target")).count(),
+                2
+            );
+            assert!(first.path().join("target").exists());
+
+            let cursor_json = serde_json::to_string(
+                first_page
+                    .next_cursor
+                    .as_ref()
+                    .expect("continuation cursor"),
+            )
+            .expect("cursor JSON");
+            assert_eq!(
+                parse_artifact_cleanup_cursor(&cursor_json).expect("parse serialized cursor"),
+                first_page.next_cursor.clone().expect("continuation cursor")
             );
 
-            let resumed = ArtifactCleanupOptions {
-                cursor: first_page.next_cursor,
-                ..options
-            };
-            let second_page = cleanup_artifacts_in_worktrees(
+            let changed_filters = cleanup_artifacts_in_worktrees(
                 first.path().to_path_buf(),
                 worktrees,
-                &resumed,
+                &ArtifactCleanupOptions {
+                    cursor: first_page.next_cursor,
+                    merged_only: true,
+                    ..options
+                },
                 false,
                 Vec::new(),
                 ArtifactInventoryBounds::default(),
-            )
-            .expect("resumed page");
-            assert_eq!(second_page.inspected_count, 1);
-            assert!(second_page.scan_complete);
-            assert_eq!(
-                second_page.candidates[0].worktree,
-                second.path().display().to_string()
             );
+            assert!(changed_filters.is_err());
         });
     }
 

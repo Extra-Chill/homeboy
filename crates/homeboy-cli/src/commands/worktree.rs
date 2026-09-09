@@ -623,6 +623,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                         temp_roots: Vec::new(),
                         sort: ArtifactCleanupSort::Discovery,
                         limit: None,
+                        cursor: None,
                         merged_only: false,
                         min_age_days: None,
                         include_active_worktrees: false,
