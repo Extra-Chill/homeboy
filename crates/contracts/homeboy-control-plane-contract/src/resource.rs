@@ -1076,6 +1076,10 @@ mod tests {
         assert_eq!(page.runs[0].state, ControlPlaneRunState::Running);
         assert!(page.next_cursor.is_none());
         assert!(!page.has_more);
+        assert_eq!(
+            serde_json::to_value(&page).expect("serialize fixture"),
+            serde_json::from_str::<serde_json::Value>(fixture).expect("fixture JSON")
+        );
     }
 
     #[test]
@@ -1089,6 +1093,10 @@ mod tests {
             Some(ControlPlaneRunPlacementEffective::Controller)
         );
         assert_eq!(placement.runner_id.as_deref(), Some("runner-fixture-1"));
+        assert_eq!(
+            serde_json::to_value(&page).expect("serialize fixture"),
+            serde_json::from_str::<serde_json::Value>(fixture).expect("fixture JSON")
+        );
     }
 
     #[test]

@@ -1237,6 +1237,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn migration_20_backfills_pre_v1_fixture_once() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/control-plane-migration/pre-v1-agent-task-runs.json"
+        ))
+        .expect("legacy fixture");
+        let directory = tempfile::tempdir().expect("fixture database directory");
+        let path = directory.path().join("observations.sqlite");
+        let mut connection = Connection::open(&path).expect("legacy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+            )
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 19)
+        {
+            let transaction = connection.transaction().unwrap();
+            apply_migration(&transaction, migration).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'fixture')",
+                    [migration.version],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        for run in fixture["runs"].as_array().expect("fixture runs") {
+            connection
+                .execute(
+                    "INSERT INTO runs(id, kind, started_at, finished_at, status, metadata_json) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        run["id"].as_str().unwrap(),
+                        run["kind"].as_str().unwrap(),
+                        run["started_at"].as_str().unwrap(),
+                        run["finished_at"].as_str(),
+                        run["status"].as_str().unwrap(),
+                        run["metadata"].to_string(),
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        for _ in 0..2 {
+            let connection = Connection::open(&path).expect("reopen legacy database");
+            apply_migrations(&connection).expect("migrate fixture");
+        }
+        let connection = Connection::open(&path).expect("inspect migrated database");
+        let mappings = connection
+            .prepare(
+                "SELECT mission_id, run_id FROM control_plane_mission_runs ORDER BY mission_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let expected_mappings = fixture["mappings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mapping| {
+                (
+                    mapping[0].as_str().unwrap().to_string(),
+                    mapping[1].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(mappings, expected_mappings);
+        let missions = connection
+            .prepare("SELECT id, created_at, updated_at FROM control_plane_missions ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let expected_missions = fixture["missions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mission| {
+                (
+                    mission[0].as_str().unwrap().to_string(),
+                    mission[1].as_str().unwrap().to_string(),
+                    mission[2].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(missions, expected_missions);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 20",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
     fn seed_owned_and_orphaned_children(connection: &Connection) {
         // These rows model state written *while FK enforcement was off* -- the
         // exact scenario migration 13 exists to clean up, and what

@@ -86,17 +86,7 @@ pub fn execute_delegated_action(
     };
     let requested_id = RunId::new(&run.id)
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
-    let request_json = serde_json::to_vec(request)
-        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
-    let action = serde_json::to_value(request.action)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .ok_or_else(|| ControlPlaneError::invalid_argument("action has no wire identity"))?;
-    let idempotency_digest = homeboy_engine_primitives::content_hash::sha256_hex(
-        format!("{}\0{}", action, request.idempotency_key).as_bytes(),
-    );
-    let request_digest =
-        homeboy_engine_primitives::content_hash::sha256_hex(request_json.as_slice());
+    let (action, idempotency_digest, request_digest) = delegated_action_digests(request)?;
     let claim = store
         .claim_control_plane_action(&requested_id, &idempotency_digest, &request_digest)
         .map_err(map_store_error)?;
@@ -179,6 +169,48 @@ pub fn execute_delegated_action(
         .map_err(map_store_error)?;
     ensure_delegated_action_events(store, request, &acknowledgement)?;
     Ok(Some(acknowledgement))
+}
+
+pub fn replay_delegated_action(
+    store: &ObservationStore,
+    run: &RunId,
+    request: &ControlPlaneActionRequest,
+) -> Result<Option<ControlPlaneActionAcknowledgement>, ControlPlaneError> {
+    let (_, idempotency_digest, request_digest) = delegated_action_digests(request)?;
+    let existing = store
+        .existing_control_plane_action(run, &idempotency_digest, &request_digest)
+        .map_err(map_store_error)?;
+    match existing {
+        Some(ControlPlaneActionClaim::Completed(acknowledgement)) => {
+            ensure_delegated_action_events(store, request, &acknowledgement)?;
+            Ok(Some(acknowledgement))
+        }
+        Some(ControlPlaneActionClaim::InProgress) => Err(ControlPlaneError::unavailable(
+            "this idempotent action is already in progress",
+        )),
+        Some(ControlPlaneActionClaim::Acquired { .. })
+        | Some(ControlPlaneActionClaim::Recover { .. }) => Err(ControlPlaneError::unavailable(
+            "this idempotent action is already in progress",
+        )),
+        None => Ok(None),
+    }
+}
+
+fn delegated_action_digests(
+    request: &ControlPlaneActionRequest,
+) -> Result<(String, String, String), ControlPlaneError> {
+    let request_json = serde_json::to_vec(request)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let action = serde_json::to_value(request.action)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .ok_or_else(|| ControlPlaneError::invalid_argument("action has no wire identity"))?;
+    let idempotency_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        format!("{}\0{}", action, request.idempotency_key).as_bytes(),
+    );
+    let request_digest =
+        homeboy_engine_primitives::content_hash::sha256_hex(request_json.as_slice());
+    Ok((action, idempotency_digest, request_digest))
 }
 
 fn ensure_delegated_action_events(
@@ -627,10 +659,13 @@ pub fn execute_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_delegated_action_event, ControlPlaneProvider, NoopProvider};
+    use super::{
+        append_delegated_action_event, delegated_action_digests, replay_delegated_action,
+        ControlPlaneProvider, NoopProvider,
+    };
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionPayload, ControlPlaneActionRequest,
-        ControlPlaneOperation, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        ControlPlaneErrorClass, ControlPlaneOperation, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     };
 
     #[test]
@@ -684,5 +719,39 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn an_in_progress_action_replay_remains_retryable() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::observation::ObservationStore::open_initialized_at(
+            directory.path().join("store.sqlite"),
+        )
+        .unwrap();
+        store
+            .start_run_with_id(
+                crate::observation::NewRunRecord::builder("test").build(),
+                "run-1".to_string(),
+            )
+            .unwrap();
+        let run = RunId::new("run-1").unwrap();
+        let request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: ControlPlaneAction::Resume,
+            idempotency_key: "same-key".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload::empty(),
+            confirmed: false,
+        };
+        let (_, idempotency_digest, request_digest) = delegated_action_digests(&request).unwrap();
+        store
+            .claim_control_plane_action(&run, &idempotency_digest, &request_digest)
+            .unwrap();
+
+        let error = replay_delegated_action(&store, &run, &request).unwrap_err();
+
+        assert_eq!(error.class, ControlPlaneErrorClass::Unavailable);
+        assert!(error.retryable);
     }
 }

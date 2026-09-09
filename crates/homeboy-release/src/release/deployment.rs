@@ -654,9 +654,9 @@ mod tests {
         ReleaseStepStatus,
     };
     use homeboy_control_plane_contract::{
-        ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
-        ControlPlaneActionRequest, ControlPlaneRun, ControlPlaneRunState, RunId,
-        CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneResult,
+        ControlPlaneRunState, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     };
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::defaults;
@@ -1265,6 +1265,18 @@ mod tests {
             project::save(&retry).expect("repair failed target");
 
             crate::release::control_plane::register_action_delegate();
+            homeboy_agents::orchestration::register();
+            let projected = homeboy_core::control_plane::run(&deploy_run)
+                .expect("project deploy control-plane run");
+            assert_eq!(
+                projected
+                    .action_eligibility
+                    .as_ref()
+                    .expect("action eligibility")
+                    .actions[0]
+                    .availability,
+                homeboy_control_plane_contract::ControlPlaneActionAvailability::Available
+            );
             let store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
                 &test_roots(),
             )
@@ -1291,30 +1303,20 @@ mod tests {
                 confirmed: false,
             };
             let execute = || {
-                homeboy_core::control_plane::execute_delegated_action(
-                    &store,
-                    &record,
-                    &request,
-                    || {
-                        let current = store
-                            .get_run(deploy_run.as_str())
-                            .map_err(|error| {
-                                homeboy_control_plane_contract::ControlPlaneError::unavailable(
-                                    error.message,
-                                )
-                            })?
-                            .expect("deploy run remains present");
-                        let mut resource = ControlPlaneRun::new(deploy_run.clone());
-                        resource.state = if current.status == "pass" {
-                            ControlPlaneRunState::Succeeded
-                        } else {
-                            ControlPlaneRunState::Failed
-                        };
-                        Ok(resource)
-                    },
+                let response =
+                    homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                        method: homeboy_core::http_api::HttpMethod::Post,
+                        path: format!("/v1/control-plane/runs/{}/actions", deploy_run.as_str()),
+                        body: Some(serde_json::to_value(&request).expect("action request")),
+                    })
+                    .expect("control-plane HTTP action");
+                assert_eq!(response.status, 200, "{}", response.body);
+                serde_json::from_value::<ControlPlaneResult<ControlPlaneActionAcknowledgement>>(
+                    response.body,
                 )
-                .expect("execute shared recovery action")
-                .expect("deploy delegate")
+                .expect("typed action result")
+                .resource
+                .expect("action acknowledgement")
             };
             let acknowledgement = execute();
             assert_eq!(

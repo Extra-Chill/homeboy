@@ -473,12 +473,11 @@ fn observed_agent_task_terminal_job_status(
     }
     let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
     if let Some(endpoint) = control_plane_endpoint {
-        if let Ok(client) = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(2))
-            .build()
-        {
-            if let Ok(run) = crate::daemon_http_get::control_plane_run(&client, endpoint, &run_id) {
+        if let Ok(client) = homeboy_control_plane_client::ControlPlaneClient::new_local(
+            endpoint,
+            Duration::from_secs(2),
+        ) {
+            if let Ok(run) = client.run(&run_id) {
                 if let Some(status) = control_plane_terminal_job_status(run.state) {
                     return Some(status);
                 }

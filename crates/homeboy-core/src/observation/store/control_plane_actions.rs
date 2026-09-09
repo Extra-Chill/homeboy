@@ -12,6 +12,45 @@ pub enum ControlPlaneActionClaim {
 }
 
 impl ObservationStore {
+    pub fn existing_control_plane_action(
+        &self,
+        run: &RunId,
+        idempotency_digest: &str,
+        request_digest: &str,
+    ) -> Result<Option<ControlPlaneActionClaim>> {
+        let stored: Option<(String, String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT request_digest, state, acknowledgement_json \
+                 FROM control_plane_action_claims \
+                 WHERE run_id = ?1 AND idempotency_digest = ?2",
+                params![run.as_str(), idempotency_digest],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(sqlite_error("read completed control-plane action"))?;
+        let Some((stored_digest, state, acknowledgement)) = stored else {
+            return Ok(None);
+        };
+        if stored_digest != request_digest {
+            return Err(Error::validation_invalid_argument(
+                "idempotency_key",
+                "control-plane action idempotency key was already used for different input",
+                None,
+                None,
+            ));
+        }
+        if state != "completed" {
+            return Ok(Some(ControlPlaneActionClaim::InProgress));
+        }
+        serde_json::from_str(&acknowledgement.ok_or_else(|| {
+            Error::internal_unexpected("completed control-plane action has no acknowledgement")
+        })?)
+        .map(ControlPlaneActionClaim::Completed)
+        .map(Some)
+        .map_err(|error| Error::internal_json(error.to_string(), None))
+    }
+
     pub fn claim_control_plane_action(
         &self,
         run: &RunId,

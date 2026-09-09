@@ -1479,9 +1479,10 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .push(ControlPlaneOperation::ExecuteRunAction);
         capabilities.compatibility_windows = vec![
             ControlPlaneCompatibilityWindow {
-                projection: "homeboy/agent-task-cook-report/v1#lifecycle_status,terminal,retryable"
+                projection: "homeboy/agent-task-cook/v1#lifecycle_status,terminal,retryable"
                     .to_string(),
-                replacement_schema: "homeboy/control-plane-run/v1".to_string(),
+                replacement_schema: "homeboy/control-plane-run/v1#state,action_eligibility"
+                    .to_string(),
                 remove_in: "0.370.0".to_string(),
             },
             ControlPlaneCompatibilityWindow {
@@ -4950,6 +4951,15 @@ impl ControlPlaneProvider for RegisteredProvider {
                     })
                 });
                 if !available {
+                    if let Some(acknowledgement) =
+                        homeboy_core::control_plane::replay_delegated_action(
+                            &observation,
+                            requested_id,
+                            request,
+                        )?
+                    {
+                        return Ok(acknowledgement);
+                    }
                     return Err(ControlPlaneError::invalid_argument(format!(
                         "control-plane action is unavailable for run {requested_id}"
                     )));
@@ -5665,9 +5675,9 @@ mod tests {
             .iter()
             .all(|window| window.remove_in == "0.370.0"));
         assert!(capabilities.compatibility_windows.iter().any(|window| {
-            window.projection
-                == "homeboy/agent-task-cook-report/v1#lifecycle_status,terminal,retryable"
-                && window.replacement_schema == "homeboy/control-plane-run/v1"
+            window.projection == "homeboy/agent-task-cook/v1#lifecycle_status,terminal,retryable"
+                && window.replacement_schema
+                    == "homeboy/control-plane-run/v1#state,action_eligibility"
         }));
         assert!(capabilities.compatibility_windows.iter().any(|window| {
             window.projection == "homeboy/runner-execution-record/v1#agent_task_run_id"

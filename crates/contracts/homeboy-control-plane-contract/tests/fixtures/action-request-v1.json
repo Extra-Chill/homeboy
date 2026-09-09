@@ -1,0 +1,10 @@
+{
+  "schema": "homeboy/control-plane-action-request/v1",
+  "action": "resume",
+  "idempotency_key": "resume-run-1",
+  "actor": "external-client",
+  "parameters": {
+    "schema": "homeboy/control-plane-empty-action-payload/v1"
+  },
+  "confirmed": false
+}

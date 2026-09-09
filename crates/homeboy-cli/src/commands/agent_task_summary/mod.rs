@@ -597,7 +597,7 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         "patch promoted and verified"
     } else if target_applied {
         "patch promoted"
-    } else if promotable {
+    } else if promotable || metrics.non_empty_patches > 0 {
         "patch produced, not promoted"
     } else if raw_apply_candidates > 0 {
         "no-op: patch artifacts produced but empty"
@@ -645,6 +645,9 @@ fn target_application_line(payload: &Value) -> Option<String> {
     let verification = promotion
         .get("verified")
         .and_then(Value::as_bool)
+        .or_else(|| {
+            (string_value(promotion, &["verification_phase"]) == Some("pre_apply")).then_some(false)
+        })
         .map(|verified| if verified { "verified" } else { "not verified" })
         .unwrap_or("unknown");
     Some(format!(
