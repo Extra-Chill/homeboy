@@ -206,6 +206,9 @@ try {
 	assert.equal(fs.existsSync(scriptPath), true, `provider command target should exist: ${scriptPath}`);
 
 	const mockCliPath = path.join(root, 'mock-opencode.cjs');
+	const ambientCargoTargetDir = path.join(root, 'ambient cargo target');
+	const runtimeCargoTargetDir = path.join(root, 'runtime cargo target with spaces');
+	const cargoTargetResolution = 'portable';
 	fs.writeFileSync(mockCliPath, `#!/usr/bin/env node
 const assert = require('node:assert/strict');
 assert.equal(process.argv[2], 'run');
@@ -218,6 +221,11 @@ assert.equal([
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN, 'refresh-token-must-not-leak');
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, 'access-token-must-not-leak');
 assert.equal(process.env.UNDECLARED_SECRET, undefined);
+if (instruction === 'Prove two attached runtime tools without leaking secrets.') {
+  assert.equal(process.env.UNDECLARED_CARGO_ENV, undefined);
+  assert.equal(process.env.CARGO_TARGET_DIR, ${JSON.stringify(runtimeCargoTargetDir)});
+  assert.equal(process.env.HOMEBOY_CARGO_TARGET_RESOLUTION, ${JSON.stringify(cargoTargetResolution)});
+}
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.agent.title.disable, true);
 assert.equal(config.permission.external_directory['*'], 'deny');
@@ -270,10 +278,20 @@ process.exit(0);
 			AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
 			FIXTURE_MCP_TOKEN: 'fixture-token-must-not-leak',
 			UNDECLARED_SECRET: 'must-not-reach-opencode',
+			UNDECLARED_CARGO_ENV: 'must-not-reach-opencode',
+			CARGO_TARGET_DIR: ambientCargoTargetDir,
+			HOMEBOY_CARGO_TARGET_RESOLUTION: cargoTargetResolution,
 		},
 		input: JSON.stringify({
 			...request,
 			instructions: 'Prove two attached runtime tools without leaking secrets.',
+			executor: {
+				...request.executor,
+				config: {
+					...request.executor.config,
+					runtime_env: { CARGO_TARGET_DIR: runtimeCargoTargetDir },
+				},
+			},
 			resolved_runtime_tools: [fixtureRuntimeTool, secondFixtureRuntimeTool],
 		}),
 	});
