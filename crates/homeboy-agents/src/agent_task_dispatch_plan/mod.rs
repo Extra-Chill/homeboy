@@ -155,7 +155,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let (mut provider_config, _) = dispatch_provider_config(
+    let (mut provider_config, mut generated_provider_client_context) = dispatch_provider_config(
         request,
         &repo,
         &component,
@@ -168,17 +168,14 @@ pub fn build_dispatch_plan_with_provider_requirements(
         .as_ref()
         .and_then(|route| route.provider_config.as_object())
     {
+        // A selected policy route owns its explicit context, even when the
+        // base config received a Homeboy-generated fanout context.
+        generated_provider_client_context &= !overrides.contains_key("client_context");
         provider_config
             .as_object_mut()
             .expect("dispatch provider config object")
             .extend(overrides.clone());
     }
-    // Policy-route configuration is authoritative for the selected provider.
-    // Its client context is caller-owned even when Homeboy generated the base.
-    let generated_provider_client_context = !provider_config
-        .as_object()
-        .expect("dispatch provider config object")
-        .contains_key("client_context");
     let policy_backend = initial_route
         .as_ref()
         .map(|route| route.backend.clone())
@@ -1311,6 +1308,34 @@ mod tests {
         assert_eq!(
             plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
             false
+        );
+    }
+
+    #[test]
+    fn generated_fanout_context_remains_marked_for_readiness_identity() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with generated fanout context.".to_string()),
+            core: DispatchCoreInputs {
+                generated_fanout_context: true,
+                client_context: Some(
+                    serde_json::json!({
+                        "fanout": {
+                            "id": "shared-fanout",
+                            "semantics": "batch_cook",
+                            "cook_id": "generated-child"
+                        }
+                    })
+                    .to_string(),
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
+            true
         );
     }
 
