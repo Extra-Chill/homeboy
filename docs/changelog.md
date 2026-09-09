@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.370.1] - 2026-09-09
+
+### Changed
+- stop paying production probe budgets and thousand-entry fixtures in tests
+- Remove retired control-plane projections
+- Extend the generic control plane
+- root the refresh path so its tests leave the global home lock
+
+### Fixed
+- prioritize explicit lease adoption
+- route selected credentials to Lab runners
+- require targeted runner admission
+
 ## [0.370.0] - 2026-09-08
 
 ### Added
