@@ -489,12 +489,11 @@ pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     with_remote_tracking_authority_until(git_root, "update remote default branch", deadline, |_| {
         let remote = resolve_default_remote_until(git_root, deadline)?;
-        let remote_branch = default_remote_branch_until(git_root, &remote, deadline)?;
+        let remote_branch = remote_default_branch_until(git_root, &remote, deadline)?;
         let (target_remote, target_ref, local_branch) = match remote_branch {
             Some(branch) => {
                 let branch_name = branch
-                    .rsplit_once('/')
-                    .map(|(_, name)| name)
+                    .strip_prefix(&format!("{remote}/"))
                     .unwrap_or(&branch);
                 (
                     remote,
@@ -575,39 +574,33 @@ fn resolve_default_remote_until(git_root: &Path, deadline: Instant) -> Result<St
     }
 }
 
-fn default_remote_branch_until(
+/// Resolve the remote's live HEAD symref without relying on cached
+/// remote-tracking refs, which may belong to a previous remote URL or default.
+fn remote_default_branch_until(
     git_root: &Path,
     remote: &str,
     deadline: Instant,
 ) -> Result<Option<String>> {
-    let head_ref = format!("refs/remotes/{remote}/HEAD");
     let output = run_git_output_with_env_timeout(
         git_root,
-        &["symbolic-ref", "--quiet", "--short", &head_ref],
-        "git default remote branch",
+        &["ls-remote", "--symref", remote, "HEAD"],
+        "git remote default branch",
         &[],
         remaining_timeout(deadline)?,
     )?;
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !value.is_empty() {
-            return Ok(Some(value));
-        }
-    }
-    for branch in ["main", "trunk", "master"] {
-        let candidate = format!("{remote}/{branch}");
-        let output = run_git_output_with_env_timeout(
-            git_root,
-            &["rev-parse", "--verify", "--quiet", &candidate],
-            "git rev-parse",
-            &[],
-            remaining_timeout(deadline)?,
-        )?;
-        if output.status.success() {
-            return Ok(Some(candidate));
-        }
-    }
-    Ok(None)
+    Ok(output
+        .status
+        .success()
+        .then(|| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("ref: refs/heads/")
+                        .and_then(|line| line.strip_suffix("\tHEAD"))
+                        .map(|branch| format!("{remote}/{branch}"))
+                })
+        })
+        .flatten())
 }
 
 fn configured_upstream_until(git_root: &Path, deadline: Instant) -> Result<(String, String)> {
@@ -798,14 +791,12 @@ mod tests {
             &["hang"],
             "test hung Git phase",
             &[],
-            Duration::from_millis(50),
+            Duration::from_millis(250),
         )
         .expect_err("hung Git alias should time out");
 
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(err.details["stderr"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("timed out")));
+        assert!(err.message.contains("timed out"));
         let pid: i32 = std::fs::read_to_string(&child_pid)
             .expect("hung child records its pid")
             .trim()
@@ -962,6 +953,70 @@ mod tests {
             std::fs::read_to_string(fetches).unwrap().lines().count(),
             1,
             "the update must merge the authority-fetched tracking ref without a second fetch"
+        );
+    }
+
+    #[test]
+    fn update_to_remote_default_branch_uses_live_remote_head_with_slash_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let remote = tmp.path().join("remote.git");
+        let seed = tmp.path().join("seed");
+        let checkout = tmp.path().join("checkout");
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["config", "user.email", "t@x.test"]);
+        git(&seed, &["config", "user.name", "T"]);
+        std::fs::write(seed.join("f.txt"), "main\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "main"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+
+        git(&seed, &["switch", "-qc", "release/2026"]);
+        std::fs::write(seed.join("f.txt"), "release\n").unwrap();
+        git(&seed, &["commit", "-qam", "release"]);
+        git(&seed, &["push", "-q", "origin", "release/2026"]);
+        git(
+            &remote,
+            &["symbolic-ref", "HEAD", "refs/heads/release/2026"],
+        );
+        let expected = run_git(&seed, &["rev-parse", "HEAD"], "release head").unwrap();
+        assert_eq!(
+            remote_default_branch_until(
+                &checkout,
+                "origin",
+                Instant::now() + Duration::from_secs(2)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("origin/release/2026")
+        );
+
+        update_to_remote_default_branch(&checkout).expect("update live default branch");
+
+        assert_eq!(
+            run_git(&checkout, &["rev-parse", "HEAD"], "checkout head").unwrap(),
+            expected,
+            "the cached origin/main HEAD must not override the remote's current default"
         );
     }
 

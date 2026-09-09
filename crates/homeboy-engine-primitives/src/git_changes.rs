@@ -18,11 +18,45 @@ use std::time::{Duration, Instant};
 
 use homeboy_error::{Error, Result};
 
+use crate::command;
 use crate::git_remote_tracking_authority::with_remote_tracking_authority_until;
 
 /// Run a git subcommand in `path`, returning the raw process output.
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<Output> {
     Command::new("git").args(args).current_dir(path).output()
+}
+
+/// Run Git until `deadline`, terminating its process group if a transport or
+/// credential helper stalls.
+fn execute_git_until(path: &str, args: &[&str], deadline: Instant) -> Result<Output> {
+    let mut process = Command::new("git");
+    process
+        .args(args)
+        .current_dir(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command::isolate_process_tree(&mut process);
+    let mut child = process
+        .spawn()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let mut timed_out = false;
+    let output = command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        command::DEFAULT_CAPTURE_LIMIT_BYTES,
+        || {
+            timed_out = Instant::now() >= deadline;
+            timed_out
+        },
+    )
+    .map_err(|error| Error::git_command_failed(error.to_string()))?
+    .into_output();
+    if timed_out {
+        return Err(Error::git_command_failed(
+            "git shallow-clone fetch deadline exhausted; terminated child process group",
+        ));
+    }
+    Ok(output)
 }
 
 /// Get the files that changed on the current branch relative to `git_ref`.
@@ -170,18 +204,19 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     }
 
     eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
+    let deadline = Instant::now() + Duration::from_secs(30);
     with_remote_tracking_authority_until(
         std::path::Path::new(path),
         "deepen shallow clone",
-        Instant::now() + Duration::from_secs(30),
+        deadline,
         |_| {
             // Fetch the ref itself if it's not already present.
             let remote = resolve_default_remote(path);
-            let _ = execute_git(path, &["fetch", &remote, git_ref, "--depth=50"]);
+            let _ = execute_git_until(path, &["fetch", &remote, git_ref, "--depth=50"], deadline)?;
 
             // Progressive deepening: try increasingly generous depths.
             for depth in &["50", "200"] {
-                let _ = execute_git(path, &["fetch", "--deepen", depth]);
+                let _ = execute_git_until(path, &["fetch", "--deepen", depth], deadline)?;
                 if has_merge_base(path, git_ref) {
                     eprintln!("Merge base found after deepening by {depth} commits");
                     return Ok(());
@@ -190,7 +225,7 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
 
             // Last resort: full unshallow.
             eprintln!("Merge base not found with depth 200, unshallowing repository");
-            let _ = execute_git(path, &["fetch", "--unshallow"]);
+            let _ = execute_git_until(path, &["fetch", "--unshallow"], deadline)?;
 
             if has_merge_base(path, git_ref) {
                 eprintln!("Merge base found after full unshallow");
@@ -281,5 +316,44 @@ mod tests {
             !files.contains(&"deleted.txt".to_string()),
             "deleted file excluded: {files:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_terminates_a_stalled_git_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        execute_git(path, &["init", "-q"]).expect("initialize repository");
+        let remote = dir.path().join("remote.git");
+        execute_git(path, &["init", "--bare", "-q", remote.to_str().unwrap()])
+            .expect("initialize remote");
+        execute_git(path, &["remote", "add", "origin", remote.to_str().unwrap()])
+            .expect("configure remote");
+        let upload_pack = dir.path().join("hang-upload-pack");
+        std::fs::write(&upload_pack, "#!/bin/sh\nsleep 10 &\nwait\n").expect("write helper");
+        std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755))
+            .expect("make helper executable");
+        execute_git(
+            path,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                upload_pack.to_str().unwrap(),
+            ],
+        )
+        .expect("configure upload-pack helper");
+
+        let started = Instant::now();
+        let error = execute_git_until(
+            path,
+            &["fetch", "origin"],
+            Instant::now() + Duration::from_millis(250),
+        )
+        .expect_err("stalled fetch must exhaust its deadline");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(error.message.contains("deadline exhausted"));
     }
 }
