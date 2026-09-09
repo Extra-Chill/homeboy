@@ -13,6 +13,7 @@
 //! primitives base rather than all of `homeboy-core` for changed-file scoping.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,16 @@ fn execute_git(path: &str, args: &[&str]) -> std::io::Result<Output> {
 /// Run Git until `deadline`, terminating its process group if a transport or
 /// credential helper stalls.
 fn execute_git_until(path: &str, args: &[&str], deadline: Instant) -> Result<Output> {
-    let mut process = Command::new("git");
+    execute_git_until_with_program(path, args, deadline, Path::new("git"))
+}
+
+fn execute_git_until_with_program(
+    path: &str,
+    args: &[&str],
+    deadline: Instant,
+    program: &Path,
+) -> Result<Output> {
+    let mut process = Command::new(program);
     process
         .args(args)
         .current_dir(path)
@@ -325,35 +335,35 @@ mod tests {
 
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().to_str().expect("utf-8 path");
-        execute_git(path, &["init", "-q"]).expect("initialize repository");
-        let remote = dir.path().join("remote.git");
-        execute_git(path, &["init", "--bare", "-q", remote.to_str().unwrap()])
-            .expect("initialize remote");
-        execute_git(path, &["remote", "add", "origin", remote.to_str().unwrap()])
-            .expect("configure remote");
-        let upload_pack = dir.path().join("hang-upload-pack");
-        std::fs::write(&upload_pack, "#!/bin/sh\nsleep 10 &\nwait\n").expect("write helper");
-        std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755))
-            .expect("make helper executable");
-        execute_git(
-            path,
-            &[
-                "config",
-                "remote.origin.uploadpack",
-                upload_pack.to_str().unwrap(),
-            ],
-        )
-        .expect("configure upload-pack helper");
+        let git = dir.path().join("git");
+        let pid_file = dir.path().join("descendant.pid");
+        let script = format!(
+            "#!/bin/sh\nsleep 30 &\necho $! > {}\nwait\n",
+            crate::shell::quote_path(&pid_file.display().to_string())
+        );
+        std::fs::write(&git, script).expect("write stalled git");
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))
+            .expect("make stalled git executable");
 
         let started = Instant::now();
-        let error = execute_git_until(
+        let error = execute_git_until_with_program(
             path,
             &["fetch", "origin"],
-            Instant::now() + Duration::from_millis(250),
+            Instant::now() + Duration::from_secs(1),
+            &git,
         )
         .expect_err("stalled fetch must exhaust its deadline");
 
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(error.message.contains("deadline exhausted"));
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        assert!(
+            !command::process_is_running(descendant_pid),
+            "deadline left descendant {descendant_pid} runnable"
+        );
     }
 }

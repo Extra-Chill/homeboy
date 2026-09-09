@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use homeboy_error::{Error, Result};
+
+use crate::command;
 
 const WAIT_INTERVAL: Duration = Duration::from_millis(50);
 const LOCK_FILE: &str = "homeboy-remote-tracking.lock";
@@ -23,7 +26,7 @@ pub fn with_remote_tracking_authority_until<T>(
     action: impl FnOnce(Duration) -> Result<T>,
 ) -> Result<T> {
     report_authority_attempt();
-    let common_dir = git_common_dir(repository)?;
+    let common_dir = git_common_dir(repository, deadline)?;
     let authority = {
         let mut authorities = AUTHORITIES
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -52,12 +55,41 @@ pub fn with_remote_tracking_authority_until<T>(
     )?)
 }
 
-fn git_common_dir(repository: &Path) -> Result<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+fn git_common_dir(repository: &Path, deadline: Instant) -> Result<PathBuf> {
+    git_common_dir_with_program(repository, deadline, Path::new("git"))
+}
+
+fn git_common_dir_with_program(
+    repository: &Path,
+    deadline: Instant,
+    program: &Path,
+) -> Result<PathBuf> {
+    let mut git = Command::new(program);
+    git.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(repository)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command::isolate_process_tree(&mut git);
+    let mut child = git
+        .spawn()
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let mut timed_out = false;
+    let output = command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        command::DEFAULT_CAPTURE_LIMIT_BYTES,
+        || {
+            timed_out = Instant::now() >= deadline;
+            timed_out
+        },
+    )
+    .map_err(|error| Error::git_command_failed(error.to_string()))?
+    .into_output();
+    if timed_out {
+        return Err(Error::git_command_failed(
+            "resolve Git common directory deadline exhausted; terminated child process group",
+        ));
+    }
     if !output.status.success() {
         return Err(Error::git_command_failed(format!(
             "resolve Git common directory for {}",
@@ -68,6 +100,45 @@ fn git_common_dir(repository: &Path) -> Result<PathBuf> {
         String::from_utf8_lossy(&output.stdout).trim(),
     ))
     .map_err(|error| Error::git_command_failed(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn common_directory_probe_deadline_reaps_stalled_git_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pid_file = dir.path().join("descendant.pid");
+        let git = dir.path().join("git");
+        let script = format!(
+            "#!/bin/sh\nsleep 30 &\necho $! > {}\nwait\n",
+            crate::shell::quote_path(&pid_file.display().to_string())
+        );
+        fs::write(&git, script).expect("write stalled git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755))
+            .expect("make stalled git executable");
+
+        let started = Instant::now();
+        let error =
+            git_common_dir_with_program(dir.path(), Instant::now() + Duration::from_secs(1), &git)
+                .expect_err("stalled common-directory probe must exhaust its deadline");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(error.message.contains("deadline exhausted"));
+        let descendant_pid = fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        assert!(
+            !command::process_is_running(descendant_pid),
+            "deadline left descendant {descendant_pid} runnable"
+        );
+    }
 }
 
 fn acquire_process_guard<'a>(
