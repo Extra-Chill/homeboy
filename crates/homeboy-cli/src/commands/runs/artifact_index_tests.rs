@@ -13,26 +13,7 @@ fn test_store() -> homeboy::core::observation::ObservationStore {
     homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
 }
 
-struct XdgGuard(Option<String>);
-
 struct PublicArtifactBaseGuard(Option<String>);
-
-impl XdgGuard {
-    fn unset() -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::remove_var("XDG_DATA_HOME");
-        Self(prior)
-    }
-}
-
-impl Drop for XdgGuard {
-    fn drop(&mut self) {
-        match &self.0 {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-}
 
 impl PublicArtifactBaseGuard {
     fn unset() -> Self {
@@ -69,7 +50,7 @@ fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> 
 #[test]
 fn runs_list_rig_filter_surfaces_compact_artifact_index() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
@@ -161,7 +142,7 @@ fn runs_list_rig_filter_surfaces_compact_artifact_index() {
 #[test]
 fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
@@ -240,7 +221,7 @@ fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
 #[test]
 fn runs_artifacts_pages_large_inventory_and_filters_before_rendering() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
@@ -330,7 +311,7 @@ fn runs_artifacts_pages_large_inventory_and_filters_before_rendering() {
 #[test]
 fn runs_artifacts_classifies_persisted_bench_artifact_from_metadata() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
@@ -382,7 +363,7 @@ fn runs_artifacts_classifies_persisted_bench_artifact_from_metadata() {
 #[test]
 fn runs_artifacts_recognizes_canonical_fuzz_result_envelope() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
@@ -456,7 +437,7 @@ fn runs_artifacts_recognizes_canonical_fuzz_result_envelope() {
 #[test]
 fn runs_artifacts_summarizes_static_site_fixture_matrix_artifacts() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
@@ -603,7 +584,7 @@ fn runs_artifacts_summarizes_static_site_fixture_matrix_artifacts() {
 #[test]
 fn runs_artifacts_surfaces_static_html_preview_entrypoints() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let _public_artifact_base = PublicArtifactBaseGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
@@ -660,7 +641,7 @@ fn runs_artifacts_surfaces_static_html_preview_entrypoints() {
 #[test]
 fn runs_artifacts_returns_empty_for_run_when_only_mismatched_related_artifacts_exist() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let job_id = "job-123";
         let requested_run = store

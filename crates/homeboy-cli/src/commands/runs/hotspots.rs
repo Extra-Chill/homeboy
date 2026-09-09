@@ -784,25 +784,6 @@ mod tests {
         }
     }
 
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn sample_run(kind: &str, component_id: &str, rig_id: &str) -> NewRunRecord {
         NewRunRecord::builder(kind)
             .component_id(component_id)
@@ -859,7 +840,7 @@ mod tests {
     #[test]
     fn skipped_directory_fuzz_artifact_points_to_retrieval_command() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run("bench", "homeboy", "studio"))
@@ -906,7 +887,7 @@ mod tests {
         // batched artifact read must key on the resolved record id — keying on
         // the caller-supplied label would silently yield zero artifacts.
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(
@@ -959,7 +940,7 @@ mod tests {
         // The facade's missing-run error carries runner guidance the private
         // helper never produced. Preserve the stable argument/message contract.
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
             let error = match runs_hotspots(
                 &test_store(),

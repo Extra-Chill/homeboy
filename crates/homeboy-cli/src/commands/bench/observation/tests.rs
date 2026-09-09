@@ -23,47 +23,6 @@ use crate::commands::utils::resource_policy::{
 };
 use crate::test_support::{serve_public_artifact_base_once, with_isolated_home};
 
-pub(super) struct XdgGuard(Option<String>);
-
-struct EnvGuard {
-    key: &'static str,
-    prior: Option<String>,
-}
-
-impl XdgGuard {
-    pub(super) fn unset() -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::remove_var("XDG_DATA_HOME");
-        Self(prior)
-    }
-}
-
-impl Drop for XdgGuard {
-    fn drop(&mut self) {
-        match &self.0 {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prior = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, prior }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.prior {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 pub(super) fn bench_results(component_id: &str, scenario_id: &str, p95: f64) -> BenchResults {
     serde_json::from_value(serde_json::json!({
         "component_id": component_id,
@@ -120,9 +79,9 @@ pub(super) fn bench_args() -> BenchRunArgs {
 #[test]
 fn bench_observation_persists_success_with_metrics_and_artifacts() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let public_artifact_base = serve_public_artifact_base_once(200);
-        let _public_artifact_base = EnvGuard::set(
+        let _public_artifact_base = homeboy_core::test_support::EnvVarGuard::set(
             homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
             &public_artifact_base,
         );
@@ -322,7 +281,7 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
 #[test]
 fn bench_observation_writes_status_file_at_start_and_finish() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         fs::write(run_dir.step_file(run_dir::files::RESOURCE_SUMMARY), b"{}").expect("resources");
@@ -379,7 +338,7 @@ fn bench_observation_writes_status_file_at_start_and_finish() {
 #[test]
 fn bench_observation_persists_phase_evidence_and_classification() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
 
@@ -457,7 +416,7 @@ fn bench_observation_persists_phase_evidence_and_classification() {
 #[test]
 fn bench_observation_rewrites_invocation_artifacts_to_persisted_paths() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         let invocation_artifact = run_dir
@@ -543,7 +502,7 @@ fn bench_observation_rewrites_invocation_artifacts_to_persisted_paths() {
 #[test]
 fn bench_observation_persists_nested_failure_diagnostics_before_cleanup() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         let diagnostic = run_dir
             .path()
@@ -617,7 +576,7 @@ fn bench_observation_persists_nested_failure_diagnostics_before_cleanup() {
 #[test]
 fn bench_observation_mirrors_url_artifact_from_run_artifacts_dir() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         let runtime_artifact = run_dir.path().join("artifacts/finding-packets.json");
@@ -710,7 +669,7 @@ fn bench_observation_mirrors_url_artifact_from_run_artifacts_dir() {
 #[test]
 fn bench_observation_rewrites_cleaned_short_invocation_artifact_paths() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         let preserved_artifact = run_dir
@@ -780,7 +739,7 @@ fn bench_observation_rewrites_cleaned_short_invocation_artifact_paths() {
 #[test]
 fn bench_observation_persists_workload_artifact_directories() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         let artifact_dir = run_dir
@@ -866,7 +825,7 @@ fn bench_observation_persists_workload_artifact_directories() {
 #[test]
 fn bench_observation_persists_workflow_error() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         let mut args = bench_args();
@@ -961,7 +920,7 @@ fn ready_lab() -> LabRunnerReadiness {
 #[test]
 fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         resource_policy::reset_captured_context_for_test();
 
         let synthetic = synthetic_resources(ResourceRecommendation::Hot);
@@ -1033,7 +992,7 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
 #[test]
 fn bench_observation_records_local_placement_override_with_legacy_evidence() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         resource_policy::reset_captured_context_for_test();
 
         let synthetic = synthetic_resources(ResourceRecommendation::Hot);
@@ -1099,7 +1058,7 @@ fn bench_observation_records_local_placement_override_with_legacy_evidence() {
 #[test]
 fn bench_observation_omits_resource_policy_when_not_captured() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         resource_policy::reset_captured_context_for_test();
 
         let run_dir = RunDir::create().expect("run dir");
