@@ -4166,9 +4166,6 @@ fn preview_provider_dispatchability_evidence(
     let mut admitted_routes: BTreeMap<String, Value> = BTreeMap::new();
     let mut children = Vec::with_capacity(static_routes.routes.len());
     for route in &static_routes.routes {
-        let static_task = route.plan.tasks.first().ok_or_else(|| {
-            Error::internal_unexpected("compiled fanout cook has no provider task")
-        })?;
         // The compiled Cook may contain controller follow-up tasks. This
         // preview admission is for the selected provider route, not every
         // future task in that Cook; admitting the full plan would probe the
@@ -4178,6 +4175,9 @@ fn preview_provider_dispatchability_evidence(
             catalog,
             &mut readiness_cache,
         )?;
+        let admitted_task = admitted_plan.tasks.first().ok_or_else(|| {
+            Error::internal_unexpected("compiled fanout cook has no provider task")
+        })?;
         // Admission binds any viable fallback route. Derive coalescing identity
         // from that selected route so an unavailable primary cannot block it.
         let route_key =
@@ -4185,14 +4185,11 @@ fn preview_provider_dispatchability_evidence(
         let admission = if let Some(admission) = admitted_routes.get(&route_key) {
             admission.clone()
         } else {
-            let task = admitted_plan.tasks.first().ok_or_else(|| {
-                Error::internal_unexpected("compiled fanout cook has no provider task")
-            })?;
             let admission = serde_json::json!({
                 "state": "completed",
                 "owner": "provider_runtime_readiness",
-                "deadline_unix_ms": task.limits.execution_deadline_unix_ms,
-                "routing": task.metadata.get("provider_readiness_routing").cloned().unwrap_or(Value::Null),
+                "deadline_unix_ms": admitted_task.limits.execution_deadline_unix_ms,
+                "routing": admitted_task.metadata.get("provider_readiness_routing").cloned().unwrap_or(Value::Null),
             });
             admitted_routes.insert(route_key, admission.clone());
             admission
@@ -4200,9 +4197,9 @@ fn preview_provider_dispatchability_evidence(
         children.push(serde_json::json!({
             "cook_id": route.cook_id,
             "executor": {
-                "backend": static_task.executor.backend,
-                "selector": static_task.executor.selector,
-                "model": static_task.executor.model(),
+                "backend": admitted_task.executor.backend,
+                "selector": admitted_task.executor.selector,
+                "model": admitted_task.executor.model(),
             },
             "admission": admission,
         }));
@@ -10353,7 +10350,7 @@ fi
                         "argv": [
                             "sh",
                             "-c",
-                            "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"account\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"primary unavailable\",\"cache_key\":\"primary\",\"identity\":{}}'"
+                            "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"account\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"primary unavailable\",\"cache_key\":\"primary\",\"identity\":{}}'"
                         ],
                         "timeout_ms": 5_000
                     }
@@ -10367,7 +10364,7 @@ fi
                         "sh",
                         "-c",
                         format!(
-                            "count=$(cat {0} 2>/dev/null || printf 0); printf '%s' \"$((count + 1))\" > {0}; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"ready\",\"identity\":{{}}}}'",
+                            "count=$(cat {0} 2>/dev/null || printf 0); printf '%s' \"$((count + 1))\" > {0}; cat >/dev/null; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"ready\",\"identity\":{{}}}}'",
                             invoked.display()
                         )
                     ],
@@ -10432,8 +10429,17 @@ fi
         assert_eq!(evidence["children"][0]["admission"]["state"], "completed");
         assert_eq!(evidence["children"][1]["admission"]["state"], "completed");
         assert_eq!(
+            evidence["children"][0]["executor"]["backend"],
+            "ready-fallback"
+        );
+        assert_eq!(
+            evidence["children"][1]["executor"]["backend"],
+            "ready-fallback"
+        );
+        assert_eq!(
             std::fs::read_to_string(invoked).expect("readiness count"),
-            "1"
+            "1",
+            "both children must coalesce onto one fallback readiness probe"
         );
     }
 
