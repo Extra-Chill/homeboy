@@ -324,12 +324,47 @@ fn queued_cook_placement_update_preserves_binding_identity_and_refuses_execution
             "schema": "homeboy/unmaterialized-cook-binding/v1",
             "request_ref": "request-1",
             "placement": { "requested": "auto", "local_fallback": false },
-            "replay_intent": { "argv": ["homeboy", "agent-task", "cook"] },
+            "replay_intent": {
+                "argv": ["homeboy", "agent-task", "cook", "--", "--placement", "lab"]
+            },
         }),
         "blocked_runner_unavailable",
         "runner unavailable",
     )
     .expect("admission");
+
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"] =
+                json!("reserved-attempt");
+            true
+        })
+        .expect("reserve materialization ownership");
+    assert!(
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "local", "operator")
+            .is_err()
+    );
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]
+                .as_object_mut()
+                .expect("handoff metadata")
+                .remove("materializing_attempt_run_id");
+            record.metadata["unmaterialized_cook_admission"]["state"] = json!("exhausted");
+            true
+        })
+        .expect("exhaust admission");
+    assert!(
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "local", "operator")
+            .is_err()
+    );
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["state"] =
+                json!("blocked_runner_unavailable");
+            true
+        })
+        .expect("restore queue admission");
 
     let updated =
         update_unmaterialized_cook_placement_in_store(&store, cook_id, "local", "operator")
@@ -349,6 +384,18 @@ fn queued_cook_placement_update_preserves_binding_identity_and_refuses_execution
             .expect("argv")
             .iter()
             .any(|argument| argument == "--placement=local")
+    );
+    assert_eq!(
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]["argv"],
+        json!([
+            "homeboy",
+            "--placement=local",
+            "agent-task",
+            "cook",
+            "--",
+            "--placement",
+            "lab"
+        ])
     );
 
     store

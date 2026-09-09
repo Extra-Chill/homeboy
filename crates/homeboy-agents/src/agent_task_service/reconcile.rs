@@ -755,7 +755,7 @@ fn reconcile_unmaterialized_cook_admissions_with_process_identity(
         considered += 1;
         let selection_key = admission_selection_cache_key(admission);
         let selection = selection_cache
-            .entry(selection_key)
+            .entry(selection_key.clone())
             .or_insert_with(|| {
                 select_runner(&serde_json::json!({
                     "schema": "homeboy/unmaterialized-cook-runner-selection-request/v1",
@@ -780,6 +780,11 @@ fn reconcile_unmaterialized_cook_admissions_with_process_identity(
                 return false;
             }
             let admission = &mut current.metadata["unmaterialized_cook_admission"];
+            // Runner selection happens outside the record lock. Do not claim a
+            // route selected from an older placement binding.
+            if admission_selection_cache_key(admission) != selection_key {
+                return false;
+            }
             let active_lease =
                 unmaterialized_replay_lease_is_active(admission, now, &mut process_identity_state);
             if active_lease {

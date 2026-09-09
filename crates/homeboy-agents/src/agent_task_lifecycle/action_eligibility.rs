@@ -98,7 +98,12 @@ fn placement_update_availability(
     record: &AgentTaskRunRecord,
 ) -> (ControlPlaneActionAvailability, String) {
     let admission = &record.metadata["unmaterialized_cook_admission"];
-    if record.state != AgentTaskRunState::Queued || !admission.is_object() {
+    if record.state != AgentTaskRunState::Queued
+        || !matches!(
+            admission["state"].as_str(),
+            Some("queued" | "blocked_runner_unavailable" | "blocked_runner_stale")
+        )
+    {
         return unavailable("placement updates require a queued unmaterialized Cook admission");
     }
     if record.metadata["provider_executions"]
@@ -483,6 +488,15 @@ mod tests {
             ControlPlaneActionAvailability::Available
         );
         record.metadata["provider_executions"] = serde_json::json!([{ "state": "running" }]);
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&record, None),
+                ControlPlaneAction::PlacementUpdate
+            ),
+            ControlPlaneActionAvailability::Unavailable
+        );
+        record.metadata["provider_executions"] = serde_json::Value::Array(Vec::new());
+        record.metadata["unmaterialized_cook_admission"]["state"] = serde_json::json!("exhausted");
         assert_eq!(
             decision(
                 &lifecycle_action_eligibility(&record, None),

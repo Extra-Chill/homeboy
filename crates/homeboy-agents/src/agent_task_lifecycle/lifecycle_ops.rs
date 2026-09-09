@@ -1179,12 +1179,15 @@ pub fn update_unmaterialized_cook_placement_in_store(
                 .is_some_and(|executions| !executions.is_empty())
                 || store.read_cook_index(&cook_id).is_ok()
                 || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
-                    .as_str()
-                    .is_some_and(|run_id| store.read_record(run_id).is_ok());
+                    .is_string();
             let admission = &mut record.metadata["unmaterialized_cook_admission"];
             if record.state.is_terminal()
                 || !admission.is_object()
                 || execution_started
+                || !matches!(
+                    admission["state"].as_str(),
+                    Some("queued" | "blocked_runner_unavailable" | "blocked_runner_stale")
+                )
                 || matches!(
                     admission["lease"]["state"].as_str(),
                     Some("claimed" | "consumed" | "materializing")
@@ -1195,28 +1198,48 @@ pub fn update_unmaterialized_cook_placement_in_store(
             let Some(argv) = admission["binding"]["replay_intent"]["argv"].as_array_mut() else {
                 return false;
             };
-            let mut found = false;
+            if argv.first().and_then(serde_json::Value::as_str).is_none() {
+                return false;
+            }
+            let mut placement_argument = None;
             let mut index = 0;
             while index < argv.len() {
-                if argv[index] == "--placement" {
-                    if let Some(value) = argv.get_mut(index + 1) {
-                        *value = json!("local");
-                        found = true;
-                        break;
-                    }
+                let Some(argument) = argv[index].as_str() else {
                     return false;
-                }
-                if argv[index]
-                    .as_str()
-                    .is_some_and(|value| value.starts_with("--placement="))
-                {
-                    argv[index] = json!("--placement=local");
-                    found = true;
+                };
+                // Everything after `--` belongs to the provider and must remain
+                // byte-for-byte unchanged by a control-plane route update.
+                if argument == "--" {
                     break;
+                }
+                if argument == "--placement" {
+                    if argv
+                        .get(index + 1)
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|value| value == "--")
+                        || placement_argument.replace((index, false)).is_some()
+                    {
+                        return false;
+                    }
+                    index += 2;
+                    continue;
+                }
+                if argument.starts_with("--placement=") {
+                    if argument == "--placement="
+                        || placement_argument.replace((index, true)).is_some()
+                    {
+                        return false;
+                    }
                 }
                 index += 1;
             }
-            if !found {
+            if let Some((index, inline)) = placement_argument {
+                if inline {
+                    argv[index] = json!("--placement=local");
+                } else {
+                    argv[index + 1] = json!("local");
+                }
+            } else {
                 argv.insert(1, json!("--placement=local"));
             }
             admission["binding"]["placement"]["requested"] = json!("local");
