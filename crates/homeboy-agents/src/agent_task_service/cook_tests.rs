@@ -14017,7 +14017,7 @@ fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
 }
 
 #[test]
-fn selection_required_serializes_as_a_known_terminal_partial_failure() {
+fn selection_required_keeps_internal_lifecycle_out_of_the_cook_wire_format() {
     let report = cook_report(CookReportInput {
         cook_id: "cook-selection-lifecycle".to_string(),
         status: "selection_required",
@@ -14031,9 +14031,16 @@ fn selection_required_serializes_as_a_known_terminal_partial_failure() {
 
     let serialized = serde_json::to_value(&report.value).expect("serialize Cook report");
     assert_eq!(serialized["status"], "selection_required");
-    assert_eq!(serialized["lifecycle_status"], "partial_failure");
-    assert_eq!(serialized["terminal"], true);
-    assert_eq!(serialized["retryable"], false);
+    let lifecycle = report.value.lifecycle();
+    assert_eq!(
+        lifecycle.lifecycle_status,
+        RunLifecycleStatus::PartialFailure
+    );
+    assert!(lifecycle.terminal);
+    assert!(!lifecycle.retryable);
+    assert!(serialized.get("lifecycle_status").is_none());
+    assert!(serialized.get("terminal").is_none());
+    assert!(serialized.get("retryable").is_none());
 }
 
 #[test]

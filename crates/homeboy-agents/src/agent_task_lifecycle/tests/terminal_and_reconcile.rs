@@ -618,6 +618,7 @@ fn detached_handoff_persists_only_the_runner_api_replay_envelope() {
             envelope: legacy.execution_envelope(),
             workspace_claim_binding: None,
             workspace_owner_lease: None,
+            credential_delivery: None,
         };
 
         let pending = record_lab_offload_submission_envelope(run_id, &submission)

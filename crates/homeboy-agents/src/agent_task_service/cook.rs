@@ -1278,12 +1278,8 @@ pub struct AgentTaskCandidateAdoptionOptions {
 
 /// A Cook outcome.
 ///
-/// `Serialize` is written by hand rather than derived so the additive
-/// [`RunLifecycleProjection`] is emitted by *every* producer of this type
-/// without each of the ~30 struct literals that build it having to carry three
-/// more fields it would then be free to compute differently. The projection is
-/// derived from `status` and `disposition`, which are already present, so
-/// there is nothing for a call site to supply and nothing for it to get wrong.
+/// `Serialize` is written by hand so the derived completion projection is
+/// emitted by every producer without duplicating it across report constructors.
 #[derive(Debug, Clone)]
 pub struct AgentTaskCookReport {
     pub schema: &'static str,
@@ -1342,8 +1338,7 @@ pub struct AgentTaskCookCompletion {
     pub next_action: Option<AgentTaskCookRecoveryAction>,
 }
 
-/// The closed-vocabulary classification emitted beside an open `status`
-/// string.
+/// Internal closed-vocabulary classification of an open `status` string.
 ///
 /// # Why a report carries this at all
 ///
@@ -1352,7 +1347,9 @@ pub struct AgentTaskCookCompletion {
 /// contract every *process* caller branches on, but a consumer reading a
 /// persisted report or an HTTP response has no exit code. Without this, such a
 /// consumer receiving `{"status": "moving_base"}` cannot decide success,
-/// completion, or retry at all.
+/// completion, or retry from the Cook document. External consumers use the
+/// canonical control-plane run resource; this projection remains internal to
+/// Cook and batch aggregation.
 ///
 /// # Where each field's authority comes from
 ///
@@ -1412,8 +1409,7 @@ impl serde::Serialize for AgentTaskCookReport {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         /// Mirrors [`AgentTaskCookReport`] field for field, in order, with the
-        /// same `skip_serializing_if` rules, plus the three appended
-        /// projection fields. Borrowed so serialization stays
+        /// same `skip_serializing_if` rules. Borrowed so serialization stays
         /// allocation-free.
         #[derive(serde::Serialize)]
         struct Wire<'a> {
@@ -1448,14 +1444,8 @@ impl serde::Serialize for AgentTaskCookReport {
             failure_context: Option<&'a AgentTaskCookFailureContext>,
             #[serde(skip_serializing_if = "Option::is_none")]
             completion: Option<AgentTaskCookCompletion>,
-            // Additive. `status` above is unchanged and remains the field
-            // callers match on.
-            lifecycle_status: RunLifecycleStatus,
-            terminal: bool,
-            retryable: bool,
         }
 
-        let lifecycle = self.lifecycle();
         let completion = self.completion();
         let wire = Wire {
             schema: self.schema,
@@ -1476,9 +1466,6 @@ impl serde::Serialize for AgentTaskCookReport {
             moving_base_recovery: self.moving_base_recovery.as_ref(),
             failure_context: self.failure_context.as_ref(),
             completion,
-            lifecycle_status: lifecycle.lifecycle_status,
-            terminal: lifecycle.terminal,
-            retryable: lifecycle.retryable,
         };
         serde::Serialize::serialize(&wire, serializer)
     }
@@ -1922,10 +1909,7 @@ impl From<&Error> for AgentTaskCookCellError {
 
 /// One child's outcome inside a batch.
 ///
-/// `Serialize` is hand-written for the same reason as [`AgentTaskCookReport`]:
-/// the lifecycle projection is derived from fields already present, so it is
-/// emitted for every producer instead of being a fourth thing a call site can
-/// forget or contradict.
+/// `Serialize` preserves the existing omission rules for optional fields.
 #[derive(Debug, Clone)]
 pub struct AgentTaskCookBatchCellReport {
     pub cook_id: String,
@@ -1970,12 +1954,8 @@ impl serde::Serialize for AgentTaskCookBatchCellReport {
             result: Option<&'a AgentTaskCookReport>,
             #[serde(skip_serializing_if = "Option::is_none")]
             error: Option<&'a AgentTaskCookCellError>,
-            lifecycle_status: RunLifecycleStatus,
-            terminal: bool,
-            retryable: bool,
         }
 
-        let lifecycle = self.lifecycle();
         let wire = Wire {
             cook_id: &self.cook_id,
             initial_run_id: &self.initial_run_id,
@@ -1983,9 +1963,6 @@ impl serde::Serialize for AgentTaskCookBatchCellReport {
             exit_code: self.exit_code,
             result: self.result.as_ref(),
             error: self.error.as_ref(),
-            lifecycle_status: lifecycle.lifecycle_status,
-            terminal: lifecycle.terminal,
-            retryable: lifecycle.retryable,
         };
         serde::Serialize::serialize(&wire, serializer)
     }
@@ -2072,12 +2049,8 @@ impl serde::Serialize for AgentTaskCookBatchReport {
             cancelled: usize,
             timed_out: usize,
             cooks: &'a [AgentTaskCookBatchCellReport],
-            lifecycle_status: RunLifecycleStatus,
-            terminal: bool,
-            retryable: bool,
         }
 
-        let lifecycle = self.lifecycle();
         let wire = Wire {
             schema: self.schema,
             batch_id: &self.batch_id,
@@ -2090,9 +2063,6 @@ impl serde::Serialize for AgentTaskCookBatchReport {
             cancelled: self.cancelled,
             timed_out: self.timed_out,
             cooks: &self.cooks,
-            lifecycle_status: lifecycle.lifecycle_status,
-            terminal: lifecycle.terminal,
-            retryable: lifecycle.retryable,
         };
         serde::Serialize::serialize(&wire, serializer)
     }
@@ -2205,17 +2175,19 @@ mod run_lifecycle_projection_tests {
         }
     }
 
-    /// The whole point: the raw, open status is untouched and the closed
-    /// classification arrives beside it.
     #[test]
-    fn a_cook_report_emits_the_projection_without_changing_status() {
-        let value = serde_json::to_value(report("durable_failure", CookDisposition::Terminal))
-            .expect("serialize");
+    fn a_cook_report_omits_the_retired_lifecycle_projection() {
+        let report = report("durable_failure", CookDisposition::Terminal);
+        let lifecycle = report.lifecycle();
+        let value = serde_json::to_value(report).expect("serialize");
 
         assert_eq!(value["status"], "durable_failure");
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], true);
-        assert_eq!(value["retryable"], true);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(lifecycle.terminal);
+        assert!(lifecycle.retryable);
+        assert!(value.get("lifecycle_status").is_none());
+        assert!(value.get("terminal").is_none());
+        assert!(value.get("retryable").is_none());
         // Unchanged fields must still be present and still be skipped when
         // absent, exactly as the derived implementation did.
         assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
@@ -2230,14 +2202,14 @@ mod run_lifecycle_projection_tests {
     /// however its status string reads.
     #[test]
     fn terminality_follows_the_declared_disposition_not_the_status_string() {
-        let value = serde_json::to_value(report("durable_failure", CookDisposition::InFlight))
-            .expect("serialize");
+        let report = report("durable_failure", CookDisposition::InFlight);
+        let lifecycle = report.lifecycle();
 
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], false);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(!lifecycle.terminal);
         assert_eq!(
-            value["retryable"], false,
-            "a Cook a durable owner still carries must never be advertised as retryable"
+            lifecycle.retryable, false,
+            "a Cook a durable owner still carries must never be treated as retryable"
         );
     }
 
@@ -2245,31 +2217,34 @@ mod run_lifecycle_projection_tests {
     /// classification, never a manufactured failure — while `terminal` still
     /// arrives, because the exit declared it.
     #[test]
-    fn an_unreadable_status_reports_unknown_but_still_reports_terminality() {
-        let value = serde_json::to_value(report("moving_base", CookDisposition::Terminal))
-            .expect("serialize");
+    fn an_unreadable_status_classifies_unknown_but_retains_terminality() {
+        let report = report("moving_base", CookDisposition::Terminal);
+        let lifecycle = report.lifecycle();
+        let value = serde_json::to_value(report).expect("serialize");
 
         assert_eq!(value["status"], "moving_base");
-        assert_eq!(value["lifecycle_status"], "unknown");
-        assert_eq!(value["terminal"], true);
-        assert_eq!(value["retryable"], false);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Unknown);
+        assert!(lifecycle.terminal);
+        assert!(!lifecycle.retryable);
     }
 
     /// A cell that carries a child report defers to that report's declared
     /// disposition rather than re-deriving anything.
     #[test]
     fn a_batch_cell_defers_to_its_childs_declared_disposition() {
-        let value = serde_json::to_value(cell(
+        let cell = cell(
             "durable_failure",
             Some(report("durable_failure", CookDisposition::InFlight)),
-        ))
-        .expect("serialize");
+        );
+        let lifecycle = cell.lifecycle();
+        let value = serde_json::to_value(cell).expect("serialize");
 
         assert_eq!(value["status"], "durable_failure");
         assert_eq!(value["exit_code"], 1);
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], false);
-        assert_eq!(value["result"]["terminal"], false);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(!lifecycle.terminal);
+        assert!(value.get("lifecycle_status").is_none());
+        assert!(value["result"].get("terminal").is_none());
     }
 
     /// A child that failed before producing any Cook report has no declared
@@ -2277,11 +2252,14 @@ mod run_lifecycle_projection_tests {
     /// in-flight reading.
     #[test]
     fn a_batch_cell_without_a_child_report_classifies_from_status_alone() {
-        let value = serde_json::to_value(cell("failed", None)).expect("serialize");
+        let cell = cell("failed", None);
+        let lifecycle = cell.lifecycle();
+        let value = serde_json::to_value(cell).expect("serialize");
 
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], true);
-        assert_eq!(value["retryable"], true);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(lifecycle.terminal);
+        assert!(lifecycle.retryable);
+        assert!(value.get("lifecycle_status").is_none());
         assert!(value.get("result").is_none());
     }
 
@@ -2325,7 +2303,7 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
-    fn a_batch_report_emits_the_projection_beside_its_status() {
+    fn a_batch_report_omits_the_retired_lifecycle_projection() {
         let report = AgentTaskCookBatchReport {
             schema: "homeboy/agent-task-cook-batch/v1",
             batch_id: "batch-projection".to_string(),
@@ -2341,14 +2319,18 @@ mod run_lifecycle_projection_tests {
         };
 
         let value = serde_json::to_value(&report).expect("serialize");
+        let lifecycle = report.lifecycle();
 
         assert_eq!(value["status"], "partial_failure");
-        assert_eq!(value["lifecycle_status"], "partial_failure");
-        assert_eq!(value["terminal"], true);
         assert_eq!(
-            value["retryable"], false,
-            "a partially failed batch must not be advertised as blanket-retryable"
+            lifecycle.lifecycle_status,
+            RunLifecycleStatus::PartialFailure
         );
+        assert!(lifecycle.terminal);
+        assert!(!lifecycle.retryable);
+        assert!(value.get("lifecycle_status").is_none());
+        assert!(value.get("terminal").is_none());
+        assert!(value.get("retryable").is_none());
     }
 
     #[test]
@@ -2899,6 +2881,7 @@ pub fn run_cook_batch_with_control(
                                 &batch_id,
                                 &cell.initial_run_id,
                                 child_finalization_value(&cell),
+                                child_terminal_state(&cell),
                             ) {
                                 // Cleanup cannot consume a successful outcome
                                 // until its batch checkpoint is durable.
@@ -3215,6 +3198,7 @@ where
             batch_id,
             &child.run_id,
             child_finalization_value(&cell),
+            child_terminal_state(&cell),
         )?;
         cells.push(cell);
     }
@@ -3425,19 +3409,37 @@ where
 ///
 /// `error` follows [`AgentTaskCookBatchCellReport::error`] and is therefore now
 /// an object rather than a string; `error.message` carries the text the field
-/// used to hold. `status` and `exit_code` are unchanged, and
-/// `lifecycle_status`/`terminal`/`retryable` are added so an owner reading only
-/// this checkpoint can classify the child without loading its report.
+/// used to hold. `status` and `exit_code` are unchanged. Canonical lifecycle is
+/// persisted directly on the batch child rather than duplicated in this JSON.
 fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
-    let lifecycle = cell.lifecycle();
     serde_json::json!({
         "resumed_at": chrono::Utc::now().to_rfc3339(),
         "exit_code": cell.exit_code,
         "status": cell.status,
-        "lifecycle_status": lifecycle.lifecycle_status,
-        "terminal": lifecycle.terminal,
-        "retryable": lifecycle.retryable,
         "error": cell.error,
+    })
+}
+
+fn child_terminal_state(
+    cell: &AgentTaskCookBatchCellReport,
+) -> Option<crate::agent_task_lifecycle::AgentTaskRunState> {
+    let lifecycle = cell.lifecycle();
+    if !lifecycle.terminal {
+        return None;
+    }
+    use crate::agent_task_lifecycle::AgentTaskRunState;
+    Some(match lifecycle.lifecycle_status {
+        RunLifecycleStatus::Succeeded => AgentTaskRunState::Succeeded,
+        RunLifecycleStatus::CandidateRecoverable => AgentTaskRunState::CandidateRecoverable,
+        RunLifecycleStatus::PartialRecoverable => AgentTaskRunState::PartialRecoverable,
+        RunLifecycleStatus::PartialFailure => AgentTaskRunState::PartialFailure,
+        RunLifecycleStatus::Cancelled => AgentTaskRunState::Cancelled,
+        RunLifecycleStatus::Failed | RunLifecycleStatus::TimedOut | RunLifecycleStatus::Stale => {
+            AgentTaskRunState::Failed
+        }
+        RunLifecycleStatus::Queued | RunLifecycleStatus::Running | RunLifecycleStatus::Unknown => {
+            return None
+        }
     })
 }
 

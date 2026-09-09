@@ -83,6 +83,18 @@ pub(super) fn remote_runner_result_from_exec_output(
         data[AGENT_TASK_DISPATCH_HANDOFF_EVENT_KEY] =
             serde_json::to_value(handoff_event).unwrap_or(serde_json::Value::Null);
     }
+    let fallback_outcome_run_id = lab_runner_workload
+        .as_ref()
+        .map(|workload| {
+            workload
+                .agent_task
+                .as_ref()
+                .map(|agent_task| agent_task.run_id.clone())
+                .unwrap_or_else(|| workload.workload_id.clone())
+        })
+        .or_else(|| exec_output.mirror_run_id.clone())
+        .or_else(|| exec_output.job_id.clone())
+        .unwrap_or_else(|| exec_output.runner_id.clone());
     if let Some(lab_runner_workload) = lab_runner_workload {
         data["runner_workload"] = serde_json::to_value(
             super::super::workload::lab_runner_workload_with_result_refs(
@@ -94,13 +106,8 @@ pub(super) fn remote_runner_result_from_exec_output(
         )
         .unwrap_or(serde_json::Value::Null);
     }
-    let fallback_outcome_run_id = exec_output
-        .mirror_run_id
-        .clone()
-        .or_else(|| exec_output.job_id.clone())
-        .unwrap_or_else(|| exec_output.runner_id.clone());
     let mut outcome = if let Some(execution_record) = execution_record.as_ref() {
-        RunOutcomeEnvelope::from_runner_execution_record(execution_record)
+        RunOutcomeEnvelope::from_runner_execution_record(&fallback_outcome_run_id, execution_record)
     } else {
         RunOutcomeEnvelope::new(if exit_code == 0 {
             "succeeded"

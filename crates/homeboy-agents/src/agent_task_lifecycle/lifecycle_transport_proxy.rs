@@ -392,8 +392,8 @@ pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
 /// This is the recovery-safe fallback for
 /// [`bind_pending_lab_handoff_snapshot_in_store`]:
 /// it only yields a runner when the execution record is *planned* (not yet
-/// bound to a job id) and names this exact run, so binding a replacement job
-/// cannot latch onto a terminal or mismatched execution record.
+/// bound to a job id), so binding a replacement job cannot latch onto a
+/// terminal execution record. The outer lifecycle record owns run identity.
 fn planned_execution_record_runner_id(record: &AgentTaskRunRecord) -> Option<String> {
     let execution = record
         .metadata
@@ -405,13 +405,6 @@ fn planned_execution_record_runner_id(record: &AgentTaskRunRecord) -> Option<Str
                 .ok()
         })?;
     if execution.job_id.is_some() {
-        return None;
-    }
-    if execution
-        .agent_task_run_id
-        .as_deref()
-        .is_some_and(|run_id| run_id != record.run_id)
-    {
         return None;
     }
     let runner_id = execution.runner_id.trim();

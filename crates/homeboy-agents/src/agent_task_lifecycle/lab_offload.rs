@@ -765,8 +765,7 @@ pub(crate) fn record_detached_lab_run_with_submission_in_store(
                 input.runner_id,
                 "daemon",
             )
-            .with_job_id(input.runner_job_id)
-            .with_agent_task_run_id(&run_id),
+            .with_job_id(input.runner_job_id),
         )
         .unwrap_or(Value::Null),
     );
@@ -920,8 +919,7 @@ fn record_lab_offload_proxy_in_store(
             serde_json::to_value(
                 homeboy_core::runner_execution_envelope::RunnerExecutionRecord::planned(
                     &run_id, runner_id, "daemon",
-                )
-                .with_agent_task_run_id(&run_id),
+                ),
             )
             .unwrap_or(Value::Null),
         );
