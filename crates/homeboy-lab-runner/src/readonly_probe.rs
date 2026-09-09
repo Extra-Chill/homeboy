@@ -24,7 +24,15 @@ use serde::Serialize;
 ///
 /// Matches the existing `REMOTE_DAEMON_STATUS_TIMEOUT` used by the remote
 /// daemon status probe so the read-only surface has one consistent budget.
+#[cfg(not(test))]
 pub const DEFAULT_READONLY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Under test the probe never reaches a real remote, so the production budget
+/// is pure dead wall-clock: a single refresh test spent 90s waiting out probe
+/// deadlines it could never beat. Tests that assert the bound itself pass the
+/// value explicitly rather than depending on this default.
+#[cfg(test)]
+pub const DEFAULT_READONLY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Environment override for [`readonly_probe_timeout`], in whole seconds.
 pub const READONLY_PROBE_TIMEOUT_ENV: &str = "HOMEBOY_READONLY_PROBE_TIMEOUT_SECONDS";
