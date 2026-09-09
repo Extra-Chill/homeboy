@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::output::BulkResult;
 
 use super::operation_output::{run_bulk_ids, GitOutput};
-use super::primitives::is_git_repo;
+use super::primitives::{fetch_and_merge_upstream_ff_only, is_git_repo};
 use super::{execute_git, resolve_target};
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,7 +175,12 @@ pub fn pull(component_id: Option<&str>) -> Result<GitOutput> {
 
 /// Like [`pull`] but with an explicit path override for git operations.
 pub fn pull_at(component_id: Option<&str>, path_override: Option<&str>) -> Result<GitOutput> {
-    super::run_resolved_git(component_id, path_override, "pull", &["pull"])
+    let (id, path) = resolve_target(component_id, path_override)?;
+    let output = fetch_and_merge_upstream_ff_only(
+        Path::new(&path),
+        std::time::Instant::now() + Duration::from_secs(30),
+    )?;
+    Ok(GitOutput::from_output(id, path, "pull", output))
 }
 
 /// Options for [`rebase`].
@@ -425,8 +430,13 @@ pub fn fetch_and_fast_forward(path: &str) -> Result<Option<u32>> {
     match behind {
         None => Ok(None),
         Some(n) => {
-            // Attempt fast-forward pull
-            let output = execute_git(path, &["pull", "--ff-only"])
+            let upstream = crate::engine::command::run_in_optional(
+                path,
+                "git",
+                &["rev-parse", "--abbrev-ref", "@{upstream}"],
+            )
+            .ok_or_else(|| Error::git_command_failed("resolve git upstream"))?;
+            let output = execute_git(path, &["merge", "--ff-only", upstream.trim()])
                 .map_err(|e| Error::git_command_failed(e.to_string()))?;
 
             if !output.status.success() {

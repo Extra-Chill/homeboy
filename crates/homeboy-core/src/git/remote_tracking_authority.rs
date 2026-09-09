@@ -24,6 +24,7 @@ pub fn with_remote_tracking_authority_until<T>(
     deadline: Instant,
     action: impl FnOnce(Duration) -> Result<T>,
 ) -> Result<T> {
+    report_authority_attempt();
     let common_dir = git_common_dir(repository)?;
     let authority = {
         let mut authorities = AUTHORITIES
@@ -126,6 +127,7 @@ fn acquire_file_guard(
                 return Ok(());
             }
             Ok(false) | Err(_) if Instant::now() < deadline => {
+                report_authority_attempt();
                 if !reported_wait {
                     let owner = fs::read_to_string(lock_path)
                         .ok()
@@ -173,6 +175,16 @@ fn acquire_file_guard(
 }
 
 #[cfg(test)]
+fn report_authority_attempt() {
+    if let Some(path) = std::env::var_os("HOMEB0Y_REMOTE_TRACKING_FETCH_LOCK_ATTEMPTED") {
+        std::fs::write(path, "attempted\n").expect("write remote-tracking lock attempt");
+    }
+}
+
+#[cfg(not(test))]
+fn report_authority_attempt() {}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
@@ -202,9 +214,6 @@ mod tests {
         const CHILD: &str = "HOMEB0Y_REMOTE_TRACKING_FETCH_CHILD";
         if let Some(path) = std::env::var_os(CHILD) {
             let path = Path::new(&path);
-            if let Some(attempted) = std::env::var_os("HOMEB0Y_REMOTE_TRACKING_FETCH_ATTEMPTED") {
-                std::fs::write(attempted, "attempted\n").expect("write child fetch attempt");
-            }
             match std::env::var("HOMEB0Y_REMOTE_TRACKING_FETCH_OPERATION").as_deref() {
                 Ok("behind") => {
                     crate::git::fetch_and_get_behind_count(path.to_str().expect("path"))
@@ -306,7 +315,7 @@ mod tests {
                     .env("HOMEB0Y_REMOTE_TRACKING_FETCH_RELEASE", &release);
             }
             if let Some(attempted) = attempted {
-                command.env("HOMEB0Y_REMOTE_TRACKING_FETCH_ATTEMPTED", attempted);
+                command.env("HOMEB0Y_REMOTE_TRACKING_FETCH_LOCK_ATTEMPTED", attempted);
             }
             if let Some(reached) = reached {
                 command.env("HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED", reached);
@@ -339,7 +348,7 @@ mod tests {
         }
         assert!(
             second_attempted.exists(),
-            "second fetch did not attempt authority"
+            "second fetch did not contend for remote-tracking authority"
         );
         let contention_deadline = Instant::now() + Duration::from_millis(500);
         while !second_reached.exists() && Instant::now() < contention_deadline {
