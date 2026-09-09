@@ -218,6 +218,7 @@ pub(crate) fn disconnect_with_session_in_roots(
                 return partial_disconnect_report(runner_id, session.clone().into(), error.message)
             }
         };
+        let authoritative_rebind = authoritative_session.is_some();
         if let Some(authoritative_session) = authoritative_session {
             *session = authoritative_session.clone();
         }
@@ -232,7 +233,14 @@ pub(crate) fn disconnect_with_session_in_roots(
         let mut unresolved = Vec::new();
         for generation in generations {
             if generation.mode == RunnerTunnelMode::DirectSsh {
-                if let Err(error) = disconnect_remote_daemon(&generation, force) {
+                let stop = if authoritative_rebind {
+                    // A rebound lease belongs to the SSH authority, while this
+                    // retained session's local tunnel targets an older generation.
+                    verify_remote_daemon_stopped(&generation, force)
+                } else {
+                    disconnect_remote_daemon(&generation, force)
+                };
+                if let Err(error) = stop {
                     unresolved.push(serde_json::json!({
                         "lease_id": generation.remote_daemon_lease_id,
                         "pid": generation.remote_daemon_pid,
