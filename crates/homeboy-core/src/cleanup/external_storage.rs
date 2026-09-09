@@ -14,6 +14,7 @@ use homeboy_engine_primitives::command::{
     terminate_process_tree_and_reap, wait_with_bounded_output_supervised, ControllerChildGuard,
     SupervisedCommandTermination,
 };
+use homeboy_engine_primitives::template;
 use homeboy_extension_contract::{
     ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
     ExternalStorageReclaimResult, ExternalStorageReclaimTarget, ExternalStorageRequest,
@@ -77,7 +78,26 @@ pub fn cleanup_external_storage_from_extensions(
 ) -> Result<ExternalStorageCleanupOutput> {
     let providers = crate::extension::catalog::load_all_extensions()?
         .into_iter()
-        .flat_map(|extension| extension.external_storage_retention.providers)
+        .flat_map(|extension| {
+            let extension_path = extension.extension_path.unwrap_or_default();
+            extension
+                .external_storage_retention
+                .providers
+                .into_iter()
+                .map(move |mut provider| {
+                    provider.command = provider
+                        .command
+                        .iter()
+                        .map(|argument| {
+                            template::render(
+                                argument,
+                                &[(template::TemplateVars::EXTENSION_PATH, &extension_path)],
+                            )
+                        })
+                        .collect();
+                    provider
+                })
+        })
         .collect::<Vec<_>>();
     cleanup_external_storage_with_providers(&providers, options)
 }
@@ -758,7 +778,9 @@ mod tests {
         let pressured = HashSet::from(["root".to_string()]);
         assert_eq!(
             plan(&inventory, &pressured, 7, 20, 10, "generation")
-                .iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["old", "young"],
             "reserve pressure bypasses age only; live, referenced, credential, and pinned resources remain protected",
         );
@@ -830,6 +852,55 @@ mod tests {
         assert_eq!(output.provider_count, 1);
         assert_eq!(output.providers.len(), 1);
         assert_eq!(output.providers[0].candidate_count, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_provider_inventory_executes_rendered_program_with_literal_argv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            let extension = crate::paths::extensions().unwrap().join("fixture");
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(
+                extension.join("fixture.json"),
+                r#"{
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "external_storage_retention": {
+                        "providers": [{
+                            "id": "fixture.external-storage",
+                            "command": [
+                                "{{extension_path}}/provider with spaces;no-shell.sh",
+                                "fixed argument;not a shell command"
+                            ],
+                            "timeout_seconds": 1
+                        }]
+                    }
+                }"#,
+            )
+            .unwrap();
+            let provider = extension.join("provider with spaces;no-shell.sh");
+            std::fs::write(
+                &provider,
+                "#!/bin/sh\n[ \"$1\" = \"fixed argument;not a shell command\" ] || exit 1\ncat >/dev/null\nprintf '%s' '{\"schema\":\"homeboy/external-storage-retention/v1\",\"provider_id\":\"fixture.external-storage\",\"generation\":\"g1\",\"items\":[]}'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let output = cleanup_external_storage_from_extensions(ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: 1,
+                reserve_bytes: 0,
+                limit: 1,
+                evidence_limit: 1,
+                deadline: None,
+            })
+            .expect("installed provider command");
+            assert_eq!(output.provider_count, 1);
+            assert_eq!(output.providers[0].provider_id, "fixture.external-storage");
+        });
     }
 
     #[cfg(unix)]

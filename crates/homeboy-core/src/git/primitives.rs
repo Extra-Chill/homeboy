@@ -526,23 +526,8 @@ pub fn get_component_path_prefix(local_path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("run git test fixture command");
-
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     #[test]
     fn run_git_failure_includes_command_cwd_exit_stdout_and_stderr() {

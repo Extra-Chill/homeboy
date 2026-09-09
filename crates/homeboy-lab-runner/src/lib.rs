@@ -350,7 +350,7 @@ pub use connection::{
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
     reconcile_status_with_outcome, reconcile_terminal_jobs, reconnect_job_log_owner,
     reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, statuses_indexed, submit_reverse_broker_job,
+    runner_artifact_content, status, statuses, statuses_indexed, submit_runner_api_request,
     PeerSessionMaintenanceReport,
 };
 pub(crate) use connection::{
@@ -374,7 +374,8 @@ pub use evidence::{
 };
 pub(crate) use execution::exec_with_status_snapshot;
 pub use execution::{
-    daemon_api_get, daemon_api_post, exec, finish_scheduled_terminal_runner_exec_recovery,
+    daemon_api_get, daemon_api_post, ensure_runner_extension_parity, exec, exec_request,
+    finish_scheduled_terminal_runner_exec_recovery, probe_extension_parity_from_show,
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
     promote_runner_exec_artifacts_in_store, promote_runner_exec_summaries_in_store,
     promoted_output, reconcile_runner_generation_after_evidence,
@@ -383,9 +384,10 @@ pub use execution::{
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
     runner_exec_failure_error, runner_exec_orchestration_provenance,
     runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
-    runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics,
-    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
-    RunnerExecRecoveryChildSchedule, RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
+    runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, ExtensionParityProbe,
+    ExtensionShowOutput, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
+    RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule,
+    RunnerExecRecoveryDiagnostic, RunnerExecRequest, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;
@@ -461,8 +463,8 @@ pub use workspace::reap_run_workspace;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,
     prune_workspaces, pull_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
-    sync_workspace, update_workspace, verify_workspace_ref_hydration_source, workspace_snapshots,
-    ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
+    sync_workspace, sync_workspace_before, update_workspace, verify_workspace_ref_hydration_source,
+    workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
@@ -957,6 +959,33 @@ pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness
     lab_runner_readiness_from_refresh_observations(preferred.as_deref(), observations)
 }
 
+/// Read one explicitly selected runner for immediate workload admission. Unlike
+/// the bounded inventory refresh, this never substitutes another runner.
+pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerReadiness> {
+    let runner = load(runner_id)?;
+    runner_probe_gate::invalidate_runner_probes(runner_id);
+    let status = runner_admission_snapshot(runner_id)?.status;
+    let capabilities_ready = !runner_capability_inventory(runner_id)?
+        .runtime_ids
+        .is_empty();
+    let mode = status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+    let candidate = lab_runner_admission_candidate(
+        runner_id,
+        mode,
+        runner.settings.concurrency_limit,
+        &status,
+        capabilities_ready,
+        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    );
+    Ok(lab_runner_readiness_from_candidates(
+        Some(runner_id),
+        vec![candidate],
+    ))
+}
+
 fn observe_lab_runner_admission_candidate(
     runner_id: &str,
     deadline: std::time::Instant,
@@ -964,9 +993,9 @@ fn observe_lab_runner_admission_candidate(
     let runner = load(runner_id)?;
     runner_probe_gate::invalidate_runner_probes(runner_id);
     let status = runner_admission_snapshot_until(runner_id, deadline)?.status;
-    let capabilities_ready = runner_capability_inventory_until(runner_id, deadline)?
+    let capabilities_ready = !runner_capability_inventory_until(runner_id, deadline)?
         .runtime_ids
-        .contains("homeboy");
+        .is_empty();
     let mode = status
         .session
         .as_ref()
@@ -1397,6 +1426,24 @@ fn resolve_default_lab_runner_from_candidates(
 }
 
 pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
+    create_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        json_spec,
+        skip_existing,
+    )
+}
+
+/// [`create`] against an explicitly injected config root.
+///
+/// Existence checks and the persisted write both follow `roots`, so creating a
+/// runner in an injected root cannot observe or overwrite the ambient
+/// installation's registry (#14362).
+#[allow(dead_code)]
+pub fn create_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    json_spec: &str,
+    skip_existing: bool,
+) -> Result<CreateOutput<Runner>> {
     let raw = config::read_json_spec_to_string(json_spec)?;
     let value: Value = config::from_str(&raw)?;
 
@@ -1408,12 +1455,12 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runne
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
-            if skip_existing && load(&id).is_ok() {
+            if skip_existing && load_in_roots(roots, &id).is_ok() {
                 summary.record_skipped(id);
                 continue;
             }
 
-            match create_single_value(item.clone()) {
+            match create_single_value_in_roots(roots, item.clone()) {
                 Ok(result) => summary.record_created(result.id),
                 Err(err) => summary.record_error(id, err.message),
             }
@@ -1421,7 +1468,9 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runne
         return Ok(CreateOutput::Bulk(summary));
     }
 
-    Ok(CreateOutput::Single(create_single_value(value)?))
+    Ok(CreateOutput::Single(create_single_value_in_roots(
+        roots, value,
+    )?))
 }
 
 /// Inspect a legacy runner configuration without resolving or rendering values.
@@ -1524,6 +1573,58 @@ fn runner_secret_name(runner_id: &str, key: &str) -> String {
     format!("runner/{runner_id}/{key}")
 }
 
+/// [`merge`] against an explicitly injected config root.
+///
+/// Resolving the runner ambiently while merging into an injected root would
+/// read one installation's registry and write another's (#14362).
+#[allow(dead_code)]
+pub fn merge_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    id: Option<&str>,
+    json_spec: &str,
+    replace_fields: &[String],
+) -> Result<MergeOutput> {
+    let raw = config::read_json_spec_to_string(json_spec)?;
+    let parsed: Value = config::from_str(&raw)?;
+
+    if parsed.is_array() {
+        return Ok(MergeOutput::Bulk(config::merge_batch_from_json_in_root::<
+            Runner,
+        >(roots.config(), &raw)?));
+    }
+
+    let effective_id = id
+        .map(String::from)
+        .or_else(|| parsed.get("id").and_then(Value::as_str).map(String::from))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "id",
+                "Provide runner ID as argument or in JSON body",
+                None,
+                None,
+            )
+        })?;
+
+    if let Ok(runner) = config::load_in_root::<Runner>(roots.config(), &effective_id) {
+        if runner.kind == RunnerKind::Local {
+            return Ok(MergeOutput::Single(config::merge_from_json_in_root::<
+                Runner,
+            >(
+                roots.config(),
+                Some(&effective_id),
+                &raw,
+                replace_fields,
+            )?));
+        }
+    }
+
+    Ok(MergeOutput::Single(merge_server_runner(
+        &effective_id,
+        parsed,
+        replace_fields,
+    )?))
+}
+
 pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {
     let raw = config::read_json_spec_to_string(json_spec)?;
     let parsed: Value = config::from_str(&raw)?;
@@ -1599,7 +1700,10 @@ pub fn enable_server_runner(server_id: &str, patch: Value) -> Result<Runner> {
     Ok(runner_from_spec(server_id, spec))
 }
 
-fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
+fn create_single_value_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    value: Value,
+) -> Result<CreateResult<Runner>> {
     let id = value
         .get("id")
         .and_then(Value::as_str)
@@ -1613,7 +1717,7 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
 
     match runner.kind {
         RunnerKind::Local => {
-            if config::exists::<Runner>(&id) {
+            if config::exists_in_root::<Runner>(roots.config(), &id) {
                 return Err(Error::validation_invalid_argument(
                     "runner.id",
                     format!("runner '{}' already exists", id),
@@ -1622,7 +1726,7 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
                 ));
             }
             config::validate(&runner)?;
-            config::save(&runner)?;
+            config::save_in_root(roots.config(), &runner)?;
             Ok(CreateResult {
                 id: runner.id.clone(),
                 entity: runner,

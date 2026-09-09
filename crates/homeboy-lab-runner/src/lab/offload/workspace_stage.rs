@@ -7,9 +7,11 @@ use crate::offload_changed_since::{
     degrade_changed_since_to_full_scope, remove_controller_changed_since_args,
 };
 use homeboy_core::runner_execution_envelope::{
-    PathMaterializationEntry, PathMaterializationPlan,
+    PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+};
+use homeboy_lab_contract::path_materialization::{
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
 };
 use std::path::{Path, PathBuf};
 
@@ -64,6 +66,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) workspace_mapping: Vec<LabWorkspaceMappingEntry>,
     pub(crate) path_materialization_plan: PathMaterializationPlan,
     pub(crate) source_snapshot: SourceSnapshot,
+    pub(crate) workspace_snapshots: Vec<SourceSnapshot>,
     pub(crate) remapped_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
     pub(crate) runner_required_extensions: Vec<String>,
@@ -494,6 +497,22 @@ fn prepare_lab_offload_workspace_stage_inner(
     source_snapshot.synthetic_checkout_tree =
         synced.current_workspace.synthetic_checkout_tree.clone();
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
+    let mut workspace_snapshots = vec![source_snapshot.clone()];
+    for extra in &synced_extra_workspaces {
+        let mut snapshot = homeboy_core::source_snapshot::collect_local(
+            runner_id,
+            Path::new(&extra.local_path),
+            Some(&extra.remote_path),
+            "lab_offload",
+        );
+        snapshot.sync_excludes = extra.excludes.clone();
+        snapshot.workspace_snapshot_identity = Some(extra.snapshot_identity.clone());
+        snapshot.synthetic_checkout_commit =
+            extra.current_workspace.synthetic_checkout_commit.clone();
+        snapshot.synthetic_checkout_ref = extra.current_workspace.synthetic_checkout_ref.clone();
+        snapshot.synthetic_checkout_tree = extra.current_workspace.synthetic_checkout_tree.clone();
+        workspace_snapshots.push(snapshot);
+    }
     if contract.requires_extension_parity {
         plan = with_step(
             plan,
@@ -669,14 +688,8 @@ fn prepare_lab_offload_workspace_stage_inner(
     );
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
-    // The target worktree is already materialized on the runner. Give portable
-    // cooks and promotions a local adapter so applying patches and verification
-    // stay on that workspace instead of requiring a controller-side provider.
-    let remapped_args = inject_materialized_promotion_provider(
-        remapped_args,
-        command_prefix_argv.first().map(String::as_str),
-        &remote_cwd,
-    );
+    // Runner execution context binds native promotion to this materialized
+    // checkout while preserving the controller's worktree identity in argv.
     let (remapped_args, agent_task_run_id) = ensure_agent_task_lifecycle_identity_with(
         &remapped_args,
         run_isolation_token.as_deref(),
@@ -718,6 +731,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         workspace_mapping,
         path_materialization_plan,
         source_snapshot,
+        workspace_snapshots,
         remapped_args,
         agent_task_run_id,
         runner_required_extensions,
@@ -1086,45 +1100,6 @@ fn build_lab_offload_remote_command(
     let remote_args = inject_required_extension_args(remote_args, &plan.command_extensions);
     command.extend(remote_args.into_iter().skip(1));
     command
-}
-
-fn inject_materialized_promotion_provider(
-    mut args: Vec<String>,
-    homeboy_path: Option<&str>,
-    workspace: &str,
-) -> Vec<String> {
-    let Some(agent_task_index) = args.iter().position(|arg| arg == "agent-task") else {
-        return args;
-    };
-    if !matches!(
-        args.get(agent_task_index + 1).map(String::as_str),
-        Some("cook" | "promote")
-    ) || args.iter().any(|arg| {
-        arg == "--provider-command"
-            || arg.starts_with("--provider-command=")
-            || arg == "--provider-argv"
-            || arg.starts_with("--provider-argv=")
-    }) {
-        return args;
-    }
-    let Some(homeboy_path) = homeboy_path.filter(|path| !path.trim().is_empty()) else {
-        return args;
-    };
-
-    let insert_at = args
-        .iter()
-        .position(|arg| arg == "--")
-        .unwrap_or(args.len());
-    args.splice(
-        insert_at..insert_at,
-        [
-            format!("--provider-argv={homeboy_path}"),
-            "--provider-argv=agent-task".to_string(),
-            "--provider-argv=promotion-provider".to_string(),
-            format!("--provider-argv=--workspace={workspace}"),
-        ],
-    );
-    args
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2224,7 +2199,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_cook_gets_materialized_workspace_promotion_provider() {
+    fn detached_cook_preserves_the_controller_worktree_identity() {
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -2240,11 +2215,7 @@ mod tests {
 
         let command = build_lab_offload_remote_command(
             &["/runner/bin/homeboy".to_string()],
-            &inject_materialized_promotion_provider(
-                args,
-                Some("/runner/bin/homeboy"),
-                "/runner/workspaces/homeboy",
-            ),
+            &args,
             "/runner/workspaces/homeboy",
             &[],
             None,
@@ -2265,30 +2236,7 @@ mod tests {
                 "homeboy@fix-7913",
                 "--verify",
                 "cargo test --lib",
-                "--provider-argv=/runner/bin/homeboy",
-                "--provider-argv=agent-task",
-                "--provider-argv=promotion-provider",
-                "--provider-argv=--workspace=/runner/workspaces/homeboy",
             ]
-        );
-    }
-
-    #[test]
-    fn detached_cook_preserves_explicit_promotion_provider() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--provider-command=custom-provider".to_string(),
-        ];
-
-        assert_eq!(
-            inject_materialized_promotion_provider(
-                args.clone(),
-                Some("/runner/bin/homeboy"),
-                "/runner/workspaces/homeboy",
-            ),
-            args
         );
     }
 
@@ -2311,11 +2259,7 @@ mod tests {
 
             let command = build_lab_offload_remote_command(
                 &["/runner/bin/homeboy".to_string()],
-                &inject_materialized_promotion_provider(
-                    args,
-                    Some("/runner/bin/homeboy"),
-                    "/runner/workspaces/homeboy-fix-7964",
-                ),
+                &args,
                 "/runner/workspaces/homeboy-fix-7964",
                 &[],
                 None,
@@ -2323,13 +2267,10 @@ mod tests {
             );
 
             assert!(command.contains(&"/runner/artifacts/detached/aggregate.json".to_string()));
-            assert!(command.windows(4).any(|args| args
-                == [
-                    "--provider-argv=/runner/bin/homeboy",
-                    "--provider-argv=agent-task",
-                    "--provider-argv=promotion-provider",
-                    "--provider-argv=--workspace=/runner/workspaces/homeboy-fix-7964",
-                ]));
+            assert!(command
+                .windows(2)
+                .any(|args| args == ["--to-worktree", "homeboy@fix-7964"]));
+            assert!(!command.iter().any(|arg| arg.starts_with("--provider-")));
             assert!(!command.iter().any(|arg| arg.contains("/Users/")));
         }
     }
@@ -3330,14 +3271,7 @@ mod tests {
         });
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(output.status.success(), "git {} failed", args.join(" "));
-    }
+    use homeboy_core::test_support::run_git_command as git;
 
     fn git_output(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")

@@ -5,10 +5,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use super::apply::{
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider,
-};
+use super::apply::{AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace};
 
 use super::promote::promote_with_provider;
 use super::types::{
@@ -43,8 +40,8 @@ pub(super) struct FakePromotionWorkspaceProvider {
     replace_source_on_apply: Option<(PathBuf, String)>,
 }
 
-impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
-    fn apply_patch(
+impl FakePromotionWorkspaceProvider {
+    pub(super) fn apply_patch(
         &mut self,
         request: AgentTaskPromotionApplyRequest,
     ) -> Result<AgentTaskPromotionWorkspace> {
@@ -86,55 +83,11 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
         })
     }
 
-    fn verify(
-        &mut self,
-        cwd: &Path,
-        index: usize,
-        command: &str,
-        visibility: AgentTaskGateVisibility,
-        reveal_policy: AgentTaskGateRevealPolicy,
-    ) -> Result<AgentTaskGateReport> {
-        self.verify_calls.push((
-            cwd.to_path_buf(),
-            command.to_string(),
-            visibility,
-            reveal_policy,
-        ));
-        if self.verify_transport_error {
-            return Err(Error::internal_io(
-                "simulated verification transport interruption",
-                Some("promotion gate transport".to_string()),
-            ));
-        }
-        let status = Command::new("git")
-            .args(["status", "--porcelain", "--untracked-files=all"])
-            .current_dir(cwd)
-            .output();
-        self.verify_worktrees_clean
-            .push(status.is_ok_and(|status| status.status.success() && status.stdout.is_empty()));
-        if self.run_verify_command {
-            return crate::agent_task_gate::run_gate_command_with_policy(
-                cwd,
-                index,
-                command,
-                visibility,
-                reveal_policy,
-            );
-        }
-        Ok(AgentTaskGateReport::new(
-            format!("gate-{index}"),
-            vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
-            self.verify_exit_code,
-            String::new(),
-            String::new(),
-            None,
-            visibility,
-            reveal_policy,
-            crate::agent_task_gate::AgentTaskGateEnvironment::default(),
-        ))
-    }
-
-    fn verify_with_runtime_tmpdir(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test gate injection mirrors the native verifier inputs"
+    )]
+    pub(super) fn verify_with_runtime_tmpdir(
         &mut self,
         cwd: &Path,
         index: usize,

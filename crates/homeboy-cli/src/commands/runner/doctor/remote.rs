@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use types::*;
 
 pub fn report(
@@ -237,17 +238,15 @@ pub fn report(
         ));
     }
 
-    let workspace_writable = (!scoped)
-        .then(|| probes::remote_path_writable(client, &workspace_root))
-        .unwrap_or(false);
-    if !scoped {
-        checks.push(checks::path_writable_check(
-            "workspace.writable",
-            workspace_writable,
-            Path::new(&workspace_root),
-            "Make the remote workspace root writable by the runner user",
-        ));
-    }
+    // A Lab repair must not report success for a runner that cannot accept a
+    // workspace. Keep this lightweight check in the otherwise bounded scope.
+    let workspace_writable = probes::remote_path_writable(client, &workspace_root);
+    checks.push(checks::path_writable_check(
+        "workspace.writable",
+        workspace_writable,
+        Path::new(&workspace_root),
+        "Make the remote workspace root writable by the runner user",
+    ));
 
     let artifact_store_available = (!scoped)
         .then(|| probes::remote_artifact_store_available(client, &artifact_root))
@@ -277,10 +276,60 @@ pub fn report(
             options.agent_backend.as_deref(),
             options.agent_selector.as_deref(),
         ));
-        checks.extend(probes::provider_readiness_checks(
-            client,
-            &homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
-        ));
+        let extension_dependencies = probes::lab_offload_extension_dependencies(
+            &options.extensions,
+            catalog.providers(),
+            options.agent_backend.as_deref(),
+            options.agent_selector.as_deref(),
+        );
+        let parity_cwd = options.path.as_deref().unwrap_or(workspace_root.as_str());
+        let parity_checks = extension_dependencies
+            .iter()
+            .map(|dependency| {
+                let mut check = extension_parity::remote_live_readiness_check(
+                    client,
+                    runner_id,
+                    runner,
+                    homeboy_command,
+                    Some(parity_cwd),
+                    &dependency.extension_id,
+                );
+                if let Some(provider_id) = &dependency.provider_id {
+                    check
+                        .details
+                        .insert("provider_id".to_string(), provider_id.clone());
+                }
+                check
+            })
+            .collect::<Vec<_>>();
+        let global_parity_blocked = parity_checks.iter().any(|check| {
+            check.status == RunnerDoctorStatus::Error && !check.details.contains_key("provider_id")
+        });
+        let blocked_providers = parity_checks
+            .iter()
+            .filter(|check| check.status == RunnerDoctorStatus::Error)
+            .filter_map(|check| check.details.get("provider_id"))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        checks.extend(parity_checks);
+        if !global_parity_blocked {
+            let selected_provider_ids = probes::eligible_provider_ids(
+                catalog.providers(),
+                options.agent_backend.as_deref(),
+                options.agent_selector.as_deref(),
+            );
+            let readiness_contracts = probes::selected_provider_readiness_contracts(
+                homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
+                &selected_provider_ids,
+            )
+            .into_iter()
+            .filter(|contract| !blocked_providers.contains(&contract.provider_id))
+            .collect::<Vec<_>>();
+            checks.extend(probes::provider_readiness_checks(
+                client,
+                &readiness_contracts,
+            ));
+        }
         checks.extend(probes::managed_runner_source_checks(
             client,
             &homeboy::agents::agent_tasks::provider::provider_runner_source_contracts(),
@@ -306,13 +355,15 @@ pub fn report(
     });
     checks.extend(daemon_checks);
 
-    for extension_id in normalized_extension_ids(&options.extensions) {
-        checks.push(extension_parity::remote_check(
-            client,
-            homeboy_command,
-            options.path.as_deref(),
-            &extension_id,
-        ));
+    if options.scope != RunnerDoctorScope::LabOffload {
+        for extension_id in normalized_extension_ids(&options.extensions) {
+            checks.push(extension_parity::remote_check(
+                client,
+                homeboy_command,
+                options.path.as_deref(),
+                &extension_id,
+            ));
+        }
     }
 
     let capabilities = probes::capabilities_from(
@@ -377,6 +428,7 @@ pub fn report(
         runner_id: runner_id.to_string(),
         runner: runner_summary("ssh", Some(runner), Some(server)),
         status: checks::overall_status(&checks),
+        failure: None,
         capabilities,
         resources,
         checks,
@@ -411,6 +463,7 @@ pub(super) fn unreachable_report(
     RunnerDoctorOutput {
         variant: "doctor", command: "runner.doctor", runner_id: runner_id.to_string(),
         runner: runner_summary("ssh", Some(runner), Some(server)), status: RunnerDoctorStatus::Error,
+        failure: None,
         capabilities: RunnerCapabilities::default(), resources: RunnerResources::default(),
         checks: vec![checks::error("ssh.execution", format!("SSH runner {} is not reachable", runner_id), Some("Run `homeboy server status <server-id>` and verify host, user, port, identity_file, and network access".to_string()), common::detail_map(&[("stderr", output.stderr.trim()), ("stdout", output.stdout.trim())]))],
         secret_env_migration: None, diagnostics: Some(types::RunnerDoctorDiagnostics { status: "partial", completed_checks: 1, timed_out_probes: Vec::new() }), daemon_recovery: None, admission_summary: None, provider_readiness: None, repairs: Vec::new(),
@@ -428,6 +481,13 @@ pub(super) fn disconnected_report(
     let (message, remediation) = match daemon_recovery.as_ref() {
         Some(recovery) => {
             details.insert("active_jobs".to_string(), recovery.active_jobs.to_string());
+            if let Some(reason_code) = recovery.stale_reason_code {
+                let reason_code = serde_json::to_value(reason_code)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string());
+                details.insert("reason_code".to_string(), reason_code);
+            }
             if let Some(lease_id) = &recovery.lease_id {
                 details.insert("lease_id".to_string(), lease_id.clone());
             }
@@ -466,6 +526,7 @@ pub(super) fn disconnected_report(
         runner_id: runner_id.to_string(),
         runner: runner_summary("ssh", Some(runner), Some(server)),
         status: RunnerDoctorStatus::Error,
+        failure: None,
         capabilities: RunnerCapabilities::default(),
         resources: RunnerResources::default(),
         checks: vec![checks::error(

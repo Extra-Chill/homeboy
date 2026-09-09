@@ -159,7 +159,10 @@ impl AgentTaskPromotionReport {
             AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::VerifiedNoChanges
         ) && self.deterministic_gates.iter().any(|gate| {
             gate.visibility == HomeboyGateVisibility::Visible
-                && gate.command.as_slice() == ["sh", "-lc", command]
+                && gate
+                    .invocation()
+                    .map(|invocation| invocation.reviewer_command() == command)
+                    .unwrap_or(false)
                 && durable_gate_passed(gate)
                 && self.gate_candidate_identity_matches(gate)
         })
@@ -185,10 +188,24 @@ impl AgentTaskPromotionReport {
         // Gate verification runs from an immutable commit-tree checkout, whose
         // synthetic commit differs from the adopted source revision. Bind the
         // adoption to the original candidate fingerprint instead.
-        self.provenance
+        let candidate_head = self
+            .provenance
             .pointer("/candidate/fingerprint/head")
-            .and_then(Value::as_str)
-            == Some(adopted)
+            .and_then(Value::as_str);
+        // Native direct promotion applies the authenticated source patch to the
+        // destination worktree without changing its base commit. Provider-backed
+        // promotion may instead advance HEAD to the adopted revision.
+        candidate_head == Some(adopted)
+            || candidate_head
+                == self
+                    .provenance
+                    .pointer("/adoption/candidate_base")
+                    .and_then(Value::as_str)
+            || candidate_head
+                == self
+                    .provenance
+                    .pointer("/historical_task_base")
+                    .and_then(Value::as_str)
     }
 }
 

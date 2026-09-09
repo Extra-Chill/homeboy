@@ -363,20 +363,6 @@ fn registered_by_local_path_core(
 /// If the standalone file has a `local_path` and that directory contains a
 /// `homeboy.json`, the portable config is merged on top (portable config is
 /// the source of truth for version_targets, changelog_target, etc.).
-/// Ambient sibling of [`load_standalone_components_in_root`], retained for the
-/// inventory tests that still resolve their root from the process.
-///
-/// `#[cfg(test)]` rather than deleted: the eight callers in this module's test
-/// file are the only ones left, so in a lib build it is dead code under
-/// `-D warnings`. Migrating those tests onto the rooted sibling is the honest
-/// follow-up; gating it keeps that a separate, reviewable change instead of a
-/// rider on the rooting slice (#7505).
-#[cfg(test)]
-pub(super) fn load_standalone_components() -> Result<Vec<Component>> {
-    load_standalone_components_core(None)
-}
-
-/// [`load_standalone_components`] at the active config-root boundary.
 fn load_standalone_components_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
     let dir = components_dir(config_root)?;
     if !dir.exists() {

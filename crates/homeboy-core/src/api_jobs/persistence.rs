@@ -4,12 +4,12 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::remote_runner::RemoteRunnerJobRequest;
 use super::store::{DurableJobStore, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::error::{Error, Result};
@@ -351,18 +351,6 @@ pub(super) struct JobStoreCompactionEvidence {
     pub(super) active_jobs: usize,
 }
 
-pub(super) fn request_metadata_string(
-    request: &RemoteRunnerJobRequest,
-    key: &str,
-) -> Option<String> {
-    request
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get(key))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
 pub(super) fn read_durable_store(path: &Path) -> Result<DurableJobStore> {
     if !path.exists() {
         return Ok(DurableJobStore::default());
@@ -370,7 +358,7 @@ pub(super) fn read_durable_store(path: &Path) -> Result<DurableJobStore> {
 
     let content = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
-    match serde_json::from_str(&content) {
+    match serde_json::from_str::<DurableJobStore>(&content) {
         Ok(store) => Ok(store),
         Err(err) => {
             let quarantine_path = path.with_file_name(format!(
@@ -682,12 +670,18 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
         .iter()
         .map(|artifact| artifact.id.clone())
         .collect::<Vec<_>>();
-    let linked_agent_task_run_id = stored
+    let remote_envelope = stored
         .remote_runner
         .as_ref()
-        .and_then(|remote_runner| remote_runner.request.lab_runner_workload.as_ref())
-        .and_then(|workload| workload.agent_task.as_ref())
-        .map(|agent_task| agent_task.run_id.trim())
+        .map(|remote_runner| &remote_runner.envelope);
+    let linked_agent_task_run_id = remote_envelope
+        .and_then(|envelope| {
+            lab_runner_workload_from_execution_envelope(envelope)
+                .ok()
+                .flatten()
+        })
+        .and_then(|workload| workload.agent_task)
+        .map(|agent_task| agent_task.run_id.trim().to_string())
         .filter(|run_id| !run_id.is_empty());
 
     serde_json::json!({
@@ -706,15 +700,15 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
             "terminal_result_recorded": false,
             "last_known_event": last_child_event.map(last_known_child_event),
             "output_observed": last_child_event.is_some(),
-            "linked_durable_run": linked_agent_task_run_id.map(|run_id| serde_json::json!({
+            "linked_durable_run": linked_agent_task_run_id.as_deref().map(|run_id| serde_json::json!({
                 "kind": "agent_task",
                 "run_id": run_id,
                 "terminal_result_observed": false,
             })),
         },
-        "remote_runner": stored.remote_runner.as_ref().map(|remote_runner| serde_json::json!({
-            "runner_id": remote_runner.request.runner_id.clone(),
-            "project_id": remote_runner.request.project_id.clone(),
+        "remote_runner": stored.remote_runner.as_ref().map(|_| serde_json::json!({
+            "runner_id": remote_envelope.as_ref().and_then(|envelope| envelope.dispatch.as_ref()).map(|dispatch| dispatch.runner_id.clone()),
+            "project_id": remote_envelope.as_ref().and_then(|envelope| envelope.dispatch.as_ref()).and_then(|dispatch| dispatch.project_id.clone()),
             "claim_id": stored.job.claim_id.clone(),
             "claimed_by_runner_id": stored.job.claimed_by_runner_id.clone(),
             "claimed_at_ms": stored.job.claimed_at_ms,

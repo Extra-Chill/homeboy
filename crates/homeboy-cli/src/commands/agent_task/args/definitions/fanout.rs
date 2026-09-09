@@ -5,14 +5,14 @@ use super::cook::{
     PROVIDER_EVIDENCE_DECLARATION,
 };
 
-pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"rust":{"verify":["cargo test"],"private_verify":["./private-check"],"mode":"append"},"node":{"verify":["npm test"],"mode":"replace"}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"rust"},{"selector":"owner/repo#124","profile":"node"}]}"#;
+pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
 
 const VERIFICATION_PROFILES_HELP: &str = r#"JSON verification profile declaration, inline or @file.json.
 
-Profiles contain visible `verify` and/or `private_verify` command arrays. `mode` is `append` (the default, combining profile and shared gates) or `replace` (discarding shared gates for that child). Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector.
+Profiles select one typed `plan`; shared `--verify` and `--private-verify` remain explicit shell escape hatches. Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector.
 
 Complete example:
-  {"profiles":{"rust":{"verify":["cargo test"],"private_verify":["./private-check"],"mode":"append"},"node":{"verify":["npm test"],"mode":"replace"}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"rust"},{"selector":"owner/repo#124","profile":"node"}]}"#;
+  {"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
 
 #[derive(Args, Debug)]
 pub struct AgentTaskFanoutArgs {
@@ -36,6 +36,9 @@ pub enum AgentTaskFanoutCommand {
     /// Every child requires a deterministic gate from shared --verify/
     /// --private-verify inputs or --verification-profiles. A child that cannot
     /// verify its work cannot promote it (#9838).
+    #[command(
+        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --preview\n\nOne repository per batch: every issue in a cook-batch must belong to --repo. For independent repositories, create a multi-repository batch-cook manifest with one cook cell per repository, then run:\n  homeboy agent-task fanout run-plan --input @multi-repo-plan.json\n\nTwo phases: without --run-plan, cook-batch validates and materializes the batch, then returns a fanout run-plan command. Add --run-plan only after reviewing that plan to execute every child.\n\nVerification is required: every child needs a shared --verify/--private-verify gate or an assignment in --verification-profiles; a child that cannot verify cannot promote.\n\nPlacement: run the batch on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nPer-child verification profiles:\n  homeboy agent-task fanout cook-batch --repo REPO --verification-profiles @profiles.json ISSUE_URL... --preview\n\nUse --help-full for provider, gate, resource, environment, artifact, runner, and scheduling controls."
+    )]
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
     /// Normalize and inspect a batch-cook plan without submitting or running it.
     ///
@@ -60,14 +63,24 @@ pub enum AgentTaskFanoutCommand {
     /// List artifacts recorded by a durable batch's child runs.
     Artifacts(AgentTaskFanoutBatchStatusArgs),
     /// Execute each cook in a batch-cook plan through the cook-loop service and
-    /// return a batch summary.
+    /// return a batch summary. Input plans may declare independent repositories
+    /// and per-cell Cook policy; `cook-batch` remains the concise same-repository
+    /// planner.
     ///
     /// Successful child cooks open or update their own pull requests.
     RunPlan(AgentTaskFanoutRunPlanArgs),
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(disable_help_flag = true)]
 pub struct AgentTaskFanoutCookBatchArgs {
+    /// Show compact task-first cook-batch help. Use `--help-full` for the
+    /// complete cook-batch option reference.
+    #[arg(short = 'h', long, action = clap::ArgAction::HelpShort)]
+    pub help: Option<bool>,
+    /// Show the complete cook-batch option reference.
+    #[arg(long = "help-full", action = clap::ArgAction::HelpLong)]
+    pub help_full: Option<bool>,
     /// GitHub issue URL cooked by one child of the wave. Repeat for multiple
     /// issues; every URL must be unique and resolve through the tracker.
     #[arg(value_name = "ISSUE_URL", required = true)]
@@ -187,10 +200,10 @@ pub struct AgentTaskFanoutCookBatchArgs {
         value_name = "SECONDS"
     )]
     pub max_duration: Option<u64>,
-    /// Resolve and validate the batch without side effects: no repository
-    /// hydration, provider dispatch, worktree creation, or file reads. Prints
-    /// the static plan, worktree projection, preflight, and a replayable
-    /// command — the batch-wide counterpart of `agent-task cook --preview`.
+    /// Resolve and validate the batch without repository hydration, provider
+    /// dispatch, provider-runtime readiness, or worktree creation. Prints the
+    /// static plan, worktree projection, preflight, and a replayable command;
+    /// execution owns bounded provider readiness admission.
     /// `--dry-run` is accepted as the historical spelling of this flag.
     #[arg(long = "preview", alias = "dry-run")]
     pub preview: bool,
@@ -215,7 +228,8 @@ pub struct AgentTaskFanoutCookBatchArgs {
 pub struct AgentTaskFanoutInputArgs {
     /// Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit`
     /// expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`);
-    /// `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec.
+    /// `submit-batch` expects an `AgentTaskPlan` JSON spec; `run-plan` expects a
+    /// batch-cook fanout plan and may carry independent repository cells.
     #[arg(long = "input", value_name = "SPEC")]
     pub input: String,
     /// Stable identity recorded for the submitted batch. Omit to keep the
@@ -323,6 +337,8 @@ impl AgentTaskFanoutPlanArgs {
     /// flags are pinned off because `fanout plan` never executes.
     pub(crate) fn into_cook_batch_preview(self) -> AgentTaskFanoutCookBatchArgs {
         AgentTaskFanoutCookBatchArgs {
+            help: None,
+            help_full: None,
             issues: self.issues,
             repo: self.repo.unwrap_or_default(),
             // `fanout plan` does not expose component selection.

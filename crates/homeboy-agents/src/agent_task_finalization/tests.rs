@@ -30,6 +30,7 @@ struct MockBackend {
     pr_lookup_complete: bool,
     publication_observed_after_pr_lookup: bool,
     existing_pr: Option<AgentTaskPrRef>,
+    merged_pr: Option<AgentTaskPrRef>,
     create_error: bool,
     push_error: bool,
     identity_error: bool,
@@ -292,6 +293,15 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     ) -> Result<Option<AgentTaskPrRef>> {
         self.pr_lookup_complete = true;
         Ok(self.existing_pr.clone())
+    }
+
+    fn find_merged_pr(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Result<Option<AgentTaskPrRef>> {
+        Ok(self.merged_pr.clone())
     }
 
     fn verify_remote_candidate(
@@ -1094,6 +1104,35 @@ fn updates_existing_pr_for_same_branch() {
     assert_eq!(report.pr_number, Some(77));
     assert!(backend.updated);
     assert!(!backend.created);
+}
+
+#[test]
+fn recovers_a_merged_pr_without_republishing() {
+    let mut backend = MockBackend {
+        candidate_state: Some(AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        }),
+        merged_pr: Some(AgentTaskPrRef {
+            number: 76,
+            url: "https://github.com/Extra-Chill/homeboy/pull/76".to_string(),
+            is_draft: false,
+        }),
+        ..Default::default()
+    };
+
+    let report = finalize_pr_with_backend(options(), &mut backend).expect("merged receipt");
+
+    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.pr_action, "already_merged");
+    assert_eq!(report.pr_number, Some(76));
+    assert_eq!(
+        report.finalization_outcome.publication_action,
+        "already_merged"
+    );
+    assert!(report.finalization_outcome.published);
+    assert!(!backend.created && !backend.updated);
+    assert_eq!(backend.publication_binding_calls, 1);
 }
 
 #[test]
@@ -2775,26 +2814,6 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
         })
         .to_string();
         std::fs::write(outcome.path(), &source).expect("write adoption outcome");
-        let provider = tempfile::NamedTempFile::new().expect("promotion provider");
-        std::fs::write(
-            provider.path(),
-            format!(
-                "#!/bin/sh\ncat >/dev/null\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\",\"command_evidence\":[]}}'\n",
-                repo.path().display()
-            ),
-        )
-        .expect("write promotion provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(provider.path())
-                .expect("provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(provider.path(), permissions)
-                .expect("make provider executable");
-        }
         let promotion = crate::agent_task_promotion::promote_with_checkpoint(
             crate::agent_task_promotion::AgentTaskPromotionOptions {
                 source,
@@ -2804,7 +2823,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                 base_ref: Some(base_branch.clone()),
                 task_base_sha: Some(historical_base),
                 candidate_ref: Some(merged_candidate.clone()),
-                to_worktree: "repo@adopted".to_string(),
+                to_worktree: repo.path().display().to_string(),
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,
@@ -2812,7 +2831,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                     verify: vec!["true".to_string()],
                     ..Default::default()
                 },
-                provider_command: Some(provider.path().display().to_string()),
+                provider_command: None,
                 provider_invocation: None,
             },
             |checkpoint| {

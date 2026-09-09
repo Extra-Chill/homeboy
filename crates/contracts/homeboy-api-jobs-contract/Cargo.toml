@@ -13,7 +13,6 @@ name = "homeboy_api_jobs_contract"
 path = "src/lib.rs"
 
 [dependencies]
-homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
 homeboy-runner-contract = { version = "0.1.0", path = "../homeboy-runner-contract" }
 homeboy-source-snapshot-contract = { version = "0.1.0", path = "../homeboy-source-snapshot-contract" }
 serde = { version = "1.0", features = ["derive"] }

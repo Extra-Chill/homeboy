@@ -1,6 +1,6 @@
 use super::super::*;
 use std::collections::BTreeMap;
-use types::RunnerDoctorStatus;
+use types::{RunnerDoctorStatus, RunnerRepairAction};
 
 #[test]
 fn local_alias_report_has_stable_top_level_shape() {
@@ -80,6 +80,80 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
 }
 
 #[test]
+fn compact_doctor_projection_retains_provider_readiness() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
+        ready_for: vec!["ready.provider".to_string()],
+        blocked_for: vec!["blocked.provider".to_string()],
+        unverified_for: vec!["unverified.provider".to_string()],
+        unverified_remediation: Some("Authentication has not been verified.".to_string()),
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(
+        compact["provider_readiness"]["ready_for"],
+        serde_json::json!(["ready.provider"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["blocked_for"],
+        serde_json::json!(["blocked.provider"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["unverified_for"],
+        serde_json::json!(["unverified.provider"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["guidance"],
+        "Authentication has not been verified."
+    );
+}
+
+#[test]
+fn compact_doctor_projection_retains_all_unverified_provider_readiness() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
+        ready_for: Vec::new(),
+        blocked_for: Vec::new(),
+        unverified_for: vec!["opencode.agent-task-executor".to_string()],
+        unverified_remediation: Some(
+            "Provider authentication is unverified because runner doctor cannot select a model."
+                .to_string(),
+        ),
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(
+        compact["provider_readiness"]["unverified_for"],
+        serde_json::json!(["opencode.agent-task-executor"])
+    );
+    assert_eq!(
+        compact["provider_readiness"]["guidance"],
+        "Provider authentication is unverified because runner doctor cannot select a model."
+    );
+    assert_eq!(compact["truncation"]["provider_readiness"]["shown"], 1);
+}
+
+#[test]
+fn full_doctor_projection_retains_nonsecret_unverified_provider_ids() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
+        ready_for: Vec::new(),
+        blocked_for: Vec::new(),
+        unverified_for: vec!["opencode.agent-task-executor".to_string()],
+        unverified_remediation: None,
+    });
+
+    let full = output_projection(report, true);
+
+    assert_eq!(
+        full["provider_readiness"]["unverified_for"],
+        serde_json::json!(["opencode.agent-task-executor"])
+    );
+}
+
+#[test]
 fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.checks = (0..COMPACT_CHECK_LIMIT)
@@ -108,6 +182,175 @@ fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
         "homeboy runner doctor local --repair"
     );
     assert_eq!(compact["truncation"]["checks"]["omitted"], 1);
+}
+
+#[test]
+fn compact_doctor_retains_safe_typed_runner_convergence_action() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.checks = vec![types::RunnerCheck {
+        id: "homeboy.version_skew".to_string(),
+        status: RunnerDoctorStatus::Warning,
+        message: "controller is ahead".to_string(),
+        remediation: Some("refresh runner".to_string()),
+        remediation_action: Some(RunnerRepairAction::RefreshHomeboy {
+            git_ref: Some("abc1234".to_string()),
+            allow_downgrade: false,
+        }),
+        details: BTreeMap::new(),
+    }];
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(
+        compact["checks"][0]["remediation_action"]["action"],
+        "refresh_homeboy"
+    );
+    assert_eq!(
+        compact["checks"][0]["remediation_action"]["git_ref"],
+        "abc1234"
+    );
+    assert_eq!(
+        compact["checks"][0]["remediation_action"]["allow_downgrade"],
+        false
+    );
+}
+
+#[test]
+fn compact_doctor_retains_failed_repair_cause_and_remediation() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.repairs.push(types::RunnerRepair {
+        id: "repair.daemon".to_string(),
+        status: RunnerDoctorStatus::Error,
+        message: "promotion lease remained contended after the bounded wait".to_string(),
+        commands: vec!["homeboy runner doctor local --scope lab-offload --repair".to_string()],
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(compact["repairs"][0]["id"], "repair.daemon");
+    assert_eq!(
+        compact["repairs"][0]["message"],
+        "promotion lease remained contended after the bounded wait"
+    );
+    assert_eq!(
+        compact["repairs"][0]["commands"][0],
+        "homeboy runner doctor local --scope lab-offload --repair"
+    );
+}
+
+#[test]
+fn doctor_failure_projection_lifts_actionable_root_causes_in_compact_and_full_modes() {
+    for (check_id, reason_code, remediation, expected_code) in [
+        (
+            "daemon.recovery",
+            Some("pid_dead"),
+            "homeboy runner connect local --adopt-orphan-lease lease-dead",
+            "runner.doctor.daemon_recovery.pid_dead",
+        ),
+        (
+            "provider.auth",
+            Some("authentication_denied"),
+            "homeboy runner doctor local --scope lab-offload",
+            "runner.doctor.provider_auth.authentication_denied",
+        ),
+        (
+            "daemon.exec",
+            Some("runner_doctor.daemon_timeout"),
+            "homeboy runner doctor local --scope lab-offload",
+            "runner.doctor.daemon_exec.runner_doctor_daemon_timeout",
+        ),
+        (
+            "inventory.stale",
+            Some("stale_inventory"),
+            "homeboy runner doctor local --scope lab-offload",
+            "runner.doctor.inventory_stale.stale_inventory",
+        ),
+    ] {
+        for full in [false, true] {
+            let (mut report, _) = run("local").expect("local doctor report");
+            report.status = RunnerDoctorStatus::Error;
+            report.checks = vec![types::RunnerCheck {
+                id: check_id.to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: format!("{check_id} failed"),
+                remediation: Some(remediation.to_string()),
+                remediation_action: None,
+                details: BTreeMap::from([(
+                    "reason_code".to_string(),
+                    reason_code.expect("fixture reason").to_string(),
+                )]),
+            }];
+
+            let projection = output_projection(report, full);
+            assert_eq!(
+                projection["failure"]["code"], expected_code,
+                "{check_id}, full={full}"
+            );
+            let data = serde_json::to_value(
+                crate::commands::runner::types::RunnerCommandOutput::Doctor(Box::new(projection)),
+            )
+            .expect("doctor output serializes");
+            let envelope = compact_command_run(Ok(data), 1)
+                .with_identity(
+                    &crate::commands::utils::response::CommandIdentity::with_operation(
+                        "runner", "doctor",
+                    ),
+                )
+                .stdout_envelope();
+            let envelope = serde_json::to_value(envelope).expect("envelope serializes");
+            assert_eq!(
+                envelope["diagnostics"]["code"], expected_code,
+                "{check_id}, full={full}"
+            );
+            assert_eq!(
+                envelope["next_actions"][0]["command"], remediation,
+                "{check_id}, full={full}"
+            );
+        }
+    }
+}
+
+#[test]
+fn doctor_failure_projection_names_an_invariant_violation_without_failed_checks() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.status = RunnerDoctorStatus::Error;
+    report.checks.clear();
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(compact["failure"]["code"], "runner.doctor.readiness_error");
+    assert_eq!(
+        compact["failure"]["next_actions"][0]["command"],
+        "homeboy runner doctor local --full"
+    );
+}
+
+#[test]
+fn doctor_failure_does_not_promote_prose_or_unredacted_secret_details() {
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+
+    for full in [false, true] {
+        let (mut report, _) = run("local").expect("local doctor report");
+        report.status = RunnerDoctorStatus::Error;
+        report.checks = vec![types::RunnerCheck {
+            id: "tool.required.example".to_string(),
+            status: RunnerDoctorStatus::Error,
+            message: format!("probe failed with token={secret}"),
+            remediation: Some("Fix the shell environment, then rerun doctor.".to_string()),
+            remediation_action: None,
+            details: BTreeMap::from([("probe_error".to_string(), format!("token={secret}"))]),
+        }];
+        let projection = output_projection(report, full);
+        let rendered = projection.to_string();
+
+        assert!(!rendered.contains(secret), "full={full}");
+        assert_eq!(
+            projection["failure"]["next_actions"][0]["command"],
+            "homeboy runner doctor local --full",
+            "full={full}"
+        );
+        assert_eq!(projection["failure"]["next_actions"][0]["kind"], "show");
+    }
 }
 
 #[test]
@@ -179,6 +422,38 @@ fn compact_doctor_falls_back_when_escaped_untrusted_fields_exceed_the_wire_budge
         compact["truncation"]["checks"]["omitted"],
         "see_full_output"
     );
+}
+
+#[test]
+fn compact_doctor_size_fallback_retains_failed_repair() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    let escaped = "\"\\\n".repeat(10_000);
+    report.checks = (0..COMPACT_CHECK_LIMIT)
+        .map(|_| types::RunnerCheck {
+            id: escaped.clone(),
+            status: RunnerDoctorStatus::Error,
+            message: escaped.clone(),
+            remediation: Some(escaped.clone()),
+            remediation_action: None,
+            details: BTreeMap::new(),
+        })
+        .collect();
+    report.repairs.push(types::RunnerRepair {
+        id: "repair.daemon".to_string(),
+        status: RunnerDoctorStatus::Error,
+        message: "promotion wait exhausted; do not use generic reconnect".to_string(),
+        commands: vec!["homeboy runner doctor local --scope lab-offload --repair".to_string()],
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(compact["checks"].as_array().unwrap().len(), 0);
+    assert_eq!(compact["repairs"][0]["id"], "repair.daemon");
+    assert_eq!(
+        compact["repairs"][0]["message"],
+        "promotion wait exhausted; do not use generic reconnect"
+    );
+    assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
 }
 
 #[test]
@@ -265,7 +540,7 @@ fn overall_status_promotes_errors_over_warnings() {
 #[test]
 fn lab_offload_readiness_keeps_a_healthy_eligible_provider_ready() {
     let checks = vec![
-        provider_check("selected.provider", RunnerDoctorStatus::Ok),
+        live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
         provider_check("optional.provider", RunnerDoctorStatus::Error),
     ];
     let eligible = vec![
@@ -278,12 +553,13 @@ fn lab_offload_readiness_keeps_a_healthy_eligible_provider_ready() {
     assert_eq!(status, RunnerDoctorStatus::Ok);
     assert_eq!(readiness.ready_for, vec!["selected.provider"]);
     assert_eq!(readiness.blocked_for, vec!["optional.provider"]);
+    assert!(readiness.unverified_for.is_empty());
 }
 
 #[test]
 fn lab_offload_readiness_blocks_a_failed_selected_provider() {
     let checks = vec![
-        provider_check("selected.provider", RunnerDoctorStatus::Error),
+        live_auth_provider_check("selected.provider", RunnerDoctorStatus::Error),
         provider_check("optional.provider", RunnerDoctorStatus::Ok),
     ];
     let eligible = vec!["selected.provider".to_string()];
@@ -293,6 +569,66 @@ fn lab_offload_readiness_blocks_a_failed_selected_provider() {
     assert_eq!(status, RunnerDoctorStatus::Error);
     assert!(readiness.ready_for.is_empty());
     assert_eq!(readiness.blocked_for, vec!["selected.provider"]);
+    assert!(readiness.unverified_for.is_empty());
+}
+
+#[test]
+fn lab_offload_readiness_error_dominates_live_auth_in_any_order() {
+    let eligible = vec!["selected.provider".to_string()];
+    for checks in [
+        vec![
+            provider_check("selected.provider", RunnerDoctorStatus::Error),
+            live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
+        ],
+        vec![
+            live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
+            provider_check("selected.provider", RunnerDoctorStatus::Error),
+            live_auth_provider_check("selected.provider", RunnerDoctorStatus::Ok),
+        ],
+    ] {
+        let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+        assert_eq!(status, RunnerDoctorStatus::Error);
+        assert!(readiness.ready_for.is_empty());
+        assert_eq!(readiness.blocked_for, eligible);
+    }
+}
+
+#[test]
+fn lab_offload_readiness_does_not_treat_a_resolved_require_graph_as_live_auth() {
+    let checks = vec![provider_check("selected.provider", RunnerDoctorStatus::Ok)];
+    let eligible = vec!["selected.provider".to_string()];
+
+    let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+
+    assert_eq!(status, RunnerDoctorStatus::Warning);
+    assert!(readiness.ready_for.is_empty());
+    assert!(readiness.blocked_for.is_empty());
+    assert_eq!(readiness.unverified_for, eligible);
+    assert_eq!(
+        readiness.unverified_remediation.as_deref(),
+        Some("Provider authentication is unverified because runner doctor cannot select a model. Run the selected task's normal preflight; doctor never changes credentials.")
+    );
+}
+
+#[test]
+fn lab_offload_readiness_blocks_all_providers_on_a_runner_prerequisite_error() {
+    let checks = vec![checks::error(
+        "extension.parity",
+        "required extension is stale".to_string(),
+        None,
+        BTreeMap::new(),
+    )];
+    let eligible = vec![
+        "selected.provider".to_string(),
+        "optional.provider".to_string(),
+    ];
+
+    let (status, readiness) = checks::lab_offload_status(&checks, &eligible);
+
+    assert_eq!(status, RunnerDoctorStatus::Error);
+    assert!(readiness.ready_for.is_empty());
+    assert_eq!(readiness.blocked_for, eligible);
+    assert!(readiness.unverified_for.is_empty());
 }
 
 fn provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::RunnerCheck {
@@ -304,6 +640,14 @@ fn provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::Runne
         remediation_action: None,
         details: BTreeMap::from([("provider_id".to_string(), provider_id.to_string())]),
     }
+}
+
+fn live_auth_provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::RunnerCheck {
+    let mut check = provider_check(provider_id, status);
+    check
+        .details
+        .insert("readiness_scope".to_string(), "live_auth".to_string());
+    check
 }
 
 #[test]

@@ -368,7 +368,7 @@ impl AgentTaskRequest {
                 kind: "agent_task".to_string(),
                 ref_id: Some(self.task_id.clone()),
             },
-            lab_runner_workload: None,
+            runner_workload: None,
             agent_task: serde_json::to_value(self).ok(),
             secret_env: Some(secret_env),
             env_materialization: None,

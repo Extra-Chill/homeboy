@@ -16,9 +16,15 @@ use std::path::Path;
 use std::time::Duration;
 
 mod action;
+pub mod action_api;
+mod api;
 mod context;
+pub(crate) mod deadline_process;
 pub(crate) mod env_provider;
 mod environment;
+mod environment_api;
+mod execute_api;
+mod execute_idempotency;
 mod runner;
 mod runtime_helper;
 mod scenario_runner;
@@ -33,17 +39,20 @@ use homeboy_extension_contract::manifest_action_config::RuntimeConfig;
 use homeboy_extension_contract::runner_contract::RunnerStepFilter;
 use homeboy_extension_contract::ExtensionManifest;
 
-pub use action::execute_action;
+pub use api::invoke_api;
 pub use context::ResolvedExtensionInvocationContext;
-pub use env_provider::{
-    declared_secret_names, resolve_installed, resolve_installed_all, EnvProviderCommandPayload,
-    EnvProviderContribution, ENV_PROVIDER_COMMAND_PAYLOAD_ENV,
+pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
+use environment::build_action_env;
+pub use environment::control_plane_identity_env;
+pub(crate) use environment::{build_exec_env, execute_extension_command, prepare_capability_run};
+pub use environment_api::{
+    declared_environment_secret_names as declared_secret_names, resolve_environment_api,
+    EnvironmentResolutionContext,
 };
-pub(crate) use environment::prepare_capability_run;
-use environment::{
-    build_action_env, build_exec_env, execute_extension_command, execute_extension_runtime,
+pub use execute_api::{
+    execute_api, execute_response_result, execute_run_request,
+    execute_run_request_with_control_plane,
 };
-use homeboy_core::extension::readiness::extension_ready_status;
 pub(crate) use runner::{read_extension_phase_timings, tail_lines};
 pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub(crate) use runtime_helper::WRITE_TEST_RESULTS_ENV;
@@ -53,8 +62,8 @@ pub use runtime_helper::{
     RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
 };
 pub use scenario_runner::{build_scenario_runner, ScenarioRunnerOptions};
+pub(crate) use settings::build_settings_json;
 use settings::serialize_settings;
-pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
 pub use tool::exec_tool;
 
 /// Result of executing a extension.
@@ -67,7 +76,6 @@ pub struct ExtensionRunResult {
 pub(crate) struct ExtensionExecutionResult {
     pub output: CapturedOutput,
     pub exit_code: i32,
-    pub success: bool,
 }
 
 pub(crate) struct ExtensionExecutionOutcome {
@@ -213,7 +221,8 @@ fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) 
 
     match env_provider::env_vars(
         &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
-        extension,
+        extension_id,
+        Some(extension_dir),
         extension_dir,
         &base_env,
     ) {
@@ -231,129 +240,6 @@ fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) 
 /// Backward-compatible alias for existing command API usage.
 pub type ExtensionStepFilter = RunnerStepFilter;
 
-/// Execute a extension with optional project context.
-pub fn run_extension(
-    extension_id: &str,
-    project_id: Option<&str>,
-    component_id: Option<&str>,
-    inputs: Vec<(String, String)>,
-    args: Vec<String>,
-    mode: ExtensionExecutionMode,
-    filter: ExtensionStepFilter,
-) -> Result<ExtensionRunResult> {
-    let is_captured = matches!(mode, ExtensionExecutionMode::Captured);
-    let execution = execute_extension_runtime(
-        extension_id,
-        project_id,
-        component_id,
-        inputs,
-        args,
-        None,
-        None,
-        mode,
-        &filter,
-    )?;
-
-    let output = if is_captured && !execution.result.output.is_empty() {
-        Some(execution.result.output)
-    } else {
-        None
-    };
-
-    Ok(ExtensionRunResult {
-        exit_code: execution.result.exit_code,
-        project_id: execution.project_id,
-        output,
-    })
-}
-
-/// Run an extension-owned deployment provider command and retain its structured
-/// stdout for the deploy result. Provider-specific validation and mutation stay
-/// entirely inside the extension command.
-pub fn run_deployment_provider(
-    extension_id: &str,
-    provider_id: &str,
-    project_id: &str,
-    component_id: &str,
-    component_path: &str,
-    contract: &std::path::Path,
-    dry_run: bool,
-) -> Result<ExtensionRunResult> {
-    let extension = load_extension(extension_id)?;
-    let provider = crate::extension::catalog::deployment_providers(&extension)
-        .into_iter()
-        .find(|provider| provider.id == provider_id)
-        .ok_or_else(|| Error::validation_invalid_argument(
-            "deployment_provider.provider",
-            format!("Extension '{extension_id}' does not declare deployment provider '{provider_id}'"),
-            None,
-            None,
-        ))?;
-    let readiness = extension_ready_status(&extension);
-    if readiness.ready != Some(true) {
-        return Err(Error::validation_invalid_argument(
-            "deployment_provider.extension",
-            format!("Deployment extension '{extension_id}' is not ready"),
-            readiness.detail.or(readiness.reason),
-            None,
-        ));
-    }
-    let extension_path = validation::require(
-        extension.extension_path.as_ref(),
-        "extension",
-        "extension_path not set",
-    )?;
-    let contract = contract.to_str().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "deployment_provider.contract",
-            "Contract path is not valid UTF-8",
-            None,
-            None,
-        )
-    })?;
-    let quoted_contract = shell::quote_path(contract);
-    let command_template = if dry_run {
-        provider.dry_run_command.as_deref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "deployment_provider.dry_run_command",
-                format!("Provider '{provider_id}' does not declare a non-mutating dry-run command"),
-                None,
-                None,
-            )
-        })?
-    } else {
-        &provider.command
-    };
-    let command = template::render(
-        command_template,
-        &[
-            ("extension_path", extension_path),
-            ("payload.contract", &quoted_contract),
-        ],
-    );
-    let execution = execute_extension_command(
-        &command,
-        &[],
-        Some(extension_path),
-        &build_exec_env(
-            extension_id,
-            Some(project_id),
-            Some(component_id),
-            "{}",
-            Some(extension_path),
-            None,
-            None,
-            Some(component_path),
-        ),
-        ExtensionExecutionMode::Captured,
-    )?;
-    Ok(ExtensionRunResult {
-        exit_code: execution.exit_code,
-        project_id: Some(project_id.to_string()),
-        output: Some(execution.output),
-    })
-}
-
 /// Execute a extension action (API call).
 pub fn run_action(
     extension_id: &str,
@@ -361,7 +247,27 @@ pub fn run_action(
     project_id: Option<&str>,
     data: Option<&str>,
 ) -> Result<serde_json::Value> {
-    execute_action(extension_id, action_id, project_id, data, None)
+    use homeboy_extension_contract::api::v1::{
+        ExtensionApiActionInvokeRequest, EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
+        EXTENSION_API_V1,
+    };
+
+    let selected = data
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| Error::internal_json(error.to_string(), Some("parse action data".into())))?
+        .unwrap_or_default();
+    action_api::response_value(action_api::invoke_action_api(
+        &ExtensionApiActionInvokeRequest {
+            schema: EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: extension_id.to_string(),
+            action_id: action_id.to_string(),
+            project_id: project_id.map(str::to_string),
+            selected,
+            payload: None,
+        },
+    ))
 }
 
 fn extension_runtime(extension: &ExtensionManifest) -> Result<&RuntimeConfig> {
@@ -464,27 +370,23 @@ pub(crate) fn build_capability_env_with_additional_providers(
 
     let mut provider_env = env.clone();
     provider_env.extend(extra_env.iter().cloned());
-    if let Ok(extension) = env_provider::load_manifest_from_dir(extension_path) {
+    env.extend(env_provider::env_vars(
+        &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
+        extension_name,
+        Some(extension_path),
+        component_path,
+        &provider_env,
+    )?);
+    for (extension_id, provider_path) in additional_env_provider_paths {
         env.extend(env_provider::env_vars(
             &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
                 "homeboy",
             ),
-            &extension,
+            extension_id,
+            Some(provider_path),
             component_path,
             &provider_env,
         )?);
-    }
-    for (_extension_id, provider_path) in additional_env_provider_paths {
-        if let Ok(extension) = env_provider::load_manifest_from_dir(provider_path) {
-            env.extend(env_provider::env_vars(
-                &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
-                    "homeboy",
-                ),
-                &extension,
-                component_path,
-                &provider_env,
-            )?);
-        }
     }
     env.extend(extra_env.iter().cloned());
     Ok(env)
@@ -646,6 +548,7 @@ mod tests {
     use super::*;
     use crate::extension::resolve::extract_component_extension_settings;
     use homeboy_core::component::Component;
+    use homeboy_extension_contract::manifest_action_config::SettingConfig;
 
     fn runtime_with_setup_timeout(setup_timeout_seconds: Option<u64>) -> RuntimeConfig {
         RuntimeConfig {
@@ -656,6 +559,16 @@ mod tests {
             env: None,
             entrypoint: None,
             args: None,
+        }
+    }
+
+    fn setting(id: &str, default: serde_json::Value) -> SettingConfig {
+        SettingConfig {
+            id: id.to_string(),
+            setting_type: "json".to_string(),
+            label: id.to_string(),
+            placeholder: None,
+            default: Some(default),
         }
     }
 
@@ -732,58 +645,21 @@ mod tests {
             })
             .expect("project");
 
-            let result = run_extension(
+            let result = execute_response_result(execute_api(&execute_run_request(
                 "fixture-extension",
                 Some("site"),
                 Some("fixture"),
                 vec![],
                 vec![],
                 ExtensionExecutionMode::Captured,
-                ExtensionStepFilter::default(),
-            )
+                &ExtensionStepFilter::default(),
+                "test:project-attachment".to_string(),
+            )))
             .expect("extension run");
 
             assert_eq!(
                 result.output.expect("output").stdout,
                 attachment.path().to_string_lossy()
-            );
-        });
-    }
-
-    #[test]
-    fn deployment_provider_uses_the_declared_non_mutating_command() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let contract = tempfile::NamedTempFile::new().expect("contract");
-            let component = tempfile::tempdir().expect("component");
-            write_extension(
-                home.path(),
-                "fixture-provider",
-                serde_json::json!({
-                    "name": "fixture-provider", "version": "1.0.0",
-                    "deployment_providers": [{
-                        "id": "fixture.deploy",
-                        "command": "sh {{extension_path}}/run.sh apply {{payload.contract}}",
-                        "dry_run_command": "sh {{extension_path}}/run.sh validate {{payload.contract}}"
-                    }]
-                }),
-                "#!/bin/sh\nprintf '%s|%s' \"$1\" \"$HOMEBOY_COMPONENT_PATH\"\n",
-            );
-
-            let result = run_deployment_provider(
-                "fixture-provider",
-                "fixture.deploy",
-                "site",
-                "fixture",
-                component.path().to_str().expect("component path"),
-                contract.path(),
-                true,
-            )
-            .expect("provider dry run");
-
-            assert_eq!(result.exit_code, 0);
-            assert_eq!(
-                result.output.expect("output").stdout,
-                format!("validate|{}", component.path().display())
             );
         });
     }
@@ -809,15 +685,16 @@ mod tests {
                 "#!/bin/sh\nprintf '%s|%s' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"\n",
             );
 
-            let result = run_extension(
+            let result = execute_response_result(execute_api(&execute_run_request(
                 "fixture-extension",
                 None,
                 Some("fixture"),
                 vec![],
                 vec![],
                 ExtensionExecutionMode::Captured,
-                ExtensionStepFilter::default(),
-            )
+                &ExtensionStepFilter::default(),
+                "test:component-identity".to_string(),
+            )))
             .expect("extension run");
 
             assert_eq!(
@@ -1073,12 +950,11 @@ mod tests {
     fn build_settings_json_preserves_array_values() {
         // Regression test for #844: array values in extension settings
         // were serialized as empty strings.
-        let manifest = serde_json::json!({
-            "settings": [
-                { "id": "string_setting", "default": "hello" },
-                { "id": "array_default", "default": ["a", "b"] }
-            ]
-        });
+        let manifest_settings = vec![
+            setting("string_setting", serde_json::json!("hello")),
+            setting("array_default", serde_json::json!(["a", "b"])),
+            setting("null_default", serde_json::Value::Null),
+        ];
 
         let extension_settings: Vec<(String, serde_json::Value)> = vec![
             (
@@ -1094,8 +970,8 @@ mod tests {
         let overrides: Vec<(String, String)> = vec![];
         let json_overrides: Vec<(String, serde_json::Value)> = vec![];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
+        let json = build_settings_json(
+            &manifest_settings,
             &extension_settings,
             &overrides,
             &json_overrides,
@@ -1118,6 +994,7 @@ mod tests {
 
         // Array default from manifest is preserved
         assert_eq!(parsed["array_default"], serde_json::json!(["a", "b"]));
+        assert_eq!(parsed["null_default"], serde_json::Value::Null);
     }
 
     #[test]
@@ -1134,14 +1011,13 @@ mod tests {
             }
         }))
         .expect("component config");
-        let manifest = serde_json::json!({
-            "settings": [
-                { "id": "test_backend", "default": "custom-provider" }
-            ]
-        });
+        let manifest_settings = vec![setting(
+            "test_backend",
+            serde_json::json!("custom-provider"),
+        )];
         let extension_settings = extract_component_extension_settings(&component, "sample-runtime");
 
-        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &[], &[])
+        let json = build_settings_json(&manifest_settings, &extension_settings, &[], &[])
             .expect("settings json");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse settings json");
 
@@ -1151,19 +1027,13 @@ mod tests {
 
     #[test]
     fn build_settings_json_cli_overrides_replace_values() {
-        let manifest = serde_json::json!({});
         let extension_settings: Vec<(String, serde_json::Value)> =
             vec![("key".to_string(), serde_json::json!(["original"]))];
         let overrides = vec![("key".to_string(), "override_value".to_string())];
         let json_overrides: Vec<(String, serde_json::Value)> = vec![];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
-            &extension_settings,
-            &overrides,
-            &json_overrides,
-        )
-        .expect("should serialize");
+        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
+            .expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
         // CLI override replaces the array value with a string
@@ -1176,11 +1046,7 @@ mod tests {
         // unlike --setting which would coerce them to a JSON-string-of-an-
         // object. Mirrors the wp_config_defines / bench_env use case
         // (homeboy-extensions #248 / #250).
-        let manifest = serde_json::json!({
-            "settings": [
-                { "id": "bench_env", "default": {} }
-            ]
-        });
+        let manifest_settings = vec![setting("bench_env", serde_json::json!({}))];
         let extension_settings: Vec<(String, serde_json::Value)> = vec![];
         let overrides: Vec<(String, String)> = vec![];
         let json_overrides = vec![(
@@ -1188,8 +1054,8 @@ mod tests {
             serde_json::json!({"BENCH_CORPUS_SIZE": "1000"}),
         )];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
+        let json = build_settings_json(
+            &manifest_settings,
             &extension_settings,
             &overrides,
             &json_overrides,
@@ -1209,18 +1075,12 @@ mod tests {
     fn build_settings_json_typed_override_wins_on_conflict() {
         // When the same key is targeted by both --setting and --setting-json,
         // the typed override wins (strictly more expressive, applied later).
-        let manifest = serde_json::json!({});
         let extension_settings: Vec<(String, serde_json::Value)> = vec![];
         let overrides = vec![("key".to_string(), "string_value".to_string())];
         let json_overrides = vec![("key".to_string(), serde_json::json!({"nested": true}))];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
-            &extension_settings,
-            &overrides,
-            &json_overrides,
-        )
-        .expect("should serialize");
+        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
+            .expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
         assert_eq!(parsed["key"], serde_json::json!({"nested": true}));

@@ -39,8 +39,8 @@ use super::mirror::{
     mirror_remote_observation_runs_by_id_with_downloader, mirror_reverse_broker_evidence,
     mirror_terminal_job_artifacts_with, mirrored_patch_result, mirrored_runner_job_identity,
     primary_mirrored_run, refresh_mirrored_daemon_evidence, refresh_mirrored_daemon_evidence_with,
-    MirrorEvidenceRequest, ReverseBrokerEvidenceContext, MIRRORED_REMOTE_EVENT_LIMIT,
-    MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+    runner_job_log_snapshot_with_owner_recovery_with, MirrorEvidenceRequest,
+    ReverseBrokerEvidenceContext, MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
 
 use super::tokens::{
@@ -68,6 +68,72 @@ fn runner_execution_record_resolves_its_authoritative_job_identity() {
             "homeboy-lab".to_string(),
             "c2d54086-5e83-4268-88a7-51232fa05a0c".to_string()
         ))
+    );
+}
+
+#[test]
+fn mirror_refresh_recovers_terminal_evidence_from_the_exact_retained_generation() {
+    let job_id = "00000000-0000-0000-0000-000000000123";
+    let mut retained_job = terminal_runner_job();
+    retained_job.id = Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job ID");
+    let retained_events = vec![JobEvent {
+        sequence: 1,
+        job_id: retained_job.id,
+        kind: JobEventKind::Result,
+        timestamp_ms: retained_job.updated_at_ms,
+        message: Some("old generation terminal result".to_string()),
+        data: Some(json!({ "exit_code": 0, "stdout": "exact retained evidence" })),
+    }];
+    let mut reconnected = false;
+    let mut closed = false;
+
+    let recovered = runner_job_log_snapshot_with_owner_recovery_with(
+        "homeboy-lab",
+        job_id,
+        || {
+            Err(Error::validation_invalid_argument(
+                "job_id",
+                "current admission generation returned HTTP 404",
+                None,
+                None,
+            ))
+        },
+        |runner_id, requested_job_id| {
+            assert_eq!(runner_id, "homeboy-lab");
+            assert_eq!(requested_job_id, job_id);
+            reconnected = true;
+            Ok("generation-a")
+        },
+        |generation, requested_job_id| {
+            assert_eq!(*generation, "generation-a");
+            assert_eq!(requested_job_id, job_id);
+            Ok(homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                job: retained_job.clone(),
+                events: retained_events.clone(),
+            })
+        },
+        |generation| {
+            assert_eq!(*generation, "generation-a");
+            closed = true;
+        },
+    )
+    .expect("exact retained generation recovers terminal evidence");
+
+    assert!(reconnected);
+    assert!(closed);
+    assert_eq!(recovered.job.id.to_string(), job_id);
+    assert_eq!(recovered.job.status, JobStatus::Succeeded);
+    assert_eq!(recovered.events.len(), 1);
+    assert_eq!(
+        recovered.events[0].message.as_deref(),
+        Some("old generation terminal result")
+    );
+    assert_eq!(
+        recovered.events[0]
+            .data
+            .as_ref()
+            .and_then(|data| data.get("stdout")),
+        Some(&json!("exact retained evidence"))
     );
 }
 
@@ -288,6 +354,75 @@ fn controller_terminal_metadata_keeps_fetch_fallback_without_public_origin() {
             None => std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"),
         }
     });
+}
+
+#[test]
+fn controller_terminal_metadata_keeps_verified_bytes_when_public_alias_returns_404() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let public_url = serve_public_alias(404);
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let path = home.path().join("report.txt");
+        let bytes = b"controller bytes";
+        fs::write(&path, bytes).expect("artifact");
+        let sha256 = homeboy_core::artifact_metadata::sha256_file(&path).expect("sha256");
+        let validation = homeboy_core::artifact_links::validate_public_artifact_url(&public_url);
+        store
+            .import_artifact(&ArtifactRecord {
+                id: "report".to_string(),
+                run_id: run.id.clone(),
+                kind: "report".to_string(),
+                artifact_type: "file".to_string(),
+                path: path.display().to_string(),
+                sha256: Some(sha256),
+                size_bytes: Some(bytes.len() as i64),
+                mime: Some("text/plain".to_string()),
+                metadata_json: json!({
+                    "public_url_validation": homeboy_core::artifact_links::public_artifact_url_validation_json(&validation),
+                }),
+                created_at: "2026-09-07T00:00:00Z".to_string(),
+                ..Default::default()
+            })
+            .expect("import retained artifact");
+
+        let metadata =
+            controller_artifact_metadata(std::slice::from_ref(&run)).expect("terminal metadata");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id, "report");
+        assert_eq!(
+            metadata[0].metadata.as_ref().expect("metadata")["fetch_command"],
+            format!("homeboy runs artifact get {} report -o <path>", run.id)
+        );
+        assert_eq!(
+            metadata[0].metadata.as_ref().expect("metadata")["unreachable_aliases"][0]
+                ["status_code"],
+            404
+        );
+        assert_eq!(
+            metadata[0].metadata.as_ref().expect("metadata")["unreachable_aliases"][0]["error"],
+            "public artifact URL returned HTTP 404"
+        );
+    });
+}
+
+fn serve_public_alias(status: u16) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind public alias");
+    let addr = listener.local_addr().expect("alias address");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept alias probe");
+        let mut buffer = [0; 1024];
+        let _ = stream.read(&mut buffer);
+        let body = "missing";
+        write!(
+            stream,
+            "HTTP/1.1 {status} Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write alias response");
+    });
+    format!("http://{addr}/artifact")
 }
 
 #[test]

@@ -12,6 +12,41 @@ use serde_json::{json, Value};
 
 pub const WORK_JOB_TYPE: &str = "work";
 pub const WORK_JOB_VERSION: u32 = 1;
+
+/// Supervision phase of one detached orchestration child.
+///
+/// Cook, fanout, and loop all supervise a detached child through the same three
+/// states, so they share this projection rather than restating it. The wire
+/// form is `queued` / `supervising` / `completed`, unchanged from the
+/// per-domain enums this replaces.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkJobPhase {
+    /// Admitted, not yet supervising.
+    #[default]
+    Queued,
+    /// The daemon is watching a live detached child.
+    Supervising,
+    /// The child ended and its durable outcome was observed.
+    Completed,
+}
+
+/// Whether a supervised detached child is still the exact process the job
+/// admitted. A recycled PID is not the same child, so start identity is part of
+/// the question rather than an optional refinement.
+pub(crate) fn supervised_child_is_live(
+    child_pid: u32,
+    child_start_identity: &homeboy_core::process::ProcessStartIdentity,
+) -> bool {
+    matches!(
+        homeboy_core::process::process_identity_state_with_start_identity(
+            child_pid,
+            None,
+            Some(child_start_identity),
+        ),
+        homeboy_core::process::ProcessIdentityState::Live
+    )
+}
 pub(crate) const WORK_JOB_REQUEST_SCHEMA: &str = "homeboy/work-job-request/v1";
 pub(crate) const WORK_JOB_CHECKPOINT_SCHEMA: &str = "homeboy/work-job-checkpoint/v1";
 pub(crate) const WORK_JOB_PROGRESS_SCHEMA: &str = "homeboy/work-job-progress/v1";
@@ -328,4 +363,33 @@ fn to_value<T: Serialize>(value: T) -> Result<Value> {
 
 fn invalid_work_job(message: &str) -> Error {
     Error::validation_invalid_argument("work_job", message, None, None)
+}
+
+#[cfg(test)]
+mod work_job_phase_tests {
+    use super::WorkJobPhase;
+
+    /// Cook, fanout, and loop job records are durable. Collapsing their three
+    /// identical phase enums into one is only safe while the wire form stays
+    /// exactly what those records already contain.
+    #[test]
+    fn phase_wire_form_matches_the_persisted_per_domain_encoding() {
+        for (phase, encoded) in [
+            (WorkJobPhase::Queued, "\"queued\""),
+            (WorkJobPhase::Supervising, "\"supervising\""),
+            (WorkJobPhase::Completed, "\"completed\""),
+        ] {
+            assert_eq!(serde_json::to_string(&phase).expect("encode"), encoded);
+            assert_eq!(
+                serde_json::from_str::<WorkJobPhase>(encoded).expect("decode"),
+                phase
+            );
+        }
+    }
+
+    /// A record written before the phase field existed still loads as queued.
+    #[test]
+    fn absent_phase_defaults_to_queued() {
+        assert_eq!(WorkJobPhase::default(), WorkJobPhase::Queued);
+    }
 }

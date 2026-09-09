@@ -23,6 +23,7 @@ use homeboy_core::secret_env_plan::{
     SecretEnvHandoffEntry, SecretEnvPlan, SecretEnvPlanMaterializeRequest,
 };
 use homeboy_core::{config, Error, Result};
+use homeboy_runner_contract::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 
 use super::super::Runner;
 use super::args_util::{non_empty_arg, subcommand_index};
@@ -79,7 +80,8 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
         .into_iter()
         .filter(|(name, _)| !secret_env_names.contains(name))
         .collect::<BTreeMap<_, _>>();
-    let secret_env_plan = materialized_lab_secret_env_plan(public_env, secret_env_names.clone())?;
+    let mut secret_env_plan =
+        materialized_lab_secret_env_plan(public_env, secret_env_names.clone())?;
     let resolved_secret_env_names = secret_env_plan.secret_env_names();
     let secret_values = env_delta
         .iter()
@@ -96,6 +98,26 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&tunnel_secret_env));
     runner_deferred_secret_env.sort();
     runner_deferred_secret_env.dedup();
+    // Preserve authority with the durable name-only plan. Only values resolved
+    // by this controller are eligible for the transient broker sidecar.
+    secret_env_plan.env_materialization = Some(EnvMaterializationPlan {
+        secret_refs: secret_env_plan
+            .secret_env_names()
+            .into_iter()
+            .map(|name| EnvSecretRef {
+                owner: Some(
+                    if runner_deferred_secret_env.contains(&name) {
+                        "runner"
+                    } else {
+                        "controller"
+                    }
+                    .to_string(),
+                ),
+                name,
+            })
+            .collect(),
+        ..EnvMaterializationPlan::default()
+    });
     let entries = lab_secret_env_handoff_entries(
         &env_delta,
         &runner_deferred_secret_env,
@@ -341,12 +363,16 @@ pub(super) fn hydrate_agent_task_secret_env(
 
 fn hydrate_agent_task_secret_env_with_providers(
     args: &[String],
-    env: &mut HashMap<String, String>,
+    _env: &mut HashMap<String, String>,
     providers: &[AgentTaskExecutorProvider],
 ) -> Result<serde_json::Value> {
-    let mut names = declared_agent_task_controller_secret_env_with_providers(args, providers)?;
+    let names = declared_agent_task_controller_secret_env_with_providers(args, providers)?;
     let mut runner_deferred_names =
         declared_agent_task_run_plan_secret_env_with_providers(args, providers);
+    // Provider credentials belong to the execution runner. Carry their names in
+    // the existing secret plan so the runner resolves its own references after
+    // durable replay; never materialize values into a broker submission.
+    runner_deferred_names.extend(names.iter().cloned());
     runner_deferred_names.sort();
     runner_deferred_names.dedup();
     if names.is_empty() && runner_deferred_names.is_empty() {
@@ -363,33 +389,6 @@ fn hydrate_agent_task_secret_env_with_providers(
         })
         .transpose()?
         .unwrap_or_default();
-    let controller_source_run_plan_names = runner_deferred_names
-        .iter()
-        .filter(|name| fallback_sources.contains_key(name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !controller_source_run_plan_names.is_empty() {
-        names.extend(controller_source_run_plan_names.iter().cloned());
-        names.sort();
-        names.dedup();
-        runner_deferred_names.retain(|name| !controller_source_run_plan_names.contains(name));
-    }
-    if !names.is_empty() {
-        let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(&names, &fallback_sources).map_err(|error| {
-            Error::validation_invalid_argument(
-                "secret-env",
-                error.message,
-                None,
-                Some(vec![
-                    "Configure provider secrets with Homeboy's global agent-task secret config, for example `homeboy agent-task auth map-env` or `homeboy agent-task auth set-keychain`.".to_string(),
-                ]),
-            )
-        })?;
-        for (name, value) in resolved {
-            env.insert(name, value);
-        }
-    }
-
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
         "secret_env": agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources),

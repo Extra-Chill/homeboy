@@ -153,6 +153,13 @@ pub fn cached_latest_release() -> Option<CachedLatestRelease> {
     })
 }
 
+/// Whether a cached release observation is still recent enough to establish a
+/// current-version verdict. Stale observations remain useful evidence, but must
+/// not make a status surface claim that a matching binary is current.
+pub fn cached_latest_release_is_fresh(checked_at: u64) -> bool {
+    update_check_cache::is_cache_fresh(checked_at, CHECK_INTERVAL_SECS)
+}
+
 /// Whether the operator has turned the update check off, by environment or by
 /// config. Callers that report freshness must treat this as "not established"
 /// rather than "current".

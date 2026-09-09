@@ -1,3 +1,4 @@
+use crate::extension::root_manifest::{ExtensionRootManifest, SharedAssetDeclaration};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -34,27 +35,6 @@ pub struct RuntimePackageRefreshResult {
     pub manifest_path: PathBuf,
     pub source_revision: Option<String>,
     pub replaced_existing: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct RootManifest {
-    #[serde(default)]
-    shared_assets: Vec<SharedAssetDeclaration>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum SharedAssetDeclaration {
-    Path(String),
-    Object { path: String },
-}
-
-impl SharedAssetDeclaration {
-    fn path(self) -> String {
-        match self {
-            Self::Path(path) | Self::Object { path } => path,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -207,8 +187,17 @@ fn refresh_locked_in_root(
 /// Snapshot root-manifest runtime assets into a new generation. Linked extension
 /// installs call this instead of writing through the stable runtime boundary.
 pub fn refresh_shared_assets(source_root: &Path) -> Result<()> {
+    refresh_shared_assets_with_revision(source_root, None)
+}
+
+/// [`refresh_shared_assets`] with explicit source revision evidence supplied by
+/// the extension lifecycle when its durable snapshot no longer has `.git`.
+pub fn refresh_shared_assets_with_revision(
+    source_root: &Path,
+    revision: Option<&str>,
+) -> Result<()> {
     let config_root = paths::homeboy()?;
-    refresh_shared_assets_in_root(&config_root, source_root)
+    refresh_shared_assets_in_root_with_revision(&config_root, source_root, revision)
 }
 
 /// [`refresh_shared_assets`] against an explicitly injected config root.
@@ -216,12 +205,24 @@ pub fn refresh_shared_assets(source_root: &Path) -> Result<()> {
 /// As with [`refresh_in_root`], the lock and the generation store are taken
 /// under one resolution rather than two.
 pub fn refresh_shared_assets_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
+    refresh_shared_assets_in_root_with_revision(config_root, source_root, None)
+}
+
+fn refresh_shared_assets_in_root_with_revision(
+    config_root: &Path,
+    source_root: &Path,
+    revision: Option<&str>,
+) -> Result<()> {
     config::with_config_lock_at(config_root, || {
-        refresh_shared_assets_locked_in_root(config_root, source_root)
+        refresh_shared_assets_locked_in_root(config_root, source_root, revision)
     })
 }
 
-fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
+fn refresh_shared_assets_locked_in_root(
+    config_root: &Path,
+    source_root: &Path,
+    revision: Option<&str>,
+) -> Result<()> {
     let store = config_root.join(GENERATIONS);
     fs::create_dir_all(store.join("staging")).map_err(io("prepare runtime generation store"))?;
     recover(&store)?;
@@ -234,6 +235,10 @@ fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) 
     remove_if_exists(&stage, "clean linked runtime generation stage")?;
     seed_generation(config_root, &store, &stage)?;
     materialize_all_declared_runtime_assets(&source_root, &stage)?;
+    let source_revision = revision
+        .map(str::to_string)
+        .or_else(|| git::short_head_revision(&source_root));
+    write_shared_runtime_revisions(&stage, source_revision.as_deref())?;
     sync_tree(&stage)?;
     write_journal(
         &store,
@@ -260,6 +265,27 @@ fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) 
         "finalize linked runtime generation refresh",
     )?;
     sync_dir(&store)
+}
+
+fn write_shared_runtime_revisions(stage: &Path, revision: Option<&str>) -> Result<()> {
+    let Some(revision) = revision.filter(|revision| !revision.trim().is_empty()) else {
+        return Ok(());
+    };
+    let runtimes = stage.join("agent-runtimes");
+    let Ok(entries) = fs::read_dir(runtimes) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(io("read staged runtime package"))?;
+        if entry.path().is_dir() {
+            write_synced(
+                &entry.path().join(".source-revision"),
+                revision.as_bytes(),
+                "write shared runtime source revision",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn seed_generation(config_root: &Path, store: &Path, stage: &Path) -> Result<()> {
@@ -408,7 +434,7 @@ fn materialize_declared_assets(root: &Path, stage: &Path, runtime_id: &str) -> R
     let Ok(raw) = fs::read_to_string(&manifest) else {
         return Ok(Vec::new());
     };
-    let parsed: RootManifest = serde_json::from_str(&raw).map_err(|error| {
+    let parsed: ExtensionRootManifest = serde_json::from_str(&raw).map_err(|error| {
         Error::validation_invalid_argument(
             "source",
             format!("invalid shared asset manifest: {error}"),
@@ -451,7 +477,7 @@ fn materialize_declared_assets(root: &Path, stage: &Path, runtime_id: &str) -> R
 fn materialize_all_declared_runtime_assets(root: &Path, stage: &Path) -> Result<()> {
     let manifest = root.join(ROOT_MANIFEST);
     let raw = fs::read_to_string(&manifest).map_err(io("read linked runtime asset manifest"))?;
-    let parsed: RootManifest = serde_json::from_str(&raw).map_err(|error| {
+    let parsed: ExtensionRootManifest = serde_json::from_str(&raw).map_err(|error| {
         Error::validation_invalid_argument(
             "source",
             format!("invalid shared asset manifest: {error}"),
@@ -1047,7 +1073,7 @@ mod tests {
                 staged_source.path().join(ROOT_MANIFEST),
             )
             .unwrap();
-            let manifest: RootManifest =
+            let manifest: ExtensionRootManifest =
                 serde_json::from_slice(&fs::read(source.join(ROOT_MANIFEST)).unwrap()).unwrap();
             for asset in manifest.shared_assets {
                 let asset = asset.path();

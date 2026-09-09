@@ -22,18 +22,19 @@ pub(crate) fn prepare_capability_run(
         )?;
     }
 
-    let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
+    let manifest =
+        homeboy_core::extension::catalog::load_extension_from_dir(&execution.extension_path)?;
     homeboy_extension_contract::validate_core_compatibility(
         "extension",
         &execution.extension_id,
         manifest
-            .get("requires")
-            .and_then(|requires| requires.get("homeboy"))
-            .and_then(serde_json::Value::as_str),
+            .requires
+            .as_ref()
+            .and_then(|requires| requires.homeboy.as_deref()),
         homeboy_core::extension::lifecycle::read_source_revision(&execution.extension_id),
     )?;
-    let settings_json = build_settings_json_from_manifest(
-        &manifest,
+    let settings_json = build_settings_json(
+        &manifest.settings,
         &execution.settings,
         settings_overrides,
         settings_json_overrides,
@@ -147,7 +148,7 @@ pub(super) fn build_action_env(
     env
 }
 
-pub(super) fn execute_extension_command(
+pub(crate) fn execute_extension_command(
     command_template: &str,
     vars: &[(&str, &str)],
     working_dir: Option<&str>,
@@ -166,7 +167,6 @@ pub(super) fn execute_extension_command(
             Ok(ExtensionExecutionResult {
                 output: CapturedOutput::default(),
                 exit_code,
-                success: exit_code == 0,
             })
         }
         ExtensionExecutionMode::Captured => {
@@ -174,7 +174,6 @@ pub(super) fn execute_extension_command(
             Ok(ExtensionExecutionResult {
                 output: CapturedOutput::new(cmd_output.stdout, cmd_output.stderr),
                 exit_code: cmd_output.exit_code,
-                success: cmd_output.success,
             })
         }
     }
@@ -185,6 +184,7 @@ pub(super) fn execute_extension_runtime(
     extension_id: &str,
     project_id: Option<&str>,
     component_id: Option<&str>,
+    control_plane: Option<&homeboy_extension_contract::api::v1::ExtensionApiControlPlaneIdentity>,
     inputs: Vec<(String, String)>,
     args: Vec<String>,
     payload: Option<&serde_json::Value>,
@@ -247,6 +247,10 @@ pub(super) fn execute_extension_runtime(
     );
     let mut env_pairs = build_runtime_env(runtime, &context, &vars, &settings_json, extension_path);
 
+    if let Some(identity) = control_plane {
+        env_pairs.extend(control_plane_identity_env(identity));
+    }
+
     env_pairs.extend(filter.to_env_pairs());
 
     let execution = execute_extension_command(
@@ -263,6 +267,37 @@ pub(super) fn execute_extension_runtime(
     })
 }
 
+pub fn control_plane_identity_env(
+    identity: &homeboy_extension_contract::api::v1::ExtensionApiControlPlaneIdentity,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            "HOMEBOY_CONTROL_PLANE_MISSION_ID".to_string(),
+            identity.mission.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_RUN_ID".to_string(),
+            identity.run.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_TASK_ID".to_string(),
+            identity.task.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_ATTEMPT_ID".to_string(),
+            identity.attempt.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_ATTEMPT_NUMBER".to_string(),
+            identity.attempt_number.to_string(),
+        ),
+        (
+            "HOMEBOY_CONTROL_PLANE_EXECUTION_ID".to_string(),
+            identity.execution.to_string(),
+        ),
+    ]
+}
+
 /// Build execution environment variables for a extension.
 ///
 /// This is the single canonical env builder for all extension execution contexts
@@ -272,7 +307,7 @@ pub(super) fn execute_extension_runtime(
 /// instead of loading the component from storage. This supports `--path` overrides
 /// in commands like `homeboy test --path /alt/path`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build_exec_env(
+pub(crate) fn build_exec_env(
     extension_id: &str,
     project_id: Option<&str>,
     component_id: Option<&str>,

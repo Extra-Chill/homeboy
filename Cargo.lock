@@ -106,6 +106,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "ascii"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -227,6 +233,12 @@ dependencies = [
  "wasm-bindgen",
  "windows-link",
 ]
+
+[[package]]
+name = "chunked_transfer"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
 name = "cipher"
@@ -701,14 +713,13 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.367.3"
+version = "0.371.0"
 dependencies = [
  "base64",
  "chrono",
  "clap",
  "homeboy-agents",
  "homeboy-cli",
- "homeboy-code-audit",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension-contract",
@@ -760,7 +771,6 @@ dependencies = [
 name = "homeboy-api-jobs-contract"
 version = "0.1.0"
 dependencies = [
- "homeboy-lab-contract",
  "homeboy-runner-contract",
  "homeboy-source-snapshot-contract",
  "serde",
@@ -816,6 +826,7 @@ dependencies = [
  "homeboy-refactor",
  "homeboy-refactor-contract",
  "homeboy-release",
+ "homeboy-resource-topology-contract",
  "homeboy-review",
  "homeboy-rig",
  "homeboy-runner-contract",
@@ -886,6 +897,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-control-plane-client"
+version = "0.1.0"
+dependencies = [
+ "homeboy-control-plane-contract",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tiny_http",
+]
+
+[[package]]
 name = "homeboy-control-plane-contract"
 version = "0.1.0"
 dependencies = [
@@ -926,6 +948,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor-contract",
  "homeboy-release-contract",
+ "homeboy-resource-topology-contract",
  "homeboy-runner-contract",
  "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
@@ -1004,6 +1027,7 @@ name = "homeboy-extension-contract"
 version = "0.1.0"
 dependencies = [
  "homeboy-audit-contract",
+ "homeboy-control-plane-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-finding",
@@ -1059,6 +1083,7 @@ version = "0.1.0"
 dependencies = [
  "homeboy-error",
  "homeboy-redaction",
+ "homeboy-runner-contract",
  "serde",
  "serde_json",
 ]
@@ -1075,11 +1100,13 @@ dependencies = [
  "glob-match",
  "homeboy-agents",
  "homeboy-artifact-ref-contract",
+ "homeboy-control-plane-client",
  "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension-contract",
  "homeboy-fuzz",
+ "homeboy-lab-contract",
  "homeboy-lab-runner-contract",
  "homeboy-product-identity",
  "homeboy-rig",
@@ -1177,6 +1204,8 @@ dependencies = [
  "fs4",
  "glob",
  "glob-match",
+ "homeboy-agents",
+ "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-deploy",
  "homeboy-engine-primitives",
@@ -1205,6 +1234,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-resource-topology-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-review"
 version = "0.1.0"
 dependencies = [
@@ -1230,6 +1267,7 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-paths",
  "homeboy-product-identity",
+ "homeboy-rig-contract",
  "homeboy-runner-contract",
  "homeboy-stack",
  "libc",
@@ -1241,10 +1279,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-rig-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-runner-contract"
 version = "0.1.0"
 dependencies = [
- "homeboy-lab-contract",
+ "homeboy-error",
+ "homeboy-redaction",
  "homeboy-source-snapshot-contract",
  "serde",
  "serde_json",
@@ -1319,6 +1366,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml",
 ]
@@ -1377,6 +1425,12 @@ name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
+
+[[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
@@ -2586,6 +2640,18 @@ name = "time-core"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
+
+[[package]]
+name = "tiny_http"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
+dependencies = [
+ "ascii",
+ "chunked_transfer",
+ "httpdate",
+ "log",
+]
 
 [[package]]
 name = "tinystr"

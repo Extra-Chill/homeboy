@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
+use homeboy_agents::agent_task_provider::discovery::AgentTaskExecutorDiscovery;
 use homeboy_core::extension;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use serde::{Deserialize, Serialize};
 
 use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
@@ -17,7 +19,10 @@ use homeboy_core::extension::catalog::{
 use homeboy_core::extension::readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
-use homeboy_core::extension::{invoke::run_setup, resolve::is_extension_compatible};
+use homeboy_core::extension::{
+    invoke::{execute_api, execute_response_result, execute_run_request, run_setup},
+    resolve::is_extension_compatible,
+};
 use homeboy_extension_contract as extension_contract;
 use homeboy_extension_contract::action_types::ActionType;
 use homeboy_extension_contract::api::v1::{
@@ -52,11 +57,8 @@ enum ExtensionCommand {
         #[arg(short, long)]
         project: Option<String>,
         /// Run live readiness probes concurrently and refresh cached readiness
-        #[arg(long, conflicts_with = "skip_ready_check")]
+        #[arg(long)]
         live_readiness: bool,
-        /// Deprecated compatibility flag; inventory is metadata-only by default
-        #[arg(long, hide = true)]
-        skip_ready_check: bool,
     },
     /// Compare installed extension revisions with their current checkout HEADs
     DiffInstalled {
@@ -71,11 +73,8 @@ enum ExtensionCommand {
         /// Extension ID
         extension_id: String,
         /// Run the live readiness probe and refresh cached readiness
-        #[arg(long, conflicts_with = "skip_ready_check")]
+        #[arg(long)]
         live_readiness: bool,
-        /// Deprecated compatibility flag; inspection is metadata-only by default
-        #[arg(long, hide = true)]
-        skip_ready_check: bool,
     },
     /// Execute a extension
     Run {
@@ -229,8 +228,7 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
         ExtensionCommand::List {
             project,
             live_readiness,
-            skip_ready_check,
-        } => list(project, readiness_mode(live_readiness, skip_ready_check)),
+        } => list(project, readiness_mode(live_readiness)),
         ExtensionCommand::DiffInstalled {
             extension_id,
             runner,
@@ -238,11 +236,7 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
         ExtensionCommand::Show {
             extension_id,
             live_readiness,
-            skip_ready_check,
-        } => show_extension(
-            &extension_id,
-            readiness_mode(live_readiness, skip_ready_check),
-        ),
+        } => show_extension(&extension_id, readiness_mode(live_readiness)),
         ExtensionCommand::Run {
             extension_id,
             project,
@@ -321,12 +315,23 @@ impl ExtensionArgs {
     }
 
     pub(crate) fn is_runner_resident_read_command(&self) -> bool {
-        matches!(self.command, ExtensionCommand::Show { .. })
+        // The default show path only loads the controller-local manifest and
+        // cached readiness. The live probe may execute an extension command.
+        matches!(
+            self.command,
+            ExtensionCommand::Show {
+                live_readiness: true,
+                ..
+            }
+        )
     }
 
     pub(crate) fn runner_resident_read_command_label(&self) -> &'static str {
         match self.command {
-            ExtensionCommand::Show { .. } => "extension show",
+            ExtensionCommand::Show {
+                live_readiness: true,
+                ..
+            } => "extension show --live-readiness",
             _ => "extension",
         }
     }
@@ -338,6 +343,17 @@ impl ExtensionArgs {
                 | ExtensionCommand::Converge
                 | ExtensionCommand::Refresh { .. }
                 | ExtensionCommand::DevRun { .. }
+        )
+    }
+
+    /// A valid local refresh replaces controller extension state from an
+    /// already-present resource. It is not a portable workload unless the
+    /// operator explicitly selects Lab.
+    pub(crate) fn refreshes_local_source(&self) -> bool {
+        matches!(
+            &self.command,
+            ExtensionCommand::Refresh { source, .. }
+                if homeboy_core::extension::lifecycle::is_local_source(source)
         )
     }
 
@@ -699,6 +715,10 @@ pub struct ExtensionRuntimeDiagnostics {
     pub linked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_manifest_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_generation: Option<String>,
     pub runtime_manifest_found: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runtime_ids: Vec<String>,
@@ -751,7 +771,7 @@ pub struct InstalledExtensionDiff {
 }
 
 /// Inventory is static by default; callers must explicitly request live probes.
-fn readiness_mode(live_readiness: bool, _skip_ready_check: bool) -> ExtensionReadinessMode {
+fn readiness_mode(live_readiness: bool) -> ExtensionReadinessMode {
     if live_readiness {
         ExtensionReadinessMode::Probe
     } else {
@@ -1112,7 +1132,7 @@ fn parse_runner_diff_installed(stdout: &str) -> homeboy::core::Result<Vec<Instal
 }
 
 fn installed_extension_diff(summary: ExtensionInventoryEntry) -> InstalledExtensionDiff {
-    let checkout_head_revision = git::head_sha_short(Path::new(&summary.path));
+    let checkout_head_revision = git::head_sha(Path::new(&summary.path));
     let manifest_path = manifest_path_for_summary(&summary);
     let source_url = read_source_url_metadata(&summary.path);
     let source_path = source_url.as_deref().and_then(local_source_path);
@@ -1367,16 +1387,16 @@ fn run_extension(
     };
 
     let filter = ExtensionStepFilter { step, skip };
-
-    let result = homeboy_core::extension::invoke::run_extension(
+    let result = execute_response_result(execute_api(&execute_run_request(
         extension_id,
         project.as_deref(),
         component.as_deref(),
         inputs,
         args,
         mode,
-        filter,
-    )?;
+        &filter,
+        format!("cli:{}", uuid::Uuid::new_v4()),
+    )))?;
 
     Ok((
         ExtensionOutput::Run {
@@ -1399,6 +1419,7 @@ fn install_extension(
             source,
             id.as_deref(),
             revision.as_deref(),
+            ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
         )?;
         return Ok((
             ExtensionOutput::Replace {
@@ -1418,6 +1439,7 @@ fn install_extension(
         source,
         id.as_deref(),
         revision.as_deref(),
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
     )?;
     let linked = is_extension_linked(&result.extension_id);
 
@@ -1439,7 +1461,12 @@ fn refresh_extension(
     id: Option<&str>,
     revision: Option<&str>,
 ) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::lifecycle::refresh(source, id, revision)?;
+    let result = homeboy_core::extension::lifecycle::refresh(
+        source,
+        id,
+        revision,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1461,7 +1488,11 @@ fn refresh_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::lifecycle::relink(extension_id, source)?;
+    let result = homeboy_core::extension::lifecycle::relink(
+        extension_id,
+        source,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -1491,7 +1522,11 @@ fn dev_run_extension(
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy_core::extension::lifecycle::install_for_component(&component, source)?;
+    let result = homeboy_core::extension::lifecycle::install_for_component(
+        &component,
+        source,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
 
     let installed = result
         .installed
@@ -1756,6 +1791,11 @@ fn extension_runtime_diagnostics(
         .unwrap_or_default();
     let source_revision = source_revision
         .or_else(|| homeboy_core::extension::lifecycle::read_source_revision(extension_id));
+    let root_manifest_path = extension
+        .as_ref()
+        .and_then(|extension| extension.extension_path.as_ref())
+        .and_then(|path| runtime_root_manifest_path(Path::new(path)))
+        .map(|path| path.to_string_lossy().to_string());
     let matching_manifests = discover_agent_runtime_catalog()
         .manifests
         .into_iter()
@@ -1781,6 +1821,8 @@ fn extension_runtime_diagnostics(
         path,
         linked,
         source_revision,
+        root_manifest_path,
+        runtime_generation: active_runtime_generation(),
         runtime_manifest_found: !runtime_ids.is_empty(),
         runtime_ids,
         tools,
@@ -1794,6 +1836,25 @@ fn extension_runtime_diagnostics(
             refresh: format!("homeboy extension refresh <source> --id {}", shell_arg(extension_id)),
         },
     }
+}
+
+fn runtime_root_manifest_path(extension_path: &Path) -> Option<std::path::PathBuf> {
+    let extension_path = std::fs::canonicalize(extension_path).ok()?;
+    let parent = extension_path.parent()?;
+    let root = if parent.file_name()?.to_str()? == "agent-runtimes" {
+        parent.parent()?
+    } else {
+        parent
+    };
+    let manifest = root.join("homeboy-extension-root.json");
+    manifest.is_file().then_some(manifest)
+}
+
+fn active_runtime_generation() -> Option<String> {
+    homeboy_core::paths::homeboy()
+        .ok()
+        .and_then(|root| std::fs::read_link(root.join("runtime-generations/current")).ok())
+        .and_then(|generation| generation.to_str().map(str::to_string))
 }
 
 fn runtime_diagnostic_env<'a>(
@@ -2273,9 +2334,60 @@ mod tests {
 
     #[test]
     fn extension_inventory_defaults_to_cached_readiness() {
-        assert_eq!(readiness_mode(false, false), ExtensionReadinessMode::Cached);
-        assert_eq!(readiness_mode(false, true), ExtensionReadinessMode::Cached);
-        assert_eq!(readiness_mode(true, false), ExtensionReadinessMode::Probe);
+        assert_eq!(readiness_mode(false), ExtensionReadinessMode::Cached);
+        assert_eq!(readiness_mode(true), ExtensionReadinessMode::Probe);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_run_projects_captured_output_and_exit_code() {
+        with_isolated_home(|home| {
+            let extension_id = "fixture-run";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{"name":"fixture-run","version":"1.0.0","executable":{"runtime":{"run_command":"sh {{extension_path}}/run.sh"}}}"#,
+            )
+            .expect("manifest");
+            let script = extension_dir.join("run.sh");
+            fs::write(&script, "#!/bin/sh\nprintf captured-output\nexit 7\n").expect("script");
+            let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).expect("chmod");
+
+            let (output, exit_code) = run_extension(
+                extension_id,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                false,
+                true,
+                None,
+                None,
+            )
+            .expect("extension run");
+            assert_eq!(exit_code, 7);
+            let ExtensionOutput::Run {
+                extension_id: returned_id,
+                project_id,
+                output,
+            } = output
+            else {
+                panic!("expected extension run output");
+            };
+            assert_eq!(returned_id, extension_id);
+            assert_eq!(project_id, None);
+            assert_eq!(
+                output.map(|captured| captured.stdout),
+                Some("captured-output".to_string())
+            );
+        });
     }
 
     #[test]
@@ -2337,6 +2449,48 @@ mod tests {
             assert!(diagnostics.freshness.refresh_behavior.contains("reports"));
 
             std::env::remove_var("HOMEBOY_GENERIC_TOOL_BIN");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_runtime_diagnostics_reports_durable_root_and_generation() {
+        with_isolated_home(|home| {
+            let config = home.path().join(".config/homeboy");
+            let source = config.join("extension-sources/opencode/agent-runtimes/opencode");
+            fs::create_dir_all(&source).expect("durable extension source");
+            fs::write(
+                source.join("opencode.json"),
+                r#"{"name":"OpenCode","version":"2.0.0"}"#,
+            )
+            .expect("extension manifest");
+            fs::write(
+                config.join("extension-sources/opencode/homeboy-extension-root.json"),
+                r#"{"shared_assets":["agent-runtimes"]}"#,
+            )
+            .expect("root manifest");
+            fs::create_dir_all(config.join("extensions")).expect("extensions directory");
+            symlink(&source, config.join("extensions/opencode")).expect("extension link");
+            fs::create_dir_all(config.join("runtime-generations/generation-2/agent-runtimes"))
+                .expect("runtime generation");
+            symlink("generation-2", config.join("runtime-generations/current"))
+                .expect("current generation link");
+
+            let diagnostics = extension_runtime_diagnostics("opencode", None);
+
+            assert_eq!(
+                diagnostics.root_manifest_path.as_deref(),
+                Some(
+                    config
+                        .join("extension-sources/opencode/homeboy-extension-root.json")
+                        .to_str()
+                        .expect("UTF-8 root manifest path")
+                )
+            );
+            assert_eq!(
+                diagnostics.runtime_generation.as_deref(),
+                Some("generation-2")
+            );
         });
     }
 
@@ -2606,6 +2760,48 @@ mod tests {
             installed_extension_diff_status(None, Some("abc1234"), Some("abc1234")),
             "unknown"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_extension_diff_is_current_for_a_linked_git_worktree() {
+        with_isolated_home(|home| {
+            let extension_id = "worktree-runtime";
+            let worktree = home.path().join("worktree");
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            fs::create_dir_all(&worktree).expect("worktree");
+            fs::write(
+                worktree.join(format!("{extension_id}.json")),
+                r#"{"name":"Worktree Runtime","version":"1.0.0"}"#,
+            )
+            .expect("manifest");
+            assert!(git(&worktree, &["init", "--quiet"]));
+            assert!(git(&worktree, &["add", "."]));
+            assert!(git(
+                &worktree,
+                &[
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "user.name=Test",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "initial"
+                ]
+            ));
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+            symlink(&worktree, extensions_dir.join(extension_id)).expect("extension link");
+
+            let summary = extension_inventory(None, ExtensionReadinessMode::Cached)
+                .into_iter()
+                .find(|summary| summary.id == extension_id)
+                .expect("worktree extension summary");
+            let diff = installed_extension_diff(summary);
+
+            assert_eq!(diff.status, "current");
+            assert_eq!(diff.installed_source_revision, diff.checkout_head_revision);
+        });
     }
 
     #[test]

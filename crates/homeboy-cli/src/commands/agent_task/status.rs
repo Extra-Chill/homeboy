@@ -8,8 +8,8 @@
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -29,7 +29,9 @@ use super::args::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
     ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
-use super::candidate::{classify_candidates, CandidateState};
+#[cfg(test)]
+use super::candidate::CandidateState;
+use super::candidate::{canonical_candidate_projection, classify_candidates};
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
@@ -55,6 +57,57 @@ const STATUS_WATCH_CHANGE_BYTE_LIMIT: usize = 8 * 1024;
 const STATUS_WATCH_EVENT_BYTE_LIMIT: usize = 4 * 1024;
 const STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT: usize = 2 * 1024;
 const BOUNDED_FULL_STATUS_BYTE_LIMIT: usize = 16 * 1024;
+const CANCEL_PROJECTION_BYTE_LIMIT: usize = 4 * 1024;
+
+/// Default terminal projection for cancellation. The complete, redacted action
+/// acknowledgement remains available through `--full` and `--output`.
+pub(crate) fn bounded_cancel_report(value: Value) -> Value {
+    let cancellation = value
+        .pointer("/result/data")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let run_id = cancellation
+        .get("run_id")
+        .or_else(|| value.get("run"))
+        .and_then(Value::as_str)
+        .filter(|run_id| run_id.len() <= COMPACT_TEXT_LIMIT)
+        .unwrap_or("<oversized-run-id>");
+    let status_command = format!("homeboy agent-task status {}", quote_arg(run_id));
+    let projection = json!({
+        "schema": homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+        "presentation": "bounded_operator_projection",
+        "run": {
+            "requested": bounded_value(value.get("run").unwrap_or(&Value::Null)),
+            "id": run_id,
+            "state": bounded_value(value.pointer("/resource/state").unwrap_or(&Value::Null)),
+        },
+        "cancellation": {
+            "acknowledgement": bounded_value(value.get("acknowledgement").unwrap_or(&Value::Null)),
+            "accepted": bounded_value(value.get("outcome").unwrap_or(&Value::Null)),
+            "disposition": bounded_value(cancellation.get("disposition").unwrap_or(&Value::Null)),
+            "terminal": bounded_value(cancellation.get("terminal").unwrap_or(&Value::Null)),
+            "waited_seconds": bounded_value(cancellation.get("waited_seconds").unwrap_or(&Value::Null)),
+        },
+        "next_action": { "command": status_command },
+        "output_budget": {
+            "max_bytes": CANCEL_PROJECTION_BYTE_LIMIT,
+            "full_output": "--full",
+            "lossless_output": "--output <path>",
+        },
+    });
+    let projection = homeboy::core::redaction::RedactionPolicy::default().redact_json(&projection);
+    if serialized_len(&projection) <= CANCEL_PROJECTION_BYTE_LIMIT {
+        projection
+    } else {
+        json!({
+            "schema": homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+            "presentation": "bounded_operator_projection",
+            "run": { "id": "<oversized-run-id>" },
+            "next_action": { "command": "homeboy agent-task status <run-id>" },
+            "output_budget": { "max_bytes": CANCEL_PROJECTION_BYTE_LIMIT, "full_output": "--full", "lossless_output": "--output <path>" },
+        })
+    }
+}
 
 /// `--output` retains the lossless report. Terminal stdout instead carries a
 /// bounded, deduplicated view with the decision and recovery command first.
@@ -116,7 +169,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
             "export_command": format!("{evidence_command} --output <path>"),
         }));
     }
-    let output = json!({
+    let mut output = json!({
         "actionable": {
             "operation": operation,
             "terminal_state": bounded_value(&status),
@@ -127,6 +180,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
         "schema": source_schema,
         "presentation": "bounded_operator_projection",
         "run_id": bounded_value(&Value::String(run_id.to_string())),
+        "status": bounded_value(&status),
         "evidence_refs": evidence_refs,
         "output_budget": {
             "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
@@ -135,6 +189,17 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
             "truncated": true,
         },
     });
+    if operation == "cook" {
+        if let Some(candidate) = value.get("durable_candidate") {
+            output["durable_candidate"] = candidate.clone();
+        }
+        if let Some(selected) = value.get("selected_candidate") {
+            output["selected_candidate"] = compact_fields(
+                selected,
+                &["run_id", "selected_task_id", "selected_artifact_id"],
+            );
+        }
+    }
     if serialized_len(&output) <= BOUNDED_FULL_STATUS_BYTE_LIMIT {
         output
     } else {
@@ -271,7 +336,25 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     } else {
         0
     };
-    Ok((serde_json::to_value(run).unwrap_or(Value::Null), exit_code))
+    let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
+    if value["action_eligibility"]["actions"]
+        .as_array()
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action["action"] == "placement_update" && action["availability"] == "available"
+            })
+        })
+    {
+        value["action_guidance"] = json!([{
+            "action": "placement_update",
+            "command": format!(
+                "homeboy --placement local agent-task placement-update {} --confirm",
+                quote_arg(&target.run_id)
+            ),
+            "reason": "explicit local placement is legal before execution ownership begins",
+        }]);
+    }
+    Ok((value, exit_code))
 }
 
 fn control_plane_run_requires_action(
@@ -284,45 +367,58 @@ fn control_plane_run_requires_action(
             matches!(
                 action.action,
                 ControlPlaneAction::Resume
+                    | ControlPlaneAction::PlacementUpdate
                     | ControlPlaneAction::Retry
-                    | ControlPlaneAction::Review
                     | ControlPlaneAction::Promote
             ) && action.availability == ControlPlaneActionAvailability::Available
         })
     })
 }
 
-/// Automatic retention runs while a task completes but can inventory every
-/// workspace sharing its roots. Keep that global operational evidence durable
-/// and addressable without allowing it to obscure this run's diagnosis.
-pub(crate) fn cleanup_evidence_projection(value: &mut Value, run_id: &str) -> Vec<Value> {
-    let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) else {
-        return Vec::new();
-    };
-    let run_ref = homeboy::core::execution_contract::encode_uri_component(run_id);
-    [
-        "automatic_artifact_retention",
-        "automatic_artifact_retention_inaccessible_roots",
-    ]
-    .into_iter()
-    .filter_map(|key| {
-        let details = metadata.remove(key)?;
-        let count = details
-            .get("worktree_count")
-            .and_then(Value::as_u64)
-            .or_else(|| details.as_array().map(|items| items.len() as u64))
-            .or_else(|| details.get("worktrees").and_then(Value::as_array).map(|items| items.len() as u64))
-            .unwrap_or(0);
-        Some(json!({
-            "kind": key,
-            "count": count,
-            "details_omitted": true,
-            "ref": format!("homeboy://agent-task/run/{run_ref}/status#metadata.{key}"),
-            "command": format!("homeboy agent-task status {}", quote_arg(run_id)),
-            "export_command": format!("homeboy agent-task status {} --output <path>", quote_arg(run_id)),
-        }))
-    })
-    .collect()
+fn compact_cook_candidate_projection(run_id: &str) -> Value {
+    match agent_task_lifecycle::durable_local_read(run_id) {
+        Ok(snapshot) => {
+            let Some(aggregate) = snapshot.aggregate else {
+                return json!({
+                    "status": "unavailable",
+                    "run_id": snapshot.record.run_id,
+                    "reason": bounded_value(&Value::String(snapshot.unavailable_sources.first().map(|source| source.detail.as_str()).unwrap_or("the authoritative observation has no aggregate").to_string())),
+                });
+            };
+            let record = serde_json::to_value(&snapshot.record).unwrap_or(Value::Null);
+            let aggregate_value = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
+            let candidate = classify_candidates(&json!({
+                "record": record,
+                "aggregate": aggregate_value,
+            }));
+            let artifact_count = aggregate
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.artifacts.len())
+                .sum::<usize>();
+            let outcome_count = aggregate.outcomes.len();
+            let provider_execution_count = candidate
+                .provider_executions
+                .map(|count| count.max(outcome_count))
+                .unwrap_or(outcome_count);
+            json!({
+                "status": "available",
+                "run_id": snapshot.record.run_id,
+                "state": snapshot.record.state,
+                "task_count": snapshot.record.tasks.len(),
+                "aggregate_path": snapshot.record.aggregate_path,
+                "outcome_count": outcome_count,
+                "provider_execution_count": provider_execution_count,
+                "artifact_count": artifact_count,
+                "canonical_candidate": canonical_candidate_projection(candidate),
+            })
+        }
+        Err(error) => json!({
+            "status": "unavailable",
+            "run_id": run_id,
+            "reason": bounded_value(&Value::String(error.message)),
+        }),
+    }
 }
 
 struct StatusPoller {
@@ -622,17 +718,10 @@ fn status_run_id(status: &Value) -> Option<&str> {
         .get("run")
         .or_else(|| status.get("run_id"))
         .and_then(Value::as_str)
-        .or_else(|| {
-            status
-                .pointer("/control_plane_run/run")
-                .and_then(Value::as_str)
-        })
 }
 
 fn status_run_state(status: &Value) -> Option<&Value> {
-    status
-        .get("state")
-        .or_else(|| status.pointer("/control_plane_run/state"))
+    status.get("state")
 }
 
 pub(super) fn parse_event_cursor(
@@ -698,6 +787,7 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
 }
 
 /// Attach the canonical run resource assembled from the durable snapshot.
+#[cfg(test)]
 fn promotion_state(record: &Value) -> String {
     let raw = record
         .pointer("/metadata/latest_promotion/status")
@@ -706,7 +796,11 @@ fn promotion_state(record: &Value) -> String {
     raw.to_string()
 }
 
-fn promotion_gate_state(record: &Value, promotion: &str) -> &'static str {
+#[cfg(test)]
+fn promotion_gate_state(record: &Value, promotion: &str, target_applied: bool) -> &'static str {
+    if !target_applied {
+        return "not_run";
+    }
     if record
         .pointer("/metadata/latest_promotion/deterministic_gates")
         .and_then(Value::as_array)
@@ -726,6 +820,7 @@ fn promotion_gate_state(record: &Value, promotion: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn finalization_state(record: &Value) -> String {
     record
         .pointer("/metadata/cook_finalization/status")
@@ -754,91 +849,6 @@ fn attach_durable_read_availability(
     }
 }
 
-fn normalized_evidence_graph(
-    run_id: &str,
-    aggregate: Option<&AgentTaskAggregate>,
-    artifact_count: usize,
-    evidence_count: usize,
-) -> Value {
-    let encoded = homeboy::core::execution_contract::encode_uri_component(run_id);
-    let mut refs = BTreeMap::new();
-    let mut insert = |kind: &str, count: usize, command: String| {
-        refs.insert(
-            kind.to_string(),
-            json!({
-                "ref": format!("homeboy://agent-task/run/{encoded}/{kind}"),
-                "count": count,
-                "command": command,
-                "export_command": format!("{command} --output <path>"),
-            }),
-        );
-    };
-    insert(
-        "status",
-        1,
-        format!("homeboy agent-task status {}", quote_arg(run_id)),
-    );
-    insert(
-        "plan",
-        1,
-        format!(
-            "homeboy agent-task evidence {} --kind plan --full",
-            quote_arg(run_id)
-        ),
-    );
-    insert(
-        "aggregate",
-        usize::from(aggregate.is_some()),
-        format!(
-            "homeboy agent-task evidence {} --kind aggregate --full",
-            quote_arg(run_id)
-        ),
-    );
-    insert(
-        "artifacts",
-        artifact_count,
-        format!("homeboy agent-task artifacts {} --full", quote_arg(run_id)),
-    );
-    insert(
-        "evidence",
-        evidence_count,
-        format!("homeboy agent-task evidence {} --full", quote_arg(run_id)),
-    );
-    let outcomes = aggregate.map_or(0, |aggregate| aggregate.outcomes.len());
-    insert(
-        "attempts",
-        outcomes,
-        format!(
-            "homeboy agent-task evidence {} --kind attempt --full",
-            quote_arg(run_id)
-        ),
-    );
-    insert(
-        "promotion",
-        usize::from(aggregate.is_some()),
-        format!(
-            "homeboy agent-task evidence {} --kind promotion --full",
-            quote_arg(run_id)
-        ),
-    );
-    let diagnostics = aggregate.map_or(0, |aggregate| {
-        aggregate
-            .outcomes
-            .iter()
-            .map(|outcome| outcome.diagnostics.len())
-            .sum()
-    });
-    insert(
-        "diagnostics",
-        diagnostics,
-        format!(
-            "homeboy agent-task evidence {} --kind diagnostic --full",
-            quote_arg(run_id)
-        ),
-    );
-    Value::Array(refs.into_values().collect())
-}
-
 const OPERATOR_HEAVY_FIELDS: &[&str] = &[
     "diff",
     "patch",
@@ -852,14 +862,29 @@ const OPERATOR_HEAVY_COLLECTIONS: &[&str] =
     &["raw_events", "resource_timeline", "cook_resource_timeline"];
 
 pub(crate) fn project_operator_output(value: &mut Value) {
-    project_operator_value(value, false);
+    project_operator_value(value, false, &mut RawFailureBudget::default());
 }
 
-fn project_operator_value(value: &mut Value, evidence_content: bool) {
+const RAW_FAILURE_COUNT_LIMIT: usize = 8;
+const RAW_FAILURE_BYTE_LIMIT: usize = 8 * 1024;
+const RAW_FAILURE_PARSE_BYTE_LIMIT: usize = 32 * 1024;
+const RAW_FAILURE_JSON_DEPTH_LIMIT: usize = 8;
+
+#[derive(Default)]
+struct RawFailureBudget {
+    retained: usize,
+    bytes: usize,
+}
+
+fn project_operator_value(
+    value: &mut Value,
+    evidence_content: bool,
+    failure_budget: &mut RawFailureBudget,
+) {
     match value {
         Value::Array(items) => {
             for item in items {
-                project_operator_value(item, evidence_content);
+                project_operator_value(item, evidence_content, failure_budget);
             }
         }
         Value::Object(fields) => {
@@ -873,14 +898,16 @@ fn project_operator_value(value: &mut Value, evidence_content: bool) {
                 .cloned()
                 .collect::<Vec<_>>();
             for key in collection_keys {
-                project_heavy_collection(fields, &key);
+                project_heavy_collection(fields, &key, failure_budget);
             }
             for (key, item) in fields.iter_mut() {
                 if OPERATOR_HEAVY_FIELDS.contains(&key.as_str())
                     || (evidence_content && key == "body")
                 {
                     if let Value::String(text) = item {
-                        if text.len() > COMPACT_TEXT_LIMIT && !is_bounded_failure_result(text) {
+                        if let Some(redacted) = bounded_failure_result(text, failure_budget) {
+                            *text = redacted;
+                        } else if is_failure_result(text) || text.len() > COMPACT_TEXT_LIMIT {
                             let digest = content_hash::sha256_hex(text.as_bytes());
                             *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
                         }
@@ -890,21 +917,49 @@ fn project_operator_value(value: &mut Value, evidence_content: bool) {
                 if OPERATOR_HEAVY_COLLECTIONS.contains(&key.as_str()) {
                     continue;
                 }
-                project_operator_value(item, hydrated_evidence && key == "content");
+                project_operator_value(item, hydrated_evidence && key == "content", failure_budget);
             }
         }
         _ => {}
     }
 }
 
-fn is_bounded_failure_result(text: &str) -> bool {
-    if text.len() > 8_192 {
-        return false;
+fn bounded_failure_result(text: &str, budget: &mut RawFailureBudget) -> Option<String> {
+    if text.len() > RAW_FAILURE_PARSE_BYTE_LIMIT {
+        return None;
     }
     let Ok(Value::Object(result)) = serde_json::from_str(text) else {
-        return false;
+        return None;
     };
-    let failed = result.get("success").and_then(Value::as_bool) == Some(false)
+    if !failure_result_object(&result) {
+        return None;
+    }
+    let mut redacted =
+        homeboy::core::redaction::RedactionPolicy::default().redact_json(&Value::Object(result));
+    redact_json_encoded_strings(&mut redacted, 0);
+    let serialized = serde_json::to_string(&redacted).ok()?;
+    if budget.retained >= RAW_FAILURE_COUNT_LIMIT
+        || budget.bytes.saturating_add(serialized.len()) > RAW_FAILURE_BYTE_LIMIT
+    {
+        return None;
+    }
+    budget.retained += 1;
+    budget.bytes += serialized.len();
+    Some(serialized)
+}
+
+fn is_failure_result(text: &str) -> bool {
+    if text.len() > RAW_FAILURE_PARSE_BYTE_LIMIT {
+        return false;
+    }
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| value.as_object().map(failure_result_object))
+        .unwrap_or(false)
+}
+
+fn failure_result_object(result: &serde_json::Map<String, Value>) -> bool {
+    result.get("success").and_then(Value::as_bool) == Some(false)
         || result
             .get("status")
             .and_then(Value::as_str)
@@ -913,13 +968,54 @@ fn is_bounded_failure_result(text: &str) -> bool {
                     status.to_ascii_lowercase().as_str(),
                     "blocked" | "error" | "failed" | "failure" | "timed_out" | "timeout"
                 )
-            });
-    failed
+            })
+}
+
+fn redact_json_encoded_strings(value: &mut Value, depth: usize) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| redact_json_encoded_strings(item, depth + 1)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|item| redact_json_encoded_strings(item, depth + 1)),
+        Value::String(text) => {
+            if text == "[REDACTED]" {
+                return;
+            }
+            let json_shaped = matches!(text.trim_start().as_bytes().first(), Some(b'{' | b'['));
+            if !json_shaped {
+                return;
+            }
+            if depth >= RAW_FAILURE_JSON_DEPTH_LIMIT {
+                *text = "[omitted JSON beyond redaction depth]".to_string();
+                return;
+            }
+            let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+                *text = "[omitted invalid encoded JSON]".to_string();
+                return;
+            };
+            if !matches!(parsed, Value::Array(_) | Value::Object(_)) {
+                return;
+            }
+            let mut parsed =
+                homeboy::core::redaction::RedactionPolicy::default().redact_json(&parsed);
+            redact_json_encoded_strings(&mut parsed, depth + 1);
+            if let Ok(serialized) = serde_json::to_string(&parsed) {
+                *text = serialized;
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
 mod bounded_failure_result_tests {
-    use super::{is_bounded_failure_result, COMPACT_TEXT_LIMIT};
+    use super::{
+        bounded_failure_result, project_operator_output, RawFailureBudget, COMPACT_TEXT_LIMIT,
+        RAW_FAILURE_BYTE_LIMIT, RAW_FAILURE_COUNT_LIMIT, RAW_FAILURE_JSON_DEPTH_LIMIT,
+        RAW_FAILURE_PARSE_BYTE_LIMIT,
+    };
 
     #[test]
     fn retains_code_less_payloads_for_every_liftable_failure_status() {
@@ -937,7 +1033,10 @@ mod bounded_failure_result_tests {
             })
             .to_string();
             assert!(payload.len() > COMPACT_TEXT_LIMIT);
-            assert!(is_bounded_failure_result(&payload), "status={status}");
+            assert!(
+                bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_some(),
+                "status={status}"
+            );
         }
     }
 
@@ -948,31 +1047,155 @@ mod bounded_failure_result_tests {
             "message": "x".repeat(COMPACT_TEXT_LIMIT),
         })
         .to_string();
-        assert!(is_bounded_failure_result(&payload));
+        assert!(bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_some());
+    }
+
+    #[test]
+    fn redacts_nested_and_json_encoded_secrets() {
+        let payload = serde_json::json!({
+            "success": false,
+            "token": "outer-secret",
+            "nested": { "authorization": "Bearer inner-secret" },
+            "encoded": serde_json::json!({ "api_key": "encoded-secret" }).to_string(),
+        })
+        .to_string();
+        let retained = bounded_failure_result(&payload, &mut RawFailureBudget::default()).unwrap();
+        for secret in ["outer-secret", "inner-secret", "encoded-secret"] {
+            assert!(!retained.contains(secret));
+        }
+        assert!(retained.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn omits_json_encoded_content_at_the_recursion_limit() {
+        let mut nested = serde_json::json!({
+            "encoded": serde_json::json!({ "token": "depth-secret" }).to_string(),
+        });
+        for _ in 0..RAW_FAILURE_JSON_DEPTH_LIMIT {
+            nested = serde_json::json!({ "nested": nested });
+        }
+        let payload = serde_json::json!({
+            "status": "failed",
+            "details": nested,
+        })
+        .to_string();
+        let retained = bounded_failure_result(&payload, &mut RawFailureBudget::default()).unwrap();
+
+        assert!(!retained.contains("depth-secret"));
+        assert!(retained.contains("omitted JSON beyond redaction depth"));
+    }
+
+    #[test]
+    fn omits_json_encoded_content_that_exceeds_the_parser_recursion_limit() {
+        let encoded = format!(
+            "{}{{\"token\":\"parser-depth-secret\"}}{}",
+            "[".repeat(256),
+            "]".repeat(256)
+        );
+        let payload = serde_json::json!({
+            "status": "failed",
+            "encoded": encoded,
+        })
+        .to_string();
+        let retained = bounded_failure_result(&payload, &mut RawFailureBudget::default()).unwrap();
+
+        assert!(!retained.contains("parser-depth-secret"));
+        assert!(retained.contains("omitted invalid encoded JSON"));
+    }
+
+    #[test]
+    fn enforces_one_count_and_byte_budget_across_many_payloads() {
+        let payload = serde_json::json!({
+            "status": "failed",
+            "message": "x".repeat(RAW_FAILURE_BYTE_LIMIT / RAW_FAILURE_COUNT_LIMIT),
+        })
+        .to_string();
+        let mut budget = RawFailureBudget::default();
+        let retained = (0..RAW_FAILURE_COUNT_LIMIT * 2)
+            .filter(|_| bounded_failure_result(&payload, &mut budget).is_some())
+            .count();
+        assert!(retained <= RAW_FAILURE_COUNT_LIMIT);
+        assert!(budget.bytes <= RAW_FAILURE_BYTE_LIMIT);
+    }
+
+    #[test]
+    fn omits_oversized_failure_json_before_parsing() {
+        let payload = serde_json::json!({
+            "status": "failed",
+            "message": "x".repeat(RAW_FAILURE_PARSE_BYTE_LIMIT),
+        })
+        .to_string();
+
+        assert!(bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_none());
+    }
+
+    #[test]
+    fn operator_projection_redacts_and_bounds_recursive_failure_payloads_globally() {
+        let original = serde_json::json!({
+            "attempts": (0..RAW_FAILURE_COUNT_LIMIT * 3).map(|index| serde_json::json!({
+                "content": {
+                    "body": serde_json::json!({
+                        "status": "failed",
+                        "token": format!("secret-{index}"),
+                        "message": "x".repeat(700),
+                    }).to_string()
+                },
+                "kind": "executor_result",
+                "uri": format!("file:///tmp/{index}"),
+                "status": "available",
+            })).collect::<Vec<_>>()
+        });
+        let mut projected = original.clone();
+        project_operator_output(&mut projected);
+        let text = projected.to_string();
+
+        assert_eq!(
+            original["attempts"][0]["content"]["body"]
+                .as_str()
+                .is_some(),
+            true
+        );
+        assert!(!text.contains("secret-"));
+        assert!(text.matches("[omitted ").count() >= RAW_FAILURE_COUNT_LIMIT);
+        assert!(text.matches("[REDACTED]").count() <= RAW_FAILURE_COUNT_LIMIT);
+        assert!(text.len() < original.to_string().len());
     }
 }
 
 /// Known event streams retain their array/item schema. The owning evidence
 /// object receives additive metadata describing the omitted durable events.
-fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &str) {
-    let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
-        return;
+fn project_heavy_collection(
+    fields: &mut serde_json::Map<String, Value>,
+    key: &str,
+    failure_budget: &mut RawFailureBudget,
+) {
+    let projection = {
+        let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
+            return;
+        };
+        let projection = (items.len() > COMPACT_REF_LIMIT).then(|| {
+            let total_items = items.len();
+            let digest = content_hash::sha256_hex(
+                serde_json::to_vec(items.as_slice())
+                    .as_deref()
+                    .unwrap_or_default(),
+            );
+            items.truncate(COMPACT_REF_LIMIT);
+            json!({
+                "total_items": total_items,
+                "returned_items": COMPACT_REF_LIMIT,
+                "omitted_items": total_items - COMPACT_REF_LIMIT,
+                "sha256": digest,
+            })
+        });
+        for item in items {
+            project_operator_value(item, true, failure_budget);
+        }
+        projection
     };
-    if items.len() <= COMPACT_REF_LIMIT {
-        return;
+    if let Some(projection) = projection {
+        fields.insert(format!("{key}_projection"), projection);
     }
-    let total_items = items.len();
-    let digest = content_hash::sha256_hex(serde_json::to_vec(items).as_deref().unwrap_or_default());
-    items.truncate(COMPACT_REF_LIMIT);
-    fields.insert(
-        format!("{key}_projection"),
-        json!({
-            "total_items": total_items,
-            "returned_items": COMPACT_REF_LIMIT,
-            "omitted_items": total_items - COMPACT_REF_LIMIT,
-            "sha256": digest,
-        }),
-    );
 }
 
 pub(super) fn list_runs(
@@ -1036,7 +1259,7 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
 /// `--apply` is the explicit operator authorization.
 pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
     let run_id = args.run_id;
-    let (mut value, exit, acknowledgement) = if args.apply {
+    if args.apply {
         let acknowledgement =
             homeboy::agents::orchestration::execute_action_from_current_environment(
                 &run_id,
@@ -1057,20 +1280,15 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
             acknowledgement.outcome,
             homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
         ));
-        (
-            acknowledgement.result.data.clone(),
+        return Ok((
+            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
             exit,
-            Some(acknowledgement),
-        )
-    } else {
-        let report = agent_task_service_direct::reconcile_run(&run_id, true)?;
-        let exit = i32::from(report.failed > 0);
-        (
-            serde_json::to_value(report).unwrap_or(Value::Null),
-            exit,
-            None,
-        )
-    };
+        ));
+    }
+
+    let report = agent_task_service_direct::reconcile_run(&run_id, true)?;
+    let exit = i32::from(report.failed > 0);
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
     if let Value::Object(object) = &mut value {
         object.insert("owner".to_string(), json!("durable_agent_tasks"));
         object.insert(
@@ -1079,22 +1297,8 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
         );
         object.insert(
             "postcondition".to_string(),
-            json!(if !args.apply {
-                "reports the selected durable records against authoritative provider state without persisted mutation"
-            } else {
-                "every selected durable record is reconciled to authoritative provider state"
-            }),
+            json!("reports the selected durable records against authoritative provider state without persisted mutation"),
         );
-        if let Some(acknowledgement) = acknowledgement {
-            object.insert(
-                "action_acknowledgement".to_string(),
-                json!(acknowledgement.acknowledgement),
-            );
-            object.insert(
-                "idempotency_key".to_string(),
-                json!(acknowledgement.idempotency_key),
-            );
-        }
     }
     Ok((value, exit))
 }
@@ -1423,7 +1627,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         total += 1;
         // Count filtered refs without hydrating their payload once the shared
         // collection budget is full.
-        if !false && hydrated.len() >= OutputBudget::COLLECTION.max_items {
+        if !args.full && hydrated.len() >= OutputBudget::COLLECTION.max_items {
             continue;
         }
         hydrated.push(agent_task_service::hydrate_evidence_ref(
@@ -1452,7 +1656,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         value["candidate_selection"] = selection;
     }
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
-    if !false {
+    if !args.full {
         attach_collection_budget(
             &mut value,
             "evidence",
@@ -1479,6 +1683,9 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let record = durable_read.record;
     let aggregate = durable_read.aggregate;
     let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
+    let liveness = agent_task_service::liveness_for_record(&record, chrono::Utc::now());
+    let queued_runner_ownership =
+        queued_runner_ownership_diagnostic(&record, liveness, &runner_diagnostic_probe);
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
     // The current promotion lifecycle denial is the active blocker. Older
@@ -1487,11 +1694,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let mut nested_reasons = current_lifecycle_diagnostic
         .clone()
         .into_iter()
+        .chain(queued_runner_ownership.clone())
         .chain(persisted_cook_failure_diagnostic(&record))
         .collect::<Vec<_>>();
     let runner_cancellation = runner_cancellation_diagnostic(&record);
-    let causal_phase = runner_cancellation
+    let causal_phase = queued_runner_ownership
         .as_ref()
+        .or(runner_cancellation.as_ref())
         .and_then(|diagnostic| diagnostic.data["causal_phase"].as_str())
         .map(str::to_string);
     nested_reasons.extend(runner_cancellation.clone());
@@ -1516,7 +1725,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
                 ) {
                     diagnostic_truncations.push(truncation);
                 }
-                if false || hydrated_evidence.len() < OutputBudget::COLLECTION.max_items {
+                if args.full || hydrated_evidence.len() < OutputBudget::COLLECTION.max_items {
                     if let Some(summary) =
                         agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
                     {
@@ -1531,11 +1740,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let root_cause = ranked_reasons
         .first()
         .cloned()
-        .map(|item| collected_diagnostic_value_with_details(item, false));
+        .map(|item| collected_diagnostic_value_with_details(item, args.full));
     let diagnostic_chain = ranked_reasons
         .into_iter()
         .take(FAILURE_REASON_LIMIT)
-        .map(|item| collected_diagnostic_value_with_details(item, false))
+        .map(|item| collected_diagnostic_value_with_details(item, args.full))
         .collect::<Vec<_>>();
 
     let missing_artifacts = aggregate
@@ -1547,7 +1756,10 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .map(causal_chain_from_aggregate)
         .unwrap_or_default();
     if causal_chain.is_empty() {
-        if let Some(diagnostic) = runner_cancellation.as_ref() {
+        if let Some(diagnostic) = queued_runner_ownership
+            .as_ref()
+            .or(runner_cancellation.as_ref())
+        {
             causal_chain.push(json!({
                 "task_id": diagnostic.task_id,
                 "surface": "runner",
@@ -1563,6 +1775,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
         retry.continuation.as_ref(),
         current_lifecycle_diagnostic.is_some(),
+        queued_runner_ownership.is_some(),
     );
 
     let mut value = json!({
@@ -1590,7 +1803,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     if let Some(selection) = target.selection {
         value["candidate_selection"] = selection;
     }
-    if !false {
+    if !args.full {
         attach_collection_budget(
             &mut value,
             "hydrated_evidence",
@@ -1613,63 +1826,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
         retry.continuation.as_ref(),
         runner_cancellation.is_some(),
+        queued_runner_ownership.is_some(),
         current_lifecycle_diagnostic.is_some(),
     );
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
-    if false {
-        value = normalized_full_diagnosis(value, run_id, aggregate.as_ref());
-    }
     Ok((value, 0))
-}
-
-/// Keep full diagnosis causal rather than recursive: the root cause and its
-/// admission facts stay inline while durable payload families become refs.
-fn normalized_full_diagnosis(
-    value: Value,
-    run_id: &str,
-    aggregate: Option<&AgentTaskAggregate>,
-) -> Value {
-    let evidence_count = value
-        .get("hydrated_evidence_total")
-        .and_then(Value::as_u64)
-        .unwrap_or_default() as usize;
-    let artifact_count = aggregate
-        .map(|aggregate| {
-            aggregate
-                .outcomes
-                .iter()
-                .map(|outcome| outcome.artifacts.len())
-                .sum()
-        })
-        .unwrap_or_default();
-    let output = json!({
-        "schema": "homeboy/agent-task-diagnose-full/v2",
-        "presentation": "normalized_evidence_graph",
-        "run_id": value.get("run_id"),
-        "state": value.get("state"),
-        "root_cause": value.get("root_cause"),
-        "causal_phase": value.get("causal_phase"),
-        "continuation_admission": value.get("continuation_admission"),
-        "retry_replay": value.get("retry_replay"),
-        "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")),
-        "actionable": value.get(ACTIONABLE_METADATA_KEY),
-        "lab_transport_failure": value.get("lab_transport_failure"),
-        "evidence_graph": normalized_evidence_graph(run_id, aggregate, artifact_count, evidence_count),
-        "output_budget": {
-            "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
-            "truncated": true,
-            "lossless_command": format!("homeboy agent-task evidence {} --full --output <path>", quote_arg(run_id)),
-        },
-    });
-    if serialized_len(&output) <= BOUNDED_FULL_STATUS_BYTE_LIMIT {
-        return output;
-    }
-
-    let mut bounded = bounded_full_operation_report(value, "diagnose");
-    bounded["schema"] = json!("homeboy/agent-task-diagnose-full/v2");
-    bounded
 }
 
 /// These fields are deliberately separate from secondary compact tables. They
@@ -1801,6 +1964,7 @@ fn attach_diagnose_actionable(
     retry_action: Option<&CommandNextAction>,
     continuation_action: Option<&CommandNextAction>,
     runner_cancellation: bool,
+    queued_runner_ownership: bool,
     current_lifecycle_denial: bool,
 ) {
     let run_id = record.run_id.as_str();
@@ -1859,6 +2023,7 @@ fn attach_diagnose_actionable(
             runner_id,
             retry_action,
             runner_cancellation,
+            queued_runner_ownership,
         )
     };
     if let Value::Object(map) = value {
@@ -1890,6 +2055,7 @@ fn diagnose_next_actions(
     runner_id: Option<&str>,
     retry_action: Option<&CommandNextAction>,
     runner_cancellation: bool,
+    queued_runner_ownership: bool,
 ) -> (Vec<CommandNextAction>, &'static str) {
     let mut actions: Vec<CommandNextAction> = Vec::new();
     for failure in failures {
@@ -1904,6 +2070,20 @@ fn diagnose_next_actions(
         for action in runner_cancellation_next_actions(run_id, runner_id, retry_action) {
             push_unique_next_action(&mut actions, action);
         }
+    }
+    if queued_runner_ownership {
+        push_unique_next_action(
+            &mut actions,
+            CommandNextAction::new(
+                "inspect the queued runner-owned execution",
+                format!(
+                    "homeboy --runner {} agent-task diagnose {} --full",
+                    quote_arg(runner_id.unwrap_or("<runner>")),
+                    quote_arg(run_id)
+                ),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
     }
     if actions.is_empty() {
         return (
@@ -2072,7 +2252,10 @@ fn classification_next_actions(
         // This account cannot satisfy another request until its quota, billing,
         // or credentials are repaired. Show alternative providers rather than
         // offering a same-provider retry.
-        AgentTaskFailureClassification::ProviderAccountBlocked => vec![
+        AgentTaskFailureClassification::ProviderAccountBlocked
+        | AgentTaskFailureClassification::ProviderQuotaExhausted
+        | AgentTaskFailureClassification::ProviderBillingBlocked
+        | AgentTaskFailureClassification::ProviderCredentialsExhausted => vec![
             failure_evidence,
             CommandNextAction::new(
                 "list registered providers to rotate to",
@@ -2104,6 +2287,9 @@ fn classification_next_actions(
             actions.extend(provider_readiness_actions(runner_id));
             actions
         }
+        // Capacity admission records its scoped cleanup plan in the failure
+        // evidence. Do not offer a retry until an operator has inspected it.
+        AgentTaskFailureClassification::Capacity => vec![failure_evidence],
         // The request the provider received was malformed. Replaying the
         // boundary shows the exact rejected input; a retry would resend it.
         AgentTaskFailureClassification::InvalidInput => {
@@ -2807,6 +2993,7 @@ mod diagnose_actionable_tests {
             runner_id,
             Some(&retry),
             false,
+            false,
         );
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         actions
@@ -2967,7 +3154,7 @@ mod diagnose_actionable_tests {
         };
 
         let (actions, basis) =
-            diagnose_next_actions("run-1", &[failure], &[], None, Some(&retry), false);
+            diagnose_next_actions("run-1", &[failure], &[], None, Some(&retry), false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -2987,7 +3174,8 @@ mod diagnose_actionable_tests {
             provider_budget_consumed: false,
         };
 
-        let (actions, basis) = diagnose_next_actions("run-1", &[failure], &[], None, None, false);
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &[failure], &[], None, None, false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -3024,6 +3212,7 @@ mod diagnose_actionable_tests {
             None,
             None,
             false,
+            false,
         );
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
@@ -3039,7 +3228,7 @@ mod diagnose_actionable_tests {
 
     #[test]
     fn a_run_with_no_diagnosis_at_all_falls_back_to_the_generic_set() {
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None, false);
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None, false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
         assert_eq!(actions.len(), 3);
@@ -3052,7 +3241,8 @@ mod diagnose_actionable_tests {
             "missing": ["concept_packet", "design_packet"],
         })];
 
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &missing, None, None, false);
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &[], &missing, None, None, false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -3076,6 +3266,7 @@ mod diagnose_actionable_tests {
             &missing,
             None,
             None,
+            false,
             false,
         );
 
@@ -3113,6 +3304,7 @@ mod diagnose_actionable_tests {
             None,
             None,
             false,
+            false,
         );
 
         assert_eq!(
@@ -3127,8 +3319,15 @@ mod diagnose_actionable_tests {
     #[test]
     fn runner_cancellation_uses_runner_evidence_before_a_proven_replay() {
         let retry = owner_bound_retry_action("run-1", Some("homeboy-lab"), json!({}));
-        let (actions, basis) =
-            diagnose_next_actions("run-1", &[], &[], Some("homeboy-lab"), Some(&retry), true);
+        let (actions, basis) = diagnose_next_actions(
+            "run-1",
+            &[],
+            &[],
+            Some("homeboy-lab"),
+            Some(&retry),
+            true,
+            false,
+        );
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -3295,31 +3494,6 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
     Ok((report, 0))
 }
 
-/// Cancellation is only partly synchronous, so `cancel` reports what actually
-/// happened rather than an unqualified success word.
-///
-/// The canonical control-plane action returns as soon as the cancellation
-/// *request* is durable. For a controller-owned staging job that is strictly an
-/// acknowledgement — `controller_job_cancellation` is persisted with phase
-/// `requested` and the controller keeps tearing its provider down afterwards —
-/// and for a run whose provider tree is not reachable from this host the durable
-/// terminal state is published by whoever owns it. Reporting `succeeded` for
-/// that acknowledgement is what made #12572 dishonest: the word claimed the run
-/// was cancelled while its process tree was still alive.
-///
-/// So this waits for the durable record to converge, and bounds that wait. The
-/// bound sits well above controller-local teardown (process termination allows a
-/// 2s SIGTERM grace plus a 2s SIGKILL reap grace) and well below the two-minute
-/// wrapper timeouts operators and agents run `cancel` under, so the command
-/// always answers before its caller gives up on it.
-const CANCEL_TERMINAL_WAIT: Duration = Duration::from_secs(15);
-
-/// Poll interval inside [`CANCEL_TERMINAL_WAIT`]. Each poll is a reconciling
-/// read, so it stays coarse rather than hammering the durable store.
-const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
-
-const CANCELLATION_SCHEMA: &str = "homeboy/agent-task-cancellation/v1";
-
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let idempotency_key = args
         .idempotency_key
@@ -3340,433 +3514,58 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
             confirmed: true,
         },
     )?;
-    let record = agent_task_lifecycle::status(acknowledgement.run.as_str())?;
-    if record.state.is_terminal() {
-        return Ok(attach_action_acknowledgement(
-            cancel_output(
-                &args.run_id,
-                record,
-                CancelOutcome::Terminal {
-                    waited: Duration::ZERO,
-                    polls: 0,
-                },
-            ),
-            &acknowledgement,
-        ));
-    }
-    // A provider that reserved a terminal result before cancellation could apply
-    // deliberately keeps the run joinable for that import, so there is nothing to
-    // converge on and nothing to wait for. Say that instead of polling a record
-    // cancellation was intentionally not applied to.
-    if record
-        .metadata
-        .get("cancellation_deferred_for_terminal_provider")
-        .is_some()
-    {
-        return Ok(attach_action_acknowledgement(
-            cancel_output(
-                &args.run_id,
-                record,
-                CancelOutcome::DeferredForTerminalProvider,
-            ),
-            &acknowledgement,
-        ));
-    }
-    Ok(attach_action_acknowledgement(
-        wait_for_cancellation_to_settle(&args.run_id, record),
-        &acknowledgement,
+    let exit_code = cancel_exit_code(acknowledgement.outcome, &acknowledgement.result)?;
+    Ok((
+        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+        exit_code,
     ))
 }
 
-fn attach_action_acknowledgement(
-    (mut value, exit_code): (Value, i32),
-    acknowledgement: &homeboy_control_plane_contract::ControlPlaneActionAcknowledgement,
-) -> (Value, i32) {
-    if let Some(cancellation) = value.get_mut("cancellation").and_then(Value::as_object_mut) {
-        cancellation.insert(
-            "acknowledgement".to_string(),
-            json!(acknowledgement.acknowledgement),
-        );
-        cancellation.insert(
-            "idempotency_key".to_string(),
-            json!(acknowledgement.idempotency_key),
-        );
+fn cancel_exit_code(
+    outcome: homeboy_control_plane_contract::ControlPlaneActionOutcome,
+    payload: &homeboy_control_plane_contract::ControlPlaneActionPayload,
+) -> homeboy::core::Result<i32> {
+    if outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed {
+        return Ok(1);
     }
-    (value, exit_code)
-}
-
-/// Poll the durable record of a run whose cancellation was accepted.
-///
-/// This is the reconciling read rather than a raw record read on purpose: an
-/// asynchronously cancelled controller-owned job converges through
-/// `reconcile_controller_job_cancellation`, which only runs on that path. The
-/// runner probe is disabled so an unavailable runner cannot stretch each poll
-/// and eat the bound.
-struct CancelTerminalPoller;
-
-impl WatchPoller for CancelTerminalPoller {
-    type Item = AgentTaskRunRecord;
-
-    fn poll(&self, run_id: &str) -> homeboy::core::Result<Self::Item> {
-        Ok(agent_task_lifecycle::reconcile_status_with_options(
-            run_id,
-            agent_task_lifecycle::AgentTaskStatusOptions {
-                runner_probe: agent_task_lifecycle::AgentTaskRunnerProbe::Never,
-            },
-        )?
-        .record)
-    }
-
-    fn is_terminal(&self, item: &Self::Item) -> bool {
-        item.state.is_terminal()
-    }
-}
-
-/// Why `agent-task cancel` stopped waiting.
-enum CancelOutcome {
-    /// The run is durably terminal: either it already was when the cancellation
-    /// request returned, or it converged inside the bounded wait.
-    Terminal { waited: Duration, polls: u64 },
-    /// A provider reserved a terminal result first, so cancellation was
-    /// deliberately not applied and the run stays joinable for that import.
-    DeferredForTerminalProvider,
-    /// Cancellation is durably requested, but its teardown is owned elsewhere
-    /// and had not converged when the bound expired.
-    Requested {
-        waited: Duration,
-        polls: u64,
-        /// Set when the bounded observation itself failed. The cancellation
-        /// request is already durable, so a failed *read* of its convergence is
-        /// reported here rather than as a failed cancellation.
-        observation_error: Option<String>,
-    },
-}
-
-/// Wait a bounded time for an accepted cancellation to become durably terminal.
-fn wait_for_cancellation_to_settle(
-    requested_run_id: &str,
-    accepted: AgentTaskRunRecord,
-) -> (Value, i32) {
-    let run_id = accepted.run_id.clone();
-    // A command that is about to block for seconds says so, so the wait is
-    // legible instead of looking like the #12572 hang it replaces.
-    eprintln!(
-        "Cancellation of agent-task run {run_id} was accepted; waiting up to {}s for its durable terminal state.",
-        CANCEL_TERMINAL_WAIT.as_secs()
-    );
-    let started = Instant::now();
-    let waited = watch_loop(
-        &CancelTerminalPoller,
-        &run_id,
-        &WatchConfig {
-            interval: CANCEL_TERMINAL_POLL_INTERVAL,
-            timeout: Some(CANCEL_TERMINAL_WAIT),
-        },
-        std::thread::sleep,
-        || started.elapsed(),
-        |_, _| {},
-    );
-    match waited {
-        Ok(result) if result.timed_out() => cancel_output(
-            requested_run_id,
-            result.item,
-            CancelOutcome::Requested {
-                waited: result.waited,
-                polls: result.poll_count,
-                observation_error: None,
-            },
-        ),
-        Ok(result) => cancel_output(
-            requested_run_id,
-            result.item,
-            CancelOutcome::Terminal {
-                waited: result.waited,
-                polls: result.poll_count,
-            },
-        ),
-        // The cancellation request is already durable. A failed observation of
-        // its convergence is an unconverged wait, never a failed cancellation.
-        Err(error) => cancel_output(
-            requested_run_id,
-            accepted,
-            CancelOutcome::Requested {
-                waited: started.elapsed(),
-                polls: 0,
-                observation_error: Some(error.message),
-            },
-        ),
-    }
-}
-
-/// Project one cancellation attempt onto the durable record it acted on.
-///
-/// Every field is additive: the serialized record keeps its historical shape and
-/// gains `cancellation`, `summary`, and — only when the bound expired — the
-/// `timed_out` command status that stops this from reading as a completed
-/// cancellation.
-fn cancel_output(
-    requested_run_id: &str,
-    record: AgentTaskRunRecord,
-    outcome: CancelOutcome,
-) -> (Value, i32) {
-    let run_id = record.run_id.clone();
-    let state = run_state_name(record.state);
-    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
-    surface_cancellation_recovery(&mut value);
-    let (cancellation, summary, exit_code) =
-        cancellation_projection(requested_run_id, &run_id, &state, &outcome);
-    let status_command = cancellation["status_command"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let converged = cancellation["terminal"].as_bool().unwrap_or(false);
-    if let Value::Object(fields) = &mut value {
-        fields.insert("cancellation".to_string(), cancellation);
-        fields.insert("summary".to_string(), json!(&summary));
-        if exit_code != 0 {
-            fields.insert("status".to_string(), json!("timed_out"));
-        }
-    }
-
-    let mut metadata = CommandActionableMetadata {
-        refs: CommandResultRefs {
-            agent_tasks: vec![agent_task_ref(&run_id)],
-            ..Default::default()
-        },
-        next_actions: vec![CommandNextAction::new("show status", status_command)
-            .with_kind(CommandNextActionKind::Show)],
-        ..Default::default()
-    };
-    if !converged {
-        metadata.next_actions.push(
-            CommandNextAction::new(
-                "reconcile run",
-                format!(
-                    "homeboy agent-task reconcile {} --dry-run",
-                    quote_arg(&run_id)
-                ),
-            )
-            .with_kind(CommandNextActionKind::Repair),
-        );
-    }
-    attach_actionable_metadata(&mut value, metadata);
-    (value, exit_code)
-}
-
-/// Build the cancellation projection, its operator-facing summary, and the exit
-/// code for one outcome. Pure so every reported wording is directly testable.
-fn cancellation_projection(
-    requested_run_id: &str,
-    run_id: &str,
-    state: &str,
-    outcome: &CancelOutcome,
-) -> (Value, String, i32) {
-    let status_command = format!("homeboy agent-task status {}", quote_arg(run_id));
-    let mut cancellation = json!({
-        "schema": CANCELLATION_SCHEMA,
-        "requested_run_id": requested_run_id,
-        "run_id": run_id,
-        "state": state,
-        "accepted": true,
-        "wait_timeout_secs": CANCEL_TERMINAL_WAIT.as_secs(),
-        "status_command": status_command,
-    });
-    let wait_accounting = match outcome {
-        CancelOutcome::Terminal { waited, polls } => Some((*waited, *polls)),
-        CancelOutcome::Requested { waited, polls, .. } => Some((*waited, *polls)),
-        CancelOutcome::DeferredForTerminalProvider => None,
-    };
-    if let Some((waited, polls)) = wait_accounting {
-        cancellation["waited_secs"] = json!(waited.as_secs());
-        cancellation["poll_count"] = json!(polls);
-    }
-
-    let (outcome_name, terminal, summary, exit_code) = match outcome {
-        CancelOutcome::Terminal { .. } if state == "cancelled" => (
-            "cancelled",
-            true,
-            format!(
-                "Cancellation of agent-task run {run_id} took effect: its durable state is cancelled."
-            ),
-            0,
-        ),
-        CancelOutcome::Terminal { .. } => (
-            "terminal_without_cancellation",
-            true,
-            format!(
-                "Cancellation of agent-task run {run_id} was requested, but the run reached terminal \
-                 state `{state}` instead of cancelled; that terminal result is authoritative."
-            ),
-            0,
-        ),
-        CancelOutcome::DeferredForTerminalProvider => (
-            "deferred_for_terminal_provider",
-            false,
-            format!(
-                "Cancellation of agent-task run {run_id} was deliberately not applied: a provider had \
-                 already reserved a terminal result, so the run stays joinable for that import. \
-                 Check `{status_command}`."
-            ),
-            0,
-        ),
-        CancelOutcome::Requested {
-            observation_error, ..
-        } => {
-            let mut summary = format!(
-                "Cancellation of agent-task run {run_id} was accepted and its teardown is still in \
-                 flight: the run did not reach a terminal state within {}s. Check \
-                 `{status_command}`.",
-                CANCEL_TERMINAL_WAIT.as_secs()
-            );
-            if let Some(error) = observation_error {
-                cancellation["observation_error"] = json!(error);
-                summary = format!("{summary} Observing that convergence failed: {error}.");
-            }
-            ("cancellation_requested", false, summary, TIMEOUT_EXIT_CODE)
-        }
-    };
-    cancellation["outcome"] = json!(outcome_name);
-    cancellation["terminal"] = json!(terminal);
-    cancellation["message"] = json!(&summary);
-    (cancellation, summary, exit_code)
-}
-
-fn run_state_name(state: agent_task_lifecycle::AgentTaskRunState) -> String {
-    serde_json::to_value(state)
-        .ok()
-        .and_then(|state| state.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
+    let result: homeboy_control_plane_contract::ControlPlaneCancelResult =
+        serde_json::from_value(payload.data.clone()).map_err(|error| {
+            homeboy::core::Error::internal_unexpected(format!(
+                "canonical cancellation result: {error}"
+            ))
+        })?;
+    Ok((result.disposition
+        == homeboy_control_plane_contract::ControlPlaneCancelDisposition::Requested)
+        .then_some(TIMEOUT_EXIT_CODE)
+        .unwrap_or(0))
 }
 
 #[cfg(test)]
-mod cancellation_outcome_tests {
+mod cancel_exit_code_tests {
     use super::*;
 
     #[test]
-    fn a_converged_cancellation_reports_the_cancelled_state_and_succeeds() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "cook-12572",
-            "agent-task-12572",
-            "cancelled",
-            &CancelOutcome::Terminal {
-                waited: Duration::from_secs(2),
-                polls: 3,
-            },
-        );
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(projection["schema"], CANCELLATION_SCHEMA);
-        assert_eq!(projection["outcome"], "cancelled");
-        assert_eq!(projection["terminal"], true);
-        assert_eq!(projection["requested_run_id"], "cook-12572");
-        assert_eq!(projection["run_id"], "agent-task-12572");
-        assert_eq!(projection["waited_secs"], 2);
-        assert_eq!(projection["poll_count"], 3);
-        assert_eq!(projection["message"], summary);
-        assert!(
-            summary.contains("agent-task-12572"),
-            "unexpected: {summary}"
-        );
-    }
-
-    /// The #12572 acceptance: an unconverged cancellation must not be reported
-    /// with a success word, and it must name the run plus a next command.
-    #[test]
-    fn an_unconverged_cancellation_times_out_with_the_run_id_and_a_next_command() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "agent-task-12572",
-            "running",
-            &CancelOutcome::Requested {
-                waited: CANCEL_TERMINAL_WAIT,
-                polls: 15,
-                observation_error: None,
-            },
-        );
-
-        assert_eq!(exit_code, TIMEOUT_EXIT_CODE);
-        assert_eq!(projection["outcome"], "cancellation_requested");
-        assert_eq!(projection["terminal"], false);
-        assert_eq!(projection["accepted"], true);
-        assert_eq!(projection["state"], "running");
+    fn unconverged_accepted_cancellation_maps_to_timeout() {
+        let result = homeboy_control_plane_contract::ControlPlaneCancelResult {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+            disposition: homeboy_control_plane_contract::ControlPlaneCancelDisposition::Requested,
+            terminal: false,
+            wait_timeout_seconds: 15,
+            waited_seconds: 15,
+            poll_count: 15,
+            observation_error: None,
+        };
+        let payload = homeboy_control_plane_contract::ControlPlaneActionPayload {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+            data: serde_json::to_value(result).expect("serialize result"),
+        };
         assert_eq!(
-            projection["wait_timeout_secs"],
-            CANCEL_TERMINAL_WAIT.as_secs()
-        );
-        assert_eq!(
-            projection["status_command"],
-            "homeboy agent-task status agent-task-12572"
-        );
-        assert!(
-            summary.contains("agent-task-12572"),
-            "unexpected: {summary}"
-        );
-        assert!(
-            summary.contains("homeboy agent-task status agent-task-12572"),
-            "unexpected: {summary}"
-        );
-        assert!(!summary.contains("succeeded"), "unexpected: {summary}");
-    }
-
-    #[test]
-    fn a_failed_convergence_observation_is_not_a_failed_cancellation() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "agent-task-12572",
-            "running",
-            &CancelOutcome::Requested {
-                waited: Duration::from_secs(1),
-                polls: 1,
-                observation_error: Some("daemon unreachable".to_string()),
-            },
-        );
-
-        assert_eq!(exit_code, TIMEOUT_EXIT_CODE);
-        assert_eq!(projection["outcome"], "cancellation_requested");
-        assert_eq!(projection["accepted"], true);
-        assert_eq!(projection["observation_error"], "daemon unreachable");
-        assert!(
-            summary.contains("daemon unreachable"),
-            "unexpected: {summary}"
-        );
-    }
-
-    /// A cancellation that lost the race to a terminal provider result must not
-    /// claim the run was cancelled.
-    #[test]
-    fn a_run_that_went_terminal_another_way_is_reported_as_such() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "agent-task-12572",
-            "succeeded",
-            &CancelOutcome::Terminal {
-                waited: Duration::from_secs(1),
-                polls: 2,
-            },
-        );
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(projection["outcome"], "terminal_without_cancellation");
-        assert_eq!(projection["terminal"], true);
-        assert!(summary.contains("succeeded"), "unexpected: {summary}");
-    }
-
-    #[test]
-    fn a_deferred_cancellation_reports_the_deferral_without_a_wait() {
-        let (projection, summary, exit_code) = cancellation_projection(
-            "agent-task-12572",
-            "agent-task-12572",
-            "running",
-            &CancelOutcome::DeferredForTerminalProvider,
-        );
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(projection["outcome"], "deferred_for_terminal_provider");
-        assert_eq!(projection["terminal"], false);
-        assert!(projection.get("waited_secs").is_none());
-        assert!(
-            summary.contains("deliberately not applied"),
-            "unexpected: {summary}"
+            cancel_exit_code(
+                homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded,
+                &payload,
+            )
+            .expect("exit code"),
+            TIMEOUT_EXIT_CODE
         );
     }
 }
@@ -3997,39 +3796,6 @@ fn evidence_refs_with_tasks(
     entries
 }
 
-/// Hoist live-cancellation recovery details to the top level of the cancel
-/// response so an operator sees the exact safe commands + process identifiers
-/// without digging through `metadata` (#5680 acceptance: never force manual
-/// process spelunking).
-fn surface_cancellation_recovery(value: &mut Value) {
-    let metadata = value.get("metadata").cloned().unwrap_or(Value::Null);
-
-    if let Some(live) = metadata.get("live_cancellation").cloned() {
-        value["live_cancellation"] = live;
-    }
-
-    if let Some(unsupported) = metadata.get("live_cancellation_unsupported").cloned() {
-        let recovery_commands = unsupported
-            .get("recovery_commands")
-            .cloned()
-            .unwrap_or(Value::Array(Vec::new()));
-        let reason = unsupported
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("live cancellation is not available for this provider on this host");
-        value["live_cancellation_unsupported"] = unsupported.clone();
-        value["recovery"] = json!({
-            "message": format!(
-                "Live cancellation could not signal the provider process tree directly: {reason}. Run the commands below to terminate it safely.",
-            ),
-            "owner_pid": unsupported.get("owner_pid").cloned().unwrap_or(Value::Null),
-            "runner_id": unsupported.get("runner_id").cloned().unwrap_or(Value::Null),
-            "runner_job_id": unsupported.get("runner_job_id").cloned().unwrap_or(Value::Null),
-            "recovery_commands": recovery_commands,
-        });
-    }
-}
-
 fn collect_hydrated_evidence_diagnostics(
     task_id: &str,
     evidence: &AgentTaskEvidenceRef,
@@ -4130,16 +3896,10 @@ pub(crate) fn completed_run_aggregate(
     }
 }
 
-pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) -> Option<Value> {
-    ranked_diagnostics(aggregate_failure_diagnostics(aggregate))
-        .into_iter()
-        .map(collected_diagnostic_value)
-        .next()
-}
-
 /// Project terminal execution facts into stable machine-readable states. These
 /// fields deliberately derive from typed outcome and lifecycle values, never
 /// provider summary prose or diagnostic messages.
+#[cfg(test)]
 pub(crate) fn execution_states_from_aggregate(
     aggregate: &AgentTaskAggregate,
     record: &Value,
@@ -4211,10 +3971,19 @@ pub(crate) fn execution_states_from_aggregate(
         .collect::<Vec<_>>();
     let promotion_status = promotion_state(record);
     let finalization_status = finalization_state(record);
-    let patch_promoted = matches!(
-        promotion_status.as_str(),
-        "verification_pending" | "applied" | "gate_failed"
-    );
+    let promotion = record.pointer("/metadata/latest_promotion");
+    // A retained artifact can carry a pending verification tracker before any
+    // target mutation. Only the post-apply checkpoint is evidence that this
+    // exact promotion reached its declared target.
+    let patch_promoted = canonical.target_applied;
+    let verified = canonical.verified;
+    let target = promotion_target_projection(promotion, patch_promoted);
+    let verification_phase = match promotion_status.as_str() {
+        "verification_pending" if patch_promoted => "post_apply",
+        "verification_pending" => "pre_apply",
+        "applied" | "gate_failed" if patch_promoted => "post_apply",
+        _ => "not_pending",
+    };
 
     json!({
         "schema": "homeboy/agent-task-execution-states/v1",
@@ -4230,13 +3999,38 @@ pub(crate) fn execution_states_from_aggregate(
             },
         },
         "gate": {
-            "state": promotion_gate_state(record, &promotion_status),
+            "state": promotion_gate_state(record, &promotion_status, patch_promoted),
         },
         "promotion": {
             "state": promotion_status,
             "patch_promoted": patch_promoted,
+            "verified": verified,
+            "verification_phase": verification_phase,
+            "target": target,
         },
-        "finalization": { "state": finalization_status },
+        "finalization": {
+            "state": finalization_status,
+            "finalized": canonical.finalized,
+        },
+    })
+}
+
+#[cfg(test)]
+fn promotion_target_projection(promotion: Option<&Value>, applied: bool) -> Value {
+    let Some(promotion) = promotion else {
+        return json!({ "state": "not_declared", "candidate_fingerprint_matches": Value::Null });
+    };
+    let target = promotion
+        .pointer("/target/worktree")
+        .or_else(|| promotion.get("to_worktree"));
+    let fingerprint_matches = applied
+        && promotion
+            .pointer("/provenance/candidate")
+            .is_some_and(|fingerprint| !fingerprint.is_null());
+    json!({
+        "state": if applied { "applied" } else { "not_applied" },
+        "worktree": target,
+        "candidate_fingerprint_matches": fingerprint_matches,
     })
 }
 
@@ -4394,14 +4188,16 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
         0
     } else if is_policy_denial(&class, &text) {
         0
-    } else if is_required_output_diagnostic(&class) {
-        1
     } else if is_provider_structured_error(&class) {
         // The provider's own terminal error event, already normalized by the
         // provider adapter: the most specific execution-layer cause there is.
         1
-    } else if is_provider_contract_diagnostic(&class) {
+    } else if is_required_output_diagnostic(&class) {
+        // Missing required outputs are retained as a consequence, but a typed
+        // provider rejection explains why those outputs were never produced.
         2
+    } else if is_provider_contract_diagnostic(&class) {
+        3
     } else if is_successful_process_exit(&text) {
         // A successful provider process can be useful context, but it cannot
         // explain why the task failed.
@@ -4748,7 +4544,6 @@ fn compact_mandatory_field(field: &str) -> bool {
             | "latest_run_id"
             | "status"
             | "state"
-            | "status_scope"
             | "lab_transport_failure"
             | "full_command"
     )
@@ -4797,7 +4592,27 @@ fn serialized_len(value: &Value) -> usize {
 /// diagnostic cause. Output only grows on the failure path: `failure_context` is `None`
 /// whenever `exit_code == 0`.
 pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
+    let mut value = value;
+    let recoverable = matches!(
+        value.get("status").and_then(Value::as_str),
+        Some("candidate_recoverable" | "partial_recoverable")
+    );
+    let candidate_run_id = recoverable
+        .then(|| {
+            value
+                .pointer("/selected_candidate/run_id")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("latest_run_id").and_then(Value::as_str))
+                .map(str::to_string)
+        })
+        .flatten();
+    let candidate_projection = candidate_run_id
+        .as_deref()
+        .map(compact_cook_candidate_projection);
     if full {
+        if let Some(candidate) = candidate_projection.as_ref() {
+            value["durable_candidate"] = candidate.clone();
+        }
         return value;
     }
     let attempts = value
@@ -4821,6 +4636,9 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         "finalization": value.get("finalization").map(|finalization| compact_fields(finalization, &["schema", "status", "pr_number", "pr_url", "updated_at", "created_at"])),
         "selected_candidate": value.get("selected_candidate").map(|candidate| compact_fields(candidate, &["latest_attempt_run_id", "run_id", "attempt", "invocation_scoped", "selected_task_id", "selected_artifact_id", "reason", "incomplete", "skipped_newer_attempts", "applied_promotion"])),
     });
+    if let Some(candidate) = candidate_projection {
+        summary["durable_candidate"] = candidate.clone();
+    }
     // The run ids this invocation actually dispatched, so a caller can tell them
     // apart from the cross-invocation history `latest_run_id` may be drawn from.
     if let Some(invocation_run_ids) = value.get("invocation_run_ids") {
@@ -4962,8 +4780,6 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 }),
             });
         }
-        let provider_failure =
-            homeboy::core::worktree_provider::compact_worktree_provider_failure_details(details);
         return Some(CollectedDiagnostic {
             task_id: "controller".to_string(),
             class: failure
@@ -4982,7 +4798,6 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 "error_code": failure.get("error_code"),
                 "provider_executions_consumed": failure.get("provider_executions_consumed"),
                 "details": details,
-                "worktree_provider_failure": provider_failure,
             }),
         });
     }
@@ -5109,6 +4924,35 @@ fn runner_cancellation_diagnostic(record: &AgentTaskRunRecord) -> Option<Collect
     })
 }
 
+/// A queued runner-backed record must retain its ownership diagnosis until a
+/// runner job id is durably projected. The liveness model is shared with
+/// controller-upgrade admission so both surfaces explain the same blocker.
+fn queued_runner_ownership_diagnostic(
+    record: &AgentTaskRunRecord,
+    liveness: agent_task_service::AgentTaskLiveness,
+    probe: &agent_task_lifecycle::AgentTaskRunnerDiagnosticProbe,
+) -> Option<CollectedDiagnostic> {
+    (record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && record.runner_id().is_some()
+        && probe.skipped_reason == Some("missing_runner_job_id"))
+    .then(|| CollectedDiagnostic {
+        task_id: "runner".to_string(),
+        class: "agent_task.runner_missing_pid".to_string(),
+        message: "Runner-owned execution is queued at provider_start without a runner PID."
+            .to_string(),
+        source: "runner_ownership".to_string(),
+        data: json!({
+            "causal_phase": record.metadata.pointer("/cook_progress/phase"),
+            "liveness": liveness.as_str(),
+            "liveness_reconcilable": liveness.is_reconcilable(),
+            "ownership": "runner",
+            "runner_id": record.runner_id(),
+            "runner_job_id": record.runner_job_id(),
+            "runner_execution_status": record.metadata.pointer("/runner_execution_record/status"),
+        }),
+    })
+}
+
 fn compact_items(value: Option<&Value>, fields: &[&str]) -> Value {
     Value::Array(
         value
@@ -5214,6 +5058,7 @@ fn candidate_result_payload(record: &Value, aggregate: Option<&AgentTaskAggregat
     payload
 }
 
+#[cfg(test)]
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
     collected_diagnostic_value_with_details(item, false)
 }
@@ -5242,6 +5087,8 @@ fn collected_diagnostic_value_with_details(
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if item.source == "lab_preacceptance_transport" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
+    } else if item.source == "runner_ownership" {
+        value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if let Some(details) = item.data.get("worktree_provider_failure") {
         value["details"] = details.clone();
     }
@@ -5268,7 +5115,7 @@ fn is_policy_denial(class: &str, text: &str) -> bool {
 }
 
 fn is_required_output_diagnostic(class: &str) -> bool {
-    class.contains("required_output_missing")
+    class.contains("required_output_missing") || class.contains("required_outputs_missing")
 }
 
 fn is_provider_structured_error(class: &str) -> bool {
@@ -5698,6 +5545,7 @@ fn diagnose_next_commands(
     retry_action: Option<&CommandNextAction>,
     continuation_action: Option<&CommandNextAction>,
     current_lifecycle_denial: bool,
+    queued_runner_ownership: bool,
 ) -> Vec<String> {
     let owner = record
         .runner_id()
@@ -5709,6 +5557,11 @@ fn diagnose_next_commands(
             .into_iter()
             .map(|action| action.command)
             .collect();
+    }
+    if queued_runner_ownership {
+        return vec![format!(
+            "homeboy {owner} agent-task diagnose {run_id} --full"
+        )];
     }
     let mut commands = vec![
         format!("homeboy {owner} agent-task diagnose {run_id} --full"),
@@ -6045,7 +5898,7 @@ mod tests {
         }))
         .expect("minimal durable record");
 
-        let commands = diagnose_next_commands(&record, None, None, false);
+        let commands = diagnose_next_commands(&record, None, None, false, false);
 
         assert!(commands
             .iter()
@@ -6119,6 +5972,7 @@ mod tests {
             &record,
             retry.action.as_ref(),
             retry.continuation.as_ref(),
+            false,
             false,
         );
 
@@ -6492,6 +6346,8 @@ mod tests {
         assert!(recovery.get("promotion").is_none());
         assert!(recovery.get("passed_gates").is_none());
 
-        assert_eq!(compact_cook_report(report.clone(), true), report);
+        let full = compact_cook_report(report.clone(), true);
+        assert_eq!(full["moving_base_recovery"], report["moving_base_recovery"]);
+        assert_eq!(full["durable_candidate"]["status"], "unavailable");
     }
 }

@@ -18,7 +18,7 @@ Workflow docs are task-oriented. They explain which Homeboy commands to use toge
 
 ## Related Reference
 
-- [Command index](../commands/commands-index.md)
+- [Command documentation](../commands/index.md)
 - [JSON output contract](../architecture/output-system.md)
 - [Persisted runs](../commands/runs.md)
 - [Runner command](../commands/runner.md)

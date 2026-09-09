@@ -1,3 +1,4 @@
+use super::lifecycle_store::decode_record_from_run;
 use super::*;
 use homeboy_core::observation::RunRecord;
 
@@ -40,20 +41,15 @@ pub(crate) fn diagnose_run(
     } else {
         "run `homeboy agent-task reconcile-records --dry-run` to inspect repair evidence"
     };
-    // Diagnosis must be able to read a legacy record in order to classify it as
-    // LegacySchema; the strict guard would report it as malformed metadata and
-    // send it to quarantine instead of migration.
-    let record = store::record_from_run_allowing_legacy_schema(run).map_err(|_| {
-        AgentTaskRecordHealthItem {
-            run_id: run.id.clone(),
-            reason: if run.metadata_json.get("agent_task_run").is_none() {
-                AgentTaskRecordHealthReason::MissingMetadata
-            } else {
-                AgentTaskRecordHealthReason::MalformedMetadata
-            },
-            quarantined,
-            remediation: remediation.to_string(),
-        }
+    let record = decode_record_from_run(run).map_err(|_| AgentTaskRecordHealthItem {
+        run_id: run.id.clone(),
+        reason: if run.metadata_json.get("agent_task_run").is_none() {
+            AgentTaskRecordHealthReason::MissingMetadata
+        } else {
+            AgentTaskRecordHealthReason::MalformedMetadata
+        },
+        quarantined,
+        remediation: remediation.to_string(),
     })?;
     let reason = if quarantined
         && run
@@ -63,8 +59,6 @@ pub(crate) fn diagnose_run(
             == Some(FIXTURE_RUNNER_QUARANTINE_REASON)
     {
         Some(AgentTaskRecordHealthReason::FixtureRunnerProvenance)
-    } else if record.lab_handoff_validation_error().is_some() {
-        Some(AgentTaskRecordHealthReason::MalformedMetadata)
     } else if record.schema != schemas::RUN
         || record.lifecycle.schema != RUN_LIFECYCLE_RECORD_SCHEMA
     {
@@ -116,17 +110,6 @@ pub fn record_health_summary_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<AgentTaskRecordHealthSummary> {
     Ok(lifecycle_store.read_records_with_health()?.1)
-}
-
-/// Parse a durable observation row without the supported-schema guard.
-///
-/// This is a pure `RunRecord` -> typed-record conversion: it opens no store and
-/// resolves no root, so calling it from a rooted body is not an ambient reach.
-/// It exists only so [`reconcile_record_health_in_store`] never has to name the
-/// `store::` shim path, which is how the #7505 scanner recognises a body that
-/// manufactured its own root — and which would be a false positive here.
-fn legacy_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
-    store::record_from_run_allowing_legacy_schema(run)
 }
 
 /// Quarantine only records whose durable plan and accepted handoff prove they
@@ -244,7 +227,7 @@ pub fn reconcile_record_health_in_store(
             lifecycle_store.write_record(&reconstruct_record_in_store(lifecycle_store, &run)?)?;
             report.migrated += 1;
         } else if item.reason == AgentTaskRecordHealthReason::LegacySchema {
-            let mut record = legacy_record_from_run(&run)?;
+            let mut record = decode_record_from_run(&run)?;
             let original = serde_json::to_value(&record).unwrap_or(Value::Null);
             record.schema = schemas::RUN.to_string();
             record.lifecycle.schema = RUN_LIFECYCLE_RECORD_SCHEMA.to_string();

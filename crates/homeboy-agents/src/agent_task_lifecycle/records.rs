@@ -1,6 +1,7 @@
 use super::*;
 
 use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
+use homeboy_runner_contract::{WorkspaceClaim, WorkspaceIdentity, WorkspaceOwnerLease};
 
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
@@ -138,13 +139,13 @@ pub struct AgentTaskRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<AgentTaskAcceptanceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    pub workspace_identity: Option<WorkspaceIdentity>,
     #[serde(default)]
     pub workspace_lifecycle_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_claim: Option<homeboy_core::workspace_claim::WorkspaceClaim>,
+    pub workspace_claim: Option<WorkspaceClaim>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -340,13 +341,13 @@ pub struct AgentTaskLabHandoff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expired_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    pub workspace_identity: Option<WorkspaceIdentity>,
     #[serde(default)]
     pub workspace_lifecycle_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_owner_lease: Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>,
+    pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_claim: Option<homeboy_core::workspace_claim::WorkspaceClaim>,
+    pub workspace_claim: Option<WorkspaceClaim>,
 }
 
 /// An immutable runner repair emitted by Lab admission before provider work.
@@ -417,6 +418,10 @@ pub struct AgentTaskCookIndex {
     /// bytes. Unlike `latest_run_id`, empty retries never replace this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_substantive_candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
+    /// Mission-level cancellation is durable authority over later Cook attempt
+    /// admission and completion projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_fence: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<AgentTaskCookIndexAttempt>,
 }
@@ -937,10 +942,6 @@ impl AgentTaskRunRecord {
             .and_then(|value| value.get("status"))
             .and_then(Value::as_str)
             == Some("planned")
-            && execution
-                .and_then(|value| value.get("agent_task_run_id"))
-                .and_then(Value::as_str)
-                == Some(self.run_id.as_str())
             && execution
                 .and_then(|value| value.get("runner_id"))
                 .and_then(Value::as_str)

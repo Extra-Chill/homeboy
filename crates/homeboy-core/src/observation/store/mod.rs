@@ -6,6 +6,8 @@ use serde::Serialize;
 use crate::paths::PathRoots;
 
 mod artifacts;
+mod control_plane_actions;
+mod control_plane_events;
 mod findings;
 mod helpers;
 mod runs;
@@ -19,9 +21,10 @@ pub use super::context::{
 };
 use super::records::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
-    FindingRecord, NewFindingRecord, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
-    NewTriageItemRecord, RunCursor, RunListFilter, RunPage, RunRecord, RunStatus, TraceRunRecord,
-    TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
+    FindingRecord, MissionCursor, MissionPage, MissionRecord, NewFindingRecord, NewRunRecord,
+    NewTraceRunRecord, NewTraceSpanRecord, NewTriageItemRecord, RunCursor, RunListFilter, RunPage,
+    RunRecord, RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord,
+    TriagePullRequestSignals,
 };
 use crate::{Error, Result};
 pub use artifacts::directory_tree_sha256;
@@ -29,6 +32,8 @@ pub use artifacts::{
     ArtifactListFilter, ArtifactListPage, ArtifactPublication, ArtifactPublicationType,
     BoundedArtifactProjection,
 };
+pub use control_plane_actions::ControlPlaneActionClaim;
+pub use control_plane_events::CONTROL_PLANE_EVENT_RETENTION_LIMIT;
 pub use runs::{DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT};
 
 pub(crate) use helpers::*;

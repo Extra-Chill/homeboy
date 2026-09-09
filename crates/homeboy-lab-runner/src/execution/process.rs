@@ -1013,6 +1013,7 @@ mod tests {
             run_max_bytes: u64::MAX,
             run_max_count: usize::MAX,
             cursor: None,
+            deadline: None,
         };
         let active = homeboy_core::engine::temp::cleanup_runtime_tmp_bounded(options)
             .expect("active cleanup preview");

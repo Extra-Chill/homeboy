@@ -140,8 +140,9 @@ all. A source build on an unreleased branch reports `ahead`, not `behind`.
 
 Both commands accept a positional component target, `--path`, and
 `--installed <version>`; `--component` remains available as an explicit selector.
-`--installed` overrides the running binary's version so you can ask about a
-version you are not currently running.
+Without `--installed`, the query uses the resolved component checkout's declared
+version. `--installed` overrides it so you can ask about a version you are not
+currently running.
 
 ### Regenerate a package for an existing tag
 

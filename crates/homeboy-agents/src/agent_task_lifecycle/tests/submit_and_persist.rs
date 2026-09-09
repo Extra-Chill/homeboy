@@ -13,7 +13,7 @@ use homeboy_core::api_jobs::JobStore;
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
@@ -309,6 +309,322 @@ fn unmaterialized_cook_admission_is_typed_secret_free_and_idempotent() {
     assert!(replay.metadata["unmaterialized_cook_admission"]["commands"]
         .get("run")
         .is_none());
+}
+
+#[test]
+fn queued_cook_placement_update_preserves_binding_identity_and_refuses_execution_ownership() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "queued-placement-update";
+    seed_unmaterialized_admission_parent(&store, cook_id);
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        cook_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "request-1",
+            "placement": { "requested": "auto", "local_fallback": false },
+            "replay_intent": { "argv": ["homeboy", "agent-task", "cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("admission");
+
+    let updated =
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "local", "operator")
+            .expect("local placement update");
+    assert_eq!(updated.run_id, cook_id);
+    assert_eq!(
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["request_ref"],
+        "request-1"
+    );
+    assert_eq!(
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["placement"]["requested"],
+        "local"
+    );
+    assert!(
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]["argv"]
+            .as_array()
+            .expect("argv")
+            .iter()
+            .any(|argument| argument == "--placement=local")
+    );
+
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["provider_executions"] = json!([{ "state": "running" }]);
+            true
+        })
+        .expect("record execution ownership");
+    assert!(
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "local", "operator").is_ok(),
+        "the original idempotent update remains replayable"
+    );
+    assert!(
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "auto", "operator").is_err()
+    );
+}
+
+#[test]
+fn unmaterialized_admission_initial_submission_includes_retry_lineage_metadata() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let source_run_id = "unmaterialized-lineage-source";
+    let binding = json!({
+        "schema": "homeboy/unmaterialized-cook-binding/v1",
+        "request_ref": "sha256:request",
+        "worktree_ref": "repo@branch",
+        "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+    });
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        binding.clone(),
+        "queued",
+        "source admission",
+    )
+    .expect("persist source admission");
+
+    let record = record_unmaterialized_cook_admission_with_metadata_in_store(
+        &store,
+        "unmaterialized-lineage-child",
+        binding,
+        "queued",
+        "retry admission",
+        serde_json::Map::from_iter([
+            ("retry_of".to_string(), json!(source_run_id)),
+            ("retried_from".to_string(), json!(source_run_id)),
+            ("retry_root".to_string(), json!(source_run_id)),
+            (
+                "retry_requested_at".to_string(),
+                json!("2026-09-02T00:00:00Z"),
+            ),
+        ]),
+    )
+    .expect("persist retry admission");
+
+    assert_eq!(record.metadata["retry_of"], source_run_id);
+    assert_eq!(record.metadata["retried_from"], source_run_id);
+    assert_eq!(record.metadata["retry_root"], source_run_id);
+    assert_eq!(
+        record.metadata["retry_requested_at"],
+        "2026-09-02T00:00:00Z"
+    );
+}
+
+#[test]
+fn concurrent_unmaterialized_retries_reserve_one_non_force_successor() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let source_run_id = "terminal-unmaterialized-source";
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "sha256:request",
+            "worktree_ref": "repo@branch",
+            "provider_runtime_refs": { "backend": "fixture" },
+            "retry": { "provider_rotations": 0 },
+            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("persist source admission");
+    store
+        .mutate_record(source_run_id, |record| {
+            record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize source admission");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let retry_ids = ["concurrent-retry-a", "concurrent-retry-b"];
+    let outcomes = std::thread::scope(|scope| {
+        let handles = retry_ids.map(|retry_id| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                retry_unmaterialized_cook_admission_in_store(&store, source_run_id, retry_id, false)
+            })
+        });
+        handles.map(|handle| handle.join().expect("retry thread"))
+    });
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+        1
+    );
+    let successors = store
+        .read_records()
+        .expect("read retry records")
+        .into_iter()
+        .filter(|record| {
+            record.run_id != source_run_id && record.metadata["retry_root"] == source_run_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(successors.len(), 1);
+}
+
+#[test]
+fn unmaterialized_retry_lineage_requires_force_and_retains_its_root() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let source_run_id = "unmaterialized-lineage-root";
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "sha256:request",
+            "worktree_ref": "repo@branch",
+            "provider_runtime_refs": { "backend": "fixture" },
+            "retry": { "provider_rotations": 0 },
+            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("persist source admission");
+    store
+        .mutate_record(source_run_id, |record| {
+            record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize source admission");
+
+    let (first, created) = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        "unmaterialized-lineage-first",
+        false,
+    )
+    .expect("create first successor");
+    assert!(created);
+    store
+        .mutate_record(&first.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize first successor");
+
+    let error = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        "unmaterialized-lineage-without-force",
+        false,
+    )
+    .expect_err("terminal successor requires force");
+    assert!(error.message.contains("terminal successor(s); use --force"));
+
+    let (descendant, created) = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        &first.run_id,
+        "unmaterialized-lineage-descendant",
+        true,
+    )
+    .expect("retry terminal descendant with force");
+    assert!(created);
+    assert_eq!(first.metadata["retry_root"], source_run_id);
+    assert_eq!(descendant.metadata["retry_of"], first.run_id);
+    assert_eq!(descendant.metadata["retry_root"], source_run_id);
+    assert_eq!(
+        descendant.metadata["unmaterialized_cook_admission"]["binding"]["retry_of"],
+        first.run_id
+    );
+}
+
+#[test]
+fn concurrent_unmaterialized_retries_from_root_and_descendant_share_the_root_lock() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let source_run_id = "cross-entry-lineage-root";
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "sha256:request",
+            "worktree_ref": "repo@branch",
+            "provider_runtime_refs": { "backend": "fixture" },
+            "retry": { "provider_rotations": 0 },
+            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("persist source admission");
+    store
+        .mutate_record(source_run_id, |record| {
+            record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize source admission");
+    let (first, _) = retry_unmaterialized_cook_admission_in_store(
+        &store,
+        source_run_id,
+        "cross-entry-terminal-descendant",
+        false,
+    )
+    .expect("create terminal descendant");
+    store
+        .mutate_record(&first.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("terminalize descendant");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let outcomes = std::thread::scope(|scope| {
+        let root_store = Arc::clone(&store);
+        let root_barrier = Arc::clone(&barrier);
+        let root = scope.spawn(move || {
+            root_barrier.wait();
+            retry_unmaterialized_cook_admission_in_store(
+                &root_store,
+                source_run_id,
+                "cross-entry-root-retry",
+                true,
+            )
+        });
+        let descendant_store = Arc::clone(&store);
+        let descendant_barrier = Arc::clone(&barrier);
+        let descendant = scope.spawn(move || {
+            descendant_barrier.wait();
+            retry_unmaterialized_cook_admission_in_store(
+                &descendant_store,
+                &first.run_id,
+                "cross-entry-descendant-retry",
+                false,
+            )
+        });
+        [
+            root.join().expect("root retry thread"),
+            descendant.join().expect("descendant retry thread"),
+        ]
+    });
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+        1
+    );
+    let active = store
+        .read_records()
+        .expect("read retry records")
+        .into_iter()
+        .filter(|record| {
+            record.metadata["retry_root"] == source_run_id && !record.state.is_terminal()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(active.len(), 1);
 }
 
 #[test]
@@ -2314,15 +2630,15 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
     let cook_id = "rooted-read-cook";
     let attempt_run_id = "rooted-read-cook-attempt-1-a";
     let plan = test_plan();
-    seeded
+    let record = seeded
         .submit_plan_with_runtime_admission(&plan, attempt_run_id, |_| Ok(json!({})))
         .expect("submit attempt into the seeded store");
     seeded
         .write_cook_index_attempt(cook_id, 1, attempt_run_id, now_timestamp(), None)
         .expect("register the Cook attempt in the seeded store");
     seeded
-        .write_aggregate(attempt_run_id, &succeeded_aggregate(&plan))
-        .expect("persist the attempt aggregate in the seeded store");
+        .write_aggregate_and_record(&record, &succeeded_aggregate(&plan))
+        .expect("persist the authoritative attempt pair in the seeded store");
     let aggregate_path = seeded.aggregate_path(attempt_run_id);
 
     // Every read answers from the store it was handed.
@@ -2779,6 +3095,7 @@ fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
         &plan.tasks[0].task_id,
         1,
         Some(format!("file://{}", stdout.display())),
+        None,
         None,
     )
     .expect("runtime evidence recorded before cancellation");
@@ -3493,6 +3810,28 @@ fn non_retryable_pre_execution_failure_remains_invalid_input() {
     assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
 }
 
+#[test]
+fn reserve_pressure_pre_execution_failure_is_classified_as_capacity() {
+    let plan = test_plan();
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-reserve-pressure",
+        &plan.tasks[0],
+        "worktree_capacity_admission",
+        &Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+            filesystem: "/worktrees/new-task".to_string(),
+            available_bytes: 90,
+            reserve_bytes: 100,
+            shortfall_bytes: 10,
+        }),
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Capacity)
+    );
+    assert_eq!(outcome.outputs["error_code"], "resource.capacity_reserve");
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The repair is a write: status rewrites `plan_path` back to the
 /// controller-owned file. Deciding that repair from one home and committing it
@@ -3881,10 +4220,6 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
     assert_eq!(record.metadata["runner_job_status"], "succeeded");
 }
 
-/// Stays on `with_isolated_home` (#7505). `store::interrupt_after_terminal_commit_for_test`
-/// arms a process-global `AtomicBool`, exactly like the record-write fault
-/// above; the hermetic home's global mutex is what stops a peer test from
-/// consuming the injected interruption.
 #[test]
 fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retry_is_idempotent() {
     with_isolated_home(|_| {
@@ -3897,7 +4232,29 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             remote_command: &command,
         })
         .expect("running proxy");
-        let snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        let patch = b"recoverable patch";
+        let patch_sha256 = format!("{:x}", sha2::Sha256::digest(patch));
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
+        aggregate.totals.succeeded = 0;
+        aggregate.totals.candidate_recoverable = 1;
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "recoverable.patch".to_string(),
+            kind: "patch".to_string(),
+            url: Some(
+                "homeboy://agent-task/run/agent-task-disconnected-child/artifacts#task=task-a&artifact=recoverable.patch"
+                    .to_string(),
+            ),
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(patch_sha256.clone()),
+            metadata: json!({ "executor_artifact_finalized": true }),
+            ..Default::default()
+        });
+        aggregate.events[0].state = AgentTaskState::CandidateRecoverable;
+        let snapshot = terminal_child_snapshot(&aggregate);
         store::interrupt_after_terminal_commit_for_test();
 
         reconcile_runner_job_snapshot(&mut record, &snapshot)
@@ -3907,8 +4264,25 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             store::read_record("agent-task-disconnected-child")
                 .expect("committed controller projection")
                 .state,
-            AgentTaskRunState::Succeeded
+            AgentTaskRunState::CandidateRecoverable
         );
+        assert!(
+            !store::aggregate_path(&record.run_id)
+                .expect("aggregate path")
+                .exists(),
+            "the injected fault must run before aggregate.json is cached"
+        );
+        let durable = durable_local_read(&record.run_id).expect("committed durable pair");
+        let durable_aggregate = durable.aggregate.expect("mirrored aggregate");
+        assert_eq!(
+            durable_aggregate.status,
+            AgentTaskAggregateStatus::CandidateRecoverable
+        );
+        let durable_patch = &durable_aggregate.outcomes[0].artifacts[0];
+        assert_eq!(durable_patch.id, "recoverable.patch");
+        assert_eq!(durable_patch.size_bytes, Some(patch.len() as u64));
+        assert_eq!(durable_patch.sha256.as_deref(), Some(patch_sha256.as_str()));
+        assert!(durable.unavailable_sources.is_empty());
         let (status_record, log, artifacts) = std::thread::scope(|scope| {
             let status_reader = scope.spawn(|| reconcile_status("agent-task-disconnected-child"));
             let log_reader = scope.spawn(|| logs("agent-task-disconnected-child"));
@@ -3928,15 +4302,69 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
                     .expect("committed artifacts"),
             )
         });
-        assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].data["state"], "succeeded");
-        assert!(artifacts.artifacts.is_empty());
+        assert_eq!(status_record.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(log.events[0].data["state"], "candidate_recoverable");
+        assert_eq!(artifacts.artifacts[0].id, "recoverable.patch");
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
-        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
         assert!(store::aggregate_path(&record.run_id)
             .expect("aggregate path")
             .exists());
+    });
+}
+
+#[test]
+fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-stale-terminal-cache",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let committed_aggregate = succeeded_aggregate(&test_plan());
+        let mut stale_aggregate = committed_aggregate.clone();
+        stale_aggregate.outcomes[0].summary = Some("stale aggregate cache".to_string());
+        store::interrupt_after_terminal_commit_for_test();
+        let mut snapshot = terminal_child_snapshot(&committed_aggregate);
+        snapshot.events[0].data.as_mut().expect("lifecycle event")["identity"]
+            ["persisted_run_id"] = json!(record.run_id);
+        snapshot.events[0].data.as_mut().expect("lifecycle event")["identity"]["run_id"] =
+            json!(record.run_id);
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot)
+            .expect_err("interruption precedes aggregate cache publication");
+        store::write_aggregate(&record.run_id, &stale_aggregate)
+            .expect("replace the missing cache with stale bytes");
+
+        assert_eq!(
+            store::read_aggregate_bounded(&record.run_id)
+                .expect("stale cache remains readable")
+                .outcomes[0]
+                .summary
+                .as_deref(),
+            Some("stale aggregate cache")
+        );
+        let durable = durable_local_read(&record.run_id).expect("committed durable pair");
+        assert_eq!(durable.record.state, AgentTaskRunState::Succeeded);
+        let aggregate = durable.aggregate.expect("mirrored aggregate");
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
+        assert_eq!(
+            AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store")
+                .read_aggregate_readonly(&record.run_id)
+                .expect("read-only admission follows SQLite")
+                .outcomes[0]
+                .summary
+                .as_deref(),
+            Some("ok")
+        );
+        assert!(durable.unavailable_sources.is_empty());
     });
 }
 
@@ -4106,6 +4534,40 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
         .expect("artifact projections");
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].artifact_type, "file");
+    let writable = lifecycle_store
+        .open_observation_maintained()
+        .expect("writable observation store");
+    let mut legacy_metadata = artifacts[0].metadata_json.clone();
+    legacy_metadata["agent_task"]
+        .as_object_mut()
+        .expect("agent-task metadata")
+        .remove("projection");
+    writable
+        .update_artifact_metadata(&artifacts[0].id, legacy_metadata)
+        .expect("seed legacy projection metadata");
+    drop(writable);
+    let projected_readonly = verified_controller_artifact_projection_path_in_store(
+        &lifecycle_store
+            .open_observation_readonly()
+            .expect("read-only store"),
+        run_id,
+        &aggregate.outcomes[0].task_id,
+        &aggregate.outcomes[0].artifacts[0],
+    )
+    .expect("legacy projection remains admissible read-only");
+    assert_eq!(
+        projected_readonly,
+        Some(std::path::PathBuf::from(&artifacts[0].path))
+    );
+    let after_readonly = lifecycle_store
+        .open_observation_maintained()
+        .expect("inspect legacy metadata")
+        .list_artifacts(run_id)
+        .expect("artifact projections");
+    assert!(after_readonly[0]
+        .metadata_json
+        .pointer("/agent_task/projection")
+        .is_none());
     let projected = verified_controller_artifact_projection_path_in_store(
         &lifecycle_store
             .open_observation_maintained()

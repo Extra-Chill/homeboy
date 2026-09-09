@@ -1,4 +1,6 @@
 use super::*;
+use crate::commands::runner::controller_ancestry::{commits_are_ancestral, CommitAncestry};
+use std::collections::BTreeSet;
 use types::{RunnerCheck, RunnerDoctorStatus, RunnerRepairAction, ToolProbe};
 
 pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
@@ -7,6 +9,20 @@ pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck
             spec.check_id,
             format!("{} is available", spec.command),
             None,
+        )
+    } else if probe.probe_failed {
+        // The lookup never reached a verdict, so neither "found" nor "missing"
+        // is a truthful message. Report the probe failure and hand the operator
+        // the reason instead of a remediation for a tool that may be installed.
+        error(
+            spec.check_id,
+            format!(
+                "{} could not be probed: {}",
+                spec.command,
+                probe_reason(probe)
+            ),
+            Some(PROBE_FAILURE_REMEDIATION.to_string()),
+            probe_details(probe),
         )
     } else if spec.required {
         error(
@@ -24,6 +40,24 @@ pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck
     }
 }
 
+pub(crate) const PROBE_FAILURE_REMEDIATION: &str =
+    "The tool lookup itself failed, so the tool may well be installed. Fix the reported environment or shell error, then re-run doctor.";
+
+fn probe_reason(probe: &ToolProbe) -> &str {
+    probe
+        .error
+        .as_deref()
+        .unwrap_or("the tool lookup failed without a reason")
+}
+
+fn probe_details(probe: &ToolProbe) -> BTreeMap<String, String> {
+    let mut details = BTreeMap::new();
+    if let Some(error) = &probe.error {
+        details.insert("probe_error".to_string(), error.clone());
+    }
+    details
+}
+
 pub(crate) fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerCheck {
     let mut details = BTreeMap::new();
     details.insert("command".to_string(), command.to_string());
@@ -35,6 +69,17 @@ pub(crate) fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerChe
         ok_with_details(
             format!("tool.required.{command}"),
             format!("Required runner tool {command} is available"),
+            details,
+        )
+    } else if probe.probe_failed {
+        details.extend(probe_details(probe));
+        error(
+            format!("tool.required.{command}"),
+            format!(
+                "Required runner tool {command} could not be probed: {}",
+                probe_reason(probe)
+            ),
+            Some(PROBE_FAILURE_REMEDIATION.to_string()),
             details,
         )
     } else {
@@ -132,6 +177,24 @@ pub(crate) fn homeboy_version_skew_check(
     runner_id: &str,
     server_id: &str,
 ) -> Option<RunnerCheck> {
+    homeboy_version_skew_check_with(
+        local_version,
+        local_build_identity,
+        remote_build_identity,
+        runner_id,
+        server_id,
+        commits_are_ancestral,
+    )
+}
+
+pub(super) fn homeboy_version_skew_check_with(
+    local_version: &str,
+    local_build_identity: &str,
+    remote_build_identity: &str,
+    runner_id: &str,
+    server_id: &str,
+    mut ancestry: impl FnMut(&str, &str) -> CommitAncestry,
+) -> Option<RunnerCheck> {
     let local_version = local_version.trim();
     let local_build_identity = normalize_homeboy_build_identity(local_build_identity);
     let remote_build_identity = normalize_homeboy_build_identity(remote_build_identity);
@@ -154,30 +217,70 @@ pub(crate) fn homeboy_version_skew_check(
         "remote_version".to_string(),
         remote_build_identity.to_string(),
     );
-    let quoted_runner_id = shell::quote_arg(runner_id);
-    let refresh_ref = homeboy_product_identity::build_identity()
-        .git_commit
-        .unwrap_or_else(|| format!("v{local_version}"));
-    Some(
-        warning_with_details(
-            "homeboy.version_skew",
-            format!(
-                "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
-            ),
-            Some(format!(
-                "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
-            )),
-            details,
-        )
-        // Every argument in the sentence above is already known here. Carrying
-        // it typed as well is the difference between a fix a person retypes and
-        // one a repair loop can run: `refresh_ref` is the same value in both,
-        // pinned by `version_skew_action_and_prose_carry_the_same_ref`.
-        .with_action(RunnerRepairAction::RefreshHomeboy {
-            git_ref: Some(refresh_ref.clone()),
-            allow_downgrade: false,
-        }),
-    )
+    let controller_commit = build_identity_commit(local_build_identity);
+    let runner_commit = build_identity_commit(remote_build_identity);
+    let message = format!(
+        "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
+    );
+    match (controller_commit, runner_commit) {
+        (Some(controller), Some(runner))
+            if ancestry(controller, runner) == CommitAncestry::Ancestor =>
+        {
+            details.insert("direction".to_string(), "runner_ahead".to_string());
+            Some(warning_with_details(
+                "homeboy.version_skew",
+                message,
+                Some(format!(
+                    "Runner `{runner_id}` is ahead of this controller. Upgrade the controller, then rerun `homeboy runner doctor {runner_id}`; alternatively select a common newer published or source revision. Do not refresh the runner to the older controller revision. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
+                )),
+                details,
+            ))
+        }
+        (Some(controller), Some(runner))
+            if ancestry(runner, controller) == CommitAncestry::Ancestor =>
+        {
+            details.insert("direction".to_string(), "controller_ahead".to_string());
+            let quoted_runner_id = shell::quote_arg(runner_id);
+            let refresh_ref = homeboy_product_identity::build_identity()
+                .git_commit
+                .unwrap_or_else(|| format!("v{local_version}"));
+            Some(
+                warning_with_details(
+                    "homeboy.version_skew",
+                    message,
+                    Some(format!(
+                        "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
+                    )),
+                    details,
+                )
+                .with_action(RunnerRepairAction::RefreshHomeboy {
+                    git_ref: Some(refresh_ref),
+                    allow_downgrade: false,
+                }),
+            )
+        }
+        _ => {
+            details.insert(
+                "direction".to_string(),
+                "diverged_or_unverified".to_string(),
+            );
+            Some(warning_with_details(
+                "homeboy.version_skew",
+                message,
+                Some(format!(
+                    "Controller and runner commits are divergent or cannot be compared. Select a common published or source revision before refreshing runner `{runner_id}`; use `--allow-downgrade` only for an intentional rollback authorized by an operator. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
+                )),
+                details,
+            ))
+        }
+    }
+}
+
+fn build_identity_commit(identity: &str) -> Option<&str> {
+    let commit = identity.rsplit_once('+')?.1;
+    let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
+    (commit.len() >= 7 && commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(commit)
 }
 
 fn normalize_homeboy_build_identity(identity: &str) -> &str {
@@ -259,8 +362,8 @@ pub(crate) fn lab_offload_status(
     checks: &[RunnerCheck],
     eligible_provider_ids: &[String],
 ) -> (RunnerDoctorStatus, types::RunnerDoctorProviderReadiness) {
-    let mut ready_for = eligible_provider_ids.to_vec();
-    let mut blocked_for = Vec::new();
+    let mut live_auth_ready = BTreeSet::new();
+    let mut blocked = BTreeSet::new();
     let mut has_runner_error = false;
     let mut has_warning = false;
 
@@ -269,6 +372,15 @@ pub(crate) fn lab_offload_status(
             has_warning = true;
         }
         if check.status != RunnerDoctorStatus::Error {
+            if check.status == RunnerDoctorStatus::Ok
+                && check.details.get("readiness_scope").map(String::as_str) == Some("live_auth")
+                && check
+                    .details
+                    .get("provider_id")
+                    .is_some_and(|provider_id| eligible_provider_ids.contains(provider_id))
+            {
+                live_auth_ready.insert(check.details["provider_id"].clone());
+            }
             continue;
         }
         let Some(provider_id) = check.details.get("provider_id") else {
@@ -276,17 +388,38 @@ pub(crate) fn lab_offload_status(
             continue;
         };
         if eligible_provider_ids.iter().any(|id| id == provider_id) {
-            ready_for.retain(|id| id != provider_id);
-            if !blocked_for.contains(provider_id) {
-                blocked_for.push(provider_id.clone());
-            }
+            blocked.insert(provider_id.clone());
         }
     }
 
-    let status = if has_runner_error || (!eligible_provider_ids.is_empty() && ready_for.is_empty())
-    {
+    if has_runner_error {
+        blocked.extend(eligible_provider_ids.iter().cloned());
+    }
+
+    // A failed substrate or auth observation always dominates a successful
+    // probe, including when independently bounded probes complete out of order.
+    let ready_for = eligible_provider_ids
+        .iter()
+        .filter(|id| live_auth_ready.contains(*id) && !blocked.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocked_for = eligible_provider_ids
+        .iter()
+        .filter(|id| blocked.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unverified_for = eligible_provider_ids
+        .iter()
+        .filter(|id| !live_auth_ready.contains(*id) && !blocked.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unverified_remediation = (!unverified_for.is_empty()).then(|| {
+        "Provider authentication is unverified because runner doctor cannot select a model. Run the selected task's normal preflight; doctor never changes credentials.".to_string()
+    });
+
+    let status = if has_runner_error || (!blocked_for.is_empty() && ready_for.is_empty()) {
         RunnerDoctorStatus::Error
-    } else if has_warning {
+    } else if has_warning || !unverified_for.is_empty() {
         RunnerDoctorStatus::Warning
     } else {
         RunnerDoctorStatus::Ok
@@ -296,6 +429,8 @@ pub(crate) fn lab_offload_status(
         types::RunnerDoctorProviderReadiness {
             ready_for,
             blocked_for,
+            unverified_for,
+            unverified_remediation,
         },
     )
 }

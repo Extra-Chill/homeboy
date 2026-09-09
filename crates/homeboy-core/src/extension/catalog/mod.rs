@@ -1,8 +1,8 @@
 use crate::config;
 use crate::error::{Error, ErrorCode, Result};
+use crate::extension::root_manifest::ExtensionRootManifest;
 use crate::output::MergeOutput;
 use crate::paths;
-use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -12,13 +12,9 @@ use homeboy_extension_contract::ExtensionManifest;
 mod api;
 mod manifest;
 
-pub use api::{
-    api_descriptor, list_api, negotiate_api, readiness_api, readiness_api_batch, resolve_api,
-};
-pub use manifest::{
-    deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
-    structured_sidecars,
-};
+pub use api::{capability_provider_ids, list_api, readiness_api_batch};
+pub(crate) use api::{resolve_api, snapshot_api, validate_operation_request};
+pub use manifest::{structured_sidecar_schema_version, structured_sidecars};
 
 pub const EXTENSION_RELINK_ACTION_ID: &str = "extension.relink";
 pub const EXTENSION_UNINSTALL_ACTION_ID: &str = "extension.uninstall";
@@ -87,6 +83,15 @@ pub fn load_extension_in_root(config_root: &Path, id: &str) -> Result<ExtensionM
 /// root once and delegates.
 pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
     load_extension_in_root(&paths::homeboy()?, id)
+}
+
+/// Load one extension manifest from an already-resolved extension directory.
+pub fn load_extension_from_dir(extension_dir: &Path) -> Result<ExtensionManifest> {
+    let id = extension_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::internal_io("Extension path has no file name".to_string(), None))?;
+    load_extension_at(id, extension_dir).map_err(|failure| manifest_failure_error(&failure))
 }
 
 /// Load a manifest from an injected config root when one is supplied, and from
@@ -176,27 +181,6 @@ fn discover_extensions_at(extensions_dir: &Path) -> Vec<DiscoveredExtension> {
     extensions
         .sort_by(|left, right| discovered_extension_id(left).cmp(discovered_extension_id(right)));
     extensions
-}
-
-#[derive(Deserialize)]
-struct ExtensionRootManifest {
-    #[serde(default)]
-    shared_assets: Vec<SharedAssetDeclaration>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SharedAssetDeclaration {
-    Path(String),
-    Object { path: String },
-}
-
-impl SharedAssetDeclaration {
-    fn path(self) -> String {
-        match self {
-            Self::Path(path) | Self::Object { path } => path,
-        }
-    }
 }
 
 /// Shared assets live beside installed extensions but are declared by a source
@@ -488,6 +472,35 @@ mod tests {
     fn test_load_extension() {
         crate::test_support::with_isolated_home(|_| {
             assert!(load_extension("missing-extension").is_err());
+        });
+    }
+
+    #[test]
+    fn explicit_directory_loading_is_canonical_and_path_authoritative() {
+        crate::test_support::with_isolated_home(|home| {
+            let ambient_dir = home.path().join(".config/homeboy/extensions/fixture");
+            std::fs::create_dir_all(&ambient_dir).unwrap();
+            std::fs::write(
+                ambient_dir.join("fixture.json"),
+                r#"{"name":"Ambient","version":"1.0.0"}"#,
+            )
+            .unwrap();
+
+            let explicit_root = tempfile::TempDir::new().unwrap();
+            let explicit_dir = explicit_root.path().join("fixture");
+            std::fs::create_dir_all(&explicit_dir).unwrap();
+            let manifest_path = explicit_dir.join("fixture.json");
+            std::fs::write(&manifest_path, r#"{"name":"Explicit","version":"2.0.0"}"#).unwrap();
+
+            let manifest = load_extension_from_dir(&explicit_dir).unwrap();
+            assert_eq!(manifest.id, "fixture");
+            assert_eq!(manifest.name, "Explicit");
+            assert_eq!(manifest.version, "2.0.0");
+            assert_eq!(manifest.extension_path.as_deref(), explicit_dir.to_str());
+
+            std::fs::write(&manifest_path, "{not json").unwrap();
+            let error = load_extension_from_dir(&explicit_dir).unwrap_err();
+            assert_eq!(error.details["category"], "manifest_json_malformed");
         });
     }
 

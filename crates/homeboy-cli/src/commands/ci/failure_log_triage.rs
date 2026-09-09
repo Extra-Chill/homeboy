@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use super::external_check_detail_resolver::{
-    has_unique_resolver, hydrate, normalize_target_url, skipped_for_budget, HydratedDetail,
-    ResolverDiagnostic, MAX_RESOLVERS, TOTAL_BUDGET,
+    normalize_target_url, skipped_for_budget, HydratedDetail, ResolverDiagnostic, ResolverSession,
+    MAX_RESOLVERS, TOTAL_BUDGET,
 };
 use homeboy::core::error::{Error, Result};
 use homeboy::core::git::GhClient;
@@ -181,8 +181,9 @@ mod engine {
         let runs = fetch_runs_for_head(&gh, &pr.head_sha)?;
         // One fixed deadline is shared by every resolver invocation in this triage.
         let resolver_deadline = Instant::now() + TOTAL_BUDGET;
+        let resolver_session = ResolverSession::discover();
         let (external_checks, api_degradations) =
-            fetch_external_checks(&gh, &pr.head_sha, resolver_deadline);
+            fetch_external_checks(&gh, &pr.head_sha, &resolver_session, resolver_deadline);
 
         let failed_runs: Vec<GhWorkflowRun> = runs.into_iter().filter(is_failed_run).collect();
         let total_failed_runs = failed_runs.len();
@@ -398,6 +399,7 @@ mod engine {
     pub(crate) fn fetch_external_checks(
         gh: &GhClient,
         head_sha: &str,
+        resolver_session: &ResolverSession,
         resolver_deadline: Instant,
     ) -> (Vec<CiExternalCheckSummary>, Vec<CiApiDegradation>) {
         let Ok(repo) = gh.repo_path() else {
@@ -434,6 +436,7 @@ mod engine {
                             continue;
                         }
                         checks.push(hydrate_external(
+                            resolver_session,
                             status.context,
                             status.state.unwrap_or_default(),
                             status.description,
@@ -481,6 +484,7 @@ mod engine {
                             continue;
                         }
                         checks.push(hydrate_external(
+                            resolver_session,
                             check.name,
                             check.conclusion.unwrap_or_default(),
                             None,
@@ -511,6 +515,7 @@ mod engine {
     }
 
     pub(crate) fn hydrate_external(
+        resolver_session: &ResolverSession,
         provider: String,
         status: String,
         description: Option<String>,
@@ -519,17 +524,18 @@ mod engine {
         resolver_deadline: Instant,
     ) -> CiExternalCheckSummary {
         let target_url = target_url.map(|url| normalize_target_url(&url));
-        let (details, resolver_diagnostics) =
-            if has_unique_resolver(&provider) && *resolver_slots == 0 {
-                (Vec::new(), vec![skipped_for_budget(&provider)])
-            } else {
-                // Unknown and ambiguous providers are diagnostic-only and never
-                // consume a bounded resolver invocation slot.
-                if has_unique_resolver(&provider) {
-                    *resolver_slots -= 1;
-                }
-                hydrate(&provider, &status, target_url.as_deref(), resolver_deadline)
-            };
+        let (details, resolver_diagnostics) = if resolver_session.has_unique_provider(&provider)
+            && *resolver_slots == 0
+        {
+            (Vec::new(), vec![skipped_for_budget(&provider)])
+        } else {
+            // Unknown and ambiguous providers are diagnostic-only and never
+            // consume a bounded resolver invocation slot.
+            if resolver_session.has_unique_provider(&provider) {
+                *resolver_slots -= 1;
+            }
+            resolver_session.hydrate(&provider, &status, target_url.as_deref(), resolver_deadline)
+        };
         CiExternalCheckSummary {
             provider,
             status: homeboy::core::redaction::RedactionPolicy::default()
@@ -1203,7 +1209,9 @@ mod tests {
 
     #[test]
     fn legacy_status_keeps_failure_state_when_description_is_missing_or_redacted() {
+        let resolver_session = ResolverSession::discover();
         let empty = hydrate_external(
+            &resolver_session,
             "example-ci".into(),
             "failure".into(),
             None,
@@ -1215,6 +1223,7 @@ mod tests {
         assert_eq!(empty.description, None);
 
         let described = hydrate_external(
+            &resolver_session,
             "example-ci".into(),
             "error".into(),
             Some("see https://user:token@example.test/job?token=secret".into()),

@@ -805,6 +805,7 @@ pub(crate) fn dev_extension_lifecycle(
             shell_arg(extension_id)
         )),
         status: ResourceLifecycleResourceStatus::Active,
+        migration_provenance: None,
     }
 }
 
@@ -827,6 +828,7 @@ fn installed_extension_lifecycle(
         cleanup_intent: Default::default(),
         cleanup_command: None,
         status: ResourceLifecycleResourceStatus::Retained,
+        migration_provenance: None,
     }
 }
 
@@ -898,6 +900,7 @@ fn shell_arg(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::Runner;
+    use homeboy_core::extension::registry::ExtensionLifecycleValidation;
     use std::sync::{Arc, Barrier};
 
     fn runner() -> Runner {
@@ -1278,6 +1281,7 @@ mod tests {
             homeboy_core::extension::lifecycle::install(
                 &nodejs.display().to_string(),
                 Some("nodejs"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked nodejs extension");
 

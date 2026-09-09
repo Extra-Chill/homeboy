@@ -22,6 +22,23 @@ pub(super) struct MirroredJobEvidence {
     pub(super) artifacts: Vec<JobArtifactMetadata>,
 }
 
+/// The controller either observed a terminal remote command or intentionally
+/// detached after persisting its accepted in-flight job. This boundary prevents
+/// a local wait expiry from being represented as a remote command failure.
+pub(super) enum RunnerExecCompletion {
+    Terminal(RunnerExecOutput, i32),
+    InFlight(RunnerExecOutput),
+}
+
+impl RunnerExecCompletion {
+    pub(super) fn into_output(self) -> (RunnerExecOutput, i32) {
+        match self {
+            Self::Terminal(output, exit_code) => (output, exit_code),
+            Self::InFlight(output) => (output, 0),
+        }
+    }
+}
+
 pub(super) struct SubmittedRunnerJobFlow<'a> {
     pub(super) runner: &'a Runner,
     pub(super) mode: RunnerExecMode,
@@ -66,7 +83,7 @@ pub(super) fn complete_submitted_runner_job<
     mirror: Mirror,
     mut after_events: AfterEvents,
     mut finalize: Finalize,
-) -> Result<(RunnerExecOutput, i32)>
+) -> Result<RunnerExecCompletion>
 where
     Accepted: FnMut(&Job) -> Result<()>,
     AfterHandoff: FnMut(&Job) -> Result<()>,
@@ -145,7 +162,7 @@ where
     )?;
     after_handoff(&job)?;
     if flow.detach_after_handoff {
-        return Ok(detached_handoff_output(
+        let (output, _) = detached_handoff_output(
             flow.runner,
             flow.mode,
             flow.cwd,
@@ -156,14 +173,19 @@ where
             flow.require_paths,
             flow.run_id,
             persisted_run_id,
-        ));
+        );
+        return Ok(RunnerExecCompletion::InFlight(output));
     }
 
-    let deadline = Instant::now() + runner_exec_wait_timeout();
+    let deadline = Instant::now() + runner_exec_wait_timeout(&flow.runner.settings);
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
         if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
-            observed_agent_task_terminal_job_status(run_id, flow.run_id_owns_generic_exec)
+            observed_agent_task_terminal_job_status(
+                run_id,
+                flow.run_id_owns_generic_exec,
+                flow.handoff_endpoint,
+            )
         }) {
             // The agent-task lifecycle owns provider terminality. A stale runner
             // job projection must not hold Cook in dispatch after its aggregate
@@ -184,15 +206,49 @@ where
                 &events,
                 &mut reported_progress_sequence,
             );
-            return Err(daemon_job_wait_timeout(
+            let cancellation = attempt_wait_timeout_cancel(
+                &flow.runner.id,
+                &job_id,
+                cancel_on_wait_timeout_enabled(
+                    &flow.runner.settings,
+                    flow.lab_runner_workload.as_ref(),
+                ),
+            );
+            if let WaitTimeoutCancelOutcome::Cancelled(cancelled_job) = &cancellation {
+                if cancelled_job.status.is_terminal() {
+                    // Cancellation returns the daemon's authoritative snapshot.
+                    // Project terminal work through the normal lifecycle instead
+                    // of claiming a cancelled remote command still runs.
+                    job = cancelled_job.clone();
+                    continue;
+                }
+            }
+            let (mut output, _) = detached_handoff_output(
                 flow.runner,
-                &flow.cwd,
-                &flow.command,
-                &job,
-                &events,
-                flow.timeout_label,
-                true,
-            ));
+                flow.mode,
+                flow.cwd,
+                flow.command,
+                flow.source_snapshot,
+                job,
+                flow.path_materialization_plan,
+                flow.require_paths,
+                flow.run_id,
+                persisted_run_id,
+            );
+            let cancellation_message = match cancellation {
+                WaitTimeoutCancelOutcome::Disabled => "remote job remains in flight".to_string(),
+                WaitTimeoutCancelOutcome::Cancelled(_) => {
+                    "remote cancellation was requested".to_string()
+                }
+                WaitTimeoutCancelOutcome::Failed(reason) => {
+                    format!("remote cancellation was requested but failed: {reason}")
+                }
+            };
+            output.stderr = format!(
+                "{} {job_id} on runner {} is still in flight after the controller wait timeout; {cancellation_message}. Remote command outcome is not known.\n",
+                flow.timeout_label, flow.runner.id
+            );
+            return Ok(RunnerExecCompletion::InFlight(output));
         }
         std::thread::sleep(Duration::from_millis(200));
         job = poll(&job)?;
@@ -211,6 +267,7 @@ where
     let mut job_events = events(&job).map(|events| {
         redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names)
     })?;
+    append_cancelled_result_if_absent(&job, &mut job_events);
     record_and_report_promotion_progress_frames(
         flow.run_id.as_deref(),
         &job_id,
@@ -281,8 +338,11 @@ where
         flow.run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
+    // A detached handoff wrapper is only the transport owner. Once the
+    // runner has mirrored the terminal result, that nested run owns the
+    // operator-visible outcome and its notification.
     fire_runner_direct_notification(
-        flow.run_id.as_deref(),
+        terminal_notification_run_id(mirror_run_id.as_deref(), flow.run_id.as_deref()),
         &job,
         flow.lab_runner_workload
             .as_ref()
@@ -391,17 +451,39 @@ where
     {
         append_runner_exec_diagnostic_hint(&mut output, Some(hint.to_string()));
     }
-    Ok((output, exit_code))
+    Ok(RunnerExecCompletion::Terminal(output, exit_code))
+}
+
+pub(super) fn terminal_notification_run_id<'a>(
+    mirrored_run_id: Option<&'a str>,
+    wrapper_run_id: Option<&'a str>,
+) -> Option<&'a str> {
+    mirrored_run_id
+        .filter(|run_id| !run_id.trim().is_empty())
+        .or(wrapper_run_id)
 }
 
 fn observed_agent_task_terminal_job_status(
     run_id: &str,
     run_id_owns_generic_exec: bool,
+    control_plane_endpoint: Option<&str>,
 ) -> Option<JobStatus> {
     if run_id_owns_generic_exec {
         return None;
     }
     let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
+    if let Some(endpoint) = control_plane_endpoint {
+        if let Ok(client) = homeboy_control_plane_client::ControlPlaneClient::new_local(
+            endpoint,
+            Duration::from_secs(2),
+        ) {
+            if let Ok(run) = client.run(&run_id) {
+                if let Some(status) = control_plane_terminal_job_status(run.state) {
+                    return Some(status);
+                }
+            }
+        }
+    }
     let store =
         homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
             .ok()?;
@@ -420,12 +502,14 @@ fn control_plane_terminal_job_status(
     match state {
         ControlPlaneRunState::Succeeded
         | ControlPlaneRunState::CandidateRecoverable
-        | ControlPlaneRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        | ControlPlaneRunState::PartialRecoverable
+        | ControlPlaneRunState::Skipped => Some(JobStatus::Succeeded),
         ControlPlaneRunState::PartialFailure
         | ControlPlaneRunState::Failed
         | ControlPlaneRunState::TimedOut => Some(JobStatus::Failed),
         ControlPlaneRunState::Cancelled => Some(JobStatus::Cancelled),
         ControlPlaneRunState::Queued
+        | ControlPlaneRunState::Blocked
         | ControlPlaneRunState::Running
         | ControlPlaneRunState::Stale
         | ControlPlaneRunState::Unknown => None,
@@ -443,6 +527,7 @@ mod tests {
             ControlPlaneRunState::Succeeded,
             ControlPlaneRunState::CandidateRecoverable,
             ControlPlaneRunState::PartialRecoverable,
+            ControlPlaneRunState::Skipped,
         ] {
             assert_eq!(
                 control_plane_terminal_job_status(state),
@@ -465,6 +550,7 @@ mod tests {
         );
         for state in [
             ControlPlaneRunState::Queued,
+            ControlPlaneRunState::Blocked,
             ControlPlaneRunState::Running,
             ControlPlaneRunState::Stale,
             ControlPlaneRunState::Unknown,

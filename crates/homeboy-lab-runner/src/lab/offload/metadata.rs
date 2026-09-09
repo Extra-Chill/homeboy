@@ -105,6 +105,66 @@ pub(crate) fn capability_admission_has_blocking_drift(
             && admission.provenance.ancestry != LabRuntimeAncestry::ExactSource)
 }
 
+/// Reject a direct Lab handoff for the capability evidence actually observed.
+/// This is intentionally distinct from stale_runner_homeboy_error: matching
+/// daemon and command identities do not prove the required capabilities exist.
+pub(crate) fn capability_admission_error(
+    runner_id: &str,
+    admission: &LabCapabilityAdmission,
+    require_exact_runner_version: bool,
+) -> Error {
+    debug_assert!(capability_admission_has_blocking_drift(
+        admission,
+        require_exact_runner_version
+    ));
+    let ancestry = admission.provenance.ancestry;
+    let (cause_class, cause, remediation) = if !admission.compatible {
+        (
+            "capability_incompatible",
+            admission
+                .provenance
+                .rejection_reason
+                .as_deref()
+                .unwrap_or("the runner did not provide a capability rejection reason"),
+            "Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
+        )
+    } else {
+        (
+            if ancestry == LabRuntimeAncestry::Unknown {
+                "strict_ancestry_unknown"
+            } else {
+                "strict_ancestry_not_exact"
+            },
+            "strict identity fencing requires exact-source ancestry",
+            "Reconnect the runner to collect exact source provenance, then retry.",
+        )
+    };
+    let message = if !admission.compatible {
+        format!(
+            "Lab offload refused runner `{runner_id}` because its capability admission is incompatible: {cause}. {remediation}"
+        )
+    } else {
+        format!(
+            "Lab offload refused runner `{runner_id}` because {cause}, but admission reported {ancestry:?}. {remediation}"
+        )
+    };
+
+    Error::new(
+        ErrorCode::RunnerCapabilityMissing,
+        message,
+        serde_json::json!({
+            "runner_id": runner_id,
+            "admission_cause_class": cause_class,
+            "rejection_reason": admission.provenance.rejection_reason,
+            "ancestry": ancestry,
+            "require_exact_runner_version": require_exact_runner_version,
+            "capability_admission": admission,
+            "remediation": remediation,
+        }),
+    )
+    .with_hint(remediation)
+}
+
 pub(super) fn hash_bound_runner_command_evidence(
     status: &RunnerStatusReport,
     homeboy: &str,
@@ -766,6 +826,7 @@ pub(crate) fn lab_materialization_proof_metadata(
 /// legacy dispatch metadata, while the synced workspace binds verification.
 pub(crate) struct LabWorkspaceMetadataInputs<'a> {
     pub(crate) source_snapshot: &'a SourceSnapshot,
+    pub(crate) workspace_snapshots: &'a [SourceSnapshot],
     pub(crate) legacy_path_materialization_plan: &'a PathMaterializationPlan,
     pub(crate) primary_synced_workspace: &'a RunnerWorkspaceSyncOutput,
 }
@@ -812,6 +873,40 @@ pub(crate) fn attach_lab_workspace_metadata(
         "sync_excludes": source_snapshot.sync_excludes,
         "source_snapshot": source_snapshot,
         "primary_workspace": primary_workspace_plan,
+    });
+    lab_metadata["workspace_provenance"] = serde_json::json!({
+        "schema": "homeboy/lab-workspace-provenance/v1",
+        "entries": inputs.workspace_snapshots.iter().map(|snapshot| {
+            let source_path = Path::new(snapshot.local_path.as_deref().unwrap_or_default());
+            let content_hash = crate::workspace_content_hash(source_path, &snapshot.sync_excludes)?;
+            let content_manifest = crate::workspace_content_manifest_for_policy(
+                source_path,
+                &snapshot.sync_excludes,
+                permission_policy,
+            )?;
+            Ok(serde_json::json!({
+                "remote_path": snapshot.remote_path,
+                "materialization_mode": inputs.legacy_path_materialization_plan.entries.iter()
+                    .find(|entry| entry.remote_path == snapshot.remote_path.as_deref().unwrap_or_default())
+                    .map(|entry| entry.materialization_mode.as_str())
+                    .ok_or_else(|| Error::internal_unexpected("workspace provenance snapshot has no materialization plan entry"))?,
+                "source_snapshot": snapshot,
+                "workspace_verification": {
+                    "schema": "homeboy/lab-workspace-verification/v2",
+                    "identity": snapshot.workspace_snapshot_identity,
+                    "content_hash_algorithm": content_hash_algorithm,
+                    "permission_policy": permission_policy,
+                    "content_hash": content_hash,
+                    "content_manifest": content_manifest,
+                    "sync_excludes": snapshot.sync_excludes,
+                    "source_snapshot": snapshot,
+                    "primary_workspace": {
+                        "identity": snapshot.workspace_snapshot_identity,
+                        "remote_path": snapshot.remote_path,
+                    },
+                },
+            }))
+        }).collect::<Result<Vec<_>>>()?,
     });
     Ok(())
 }

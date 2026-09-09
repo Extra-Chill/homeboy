@@ -88,13 +88,15 @@ impl LabWorkspaceHydrationOutput {
 }
 
 /// Detect dependency providers for the controller-side workspace and run each
-/// provider's install command in the materialized runner workspace root.
+/// provider's install command in the corresponding materialized runner
+/// subdirectory.
 ///
 /// Detection runs against `local_path` (the controller-side source checkout):
 /// the manifest/lockfile files are part of the synced snapshot, so they expose
 /// the same providers the materialized runner workspace does. Execution runs via
-/// the existing runner `exec` path at `remote_path` (the materialized workspace
-/// root), the same primitive source-CLI dependency bootstrap uses, so
+/// the existing runner `exec` path at the provider root below `remote_path`
+/// (the materialized workspace root), the same primitive source-CLI dependency
+/// bootstrap uses, so
 /// the install is recorded as a runner job visible in `runner job logs`.
 ///
 /// A non-zero install exit fails the job before the executor starts with an
@@ -168,6 +170,8 @@ fn hydrate_lab_workspace_dependencies_with_policy(
     offline_only: bool,
 ) -> Result<LabWorkspaceHydrationOutput> {
     let plan = deps::dependency_install_plan(std::path::Path::new(local_path))?;
+    let local_workspace_root =
+        deps::dependency_install_workspace_root(std::path::Path::new(local_path))?;
     if plan.is_empty() {
         return Ok(LabWorkspaceHydrationOutput::skipped_no_provider(
             remote_path,
@@ -189,7 +193,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         // it does not use.
         if let Some(package) = super::dependency_package::prepare_in_roots(
             homeboy_core::paths::PathRoots::from_environment()?.data(),
-            std::path::Path::new(local_path),
+            &local_workspace_root,
             &plan,
         )? {
             restore_controller_dependency_package(runner_id, remote_path, &package, &plan)?;
@@ -219,8 +223,9 @@ fn hydrate_lab_workspace_dependencies_with_policy(
     for (index, plan_step) in plan.iter().enumerate() {
         let command = runner_hydration_command(&plan_step.invocation)?;
         let started = std::time::Instant::now();
+        let component_root = dependency_root(remote_path, plan_step)?;
         let options =
-            hydration_runner_exec_options(command.clone(), remote_path, parent_run_id, index);
+            hydration_runner_exec_options(command.clone(), &component_root, parent_run_id, index);
         let (output, exit_code) = exec(
             runner_id,
             // The install command is provider-built shell argv, not a
@@ -309,7 +314,7 @@ fn restore_controller_dependency_package_with_transfer(
     );
     let archive = format!("{cache_dir}/package.zip");
     transfer_package(&runner, &cache_dir, &archive)?;
-    let output_checks = declared_output_checks(remote_path, plan).join(" && ");
+    let output_checks = declared_output_checks(remote_path, plan)?.join(" && ");
     let verify_and_restore = format!(
         "test \"$(wc -c < {archive})\" -le {max} && test \"$(shasum -a 256 {archive} | awk '{{print $1}}')\" = {sha} && unzip -oq {archive} -d {workspace} && {output_checks}",
         archive = shell::quote_arg(&archive), max = super::dependency_package::MAX_PACKAGE_BYTES,
@@ -341,7 +346,7 @@ fn prepared_source_view_is_ready(
     remote_path: &str,
     plan: &[deps::DependencyInstallPlanStep],
 ) -> Result<bool> {
-    let Some(output_tests) = declared_output_checks_for_complete_plan(remote_path, plan) else {
+    let Some(output_tests) = declared_output_checks_for_complete_plan(remote_path, plan)? else {
         return Ok(false);
     };
     let mut checks = vec![format!(
@@ -357,7 +362,7 @@ fn declared_outputs_are_ready(
     remote_path: &str,
     plan: &[deps::DependencyInstallPlanStep],
 ) -> Result<bool> {
-    let checks = declared_output_checks(remote_path, plan);
+    let checks = declared_output_checks(remote_path, plan)?;
     if checks.is_empty() {
         return Ok(true);
     }
@@ -367,29 +372,44 @@ fn declared_outputs_are_ready(
 fn declared_output_checks_for_complete_plan(
     remote_path: &str,
     plan: &[deps::DependencyInstallPlanStep],
-) -> Option<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     if plan.iter().any(|step| step.outputs.is_empty()) {
-        return None;
+        return Ok(None);
     }
-    Some(declared_output_checks(remote_path, plan))
+    Ok(Some(declared_output_checks(remote_path, plan)?))
 }
 
 fn declared_output_checks(
     remote_path: &str,
     plan: &[deps::DependencyInstallPlanStep],
-) -> Vec<String> {
-    plan.iter()
-        .flat_map(|step| &step.outputs)
-        .map(|output| {
-            let path = format!("{}/{}", remote_path.trim_end_matches('/'), output.path);
+) -> Result<Vec<String>> {
+    let mut checks = Vec::new();
+    for step in plan {
+        for output in &step.outputs {
+            let path = deps::dependency_install_step_output_path(
+                std::path::Path::new(remote_path),
+                step,
+                output,
+            )?
+            .display()
+            .to_string();
             let predicate = match output.kind {
                 deps::DependencyInstallOutputKind::Path => "-e",
                 deps::DependencyInstallOutputKind::File => "-f",
                 deps::DependencyInstallOutputKind::Directory => "-d",
             };
-            format!("test {predicate} {}", shell::quote_arg(&path))
-        })
-        .collect()
+            checks.push(format!("test {predicate} {}", shell::quote_arg(&path)));
+        }
+    }
+    Ok(checks)
+}
+
+fn dependency_root(remote_path: &str, step: &deps::DependencyInstallPlanStep) -> Result<String> {
+    Ok(
+        deps::dependency_install_step_workspace_root(std::path::Path::new(remote_path), step)?
+            .display()
+            .to_string(),
+    )
 }
 
 fn remote_checks_succeed(runner_id: &str, remote_path: &str, checks: Vec<String>) -> Result<bool> {
@@ -761,6 +781,36 @@ mod tests {
         .expect("node adapter");
     }
 
+    fn write_detected_composer_adapter(home: &std::path::Path) {
+        let root = home.join(".config/homeboy/extensions/dependency-adapters");
+        std::fs::create_dir_all(root.join("examples")).expect("adapter directory");
+        std::fs::write(
+            root.join("index.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-index/v1",
+                "manifests":[{"id":"composer-package-manager","ecosystem":"php","path":"examples/composer.json"}]
+            }"#,
+        )
+        .expect("adapter index");
+        std::fs::write(
+            root.join("examples/composer.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                "id":"composer-package-manager",
+                "version":1,
+                "ecosystem":"php",
+                "project_signals":{"root_files":["composer.json"]},
+                "package_managers":[{
+                    "id":"composer",
+                    "selection":{"priority":1,"default":true},
+                    "commands":{"install":{"command":"composer install"}},
+                    "outputs":[{"path":"vendor","kind":"directory"},{"path":"vendor/autoload.php","kind":"file"}]
+                }]
+            }"#,
+        )
+        .expect("composer adapter");
+    }
+
     /// `hydration_failure_error` classifies the failure as workspace setup and
     /// records the provider id, command, duration, and exit status so operators
     /// can distinguish a hydration (workspace setup) failure from a later
@@ -1016,6 +1066,45 @@ mod tests {
                 std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm run count"),
                 "x"
             );
+        });
+    }
+
+    #[test]
+    fn detected_composer_hydrates_nested_component_from_repository_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            write_detected_composer_adapter(home.path());
+            let path_guard = FakeBinGuard::install(
+                "composer",
+                "#!/bin/sh\nprintf '%s' \"$PWD\" > composer-cwd\nmkdir -p vendor\nprintf autoload > vendor/autoload.php\n",
+            );
+            crate::create(&path_guard.local_runner_spec("lab-nested-composer"), false)
+                .expect("create local runner");
+            let repository = tempfile::tempdir().expect("controller repository");
+            homeboy_core::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+            let component = repository.path().join("php-transformer");
+            std::fs::create_dir_all(&component).expect("controller component");
+            std::fs::write(component.join("composer.json"), "{}").expect("composer manifest");
+            let remote = tempfile::tempdir().expect("runner repository");
+            let remote_component = remote.path().join("php-transformer");
+            std::fs::create_dir_all(&remote_component).expect("runner component");
+            std::fs::write(remote_component.join("composer.json"), "{}")
+                .expect("composer manifest");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "lab-nested-composer",
+                &component.display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("nested Composer hydration succeeds");
+
+            assert_eq!(output.status, "hydrated");
+            assert_eq!(output.steps[0].provider_id, "composer");
+            assert_eq!(
+                std::fs::read_to_string(remote_component.join("composer-cwd"))
+                    .expect("Composer working directory"),
+                remote_component.display().to_string()
+            );
+            assert!(remote_component.join("vendor/autoload.php").is_file());
         });
     }
 

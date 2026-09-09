@@ -34,10 +34,9 @@ use super::{
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
-/// Opt-in: when set to a truthy value, a controller-side wait-timeout best-effort
-/// cancels the still-running remote runner job (freeing its rig lock) instead of
-/// only mirroring it. Off by default — the default contract leaves the remote job
-/// in flight and uncancelled (#6891).
+/// Per-run override: when set to a truthy value, a controller-side wait-timeout
+/// best-effort cancels the still-running remote runner job. Otherwise the runner
+/// setting applies; unset settings cancel agent-task workloads only.
 pub(crate) const RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT";
 // These runner env-var markers now live in the shared runner-contract crate so
 // core can reference them without a core -> runner edge. Re-exported here so the
@@ -66,6 +65,7 @@ mod process;
 mod recovery;
 pub(crate) mod redaction;
 mod secrets;
+mod submission;
 mod worker;
 
 #[cfg(test)]
@@ -74,6 +74,10 @@ mod tests;
 use extension_parity::{
     ensure_extension_materialized, plan_extension_parity, requested_setting_keys_for_command,
     required_extensions_for_command, validate_extension_ready,
+};
+pub use extension_parity::{
+    ensure_runner_extension_parity, probe_extension_parity_from_show, ExtensionParityProbe,
+    ExtensionShowOutput,
 };
 use policy::{preflight_remote_argv, remote_execution_preflight};
 
@@ -85,7 +89,7 @@ use daemon::*;
 use daemon_api::*;
 pub(crate) use daemon_api::{
     daemon_api_get_for_session, daemon_api_get_for_session_with_timeout,
-    daemon_api_post_json_for_session,
+    daemon_api_post_json_for_session_with_broker_token,
 };
 use failure::*;
 use handoff::*;
@@ -94,6 +98,7 @@ use paths::*;
 use process::*;
 use redaction::*;
 use secrets::*;
+use submission::*;
 
 // Crate-internal surface consumed by sibling `runner` modules (evidence, worker,
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
@@ -116,6 +121,9 @@ pub(crate) use process::{
 pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
 pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
+
+mod request;
+pub use request::{exec_request, RunnerExecRequest};
 
 // Public surface re-exported by the parent `runner` module. These mirror the
 // pre-split `pub` items so external callers keep referencing them unchanged.
@@ -402,6 +410,16 @@ pub struct RunnerExecOutput {
     pub handoff: Option<LabRunnerHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
+}
+
+impl RunnerExecOutput {
+    /// An accepted remote job is still authoritative when its controller-side
+    /// execution record remains running; no remote exit status is implied.
+    pub fn is_in_flight(&self) -> bool {
+        self.execution_record
+            .as_ref()
+            .is_some_and(|record| record.status == "running")
+    }
 }
 
 #[expect(
@@ -838,6 +856,24 @@ pub(crate) fn exec_with_status_snapshot(
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
 ) -> Result<(RunnerExecOutput, i32)> {
+    exec_with_status_snapshot_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        options,
+        status_snapshot,
+    )
+}
+
+/// [`exec_with_status_snapshot`] against an explicitly injected root.
+///
+/// Process preparation otherwise re-resolves the runner ambiently, which would
+/// discard the injected root mid-execution (#14362).
+pub(crate) fn exec_with_status_snapshot_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerExecOptions,
+    status_snapshot: Option<RunnerStatusReport>,
+) -> Result<(RunnerExecOutput, i32)> {
     let explicit_generic_run_id = options
         .run_id_owns_generic_exec
         .then(|| options.run_id.clone())
@@ -872,7 +908,7 @@ pub(crate) fn exec_with_status_snapshot(
             "preflight",
         )?;
     }
-    let result = exec_with_status_snapshot_attempt(runner_id, options, status_snapshot);
+    let result = exec_with_status_snapshot_attempt(roots, runner_id, options, status_snapshot);
     if let (Some(run_id), Err(error)) = (explicit_generic_run_id.as_deref(), &result) {
         let accepted = error.details.get("runner_exec_accepted_handoff").is_some();
         if let Err(persistence_error) =
@@ -915,6 +951,7 @@ pub(super) fn accepted_handoff_persistence_error(
 }
 
 fn exec_with_status_snapshot_attempt(
+    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
@@ -938,7 +975,7 @@ fn exec_with_status_snapshot_attempt(
     let secret_env_names = secret_env_plan.secret_env_names();
     let mut plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
-        runner: None,
+        runner: Some(crate::load_in_roots(roots, runner_id)?),
         cwd: options.cwd.clone(),
         project_id: options.project_id.clone(),
         command: options.command.clone(),
@@ -993,7 +1030,7 @@ fn exec_with_status_snapshot_attempt(
         let secret_env_names = secret_env_plan.secret_env_names();
         plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: runner_id.to_string(),
-            runner: None,
+            runner: Some(crate::load_in_roots(roots, runner_id)?),
             cwd: options.cwd.clone(),
             project_id: options.project_id.clone(),
             command: options.command.clone(),
@@ -1235,6 +1272,7 @@ fn exec_with_status_snapshot_attempt(
                 options.command,
                 request_env,
                 secret_env_names,
+                secret_env_plan,
                 options.capture_patch,
                 Some(plan.source_snapshot),
                 options.path_materialization_plan,
@@ -1616,7 +1654,6 @@ pub(super) fn fire_runner_direct_notification(
     let Some(route) = notification_route else {
         return;
     };
-    let status = job.status.as_str();
     let store = match homeboy_core::observation::ObservationStore::open_initialized() {
         Ok(store) => store,
         Err(_) => return,
@@ -1625,16 +1662,32 @@ pub(super) fn fire_runner_direct_notification(
     if already_delivered {
         return;
     }
-    let mut event =
-        homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    let run = store.get_run(run_id).ok().flatten();
+    let event = runner_direct_notification_event(run_id, job.status.as_str(), route, run.as_ref());
     // The store is already open for the delivery guard; reuse it so the
     // runner's direct delivery carries the same structured detail the
     // controller's notifier does.
-    if let Ok(Some(run)) = store.get_run(run_id) {
-        event = event.with_payload(homeboy_core::notify::run_completed_payload(&run));
-    }
     let outcome = homeboy_core::notify::dispatch(&event);
     if outcome.delivered {
         let _ = store.mark_notification_delivered(run_id, "runner-direct");
+    }
+}
+
+pub(super) fn runner_direct_notification_event(
+    run_id: &str,
+    fallback_status: &str,
+    route: &homeboy_core::notification_route::NotificationRoute,
+    run: Option<&homeboy_core::observation::RunRecord>,
+) -> homeboy_core::notify::NotifyEvent {
+    // The mirrored run is authoritative when it exists. In particular, a
+    // detached wrapper can remain `running` after its nested run has failed.
+    let status = run
+        .map(|run| run.status.as_str())
+        .unwrap_or(fallback_status);
+    let event =
+        homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    match run {
+        Some(run) => event.with_payload(homeboy_core::notify::run_completed_payload(run)),
+        None => event,
     }
 }

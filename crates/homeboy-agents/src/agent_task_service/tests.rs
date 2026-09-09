@@ -16,7 +16,7 @@ use crate::agent_task_scheduler::{
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::run_lifecycle_record::RunExecutionState;
-use homeboy_core::test_support::with_isolated_home;
+use homeboy_core::test_support::{with_isolated_home, write_component_registration};
 use homeboy_core::worktree;
 use serde_json::Value;
 use std::path::Path;
@@ -739,6 +739,107 @@ fn submitted_incomplete_run_still_executes_for_recovery() {
 }
 
 #[test]
+fn submitted_run_persists_and_executes_its_admitted_fallback_route() {
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("readiness fixture");
+        let script = temp.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='fallback',classification:model==='fallback'?'ready':'account',retryable:false,remediation:'switch',reason:model==='fallback'?'':'blocked',cache_key:model,identity:{model}}));",
+        )
+        .expect("readiness script");
+        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "service",
+                "backend": "test"
+            }))
+            .expect("provider fixture");
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
+        let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        };
+        let mut plan = test_plan();
+        plan.tasks[0].executor.model = Some("primary".to_string());
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![AgentTaskProviderRotationEntry {
+                model: Some("fallback".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let observed_request = Arc::new(Mutex::new(None));
+        agent_task_lifecycle::submit_plan(&plan, Some("submitted-fallback"))
+            .expect("submitted plan");
+
+        run_submitted_with_timeout_and_catalog(
+            "submitted-fallback".to_string(),
+            None,
+            Arc::new(CapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            }),
+            &catalog,
+        )
+        .expect("admitted fallback executes");
+
+        assert_eq!(
+            observed_request
+                .lock()
+                .expect("observed request")
+                .as_ref()
+                .and_then(|request| request.executor.model()),
+            Some("fallback")
+        );
+        let persisted = agent_task_lifecycle::load_plan("submitted-fallback").expect("plan");
+        assert_eq!(persisted.tasks[0].executor.model(), Some("fallback"));
+        assert_eq!(
+            persisted.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
+            1
+        );
+    });
+}
+
+#[test]
+fn submitted_run_admission_denial_never_enters_running_or_spends_budget() {
+    with_isolated_home(|_| {
+        let missing = "__HOMEBOY_TEST_MISSING_SUBMITTED_ADMISSION_SECRET__";
+        std::env::remove_var(missing);
+        let mut plan = test_plan();
+        plan.tasks[0].executor.secret_env.push(missing.to_string());
+        agent_task_lifecycle::submit_plan(&plan, Some("submitted-missing-secret"))
+            .expect("submitted plan");
+
+        let error = run_submitted_with_timeout_and_catalog(
+            "submitted-missing-secret".to_string(),
+            None,
+            Arc::new(SucceedingExecutor),
+            &crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+        )
+        .expect_err("missing secret blocks admission");
+        let record = lifecycle_status("submitted-missing-secret").expect("durable failure");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_ne!(record.lifecycle.execution.state, RunExecutionState::Running);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "admit_plan_provider_dispatchability"
+        );
+        assert!(record
+            .metadata
+            .get("provider_executions")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty));
+    });
+}
+
+#[test]
 fn service_persists_timed_out_run_record_and_evidence_refs() {
     with_isolated_home(|_| {
         let result = run_loaded_plan(
@@ -772,6 +873,81 @@ fn service_persists_timed_out_run_record_and_evidence_refs() {
             .evidence_refs
             .iter()
             .any(|evidence| evidence.kind == "executor-result"));
+    });
+}
+
+#[test]
+fn persisted_timeout_candidate_is_admitted_for_continuation() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        create_git_repo(workspace.path());
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.root = Some(workspace.path().display().to_string());
+        plan.tasks[0].limits.timeout_ms = Some(1);
+
+        let result = run_loaded_plan(
+            plan,
+            Some("service-timeout-candidate"),
+            Arc::new(TimeoutAfterWritingPatchExecutor),
+        )
+        .expect("timeout candidate run completed");
+        assert_eq!(result.exit_code, 0);
+
+        let lifecycle_store = test_lifecycle_store();
+        let aggregate = lifecycle_store
+            .read_aggregate("service-timeout-candidate")
+            .expect("persisted aggregate");
+        let outcome = aggregate.outcomes.first().expect("timeout outcome");
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        let artifact = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "patch")
+            .expect("persisted timeout patch");
+        for key in [
+            "run_id",
+            "task_id",
+            "producer_attempt",
+            "base_ref",
+            "provider_backend",
+            "repository_identity",
+            "workspace_identity",
+        ] {
+            assert!(
+                artifact.metadata.get(key).is_some_and(|value| {
+                    value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
+                }),
+                "persisted timeout patch is missing {key}: {:#?}",
+                artifact.metadata
+            );
+        }
+        assert_eq!(artifact.metadata["run_id"], "service-timeout-candidate");
+        assert_eq!(artifact.metadata["task_id"], outcome.task_id);
+
+        let source = serde_json::to_string(&aggregate).expect("serialize persisted aggregate");
+        let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
+            &crate::agent_task_promotion::AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some("service-timeout-candidate".to_string()),
+                source_path: Some(lifecycle_store.aggregate_path("service-timeout-candidate")),
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "timeout-continuation-target".to_string(),
+                task_id: Some(outcome.task_id.clone()),
+                artifact_id: Some(artifact.id.clone()),
+                dry_run: false,
+                gates: crate::agent_task_gate::VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &lifecycle_store
+                .open_observation_initialized()
+                .expect("observation store"),
+        )
+        .expect("persisted timeout candidate is eligible for cook continuation");
+        assert_eq!(admitted.id, artifact.id);
     });
 }
 
@@ -1065,7 +1241,7 @@ fn run_next_bounds_malformed_continuation_admission_and_progresses_on_retry() {
                 .filter_map(std::result::Result::ok)
                 .filter(
                     |entry| entry.path().extension().and_then(|value| value.to_str())
-                        == Some("failed")
+                        == Some("malformed")
                 )
                 .count(),
             agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
@@ -1177,10 +1353,13 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
                 "backend": "adversarial-readiness"
             }))
             .expect("provider fixture");
-        provider.readiness_invocation = Some(CommandInvocation {
-            argv: vec!["node".to_string(), script.display().to_string()],
-            ..CommandInvocation::default()
-        });
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         assert_eq!(provider.backend, "adversarial-readiness");
         assert!(provider.readiness_invocation.is_some());
 
@@ -1885,6 +2064,59 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
 }
 
 #[test]
+fn upgrade_admission_allows_unmaterialized_cook_blocked_on_runner_convergence() {
+    with_isolated_home(|_| {
+        let stale_cook_id = "cook-blocked-on-runner-convergence";
+        let unavailable_cook_id = "cook-blocked-on-runner-unavailable";
+        for (cook_id, state) in [
+            (stale_cook_id, "blocked_runner_stale"),
+            (unavailable_cook_id, "blocked_runner_unavailable"),
+        ] {
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                serde_json::json!({ "placement": { "local_fallback": false } }),
+                state,
+                "waiting for Lab runner admission",
+            )
+            .expect("unmaterialized Cook admission");
+        }
+
+        let stale = agent_task_lifecycle::exact_record(stale_cook_id).expect("stale Cook");
+        assert_eq!(stale.state, AgentTaskRunState::Queued);
+        assert!(stale.tasks.is_empty());
+        assert_eq!(
+            stale.metadata["unmaterialized_cook_admission"]["state"],
+            "blocked_runner_stale"
+        );
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert!(
+            !admission.allows_controller_replacement(),
+            "the unrelated unavailable runner remains fail-closed: {admission:?}"
+        );
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].run_id, unavailable_cook_id);
+        assert!(
+            !admission
+                .blockers
+                .iter()
+                .any(|blocker| blocker.run_id == stale_cook_id),
+            "the zero-task runner-skew admission must not deadlock its controller upgrade"
+        );
+        assert_eq!(
+            agent_task_lifecycle::exact_record(stale_cook_id)
+                .expect("unchanged stale Cook")
+                .state,
+            AgentTaskRunState::Queued
+        );
+    });
+}
+
+#[test]
 fn upgrade_admission_inspects_an_ambiguous_removed_runner_record_locally() {
     with_isolated_home(|_| {
         let cook_id = "concurrent-first-cook-run";
@@ -1990,12 +2222,147 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
                 .state,
             AgentTaskRunState::Cancelled
         );
+        assert!(
+            !discover_runs(AgentTaskDiscoveryFilter::Active)
+                .expect("fresh active discovery")
+                .runs
+                .iter()
+                .any(|run| run.run_id == run_id),
+            "a successful runner-owned reconciliation must not survive rediscovery"
+        );
 
         let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
         let admitted =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert!(admitted.allows_controller_replacement(), "{admitted:?}");
         assert!(admitted.blockers.is_empty());
+    });
+}
+
+#[test]
+fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_projection() {
+    with_isolated_home(|_| {
+        let run_id = "cook-runner-reconcile-claim-attempt-1-transport-retry";
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::configured_idle(),
+        ));
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        let execution_context =
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                Some(run_id),
+                "homeboy-lab",
+                "00000000-0000-4000-8000-000000000001",
+                "homeboy",
+                "reservation-1",
+            )
+            .expect("accepted runner execution context");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+            record.metadata["runner_job_id"] = serde_json::json!(execution_context.runner_job_id());
+            record.metadata["runner_execution_context"] = execution_context
+                .evidence_record()
+                .expect("execution context evidence");
+            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata")
+                .remove("runner_pid");
+        })
+        .expect("ownerless runner record");
+        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
+            idempotency_key: "reconcile-runner-claim-1".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        };
+
+        let first = crate::orchestration::execute_action_from_current_environment(run_id, &request)
+            .expect("reconciliation action");
+        assert_eq!(
+            first.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        );
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id)
+                .expect("terminal record")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+        let operation_key = format!("control-plane-action:reconcile:{}", request.idempotency_key);
+        assert_eq!(
+            agent_task_lifecycle::operation_claim(run_id, &operation_key)
+                .expect("operation claim")
+                .expect("completed operation claim")
+                .state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+        assert_eq!(
+            crate::orchestration::execute_action_from_current_environment(run_id, &request)
+                .expect("replayed reconciliation"),
+            first
+        );
+    });
+}
+
+#[test]
+fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
+    with_isolated_home(|home| {
+        let run_id = "queued-in-explicit-store";
+        let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(
+            home.path().join("explicit-lifecycle"),
+        );
+        agent_task_lifecycle::submit_plan_in_store(
+            &lifecycle_store,
+            &discovery_plan(),
+            Some(run_id),
+        )
+        .expect("submitted in explicit store");
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+                record.updated_at = None;
+                true
+            })
+            .expect("stale explicit record");
+
+        let repaired = reconcile_run_in_store(&lifecycle_store, run_id, false)
+            .expect("explicit-store reconciliation");
+        assert_eq!(repaired.reconciled, 1, "{repaired:?}");
+        assert_eq!(repaired.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("terminal explicit record")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+        assert!(agent_task_lifecycle::exact_record(run_id).is_err());
+    });
+}
+
+#[test]
+fn reconciliation_postcondition_names_an_unresolved_runner_projection() {
+    with_isolated_home(|_| {
+        let run_id = "queued-runner-projection-postcondition";
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Cancelled);
+            record.tasks[0].state = AgentTaskState::Cancelled;
+        })
+        .expect("terminal controller projection");
+        let record = agent_task_lifecycle::exact_record(run_id).expect("queued record");
+
+        let error = super::reconcile::verify_reconciled_postcondition(&record, false, false)
+            .expect_err("an unresolved runner projection cannot report reconciliation success");
+        assert!(error.message.contains(run_id));
+        assert!(error.message.contains("durable state is cancelled"));
+        assert!(error.message.contains("on the runner"));
     });
 }
 
@@ -2633,6 +3000,96 @@ fn discovery_filters_by_cook_identity_and_classifies_only_live_queued_records_as
                 .state,
             AgentTaskRunState::Cancelled
         );
+    });
+}
+
+#[test]
+fn discovery_federates_unmaterialized_cook_admissions_by_task_identity() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            "cook-pending-admission",
+            serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-binding/v1",
+                "source": {
+                    "repository": "Extra-Chill/homeboy",
+                    "task_refs": ["https://github.com/Extra-Chill/homeboy/issues/14463"]
+                },
+                "worktree_ref": "/work/homeboy@fix-14463"
+            }),
+            "queued",
+            "awaiting runner admission",
+        )
+        .expect("persist admission");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("unrelated-materialized"))
+            .expect("persist unrelated lifecycle record");
+
+        let report = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                repo: Some("Extra-Chill/homeboy".to_string()),
+                workspace: Some("/work/homeboy@fix-14463".to_string()),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/14463".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover matching admission");
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.runs.len(), 1);
+        let admission = &report.runs[0];
+        assert_eq!(admission.run_id, "cook-pending-admission");
+        assert_eq!(admission.state, AgentTaskRunState::Queued);
+        assert_eq!(
+            admission.task_url.as_deref(),
+            Some("https://github.com/Extra-Chill/homeboy/issues/14463")
+        );
+        assert!(admission
+            .commands
+            .status
+            .ends_with("cook-pending-admission"));
+        assert_eq!(report.record_health.healthy, 1);
+        assert_eq!(report.global_record_health.healthy, 2);
+    });
+}
+
+#[test]
+fn discovery_keeps_cancelled_unmaterialized_admissions_in_filtered_history() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            "cook-cancelled-admission",
+            serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-binding/v1",
+                "source": {
+                    "repository": "Extra-Chill/homeboy",
+                    "task_refs": ["https://github.com/Extra-Chill/homeboy/issues/14463"]
+                }
+            }),
+            "queued",
+            "awaiting runner admission",
+        )
+        .expect("persist admission");
+        agent_task_lifecycle::rewrite_record_for_test("cook-cancelled-admission", |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Cancelled);
+        })
+        .expect("cancel admission");
+
+        let report = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/14463".to_string()),
+                state: Some("cancelled".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover cancelled admission");
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.runs[0].run_id, "cook-cancelled-admission");
+        assert_eq!(report.runs[0].state, AgentTaskRunState::Cancelled);
     });
 }
 
@@ -3306,10 +3763,10 @@ impl agent_task_lifecycle::RunnerContinuationProvider for RunnerAuthorityFixture
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: homeboy_core::api_jobs::RemoteRunnerJobRequest,
+        _submission: crate::agent_task_lifecycle::RunnerContinuationSubmission,
     ) -> homeboy_core::Result<homeboy_core::api_jobs::Job> {
         Err(homeboy_core::Error::internal_unexpected(
             "unused in fixture",
@@ -3384,6 +3841,30 @@ impl AgentTaskExecutorAdapter for TimeoutExecutor {
                 message: "provider exceeded timeout_ms=50".to_string(),
                 data: serde_json::json!({ "timeout_ms": 50 }),
             }],
+            ..Default::default()
+        }
+    }
+}
+
+struct TimeoutAfterWritingPatchExecutor;
+
+impl AgentTaskExecutorAdapter for TimeoutAfterWritingPatchExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let workspace = request.workspace.root.expect("attempt workspace");
+        std::fs::write(
+            Path::new(&workspace).join("timeout-candidate.txt"),
+            "recovered after timeout\n",
+        )
+        .expect("write candidate");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        AgentTaskOutcome {
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("provider completed after its deadline".to_string()),
             ..Default::default()
         }
     }
@@ -3473,20 +3954,6 @@ fn create_git_repo(path: &Path) {
     homeboy_core::test_support::run_git_fixture_command(path, &["commit", "-q", "-m", "initial"]);
 }
 
-fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
-    let dir = home.join(".config/homeboy/components");
-    std::fs::create_dir_all(&dir).expect("components dir");
-    std::fs::write(
-        dir.join(format!("{id}.json")),
-        serde_json::json!({
-            "local_path": local_path,
-            "remote_path": format!("wp-content/plugins/{id}")
-        })
-        .to_string(),
-    )
-    .expect("component registration");
-}
-
 fn test_plan() -> AgentTaskPlan {
     AgentTaskPlan::new(
         "service-plan",
@@ -3567,6 +4034,7 @@ fn index_cook_attempts(cook_id: &str, first_run_id: &str, latest_run_id: &str) {
         cook_id: cook_id.to_string(),
         latest_run_id: latest_run_id.to_string(),
         latest_substantive_candidate: None,
+        cancellation_fence: None,
         attempts: [first_run_id, latest_run_id]
             .into_iter()
             .enumerate()

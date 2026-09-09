@@ -14,15 +14,12 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::output::MergeOutput;
 
-use super::connection::{
-    active_jobs_before_daemon_replacement, configured_runner_homeboy_build_identity,
-    disconnect_with_session, reconcile_status, rotate_daemon_generation,
-};
-use super::execution::exec_with_status_snapshot;
+use super::connection::configured_runner_homeboy_build_identity;
+use super::execution::{exec_with_status_snapshot, exec_with_status_snapshot_in_roots};
 use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
 use super::{
-    connect_with_orphan_adoption, copy_snapshot_to_directory, exec, load,
-    materialize_runner_extension_with_env, merge, normalize_runner_command_env_for_homeboy_path,
+    copy_snapshot_to_directory, exec, load, load_in_roots, materialize_runner_extension_with_env,
+    merge, merge_in_roots, normalize_runner_command_env_for_homeboy_path,
     plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
     RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
@@ -363,7 +360,19 @@ pub struct RunnerDevSyncOutput {
 pub fn plan_homeboy_binary_refresh(
     options: &HomeboyBinaryRefreshOptions,
 ) -> Result<HomeboyBinaryRefreshPlan> {
-    let runner = load(&options.runner_id)?;
+    plan_homeboy_binary_refresh_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        options,
+    )
+}
+
+/// [`plan_homeboy_binary_refresh`] against an explicitly injected root.
+#[allow(dead_code)]
+pub fn plan_homeboy_binary_refresh_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    options: &HomeboyBinaryRefreshOptions,
+) -> Result<HomeboyBinaryRefreshPlan> {
+    let runner = load_in_roots(roots, &options.runner_id)?;
     let runner_id = runner.id;
     match &options.mode {
         HomeboyBinaryRefreshMode::Select { binary_path } => {
@@ -419,6 +428,7 @@ pub fn plan_homeboy_binary_refresh(
                 &target_dir,
                 &binary_path,
                 options.allow_downgrade,
+                &[],
             );
             Ok(HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
@@ -438,7 +448,23 @@ pub fn plan_homeboy_binary_refresh(
 pub fn refresh_homeboy_binary(
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
-    let plan = plan_homeboy_binary_refresh(&options)?;
+    refresh_homeboy_binary_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        options,
+    )
+}
+
+/// [`refresh_homeboy_binary`] against an explicitly injected root.
+///
+/// Planning, the selection read-back and promotion all follow `roots`, so a
+/// refresh into an injected root never resolves or mutates the ambient
+/// installation (#14362).
+#[allow(dead_code)]
+pub fn refresh_homeboy_binary_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    options: HomeboyBinaryRefreshOptions,
+) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
+    let mut plan = plan_homeboy_binary_refresh_in_roots(roots, &options)?;
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -475,18 +501,37 @@ pub fn refresh_homeboy_binary(
         HomeboyBinaryRefreshMode::Select { .. } => vec!["bash".to_string()],
     };
 
-    let runner = load(&plan.runner_id)?;
+    let runner = load_in_roots(roots, &plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
     // Reconciliation settles retained generation counts from the daemon's typed
     // job view. Consume that postcondition rather than immediately replacing it
     // with a new observation that can include this recovery operation's records.
-    let admission = reconciled_refresh_admission(&plan.runner_id)?;
+    let admission = reconciled_refresh_admission_in_roots(roots, &plan.runner_id)?;
     let connection_status = admission.status.clone();
+    if plan.mode == "materialize" {
+        let authorities =
+            refresh_promotion_authorities_in_roots(roots, &plan.runner_id, &connection_status)?;
+        plan.script = materialize_script(
+            plan.source
+                .as_deref()
+                .expect("materialize plans have a source"),
+            plan.git_ref
+                .as_deref()
+                .expect("materialize plans have a ref"),
+            plan.target_dir
+                .as_deref()
+                .expect("materialize plans have a target directory"),
+            &plan.binary_path,
+            options.allow_downgrade,
+            &refresh_authority_commits(&authorities),
+        );
+    }
     let execution_route = refresh_execution_route(&runner, &admission)?;
     let diagnostic_ssh_bootstrap = execution_route.uses_diagnostic_ssh();
     let exec_options =
         refresh_execution_options(&plan, required_commands, diagnostic_ssh_bootstrap);
-    let (exec_output, exit_code) = exec_with_status_snapshot(
+    let (exec_output, exit_code) = exec_with_status_snapshot_in_roots(
+        roots,
         &plan.runner_id,
         exec_options,
         Some(connection_status.clone()),
@@ -584,14 +629,15 @@ pub fn refresh_homeboy_binary(
         .and_then(|identity| identity_commit(&identity))
         .unwrap_or_else(|| format!("unverified-{}", uuid::Uuid::new_v4()));
     let promotion_lease =
-        acquire_runner_binary_promotion(&options.runner_id, &promotion_candidate)?;
+        acquire_runner_binary_promotion_in_roots(roots, &options.runner_id, &promotion_candidate)?;
     // Materialization may have waited behind a newer refresh. Re-read every
     // authority while holding the promotion lease. In particular, a daemon can
     // connect while materialization runs, so reconnect decisions cannot use the
     // pre-materialization status snapshot.
     promotion_lease.assert_generation()?;
-    let post_lease_status = super::status(&plan.runner_id)?;
-    let promotion_authorities = refresh_promotion_authorities(&plan.runner_id, &post_lease_status)?;
+    let post_lease_status = super::connection::status_in_roots(roots, &plan.runner_id)?;
+    let promotion_authorities =
+        refresh_promotion_authorities_in_roots(roots, &plan.runner_id, &post_lease_status)?;
     // Selection belongs to the controller-owned runner registry. It must be
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
@@ -635,7 +681,8 @@ pub fn refresh_homeboy_binary(
                     },
                 )?;
                 Ok((
-                    promote_verified_runner_binary(
+                    promote_verified_runner_binary_in_roots(
+                        roots,
                         &promotion_lease,
                         &plan.runner_id,
                         homeboy_path,
@@ -690,7 +737,8 @@ pub fn refresh_homeboy_binary(
                     }
                 },
             )?;
-            let updated_fields = promote_verified_runner_binary(
+            let updated_fields = promote_verified_runner_binary_in_roots(
+                roots,
                 &promotion_lease,
                 &plan.runner_id,
                 &selected_binary_path,
@@ -788,7 +836,10 @@ pub fn refresh_homeboy_binary(
     let interrupted_job_ids;
     if options.reconnect {
         promotion_lease.assert_generation()?;
-        let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
+        let active_jobs = super::connection::active_jobs_before_daemon_replacement_in_roots(
+            roots,
+            &plan.runner_id,
+        )?;
         let preserve_generations = super::generation_store::requires_generation_preserving_refresh(
             &plan.runner_id,
             refresh_session.as_ref(),
@@ -807,7 +858,8 @@ pub fn refresh_homeboy_binary(
                 .iter()
                 .map(|job| job.job_id.clone())
                 .collect::<Vec<_>>();
-            if let Err(error) = rotate_daemon_generation(
+            if let Err(error) = super::connection::rotate_daemon_generation_in_roots(
+                roots,
                 &plan.runner_id,
                 &selected_binary_path,
                 candidate_version,
@@ -816,7 +868,8 @@ pub fn refresh_homeboy_binary(
                 candidate_binary_sha256.as_deref(),
                 &draining_job_ids,
             ) {
-                restore_runner_homeboy_path_if_selected(
+                restore_runner_homeboy_path_if_selected_in_roots(
+                    roots,
                     &plan.runner_id,
                     &selected_binary_path,
                     previous_homeboy_path.as_deref(),
@@ -872,7 +925,8 @@ pub fn refresh_homeboy_binary(
         ) {
             Ok(job_ids) => job_ids,
             Err(_) => {
-                let deferred = defer_reconnect_after_promotion_race(
+                let deferred = defer_reconnect_after_promotion_race_in_roots(
+                    roots,
                     &plan.runner_id,
                     &selected_binary_path,
                     previous_homeboy_path.as_deref(),
@@ -913,10 +967,17 @@ pub fn refresh_homeboy_binary(
             }
         };
         if let Err(error) = disconnect_before_reconnect(refresh_session.as_ref(), |session| {
-            disconnect_with_session(&plan.runner_id, Some(session), options.force).map(|_| ())
+            super::connection::disconnect_with_session_in_roots(
+                roots,
+                &plan.runner_id,
+                Some(session),
+                options.force,
+            )
+            .map(|_| ())
         }) {
             return rollback_refresh_error_with(error, || {
-                restore_runner_homeboy_path_if_selected(
+                restore_runner_homeboy_path_if_selected_in_roots(
+                    roots,
                     &plan.runner_id,
                     &selected_binary_path,
                     previous_homeboy_path.as_deref(),
@@ -938,57 +999,59 @@ pub fn refresh_homeboy_binary(
         if refresh_session.is_some() {
             phase_summary.push(refresh_phase("disconnect", true, 0));
         }
-        let (report, connect_exit_code) = match connect_with_orphan_adoption(
-            &plan.runner_id,
-            refresh_owned_lease.as_deref(),
-            &[],
-            false,
-            None,
-            None,
-            None,
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                let readiness = blocked_refresh_readiness(&plan);
-                phase_summary.push(refresh_phase("reconnect_transport", true, 1));
-                return Ok((
-                    HomeboyBinaryRefreshOutput {
-                        variant: "refresh_homeboy",
-                        command: "runner.refresh_homeboy",
-                        runner_id: plan.runner_id.clone(),
-                        dry_run: false,
-                        plan: plan.clone(),
-                        identity: Some(identity.clone()),
-                        updated_fields: updated_fields.clone(),
-                        phase_summary,
-                        daemon_refreshed: false,
-                        interrupted_job_ids,
-                        selected_binary_path: selected_binary_path.clone(),
-                        next_actions: Vec::new(),
-                        reconnect_required: true,
-                        followup_commands: readiness.continuation.clone().into_iter().collect(),
-                        readiness: Some(readiness),
-                        reconnect_deferred: None,
-                        failure: Some(refresh_verification_failure(
-                            &plan,
-                            exec_output.clone(),
-                            error.message,
-                        )),
-                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
-                            diagnostic_ssh_bootstrap,
-                            &plan,
-                            &bootstrap,
-                            &identity,
-                            &updated_fields,
-                        )),
-                        rollback: rollback.clone(),
-                        build_transcript: Some(refresh_build_transcript(&exec_output)),
-                        artifacts: None,
-                    },
-                    1,
-                ));
-            }
-        };
+        let (report, connect_exit_code) =
+            match super::connection::connect_with_orphan_adoption_in_roots(
+                roots,
+                &plan.runner_id,
+                refresh_owned_lease.as_deref(),
+                &[],
+                false,
+                None,
+                None,
+                None,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    let readiness = blocked_refresh_readiness(&plan);
+                    phase_summary.push(refresh_phase("reconnect_transport", true, 1));
+                    return Ok((
+                        HomeboyBinaryRefreshOutput {
+                            variant: "refresh_homeboy",
+                            command: "runner.refresh_homeboy",
+                            runner_id: plan.runner_id.clone(),
+                            dry_run: false,
+                            plan: plan.clone(),
+                            identity: Some(identity.clone()),
+                            updated_fields: updated_fields.clone(),
+                            phase_summary,
+                            daemon_refreshed: false,
+                            interrupted_job_ids,
+                            selected_binary_path: selected_binary_path.clone(),
+                            next_actions: Vec::new(),
+                            reconnect_required: true,
+                            followup_commands: readiness.continuation.clone().into_iter().collect(),
+                            readiness: Some(readiness),
+                            reconnect_deferred: None,
+                            failure: Some(refresh_verification_failure(
+                                &plan,
+                                exec_output.clone(),
+                                error.message,
+                            )),
+                            bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                                diagnostic_ssh_bootstrap,
+                                &plan,
+                                &bootstrap,
+                                &identity,
+                                &updated_fields,
+                            )),
+                            rollback: rollback.clone(),
+                            build_transcript: Some(refresh_build_transcript(&exec_output)),
+                            artifacts: None,
+                        },
+                        1,
+                    ));
+                }
+            };
         let daemon_identity_verification = (connect_exit_code == 0)
             .then(|| verify_refreshed_daemon_topology(&plan.runner_id, &identity))
             .transpose()
@@ -1060,16 +1123,18 @@ pub fn refresh_homeboy_binary(
             .get("git_commit")
             .and_then(Value::as_str)
         {
-            if let Err(readiness_error) =
-                probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
-            {
+            if let Err(readiness_error) = probe_reconnected_admission_readiness_in_roots(
+                roots,
+                &plan.runner_id,
+                identity_commit,
+            ) {
                 // The readiness probe can discover that the newly connected
                 // transport vanished. Never certify a transient connect as a
                 // successful reconnect when its postcondition is disconnected.
                 // This arm returns `daemon_refreshed: false` directly, so it
                 // does not reassign the local first.
                 let transport_exit_code = reconnect_transport_exit_code(
-                    super::status(&plan.runner_id)
+                    super::connection::status_in_roots(roots, &plan.runner_id)
                         .map(|status| status.is_connected())
                         .unwrap_or(false),
                 );
@@ -1196,7 +1261,24 @@ fn acquire_runner_binary_promotion(
     runner_id: &str,
     candidate_commit: &str,
 ) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_with(
+    acquire_runner_binary_promotion_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        candidate_commit,
+    )
+}
+
+/// [`acquire_runner_binary_promotion`] against an explicitly injected root.
+///
+/// The promotion lease store is machine-global by default, so an isolated
+/// refresh would otherwise contend against the host's live lease (#14362).
+fn acquire_runner_binary_promotion_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    candidate_commit: &str,
+) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
+    acquire_runner_binary_promotion_with_in_root(
+        &homeboy_core::paths::runtime_promotion_dir_in_root(roots.data()),
         runner_id,
         candidate_commit,
         super::lab_selection::emit_runtime_promotion_wait,
@@ -1208,7 +1290,22 @@ fn acquire_runner_binary_promotion_with(
     candidate_commit: &str,
     progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
 ) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key(
+    acquire_runner_binary_promotion_with_in_root(
+        &homeboy_core::paths::runtime_promotion_dir()?,
+        runner_id,
+        candidate_commit,
+        progress,
+    )
+}
+
+fn acquire_runner_binary_promotion_with_in_root(
+    root: &std::path::Path,
+    runner_id: &str,
+    candidate_commit: &str,
+    progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
+) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
+    homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key_in_root(
+        root,
         "runner binary promotion",
         runner_id.to_string(),
         candidate_commit,
@@ -1570,7 +1667,20 @@ pub(crate) fn probe_reconnected_admission_readiness(
     runner_id: &str,
     identity_commit: &str,
 ) -> Result<()> {
-    let session = super::connection::status_for_admission(runner_id)?
+    probe_reconnected_admission_readiness_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        identity_commit,
+    )
+}
+
+/// [`probe_reconnected_admission_readiness`] against an injected root.
+pub(crate) fn probe_reconnected_admission_readiness_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    identity_commit: &str,
+) -> Result<()> {
+    let session = super::connection::status_for_admission_in_roots(roots, runner_id)?
         .session
         .filter(|session| session.mode == super::RunnerTunnelMode::DirectSsh);
     let Some(session) = session else {
@@ -1736,9 +1846,20 @@ fn refresh_execution_route(
 /// later pre-rotation job probe remains the fail-closed check for work that
 /// appears while materialization is in progress.
 fn reconciled_refresh_admission(runner_id: &str) -> Result<super::RunnerAdmissionSnapshot> {
+    reconciled_refresh_admission_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+    )
+}
+
+/// [`reconciled_refresh_admission`] against an explicitly injected root.
+fn reconciled_refresh_admission_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+) -> Result<super::RunnerAdmissionSnapshot> {
     reconciled_refresh_admission_with(
         runner_id,
-        reconcile_status,
+        |runner_id| super::connection::reconcile_status_in_roots(roots, runner_id),
         super::runner_admission_snapshot_for_status,
     )
 }
@@ -1840,11 +1961,12 @@ struct RefreshPromotionAuthorities {
     configured_selected: Option<String>,
 }
 
-fn refresh_promotion_authorities(
+fn refresh_promotion_authorities_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     status: &super::RunnerStatusReport,
 ) -> Result<RefreshPromotionAuthorities> {
-    let runner = load(runner_id)?;
+    let runner = load_in_roots(roots, runner_id)?;
     let configured_selected = runner
         .settings
         .homeboy_path
@@ -1863,6 +1985,17 @@ fn refresh_promotion_authorities(
             .map(str::to_string),
         configured_selected,
     })
+}
+
+fn refresh_authority_commits(authorities: &RefreshPromotionAuthorities) -> Vec<&str> {
+    [
+        authorities.controller.as_deref(),
+        authorities.active_daemon.as_deref(),
+        authorities.configured_selected.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn validate_refresh_promotion<IsAncestor>(
@@ -2058,7 +2191,19 @@ fn refresh_ancestry_execution_options(
 }
 
 pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {
-    let runner = load(&options.runner_id)?;
+    plan_runner_dev_sync_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        options,
+    )
+}
+
+/// [`plan_runner_dev_sync`] against an explicitly injected root.
+#[allow(dead_code)]
+pub fn plan_runner_dev_sync_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    options: &RunnerDevSyncOptions,
+) -> Result<RunnerDevSyncPlan> {
+    let runner = load_in_roots(roots, &options.runner_id)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace_root",
@@ -2337,7 +2482,19 @@ fn sync_extension_overlays(
     runner_id: &str,
     plan: &RunnerDevSyncPlan,
 ) -> Result<Vec<RunnerDevSyncExtensionProvenance>> {
-    let runner = load(runner_id)?;
+    sync_extension_overlays_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        plan,
+    )
+}
+
+fn sync_extension_overlays_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    plan: &RunnerDevSyncPlan,
+) -> Result<Vec<RunnerDevSyncExtensionProvenance>> {
+    let runner = load_in_roots(roots, runner_id)?;
     let homeboy_env = installed_homeboy_env(&runner.env, runner.settings.homeboy_path.as_deref());
     let mut overlays = Vec::new();
     for extension in &plan.extensions {
@@ -2452,6 +2609,7 @@ fn materialize_script(
     target_dir: &str,
     binary_path: &str,
     allow_downgrade: bool,
+    authority_commits: &[&str],
 ) -> String {
     let mut script = format!(
         "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n",
@@ -2460,6 +2618,19 @@ fn materialize_script(
         quote_path(target_dir),
         quote_path(binary_path),
         allow_downgrade,
+    );
+    let authority_commits = authority_commits
+        .iter()
+        .map(|authority| quote_path(authority))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let downgrade_guard = format!(
+        "preflight=$(mktemp -d)\ntrap 'rm -rf \"$preflight\"' EXIT HUP INT TERM\ngit -C \"$preflight\" init --bare --quiet\nif ! git -C \"$preflight\" fetch --quiet \"$source\" \"$ref\"; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$preflight\" rev-parse --verify --quiet FETCH_HEAD^{{commit}})\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref did not resolve to a commit: $ref\" >&2\n  exit 1\nfi\ngit -C \"$preflight\" fetch --quiet \"$source\" '+refs/heads/*:refs/remotes/homeboy-refresh/*'\nfor authority in {authority_commits}; do\n  resolved_authority=$(git -C \"$preflight\" rev-parse --verify --quiet \"${{authority}}^{{commit}}\" || true)\n  if [ -n \"$resolved_authority\" ]; then\n    authority=$resolved_authority\n  fi\n  if [ -z \"$authority\" ] || [ \"$authority\" = \"$target\" ]; then\n    continue\n  fi\n  if ! git -C \"$preflight\" fetch --quiet \"$source\" \"$authority\"; then\n    if [ \"$allow_downgrade\" != true ]; then\n      echo \"Cannot prove requested Homeboy ref is not a downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n      exit 1\n    fi\n    continue\n  fi\n  if git -C \"$preflight\" merge-base --is-ancestor \"$target\" \"$authority\"; then\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$authority\" >&2\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n    echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n    if [ \"$allow_downgrade\" != true ]; then\n      echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n      exit 1\n    fi\n  fi\ndone\nrm -rf \"$preflight\"\ntrap - EXIT HUP INT TERM\n"
+    );
+    script = script.replacen(
+        "mkdir -p \"$(dirname \"$dir\")\"",
+        &format!("{downgrade_guard}mkdir -p \"$(dirname \"$dir\")\""),
+        1,
     );
     script.push_str(
         r#"identity=$("$immutable_binary" self identity)
@@ -2604,11 +2775,12 @@ fn parse_identity(stdout: &str) -> Result<Value> {
     })
 }
 
-fn refreshed_runner_env(
+fn refreshed_runner_env_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     homeboy_path: &str,
 ) -> Result<std::collections::HashMap<String, String>> {
-    let runner = load(runner_id)?;
+    let runner = load_in_roots(roots, runner_id)?;
     let mut env = runner.env;
     // A refreshed daemon must not inherit a prior generation's control-plane
     // authority. The selected binary becomes the new command authority below.
@@ -2618,8 +2790,12 @@ fn refreshed_runner_env(
     Ok(env)
 }
 
-fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> {
-    let env = refreshed_runner_env(runner_id, homeboy_path)?;
+fn refreshed_runner_patch_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    homeboy_path: &str,
+) -> Result<Value> {
+    let env = refreshed_runner_env_in_roots(roots, runner_id, homeboy_path)?;
     let mut patch = serde_json::json!({
         "homeboy_path": homeboy_path,
         "env": env,
@@ -2633,24 +2809,30 @@ fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> 
 /// Persist a verified selection in the controller-owned runner registry.
 /// Runner commands may execute remotely, but registry mutation must remain on
 /// the controller so subsequent jobs use the selected binary.
-fn promote_verified_runner_binary(
+/// [`promote_verified_runner_binary`] against an explicitly injected root.
+///
+/// The config lock, the registry merge and the selection read-back all follow
+/// `roots`, so a promotion into an injected root cannot serialize against or
+/// mutate the ambient installation (#14362).
+fn promote_verified_runner_binary_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
     promotion_lease: &homeboy_core::runtime_promotion::RuntimePromotionLease,
     runner_id: &str,
     homeboy_path: &str,
 ) -> Result<Vec<String>> {
-    homeboy_core::config::with_config_lock(|| {
+    homeboy_core::config::with_config_lock_at(roots.config(), || {
         promote_verified_runner_binary_with(
             || promotion_lease.assert_generation(),
             runner_id,
             homeboy_path,
             |runner_id, homeboy_path| {
-                let patch = refreshed_runner_patch(runner_id, homeboy_path)?;
-                match merge(Some(runner_id), &patch.to_string(), &[])? {
+                let patch = refreshed_runner_patch_in_roots(roots, runner_id, homeboy_path)?;
+                match merge_in_roots(roots, Some(runner_id), &patch.to_string(), &[])? {
                     MergeOutput::Single(result) => Ok(result.updated_fields),
                     MergeOutput::Bulk(_) => Ok(Vec::new()),
                 }
             },
-            |runner_id| Ok(load(runner_id)?.settings.homeboy_path),
+            |runner_id| Ok(load_in_roots(roots, runner_id)?.settings.homeboy_path),
         )
     })
 }
@@ -2702,24 +2884,26 @@ where
 /// Restore only if this promotion still owns the selected value. A later
 /// serialized transaction may have selected another binary after this one
 /// failed; compensation must never overwrite that newer owner.
-fn restore_runner_homeboy_path_if_selected(
+fn restore_runner_homeboy_path_if_selected_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     selected_homeboy_path: &str,
     previous_homeboy_path: Option<&str>,
 ) -> Result<bool> {
-    homeboy_core::config::with_config_lock(|| {
-        let runner = load(runner_id)?;
+    homeboy_core::config::with_config_lock_at(roots.config(), || {
+        let runner = load_in_roots(roots, runner_id)?;
         if runner.settings.homeboy_path.as_deref() != Some(selected_homeboy_path) {
             return Ok(false);
         }
         let patch = serde_json::json!({ "homeboy_path": previous_homeboy_path });
-        match merge(Some(runner_id), &patch.to_string(), &[])? {
+        match merge_in_roots(roots, Some(runner_id), &patch.to_string(), &[])? {
             MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(true),
         }
     })
 }
 
-fn defer_reconnect_after_promotion_race(
+fn defer_reconnect_after_promotion_race_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     selected_homeboy_path: &str,
     previous_homeboy_path: Option<&str>,
@@ -2729,7 +2913,8 @@ fn defer_reconnect_after_promotion_race(
         .iter()
         .map(|job| job.job_id.clone())
         .collect::<Vec<_>>();
-    let restored = restore_runner_homeboy_path_if_selected(
+    let restored = restore_runner_homeboy_path_if_selected_in_roots(
+        roots,
         runner_id,
         selected_homeboy_path,
         previous_homeboy_path,

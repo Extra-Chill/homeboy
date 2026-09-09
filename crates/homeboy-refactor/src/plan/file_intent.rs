@@ -1,176 +1,50 @@
-//! File-level intent tracking and conflict resolution for the fix pipeline.
+//! Decompose conflict resolution for the fix pipeline.
 //!
 //! When multiple fixers target the same file, their modifications can conflict.
 //! For example, `ImportAdd` adds explicit imports that decompose's `pub use *`
 //! re-exports already cover, and `VisibilityChange` narrows visibility that
 //! decompose needs to keep wide for re-export paths.
 //!
-//! `FileIntent` captures the highest-priority structural operation planned for
-//! each file. `resolve_conflicts()` drops content fixes that are dominated by
-//! structural intents, replacing ad-hoc skip sets with declarative rules.
+//! `DecomposeConflictMap` records files that will be decomposed and drops
+//! content fixes that conflict with decompose's re-export mechanism.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::auto::contracts::{Fix, InsertionKind};
 
-/// What structural operation is planned for a file.
-///
-/// Intents are ordered by priority: structural operations dominate content
-/// modifications because they fundamentally change the file's role.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FileIntent {
-    /// File stays in place. Content fixes apply normally.
-    Normal,
-    /// File will be decomposed into submodules with `pub use *` re-exports.
-    /// Content fixes that modify imports or visibility are dominated because
-    /// decompose handles both through its re-export mechanism.
-    Decompose,
-    /// File will be deleted. All content fixes are pointless.
-    ///
-    /// Only `plan::file_intent`'s own tests construct this today; production
-    /// callers set `Normal`/`Decompose`. Kept because `dominated_insertion_kinds`
-    /// and `priority` both encode real behaviour for it.
-    #[allow(dead_code, reason = "constructed only by this module's tests")]
-    Delete,
-}
-
-impl FileIntent {
-    /// Returns which `InsertionKind` categories are dominated (should be dropped)
-    /// when this intent is active on a file.
-    pub(crate) fn dominated_insertion_kinds(&self) -> Vec<DominatedKind> {
-        match self {
-            FileIntent::Normal => vec![],
-            FileIntent::Decompose => vec![
-                // Decompose's pub use * re-exports handle imports — explicit
-                // ImportAdd would create duplicate name definitions.
-                DominatedKind::ByKind(InsertionKindCategory::ImportAdd),
-                // Decompose needs items to keep their original visibility so
-                // pub use * re-exports work. Narrowing pub → pub(crate) breaks
-                // the re-export path for consumers.
-                DominatedKind::ByKind(InsertionKindCategory::VisibilityChange),
-                // Re-export removal conflicts with decompose generating new
-                // pub use * re-exports.
-                DominatedKind::ByKind(InsertionKindCategory::ReexportRemoval),
-            ],
-            FileIntent::Delete => vec![
-                // Everything is pointless on a file being deleted.
-                DominatedKind::All,
-            ],
-        }
-    }
-}
-
-/// What category of insertion is dominated.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DominatedKind {
-    /// A specific insertion kind category.
-    ByKind(InsertionKindCategory),
-    /// All insertion kinds are dominated.
-    All,
-}
-
-/// Coarse categories for `InsertionKind`, used for conflict matching.
-///
-/// We don't match on the full enum (which has struct variants with data)
-/// because conflict resolution only needs the category, not the specifics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InsertionKindCategory {
-    ImportAdd,
-    VisibilityChange,
-    ReexportRemoval,
-    FunctionRemoval,
-    MethodStub,
-    TestModule,
-    FileMove,
-    Other,
-}
-
-impl InsertionKindCategory {
-    /// Classify an `InsertionKind` into its coarse category.
-    pub(crate) fn from_kind(kind: &InsertionKind) -> Self {
-        match kind {
-            InsertionKind::ImportAdd => Self::ImportAdd,
-            InsertionKind::VisibilityChange { .. } => Self::VisibilityChange,
-            InsertionKind::ReexportRemoval { .. } => Self::ReexportRemoval,
-            InsertionKind::FunctionRemoval { .. } => Self::FunctionRemoval,
-            InsertionKind::MethodStub => Self::MethodStub,
-            InsertionKind::TestModule => Self::TestModule,
-            InsertionKind::FileMove { .. } => Self::FileMove,
-            _ => Self::Other,
-        }
-    }
-}
-
-/// Registry of file-level intents.
-///
-/// Built before fix generation so fixers can query it, and used after
-/// generation to resolve conflicts by dropping dominated fixes.
+/// Files whose content fixes may conflict with a planned decomposition.
 #[derive(Debug, Default)]
-pub(crate) struct FileIntentMap {
-    intents: HashMap<String, FileIntent>,
+pub(crate) struct DecomposeConflictMap {
+    files: HashSet<String>,
 }
 
-impl FileIntentMap {
+impl DecomposeConflictMap {
     pub(crate) fn new() -> Self {
         Self {
-            intents: HashMap::new(),
+            files: HashSet::new(),
         }
     }
 
-    /// Register a structural intent for a file. Higher-priority intents
-    /// overwrite lower-priority ones (Delete > Move > Decompose > Normal).
-    pub(crate) fn set(&mut self, file: String, intent: FileIntent) {
-        let dominated = match self.intents.get(&file) {
-            Some(existing) => priority(existing) < priority(&intent),
-            None => true,
-        };
-        if dominated {
-            self.intents.insert(file, intent);
-        }
+    pub(crate) fn mark_decompose(&mut self, file: String) {
+        self.files.insert(file);
     }
 
-    /// Check if a file has a structural intent (anything other than Normal).
-    ///
-    /// No production caller — exercised only by this module's tests.
-    #[allow(
-        dead_code,
-        reason = "no production caller; asserted by this module's tests"
-    )]
-    pub(crate) fn has_structural_intent(&self, file: &str) -> bool {
-        matches!(
-            self.intents.get(file),
-            Some(FileIntent::Decompose | FileIntent::Delete)
-        )
-    }
-
-    /// Get the intent for a file, defaulting to Normal.
-    pub(crate) fn get(&self, file: &str) -> &FileIntent {
-        self.intents.get(file).unwrap_or(&FileIntent::Normal)
-    }
-
-    /// Resolve conflicts: remove insertions from fixes that are dominated
-    /// by the file's structural intent. Returns the number of insertions dropped.
+    /// Remove insertions that conflict with decompose's generated re-exports.
     pub(crate) fn resolve_conflicts(&self, fixes: &mut Vec<Fix>) -> usize {
         let mut total_dropped = 0;
 
         for fix in fixes.iter_mut() {
-            let intent = self.get(&fix.file);
-            if *intent == FileIntent::Normal {
-                continue;
-            }
-
-            let dominated = intent.dominated_insertion_kinds();
-            if dominated.is_empty() {
+            if !self.files.contains(&fix.file) {
                 continue;
             }
 
             let before = fix.insertions.len();
             fix.insertions.retain(|insertion| {
-                let dominated = is_dominated(&insertion.kind, &dominated);
+                let dominated = is_dominated_by_decompose(&insertion.kind);
                 if dominated {
                     eprintln!(
-                        "Conflict resolution: dropped {} on {} (dominated by {:?})",
-                        insertion.description, fix.file, intent
+                        "Conflict resolution: dropped {} on {} (dominated by decompose)",
+                        insertion.description, fix.file
                     );
                 }
                 !dominated
@@ -185,22 +59,13 @@ impl FileIntentMap {
     }
 }
 
-/// Check if an insertion kind is dominated by any of the dominated-kind rules.
-fn is_dominated(kind: &InsertionKind, dominated: &[DominatedKind]) -> bool {
-    let category = InsertionKindCategory::from_kind(kind);
-    dominated.iter().any(|d| match d {
-        DominatedKind::All => true,
-        DominatedKind::ByKind(cat) => *cat == category,
-    })
-}
-
-/// Priority ordering: Delete > Decompose > Normal.
-fn priority(intent: &FileIntent) -> u8 {
-    match intent {
-        FileIntent::Normal => 0,
-        FileIntent::Decompose => 1,
-        FileIntent::Delete => 2,
-    }
+fn is_dominated_by_decompose(kind: &InsertionKind) -> bool {
+    matches!(
+        kind,
+        InsertionKind::ImportAdd
+            | InsertionKind::VisibilityChange { .. }
+            | InsertionKind::ReexportRemoval { .. }
+    )
 }
 
 #[cfg(test)]
@@ -230,7 +95,7 @@ mod tests {
 
     #[test]
     fn normal_intent_keeps_all_fixes() {
-        let map = FileIntentMap::new();
+        let map = DecomposeConflictMap::new();
         let mut fixes = vec![
             make_fix("src/foo.rs", InsertionKind::ImportAdd),
             make_fix(
@@ -249,8 +114,8 @@ mod tests {
 
     #[test]
     fn decompose_drops_import_add_and_visibility() {
-        let mut map = FileIntentMap::new();
-        map.set("src/foo.rs".into(), FileIntent::Decompose);
+        let mut map = DecomposeConflictMap::new();
+        map.mark_decompose("src/foo.rs".into());
 
         let mut fixes = vec![
             make_fix("src/foo.rs", InsertionKind::ImportAdd),
@@ -272,50 +137,12 @@ mod tests {
 
     #[test]
     fn decompose_keeps_non_dominated_kinds() {
-        let mut map = FileIntentMap::new();
-        map.set("src/foo.rs".into(), FileIntent::Decompose);
+        let mut map = DecomposeConflictMap::new();
+        map.mark_decompose("src/foo.rs".into());
 
         let mut fixes = vec![make_fix("src/foo.rs", InsertionKind::MethodStub)];
         let dropped = map.resolve_conflicts(&mut fixes);
         assert_eq!(dropped, 0);
         assert_eq!(fixes.len(), 1);
-    }
-
-    #[test]
-    fn delete_drops_everything() {
-        let mut map = FileIntentMap::new();
-        map.set("src/foo.rs".into(), FileIntent::Delete);
-
-        let mut fixes = vec![
-            make_fix("src/foo.rs", InsertionKind::ImportAdd),
-            make_fix("src/foo.rs", InsertionKind::MethodStub),
-        ];
-        let dropped = map.resolve_conflicts(&mut fixes);
-        assert_eq!(dropped, 2);
-        assert_eq!(fixes.len(), 0);
-    }
-
-    #[test]
-    fn higher_priority_intent_wins() {
-        let mut map = FileIntentMap::new();
-        map.set("src/foo.rs".into(), FileIntent::Decompose);
-        map.set("src/foo.rs".into(), FileIntent::Delete);
-        assert_eq!(*map.get("src/foo.rs"), FileIntent::Delete);
-    }
-
-    #[test]
-    fn lower_priority_does_not_overwrite() {
-        let mut map = FileIntentMap::new();
-        map.set("src/foo.rs".into(), FileIntent::Delete);
-        map.set("src/foo.rs".into(), FileIntent::Decompose);
-        assert_eq!(*map.get("src/foo.rs"), FileIntent::Delete);
-    }
-
-    #[test]
-    fn has_structural_intent_checks_correctly() {
-        let mut map = FileIntentMap::new();
-        map.set("src/foo.rs".into(), FileIntent::Decompose);
-        assert!(map.has_structural_intent("src/foo.rs"));
-        assert!(!map.has_structural_intent("src/bar.rs"));
     }
 }

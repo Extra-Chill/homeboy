@@ -24,8 +24,11 @@ impl RunsArgs {
     pub(crate) fn show_summary_eligible(&self) -> bool {
         match &self.command {
             RunsCommand::Show {
-                json, presentation, ..
-            } => !presentation.json_or_legacy(*json),
+                json,
+                presentation,
+                field,
+                ..
+            } => field.is_empty() && !presentation.json_or_legacy(*json),
             _ => false,
         }
     }

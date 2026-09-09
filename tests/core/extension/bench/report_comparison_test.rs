@@ -210,6 +210,7 @@ mod fixtures {
             rig_state: None,
             failure: None,
             diagnostics: Vec::new(),
+            persisted_run: None,
         }
     }
 
@@ -234,6 +235,7 @@ mod fixtures {
                 diagnostics: Vec::new(),
             }),
             diagnostics: Vec::new(),
+            persisted_run: None,
         }
     }
 

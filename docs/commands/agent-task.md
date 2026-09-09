@@ -41,9 +41,9 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
-`agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `list` and `active` default to 20 newest rows and return `next_cursor` when another page exists; continue active discovery with `agent-task active --limit <n> --cursor <next_cursor>`. `agent-task list --latest` searches complete durable history and returns the newest record matching the same `--task-url`, `--repo`, `--worktree`, `--submitted-after`, `--state`, `--run-placement`, and `--parent-id` filters; the existing `agent-task latest` remains available for unfiltered compatibility. Active discovery emits at most eight prioritized `next_actions`: fleet reconciliation when stale records exist, page continuation when truncated, and focused per-run inspection actions. `list --full` and `active --full` return every matching row. `list --latest` rejects `--limit`, `--cursor`, and `--full` because a one-record result cannot continue, expand, or cap a page. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the fleet-wide candidate set. Its `--limit`, `--cursor`, and `--full` selectors are rejected so discovery pagination cannot imply a reconciliation scope.
+`agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `list` and `active` default to 20 newest rows and return `next_cursor` when another page exists; continue active discovery with `agent-task active --limit <n> --cursor <next_cursor>`. `agent-task list --latest` searches complete durable history and returns the newest record matching the same `--task-url`, `--repo`, `--worktree`, `--submitted-after`, `--state`, `--run-placement`, and `--parent-id` filters; the existing `agent-task latest` remains available for unfiltered compatibility. Active discovery emits at most eight prioritized `next_actions`: fleet reconciliation when stale records exist, page continuation when truncated, and focused per-run inspection actions. `list --full` and `active --full` return every matching row. `list --latest` rejects `--limit`, `--cursor`, and `--full` because a one-record result cannot continue, expand, or cap a page. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. Applied reconciliation returns the canonical `ControlPlaneActionAcknowledgement` used by the HTTP action endpoint; the workflow-specific reconcile report remains nested under `result`. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the fleet-wide candidate set. Its `--limit`, `--cursor`, and `--full` selectors are rejected so discovery pagination cannot imply a reconciliation scope.
 
-`agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource. It is a bounded, non-reconciling read; use `agent-task logs <run-id> [--cursor <cursor>]` for canonical event pages, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
+`agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource (`homeboy/control-plane-run/v1`). Human summaries read that resource directly; they do not reconstruct `homeboy/agent-task-status-scope/v1` or wrap the run under `control_plane_run`. It is a bounded, non-reconciling read; use `agent-task logs <run-id> [--cursor <cursor>]` for canonical `ControlPlaneEventPage`s, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
 
 `agent-task status <run-id> --watch` polls the same canonical resource. Every material resource change is emitted immediately as one bounded `homeboy/agent-task-status-watch-event/v2` JSONL event on stderr. Stdout is the bounded `homeboy/agent-task-status-watch/v2` final envelope. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
 
@@ -407,12 +407,18 @@ and digest, and exact commands remain bound to the current candidate. The report
 labels these gates as `verified_inherited`; any stale, red, or malformed receipt
 requires fresh verification instead of silently accepting it.
 
+When multiple registered components share the candidate repository, pass
+`--component <component-id>` with `--manual-finalization` to select the component
+whose review profile applies. Homeboy verifies that the explicit component is
+registered and matches the candidate path. Recovery derives component identity
+from its durable record and does not accept this selector.
+
 Fresh manual finalization can execute repeated candidate-bound verification
 commands and derive separate gate results plus reviewer evidence from them:
 
 ```bash
 homeboy agent-task finalize-pr --manual-finalization \
-  --verify 'cargo test --locked' ...
+  --verify 'homeboy review test homeboy' ...
 ```
 
 Each `--verify` runs against the same clean committed candidate in an isolated
@@ -474,7 +480,7 @@ homeboy agent-task cook \
   --task-url https://github.com/Extra-Chill/homeboy/issues/6453 \
   --workspace homeboy@fix-issue-6453 \
   --to-worktree homeboy@fix-issue-6453 \
-  --verify 'cargo test --lib' \
+  --verify 'homeboy review test homeboy' \
   --backend sandbox \
   --selector wordpress.sandbox-agent-task-executor \
   --prompt @task.txt
@@ -483,6 +489,48 @@ homeboy agent-task cook \
 Use `agent-task fanout cook-batch` only when there are multiple independent
 issues that should each get separate worktree materialization, branch/PR
 metadata, and fanout status collation.
+
+For one wave spanning independent repositories, submit a
+`homeboy/agent-task-batch-cook-fanout-plan/v1` to `fanout run-plan`. Its `cooks`
+array is a per-cell Cook contract, so each cell may select its own `repo`,
+`task_url`, `base`, `to_worktree`, gates or verification profile, provider
+policy, and finalization intent. The wave still owns one concurrency limit and
+one durable parent status, while every child retains its normal Cook recipe,
+evidence, PR finalization, and replay identity.
+
+```json
+{
+  "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
+  "fanout_id": "portfolio-repairs",
+  "max_concurrency": 3,
+  "cooks": [
+    {
+      "cook_id": "blocks-engine-101",
+      "repo": "blocks-engine",
+      "task_url": "https://github.com/Automattic/blocks-engine/issues/101",
+      "prompt": "Fix issue 101.",
+      "to_worktree": "blocks-engine@fix-101",
+      "base": "trunk",
+      "verify": ["npm test"]
+    },
+    {
+      "cook_id": "homeboy-11088",
+      "repo": "homeboy",
+      "task_url": "https://github.com/Extra-Chill/homeboy/issues/11088",
+      "prompt": "Fix issue 11088.",
+      "to_worktree": "homeboy@fix-11088",
+      "base": "main",
+      "verify": ["cargo test -p homeboy-cli"]
+    }
+  ]
+}
+```
+
+Run the manifest with `homeboy agent-task fanout run-plan --input
+@portfolio-repairs.json`. Status, artifacts, cancellation, and resume use the
+single `fanout_id`. The durable parent retains a sanitized per-cell manifest;
+private gate commands, provider configuration, and evidence file paths remain
+only in the child Cook recipes.
 
 #### Multi-Issue Cook Batch
 
@@ -498,15 +546,15 @@ resolve; this is checked before any worktree is created.
 ```bash
 homeboy agent-task fanout cook-batch \
   --repo homeboy \
-  --verify 'cargo test --lib' \
+  --verify 'homeboy review test homeboy' \
   --backend sandbox \
   --selector wordpress.sandbox-agent-task-executor \
   https://github.com/Extra-Chill/homeboy/issues/6453 \
   https://github.com/Extra-Chill/homeboy/issues/6454
 ```
 
-For mixed stacks, keep shared gates on `--verify` and assign named additions or
-replacements with one JSON declaration. `--verification-profiles` accepts inline
+For mixed stacks, keep arbitrary shell gates on `--verify` and assign named typed
+test plans with one JSON declaration. `--verification-profiles` accepts inline
 JSON or `@file.json`. An assignment selector is an exact issue URL, GitHub issue
 key (`OWNER/REPO#NUMBER`), or generated task selector (`issue-NUMBER`). Every
 assignment must match one child; unmatched selectors return the typed
@@ -515,23 +563,24 @@ assignment must match one child; unmatched selectors return the typed
 ```json
 {
   "profiles": {
-    "php": { "mode": "append", "verify": ["composer audit --format=json"] },
-    "node": { "mode": "replace", "verify": ["npm audit --omit=dev"] },
-    "rust": { "verify": ["cargo fmt --check", "cargo test -p homeboy-cli"] }
+    "review": {
+      "plan": {
+        "adapter": "homeboy_review_test",
+        "command": ["homeboy", "review", "test", "homeboy"],
+        "suite_timeout_seconds": 1800
+      }
+    }
   },
   "assignments": [
-    { "selector": "Extra-Chill/homeboy#6453", "profile": "php" },
-    { "selector": "issue-6454", "profile": "node" },
-    { "selector": "https://github.com/Extra-Chill/homeboy/issues/6455", "profile": "rust" }
+    { "selector": "Extra-Chill/homeboy#6453", "profile": "review" }
   ]
 }
 ```
 
-`append` is the default mode and adds profile gates after shared gates; `replace`
-uses only that profile's gates. The generated dry-run `plan.cooks` and
-`preflight.deterministic_gates` show every child's effective profile and exact
-commands. Those command arrays are persisted with each cook recipe and carried
-unchanged to Lab provider handoff.
+Each profile selects one `TestExecutionPlan`. The current declared contract
+enforces a canonical `homeboy review test` argv and a positive suite timeout.
+The typed declaration is persisted unchanged through Cook and Lab handoff; use
+`--verify` only for arbitrary shell programs.
 
 Add `--dry-run` to inspect the derived branch/worktree names and batch-cook spec
 without creating worktrees. Add `--run-plan` after reviewing provider readiness
@@ -615,14 +664,14 @@ attempt to the Lab controller:
 
 ```bash
 homeboy --runner homeboy-lab --detach-after-handoff agent-task cook \
-  --to-worktree homeboy@fix-issue-6453 --verify 'cargo test --lib' --prompt @task.txt
+  --to-worktree homeboy@fix-issue-6453 --verify 'homeboy review test homeboy' --prompt @task.txt
 ```
 
 Wait for the completed Cook when the caller owns a synchronous workflow:
 
 ```bash
 homeboy --runner homeboy-lab agent-task cook \
-  --to-worktree homeboy@fix-issue-6453 --verify 'cargo test --lib' --prompt @task.txt
+  --to-worktree homeboy@fix-issue-6453 --verify 'homeboy review test homeboy' --prompt @task.txt
 ```
 
 Waiting is the default, so a synchronous caller passes no observation flag at
@@ -1107,15 +1156,16 @@ missing-`--backend` error instead of failing with the same precondition (#12569)
 A supplied `--backend` still fails fast: that query names one backend and has no
 fuller picture to report.
 
-A `ready` verdict means "no reason found to block dispatch," not "confirmed to
-work." `dispatchability.checks.credentials.verified` distinguishes the two: it
-is `true` only when the routed provider declared its own live readiness probe
-(`readiness_invocation`) and that probe ran and passed. When it is `false`,
-`ready: true` reflects presence only — the declared credential material is
-readable somewhere, which is not proof it is still valid. A revoked or expired
-provider-owned credential (e.g. an OAuth refresh token) stays present on disk
-after revocation, so presence-only readiness must not be read as a live
-go/no-go signal for that class of credential (#13628).
+`dispatchability.checks.credentials.status` distinguishes `missing`, `present`,
+`unverified`, `verified`, `unusable`, and `not_required`. Readable credential
+material is only `present`: a revoked or expired provider-owned credential stays
+on disk after revocation. A provider that declares the `provider_owned_auth`
+capability is dispatchable only after its bounded `readiness_invocation` runs
+and passes, producing `verified`. A failed probe reports `unusable` and preserves
+the provider-owned reason and remediation; an absent probe reports `unverified`
+and tells the operator to update the provider or select a verified backend.
+Cook performs this live admission against the final provider configuration
+before scheduler reservation can consume provider-execution budget (#13628).
 
 ## Repo-Local Gate Tasks
 
@@ -1395,27 +1445,6 @@ homeboy agent-task cook \
 External workspace managers should resolve their own handles to local paths and
 call cook with `--cwd <resolved-path>`.
 
-When a configured worktree provider cannot resolve or create the checkout for a
-repair to its own repository, declare that ownership under
-`settings.worktree_provider_self_repair.<provider-id>.repository`. The failure
-then includes typed replay argv for the explicit bootstrap route:
-
-```bash
-homeboy agent-task cook \
-  --repo workspace-service-component \
-  --task-url https://tracker.example/issues/123 \
-  --cwd /path/to/existing-clean-linked-worktree \
-  --worktree-provider-self-repair workspace-service \
-  --verify "cargo test --workspace" \
-  --prompt @task.txt
-```
-
-This route never invokes the failed workspace provider. It validates that the
-provider declares the requested repository, pins the explicit checkout branch,
-and runs the ordinary Cook provider, deterministic gates, review, and PR
-finalization. The durable `self_repair_bootstrap` provenance remains marked for
-normal provider lifecycle reconciliation after the repair ships.
-
 When `agent-task cook` is Lab-offloaded with a
 patch-producing provider, `--cwd` must point at a clean git checkout with
 `remote.origin.url` configured. Homeboy uses that contract to materialize a real
@@ -1457,6 +1486,10 @@ belong on each `agent_task_executors[]` entry:
       "remediation": "Configure EXAMPLE_API_TOKEN with homeboy agent-task auth."
     }
   ],
+  "readiness_invocation": {
+    "argv": ["example-provider", "--readiness"],
+    "timeout_ms": 30000
+  },
   "workspace_materialization": {
     "cwd": "git_checkout",
     "requires_git": true,
@@ -1482,6 +1515,10 @@ Homeboy treats these declarations as generic contracts:
 
 - `secret_env_requirements` and `runner_readiness` describe required secret env
   names and redacted readiness probes without exposing values.
+- `readiness_invocation.timeout_ms` bounds the complete provider-owned readiness
+  command, including all child probes. It defaults to 20,000 milliseconds and
+  must be between 1 and 120,000 milliseconds; providers must keep their own
+  sequential child budgets within this total.
 - `workspace_materialization` describes the checkout shape a provider needs; it
   does not name any workspace manager or product runtime.
 - `timeout_artifact_discovery` extends timeout evidence recovery with declared
@@ -1680,6 +1717,10 @@ failure classification, and the declared artifacts that were not produced. It
 projects that diagnosis into the shared `_homeboy_actionable` envelope (`run`,
 `refs`, `next_actions`, `artifacts`, `evidence`) instead of returning only
 prose. The existing `next_commands` field is unchanged.
+
+The default diagnosis keeps bounded causal excerpts and artifact refs. Use
+`--full`, `agent-task evidence --kind <kind> --full`, or their `--output` forms
+to hydrate the complete durable detail explicitly.
 
 `next_action_basis` reports how `next_actions` was produced: `diagnosis` when a
 classification or a concrete missing-artifact set mapped to specific commands,

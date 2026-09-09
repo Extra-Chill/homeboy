@@ -1,23 +1,199 @@
 #![cfg(test)]
 
+use std::collections::BTreeMap;
 use std::fs;
 
 use serde_json::json;
 
 use super::*;
 use crate::observation::{ArtifactRecord, RunRecord};
+use crate::secret_env_plan::SecretEnvPlan;
+
+fn controller_owned_secret_plan(name: &str) -> SecretEnvPlan {
+    let mut plan = SecretEnvPlan::from_secret_env_names(vec![name.to_string()]);
+    plan.env_materialization = Some(
+        homeboy_runner_contract::env_materialization_plan::EnvMaterializationPlan {
+            secret_refs: vec![
+                homeboy_runner_contract::env_materialization_plan::EnvSecretRef {
+                    name: name.to_string(),
+                    owner: Some("controller".to_string()),
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    plan
+}
+
+#[test]
+fn controller_credential_delivery_is_claim_bound_one_time_and_not_durable() {
+    let store = JobStore::default();
+    let sentinel = "controller-secret-sentinel-do-not-persist";
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
+    let job = store
+        .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "controller-credential-delivery".to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), sentinel.to_string())]),
+            }),
+        })
+        .expect("credential delivery queues");
+    assert!(!serde_json::to_string(&store.get(job.id).unwrap())
+        .unwrap()
+        .contains(sentinel));
+    assert!(!serde_json::to_string(&store.events(job.id).unwrap())
+        .unwrap()
+        .contains(sentinel));
+
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let delivery = claim
+        .credential_delivery
+        .clone()
+        .expect("claim references delivery");
+    assert_eq!(delivery.env_names, vec!["PROVIDER_TOKEN"]);
+    assert!(!serde_json::to_string(&claim).unwrap().contains(sentinel));
+    let claim_id = claim.job.claim_id.as_deref().unwrap();
+    assert!(store
+        .consume_ephemeral_credential_delivery(
+            job.id,
+            "other-runner",
+            claim_id,
+            &delivery.delivery_id
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .consume_ephemeral_credential_delivery(
+                job.id,
+                "homeboy-lab",
+                claim_id,
+                &delivery.delivery_id
+            )
+            .expect("matching claim consumes delivery")
+            .get("PROVIDER_TOKEN"),
+        Some(&sentinel.to_string())
+    );
+    assert!(store
+        .consume_ephemeral_credential_delivery(
+            job.id,
+            "homeboy-lab",
+            claim_id,
+            &delivery.delivery_id
+        )
+        .is_err());
+
+    let mut cancelled_request = remote_runner_request("homeboy-lab", None);
+    cancelled_request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
+    let cancelled = store
+        .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "cancelled-controller-credential-delivery".to_string(),
+            envelope: cancelled_request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), sentinel.to_string())]),
+            }),
+        })
+        .expect("credential delivery queues");
+    let cancelled_claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim succeeds")
+        .expect("job is claimed");
+    let cancelled_delivery = cancelled_claim
+        .credential_delivery
+        .expect("delivery reference");
+    store
+        .cancel_remote_runner_job(cancelled.id, "test cancellation")
+        .expect("cancel succeeds");
+    assert!(store
+        .consume_ephemeral_credential_delivery(
+            cancelled.id,
+            "homeboy-lab",
+            cancelled_claim.job.claim_id.as_deref().unwrap(),
+            &cancelled_delivery.delivery_id,
+        )
+        .is_err());
+}
+
+#[test]
+fn controller_delivery_requires_explicit_controller_ownership_and_fails_after_loss() {
+    let store = JobStore::default();
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.secret_env_plan = controller_owned_secret_plan("PROVIDER_TOKEN");
+    let submit = |plan: SecretEnvPlan, key: &str| {
+        store.submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: key.to_string(),
+            envelope: {
+                let mut request = request.clone();
+                request.secret_env_plan = plan;
+                request.execution_envelope()
+            },
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), "sentinel".to_string())]),
+            }),
+        })
+    };
+    let mut runner_owned = controller_owned_secret_plan("PROVIDER_TOKEN");
+    runner_owned
+        .env_materialization
+        .as_mut()
+        .unwrap()
+        .secret_refs[0]
+        .owner = Some("runner".to_string());
+    assert!(submit(runner_owned, "runner-owned-delivery").is_err());
+
+    let job = submit(request.secret_env_plan.clone(), "controller-delivery").expect("submit");
+    // This models a controller restart: durable ownership survives while the
+    // process-local plaintext registry is intentionally lost.
+    store.discard_ephemeral_credential_delivery(job.id);
+    let independent = store
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
+        .expect("queue independent runner-owned job");
+    assert!(store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("missing sidecar transitions its job")
+        .is_none());
+    assert_eq!(
+        store.get(job.id).expect("lost-sidecar job").status,
+        JobStatus::Failed
+    );
+    assert_eq!(
+        store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+            .expect("independent job remains claimable")
+            .expect("independent claim")
+            .job
+            .id,
+        independent.id
+    );
+}
 
 #[test]
 fn remote_runner_job_claim_returns_oldest_matching_job() {
     let store = JobStore::default();
     let other = store
-        .submit_remote_runner_job(remote_runner_request("other-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("other-lab", Some("extrachill")))
         .expect("other runner job queues");
     let first = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("first runner job queues");
     let second = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("second runner job queues");
 
     let claim = store
@@ -26,7 +202,15 @@ fn remote_runner_job_claim_returns_oldest_matching_job() {
         .expect("matching job is claimed");
 
     assert_eq!(claim.job.id, first.id);
-    assert_eq!(claim.request.runner_id, "homeboy-lab");
+    assert_eq!(
+        claim
+            .envelope
+            .dispatch
+            .as_ref()
+            .expect("typed dispatch")
+            .runner_id,
+        "homeboy-lab"
+    );
     assert_eq!(claim.job.status, JobStatus::Running);
     assert_eq!(
         claim.job.claimed_by_runner_id.as_deref(),
@@ -131,7 +315,7 @@ fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
     store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -150,11 +334,6 @@ fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
     assert_eq!(stale_jobs[0].runner_id, "homeboy-lab");
     assert_eq!(stale_jobs[0].status, JobStatus::Failed);
     assert_eq!(
-        stale_jobs[0].lifecycle_state.as_deref(),
-        Some("orphaned_after_control_plane_loss")
-    );
-    assert_eq!(stale_jobs[0].retryable, Some(true));
-    assert_eq!(
         stale_jobs[0].stale_reason.as_deref(),
         Some("control plane lost before the job reached a terminal status")
     );
@@ -164,10 +343,10 @@ fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
 fn remote_runner_job_claim_respects_concurrency_limit() {
     let store = JobStore::default();
     let first = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("first runner job queues");
     let second = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("events")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("events")))
         .expect("second runner job queues");
 
     let first_claim = store
@@ -229,10 +408,10 @@ fn remote_runner_job_claim_respects_concurrency_limit() {
 fn remote_runner_job_claim_can_be_filtered_by_project() {
     let store = JobStore::default();
     let wire = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("wire")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("wire")))
         .expect("wire job queues");
     let events = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("events")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("events")))
         .expect("events job queues");
 
     let claim = store
@@ -257,7 +436,7 @@ fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
         "accepted_handoff_id": "reverse_broker:homeboy-lab:cook-42:attempt-2",
     }));
     let job = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -275,14 +454,14 @@ fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
         "reverse_broker:homeboy-lab:cook-42:attempt-2"
     );
     let verified_context = context
-        .verify_claim(&claim.job, &claim.request)
+        .verify_claim(&claim.job, &claim.envelope)
         .expect("context verifies claimed job");
     assert!(verified_context.verify_integrity().is_ok());
     let mut tampered_value = serde_json::to_value(context).expect("serialize context");
     tampered_value["runner_job_id"] = serde_json::json!("different-job");
     let tampered: crate::runner_job_execution_context::RunnerJobExecutionContext =
         serde_json::from_value(tampered_value).expect("decode tampered context");
-    assert!(tampered.verify_claim(&claim.job, &claim.request).is_err());
+    assert!(tampered.verify_claim(&claim.job, &claim.envelope).is_err());
     assert!(store.events(job.id).expect("events").iter().any(|event| {
         event
             .data
@@ -306,10 +485,10 @@ fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
 fn remote_runner_context_rejects_expired_or_different_durable_claims() {
     let store = JobStore::default();
     let first = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("one")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("one")))
         .expect("first job queues");
     let second = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("two")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("two")))
         .expect("second job queues");
     let first_claim = store
         .claim_remote_runner_job("homeboy-lab", Some("one"), 30_000, None)
@@ -323,13 +502,13 @@ fn remote_runner_context_rejects_expired_or_different_durable_claims() {
 
     assert_ne!(first.id, second.id);
     assert!(context
-        .verify_claim(&second_claim.job, &second_claim.request)
+        .verify_claim(&second_claim.job, &second_claim.envelope)
         .is_err());
 
     let mut expired = first_claim.job.clone();
     expired.claim_expires_at_ms = Some(crate::api_jobs::timestamp_ms().saturating_sub(1));
     assert!(context
-        .verify_claim(&expired, &first_claim.request)
+        .verify_claim(&expired, &first_claim.envelope)
         .is_err());
 }
 
@@ -337,7 +516,7 @@ fn remote_runner_context_rejects_expired_or_different_durable_claims() {
 fn remote_runner_execution_receipt_is_one_time_and_revalidates_the_live_claim() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -362,7 +541,7 @@ fn remote_runner_execution_receipt_is_one_time_and_revalidates_the_live_claim() 
     }));
 
     let expired_job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("expired job queues");
     let expired_claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -399,7 +578,7 @@ fn remote_runner_claim_rejects_workers_without_the_context_protocol() {
     let mut request = remote_runner_request("homeboy-lab", None);
     request.extension_env_providers = vec!["authenticated-provider".to_string()];
     let job = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("remote runner job queues");
 
     let missing = store.claim_remote_runner_job_with_execution_protocol(
@@ -454,7 +633,9 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
         lifecycle_revision: 4,
         claim: Some(claim),
     });
-    let job = store.submit_remote_runner_job(request).expect("job queues");
+    let job = store
+        .submit_runner_api_fixture(request)
+        .expect("job queues");
 
     assert!(store
         .claim_remote_runner_job_with_protocols(
@@ -511,6 +692,7 @@ fn remote_runner_legacy_claims_remain_available_only_for_context_free_jobs() {
         .expect("legacy worker can claim context-free work")
         .expect("legacy job is claimed");
     assert_eq!(claim.job.id, job.id);
+    assert!(claim.request.is_some());
     assert!(claim.execution_context.is_none());
     assert!(claim.execution_protocol.is_none());
     assert!(store.events(job.id).expect("events").iter().all(|event| {
@@ -523,12 +705,136 @@ fn remote_runner_legacy_claims_remain_available_only_for_context_free_jobs() {
 }
 
 #[test]
+fn remote_runner_protocol_v1_claim_retains_legacy_request_projection() {
+    let store = JobStore::default();
+    let request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    let job = store
+        .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "submission-v1-worker".to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: None,
+        })
+        .expect("runner API request queues");
+    let protocol = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
+        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
+            .to_string(),
+        version: 1,
+    };
+
+    let claim = store
+        .claim_remote_runner_job_with_execution_protocol(
+            "homeboy-lab",
+            Some("extrachill"),
+            30_000,
+            None,
+            Some(&protocol),
+        )
+        .expect("v1 claim succeeds")
+        .expect("matching job is claimed");
+
+    assert_eq!(claim.job.id, job.id);
+    assert_eq!(
+        claim.request.expect("v1 request projection").command,
+        claim.envelope.dispatch.expect("typed dispatch").command
+    );
+}
+
+#[test]
+fn runner_api_legacy_json_claim_sidecars_match_across_v2_and_v1_projections() {
+    let store = JobStore::default();
+    let workspace =
+        crate::workspace_claim::WorkspaceIdentity::new("test", "claim-sidecars").expect("identity");
+    let binding = crate::workspace_claim::WorkspaceClaimBinding {
+        workspace: workspace.clone(),
+        lifecycle_revision: 4,
+        claim: Some(crate::workspace_claim::WorkspaceClaim {
+            schema: crate::workspace_claim::WORKSPACE_CLAIM_SCHEMA.to_string(),
+            protocol: crate::workspace_claim::WorkspaceClaimProtocol::current(),
+            workspace: workspace.clone(),
+            lifecycle_revision: 4,
+            token: "claim-token".to_string(),
+            expires_at_ms: crate::api_jobs::timestamp_ms() + 30_000,
+        }),
+    };
+    let owner_lease = crate::workspace_claim::WorkspaceOwnerLease {
+        schema: crate::workspace_claim::WORKSPACE_OWNER_LEASE_SCHEMA.to_string(),
+        protocol: crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
+        workspace,
+        owner_id: "agent-task:claim-sidecars".to_string(),
+        lifecycle_revision: 4,
+        token: "owner-token".to_string(),
+        expires_at_ms: crate::api_jobs::timestamp_ms() + 30_000,
+    };
+    let submit = |submission_key: &str| {
+        let request = remote_runner_request("homeboy-lab", None);
+        let legacy_json = serde_json::to_value(homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: submission_key.to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: Some(binding.clone()),
+            workspace_owner_lease: Some(owner_lease.clone()),
+            credential_delivery: None,
+        })
+        .expect("legacy Runner API JSON");
+        let submission =
+            serde_json::from_value(legacy_json).expect("legacy Runner API JSON remains readable");
+        store
+            .submit_runner_api_request(submission)
+            .expect("Runner API request queues")
+    };
+
+    let v2_job = submit("claim-sidecars-v2");
+    let v2 = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("v2 claim succeeds")
+        .expect("v2 claim");
+    assert_eq!(v2.job.id, v2_job.id);
+    assert!(v2.request.is_none());
+    assert_eq!(v2.workspace_claim_binding, Some(binding.clone()));
+    assert_eq!(v2.workspace_owner_lease, Some(owner_lease.clone()));
+
+    let v1_job = submit("claim-sidecars-v1");
+    let execution = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
+        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
+            .to_string(),
+        version: 1,
+    };
+    let workspace_claim = crate::workspace_claim::WorkspaceClaimProtocol::current();
+    let workspace_owner_lease = crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current();
+    let v1 = store
+        .claim_remote_runner_job_with_protocols(
+            "homeboy-lab",
+            None,
+            30_000,
+            None,
+            super::remote_runner::RemoteRunnerClaimProtocols {
+                execution: Some(&execution),
+                workspace_claim: Some(&workspace_claim),
+                workspace_owner_lease: Some(&workspace_owner_lease),
+            },
+        )
+        .expect("v1 claim succeeds")
+        .expect("v1 claim");
+    assert_eq!(v1.job.id, v1_job.id);
+    assert_eq!(v1.workspace_claim_binding, Some(binding.clone()));
+    assert_eq!(v1.workspace_owner_lease, Some(owner_lease.clone()));
+    let projected = v1.request.expect("v1 request projection");
+    assert_eq!(projected.workspace_claim_binding, Some(binding));
+    assert_eq!(projected.workspace_owner_lease, Some(owner_lease));
+}
+
+#[test]
 fn remote_runner_context_evidence_survives_controller_restart() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -565,7 +871,7 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -632,7 +938,7 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
 fn remote_runner_job_result_records_terminal_state_and_artifacts() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -780,7 +1086,7 @@ fn remote_runner_result_observation_details_are_additive_and_validate_declared_r
 fn remote_runner_job_failed_result_records_error_and_terminal_state() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -835,7 +1141,7 @@ fn remote_runner_job_failed_result_records_error_and_terminal_state() {
 fn remote_runner_job_writes_require_matching_claim_id() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -876,7 +1182,7 @@ fn remote_runner_job_writes_require_matching_claim_id() {
 fn remote_runner_job_writes_reject_expired_claims() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -913,7 +1219,7 @@ fn remote_runner_job_writes_reject_expired_claims() {
 fn cancelled_remote_runner_job_cannot_be_claimed() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     store.cancel(job.id, "user requested").expect("job cancels");
 
@@ -928,7 +1234,7 @@ fn cancelled_remote_runner_job_cannot_be_claimed() {
 fn running_remote_runner_job_can_be_cancelled_by_broker() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -949,7 +1255,7 @@ fn running_remote_runner_job_can_be_cancelled_by_broker() {
 fn expired_remote_runner_claims_are_reconciled_as_failed() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 1, None)
@@ -975,10 +1281,10 @@ fn expired_remote_runner_claims_are_reconciled_as_failed() {
 fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliation() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let queued = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote job queues");
     let claimed = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("second remote job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -1044,7 +1350,7 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
     assert_eq!(completed.status, JobStatus::Succeeded);
 
     let expired = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("expired fixture queues");
     let expired_claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -1079,12 +1385,12 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
 }
 
 #[test]
-fn remote_runner_jobs_persist_request_and_claim_state() {
+fn remote_runner_jobs_persist_envelope_and_claim_state() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
 
     let reopened = JobStore::open(&path).expect("durable store reopens");
@@ -1094,8 +1400,9 @@ fn remote_runner_jobs_persist_request_and_claim_state() {
         .expect("persisted job is claimed");
 
     assert_eq!(claim.job.id, job.id);
-    assert_eq!(claim.request.command, vec!["homeboy", "test"]);
-    assert_eq!(claim.request.project_id.as_deref(), Some("extrachill"));
+    let dispatch = claim.envelope.dispatch.as_ref().expect("typed dispatch");
+    assert_eq!(dispatch.command, vec!["homeboy", "test"]);
+    assert_eq!(dispatch.project_id.as_deref(), Some("extrachill"));
 }
 
 #[test]
@@ -1110,7 +1417,9 @@ fn remote_runner_job_enqueue_persists_run_ref_metadata() {
         active_cell_count: None,
     });
 
-    let job = store.submit_remote_runner_job(request).expect("job queued");
+    let job = store
+        .submit_runner_api_fixture(request)
+        .expect("job queued");
     let events = store.events(job.id).expect("job events");
 
     assert!(events.iter().any(|event| {

@@ -1,0 +1,30 @@
+# Keeps control-plane wire compatibility and persisted migration tests explicit.
+
+name: Control Plane Contract Boundary
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/contracts/homeboy-control-plane-contract/**'
+      - 'crates/homeboy-control-plane-client/**'
+      - 'crates/homeboy-core/src/observation/store/schema.rs'
+      - 'crates/homeboy-core/tests/fixtures/control-plane-migration/**'
+      - 'Cargo.lock'
+      - '.github/workflows/control-plane-contract-boundary.yml'
+  workflow_dispatch:
+
+jobs:
+  control-plane-contract-boundary:
+    name: homeboy / Control Plane Contract Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Verify v1 wire compatibility and pre-v1 migration
+        run: |
+          cargo test --locked -p homeboy-control-plane-contract --test v1_golden
+          cargo test --locked -p homeboy-control-plane-client
+          cargo test --locked -p homeboy-core --lib migration_20_backfills_pre_v1_fixture_once

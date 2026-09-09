@@ -27,6 +27,28 @@ The wire schemas are:
 - `homeboy/extension-api-resolve-response/v1`
 - `homeboy/extension-api-readiness-request/v1`
 - `homeboy/extension-api-readiness-response/v1`
+- `homeboy/extension-api-invoke-request/v1`
+- `homeboy/extension-api-invoke-response/v1`
+- `homeboy/extension-api-execute-request/v1`
+- `homeboy/extension-api-execute-response/v1`
+- `homeboy/extension-api-action-invoke-request/v1`
+- `homeboy/extension-api-action-invoke-response/v1`
+- `homeboy/extension-api-environment-resolve-request/v1`
+- `homeboy/extension-api-environment-resolve-response/v1`
+- `homeboy/extension-api-deployment-provider-inventory-request/v1`
+- `homeboy/extension-api-deployment-provider-inventory-response/v1`
+- `homeboy/extension-api-deployment-provider-resolve-request/v1`
+- `homeboy/extension-api-deployment-provider-resolve-response/v1`
+- `homeboy/extension-api-deployment-provider-invoke-request/v1`
+- `homeboy/extension-api-deployment-provider-invoke-response/v1`
+- `homeboy/extension-api-recipe-run-provider-inventory-request/v1`
+- `homeboy/extension-api-recipe-run-provider-inventory-response/v1`
+- `homeboy/extension-api-recipe-run-plan-request/v1`
+- `homeboy/extension-api-recipe-run-plan-response/v1`
+- `homeboy/extension-api-external-check-detail-inventory-request/v1`
+- `homeboy/extension-api-external-check-detail-inventory-response/v1`
+- `homeboy/extension-api-external-check-detail-hydrate-request/v1`
+- `homeboy/extension-api-external-check-detail-hydrate-response/v1`
 
 Additive optional fields may be added within v1. Changes to identity,
 capability meaning, compatibility decisions, or required fields require a new
@@ -90,12 +112,17 @@ diagnostics from one v1 catalog snapshot. Explicit ownership,
 over those stable descriptors; execution-context assembly loads the selected
 manifest only for internal script paths and settings.
 
+File-type providers use open capability IDs: `fingerprint.<extension>`,
+`format.<extension>`, and `refactor.<extension>`. Resolution matches those IDs
+in the same catalog and returns only the selected extension ID. Manifest paths
+and script declarations remain private execution details.
+
 ## Readiness
 
-`extension::catalog::readiness_api` returns readiness evidence for one explicit
-installed extension ID. Callers choose `cached` to read matching evidence
-without running extension code or `probe` to execute the declared runtime probe
-within Homeboy's existing timeout and recursion guards.
+`extension::catalog::readiness_api_batch` returns readiness evidence for explicit
+installed extension IDs from one discovery pass. Callers choose `cached` to read
+matching evidence without running extension code or `probe` to execute declared
+runtime probes within Homeboy's existing timeout and recursion guards.
 
 The response distinguishes `ready`, `not_ready`, `unknown`, and `timed_out` and
 preserves cache age, probe duration, timeout, diagnostic, and follow-up command
@@ -106,6 +133,169 @@ CLI extension inventory and startup command-health discovery consume v1 catalog
 and readiness responses. Their legacy presentation fields remain CLI adapters;
 core no longer maintains a parallel `ExtensionSummary` projection.
 
+## Read-Only Invocation
+
+`extension::invoke::invoke_api` synchronously executes one explicitly selected
+non-mutating capability after resolving it through v1. Requests carry the
+extension ID, capability ID, JSON input, and an explicit working directory.
+Core keeps script paths private, bounds captured output, and accepts only JSON
+stdout. Resolution, process, and output failures use typed operation failure
+codes. Process failures optionally include `process` evidence with the exit
+code, bounded stdout and stderr, and parsed stdout when it was valid JSON. The
+optional field is omitted for existing successful invocation responses.
+
+The `compiler-warnings`, `compiler-warning-fixes`, `fingerprint.<file-extension>`,
+and `refactor.<file-extension>` capabilities are adopters. Their descriptors
+reference versioned input and output schemas; audit and refactor consume
+invocation responses rather than loading manifests or running scripts directly.
+Fingerprint scripts consume `homeboy/fingerprint-input/v1` and produce
+`homeboy/fingerprint-output/v1`.
+Refactor commands remain extension-owned JSON payloads under the shared
+`homeboy/refactor-analysis-input/v1` and `homeboy/refactor-analysis-output/v1`
+schema references. Component-linked providers take precedence when they offer
+the requested capability, with installed providers as the deterministic
+fallback.
+
+This synchronous operation is intentionally limited to analysis. It does not
+perform durable mutation and therefore has no idempotency, cancellation,
+reconciliation, activity, or terminal-result lifecycle.
+
+## Execute Invocation
+
+`extension::invoke::execute_api` runs the advertised `execute` capability after
+validating the typed request and resolving it through v1. Runtime execution is
+the authoritative readiness check so stale cached probe results do not change
+direct CLI behavior. The request selects extension and capability identity,
+optional project and component context, structured inputs, argv, execution
+mode, an optional step filter, and a required idempotency key. Command strings,
+working directory, secrets, and runner implementation details stay off the
+public contract.
+
+Core claims the key before mutable resolution and invokes the existing runtime
+execution engine once per accepted key. A repeated request with the same key
+and fingerprint returns the stored success or failure response without
+executing again. A repeated key with a different fingerprint returns
+`idempotency_conflict`. An accepted key that has not finished returns
+`invocation_in_progress`. Completed records survive process restarts within the
+same Homeboy data root. An interrupted invocation remains explicitly in
+progress rather than risking a second execution; a later slice can add recovery
+through cancel or reconcile. This slice does not advertise those operations or
+daemon transport.
+
+`homeboy extension run` constructs this request and projects the typed response
+into the existing CLI output and exit-code contract. Interactive and captured
+modes keep their previous streaming and capture behavior.
+
+## Action Invocation
+
+`extension::invoke::action_api::invoke_action_api` executes one manifest action
+after resolving its advertised `action.<id>` capability through v1. The typed
+request carries extension and action identity plus selected values, project
+identity, and the action payload. Core keeps the manifest, command, working
+directory, environment, settings, and interpolated payload private.
+
+Command-backed actions return bounded process evidence: exit code, stdout,
+stderr, and parsed stdout when it is JSON. API-backed actions return only the
+remote operation output. Neither response shape exposes command text, cwd,
+payload echoes, environment declarations, extension paths, or provider
+configuration. Release, rig lifecycle, and direct CLI action execution all use
+this operation rather than a parallel manifest-action executor.
+
+## Environment Resolution
+
+`extension::invoke::resolve_environment_api` resolves the `environment`
+capability through a dedicated typed operation. Its serialized request carries
+only the selected extension ID. Authenticated runner context, working directory,
+and effective base environment are explicit private service inputs; raw runtime
+and secret values never enter the generic invocation envelope.
+
+Core resolves the installed manifest and private provider script path, then uses
+the same bounded capability process executor as read-only invocation. The
+successful response retains only extension identity, version, non-sensitive
+public environment values, and declared secret names. Process failures and
+invalid output retain bounded, redacted process evidence. Provider ordering,
+environment layering, collision detection, and runner-side secret resolution
+remain caller policy over this operation.
+
+## Recipe-Run Provider Planning
+
+`extension::recipe_run_api` lists and plans `recipe-run-provider.<id>`
+capabilities from one v1 catalog snapshot. Inventory responses retain safe
+provider identity, owning extension, resolvability, and validation diagnostics.
+Extension source paths, executable declarations, and raw manifest values remain
+private to the core adapter.
+
+Planning accepts workspace-relative recipe and artifact paths and returns a
+literal argv vector with provider identity and version. The operation performs
+no shell parsing and no runner execution. The existing runner placement,
+workspace hydration, artifact promotion, and durable terminal-result recording
+consume that plan unchanged.
+
+## Deployment Providers
+
+`extension::deployment_api::DeploymentProviderApi` discovers
+`deployment-provider.<id>` capabilities once per deploy operation. The immutable
+session supplies safe provider metadata for planning and invokes the selected
+provider without exposing command templates, extension paths, environment
+construction, or manifest values to `homeboy-deploy`.
+
+Inventory and resolution expose provider identity, owning extension, dry-run
+support, layered input and result schema references, target requirements,
+resolvability, and typed diagnostics. Invocation carries the selected deployment
+and component identities, then resolves readiness and private execution details
+inside core. Component and provider-input filesystem paths are private service
+context and never enter the serialized request. Layered provider stdout is
+projected only when it matches the
+declared result schema; all other layered output becomes opaque so target input
+and secrets cannot enter deployment evidence or errors. Legacy unlayered
+providers retain their existing structured or unstructured result.
+
+Deployment routing, repository policy validation, payload construction,
+observation phases, and component result aggregation remain deploy-subsystem
+policy over this operation.
+
+## Agent-Task Executor Registration
+
+`extension::agent_task_executor_api::AgentTaskExecutorApi` discovers
+`agent-task-executor.<id>` capabilities from installed extensions and returns one
+immutable registration inventory. Each entry exposes the executor id, backend,
+owning extension, owning runtime, declared capability tokens, whether a readiness
+probe is declared, its readiness budget, resolvability, and a typed diagnostic.
+
+Everything an executor needs in order to run stays private: argv, commands,
+extension and runtime paths, secret and environment declarations, materialization
+contracts, and provider-specific options never enter an inventory response.
+
+Entries are ordered by owning extension, runtime, and executor id. A declaration
+that cannot be parsed, an extension that is incompatible or invalid, and an
+executor id claimed by more than one source are each registered as an unusable
+entry that keeps its identity and states its diagnostic kind, rather than being
+dropped. A colliding id makes every claimant unusable so selection never depends
+on discovery order.
+
+Extension install, replace, and relink validate declared executors against this
+inventory, so the install-time gate and ordinary agent-task discovery cannot
+disagree about what an extension registers. Resolving a declaration into an
+executable provider, selection policy, workspace preparation, retries, and
+dispatch remain agent-task subsystem policy over this operation.
+
+## External Check Detail Hydration
+
+`extension::external_check_detail_api` discovers
+`external-check-detail-resolver.<provider>` capabilities once per CI triage and
+uses that immutable catalog snapshot for slot accounting, deterministic owner
+selection, and hydration. Inventory responses expose only provider identity,
+owning extension, resolvability, and safe diagnostics. Manifest paths, literal
+argv, and environment declarations remain private to the core adapter.
+
+Hydration accepts the existing extension-owned external-check request fields and
+returns its typed response or an operation-local diagnostic. The host environment
+and absolute aggregate deadline are explicit private service context. Core starts
+from an empty child environment, projects only declared values, bounds output,
+redacts secret values, and terminates contained descendants before returning.
+The CLI retains source check evidence and only adapts the typed result into its
+existing triage presentation.
+
 ## Contract Classification
 
 `homeboy-extension-contract` predates the stable API and contains several kinds
@@ -115,14 +305,13 @@ stability.
 
 | Classification | Modules | Direction |
 | --- | --- | --- |
-| Stable Extension API | `api` | Versioned public descriptor and handshake envelopes. |
+| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, execute invocation, environment-resolution, deployment-provider execution, recipe-provider planning, and external-check hydration envelopes. |
 | Stable API candidates | `capability`, `core_compat`, `exec_context`, `runtime_helper`, `sidecar_config` | Reuse or reference from future v1 operations after their wire semantics are reviewed. |
 | Extension-owned domain contracts | `action_types`, `agent_task_executor_declaration`, `autofix_config`, `bench_artifact`, `bench_diagnostics`, `bench_distribution`, `bench_gate`, `bench_metric_preset`, `bench_responsiveness`, `bench_result`, `bench_results`, `bench_stage`, `ci_config`, `ci_context`, `external_check_detail_resolver`, `external_storage_retention`, `fuzz_config`, `lint_result`, `lint_results`, `notification_transport_config`, `source_metadata_repair`, `test_analysis`, `test_drift`, `test_duration`, `test_inventory_config`, `test_parsing`, `test_result`, `test_results`, `test_workflow`, `trace_config`, `trace_parsing`, `trace_preview`, `trace_results`, `trace_spec`, `update_output`, `worktree_retention` | Remain portable domain schemas; the Extension API references their schema IDs rather than absorbing their fields. |
 | Manifest and implementation detail | `extension_contract_producer`, `hook_event`, `manifest`, `manifest_action_config`, `manifest_artifact_cleanup`, `manifest_capabilities`, `manifest_capability_config`, `manifest_deploy_config`, `manifest_test_config`, `manifest_toolchain_config`, `runner_contract`, `version` | Inputs and helpers used to build or execute descriptors. They are not a stable service API. |
 
 ## Next Operations
 
-The descriptor handshake deliberately does not define invocation lifecycle.
-Subsequent v1 slices will add idempotent invoke, cancel, reconcile, activity,
-and terminal-result contracts anchored to canonical control-plane
-references from issue #13697.
+Execute invocation uses durable idempotency within one Homeboy data root and
+does not define cancel, reconcile, activity, or daemon transport. Subsequent v1
+slices can add those operations without extending the control-plane kernel.

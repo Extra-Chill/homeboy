@@ -218,6 +218,7 @@ fn cleanup_runtime_tmp_retention(
         run_max_bytes: retention.runtime_run_max_bytes,
         run_max_count: retention.runtime_run_max_count,
         cursor,
+        deadline: None,
     })?;
     let managed_bytes = cleanup
         .rows

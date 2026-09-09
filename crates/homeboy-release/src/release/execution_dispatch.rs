@@ -1,17 +1,17 @@
+use super::context::ReleaseExtension;
 use crate::release::executor;
 use crate::release::types::{ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus};
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
-use homeboy_extension_contract::ExtensionManifest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
 pub(super) struct ReleaseExecutionContext<'a> {
     pub(super) component: &'a Component,
-    pub(super) extensions: &'a [ExtensionManifest],
+    pub(super) extensions: &'a [ReleaseExtension],
     pub(super) component_id: &'a str,
     pub(super) options: &'a ReleaseOptions,
     /// Homeboy roots resolved once for the whole plan by
@@ -270,6 +270,7 @@ pub(super) fn execute_release_plan_step(
             context.state.tag.as_deref(),
             &context.state.artifacts,
             &context.state.package_owned_paths,
+            context.options.control_plane.as_ref(),
         ))),
         step_kind if step_kind.starts_with("publish.") => {
             let target = step_kind.strip_prefix("publish.").unwrap_or_default();
@@ -1046,6 +1047,7 @@ mod tests {
         release_step_is_plan_only, release_step_is_show_stopper,
         release_step_unexpected_dirty_files, tracked_dirty_snapshot, ReleaseExecutionContext,
     };
+    use crate::release::context::ReleaseExtension;
     use crate::release::types::{
         ReleaseOptions, ReleasePipelineOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
@@ -1122,7 +1124,7 @@ mod tests {
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![extension];
+            let extensions = vec![ReleaseExtension::from_manifest(&extension)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1176,7 +1178,7 @@ mod tests {
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1243,7 +1245,7 @@ mod tests {
                 skip_build_validation: true,
                 ..ReleaseOptions::default()
             };
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1303,7 +1305,7 @@ mod tests {
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1369,7 +1371,7 @@ mod tests {
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -1404,7 +1406,7 @@ mod tests {
             );
             homeboy_core::extension::catalog::save_manifest(&package)
                 .expect("replace package extension");
-            let recovery_extensions = vec![package];
+            let recovery_extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut recovery = ReleaseExecutionContext {
                 component: &component,
                 extensions: &recovery_extensions,
@@ -1462,7 +1464,7 @@ mod tests {
                 ..Component::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![package];
+            let extensions = vec![ReleaseExtension::from_manifest(&package)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,
@@ -2017,7 +2019,7 @@ mod tests {
                 ..Default::default()
             };
             let options = ReleaseOptions::default();
-            let extensions = vec![extension];
+            let extensions = vec![ReleaseExtension::from_manifest(&extension)];
             let mut context = ReleaseExecutionContext {
                 component: &component,
                 extensions: &extensions,

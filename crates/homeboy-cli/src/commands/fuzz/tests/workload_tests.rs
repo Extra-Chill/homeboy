@@ -3,6 +3,114 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[test]
+fn selected_rig_workload_projects_plannable_inventory_without_inventory_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workload_path = temp.path().join("component-fuzz.json");
+    fs::write(
+        &workload_path,
+        serde_json::json!({
+            "schema": "homeboy/fuzz-workload/v1",
+            "id": "component-fuzz",
+            "safety_class": "read_only",
+            "surface_ids": ["component-runtime"],
+            "operations": ["query", "domain.verify"],
+            "target": {
+                "type": "service",
+                "component": "component-a",
+                "slug": "component-a"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write workload");
+    let workload = FuzzWorkloadOutput {
+        id: "component-fuzz".to_string(),
+        label: None,
+        description: None,
+        source: format!("rig_workloads:generic:{}", workload_path.display()),
+        manifest_path: Some(workload_path.to_string_lossy().to_string()),
+    };
+
+    let inventory = build_target_inventory(
+        "component-a",
+        std::slice::from_ref(&workload),
+        Some(&workload),
+        Some("proof-1".to_string()),
+        None,
+    )
+    .expect("project workload inventory");
+
+    assert_eq!(inventory.workloads.len(), 1);
+    assert_eq!(inventory.workloads[0].id, "component-fuzz");
+    assert_eq!(inventory.targets.len(), 1);
+    assert_eq!(inventory.targets[0].id, "component-a");
+    assert_eq!(inventory.targets[0].kind, "service");
+    assert_eq!(inventory.targets[0].operations.len(), 2);
+    assert_eq!(inventory.surfaces[0].id, "component-runtime");
+    assert_eq!(
+        inventory.metadata["workload_inventory_source"],
+        workload_path.to_string_lossy().as_ref()
+    );
+
+    let mut args = planner_args();
+    args.run.workload_id = Some("component-fuzz".to_string());
+    let metadata = plan_inventory_selection(&args, &inventory, None).expect("plan inventory");
+
+    assert_eq!(
+        metadata["selection"]["target_ids"],
+        serde_json::json!(["component-a"])
+    );
+    assert_eq!(
+        metadata["selection"]["operations"]
+            .as_array()
+            .expect("selected operations")
+            .len(),
+        2
+    );
+    assert_eq!(
+        metadata["sampling"]["operation_strata"][1]["values"],
+        serde_json::json!(["query", "domain.verify"])
+    );
+
+    args.strategy = FuzzPlanStrategy::CoverageGaps;
+    let coverage_gaps =
+        plan_inventory_selection(&args, &inventory, None).expect("plan coverage gaps");
+    assert!(coverage_gaps["selection"]["operations"]
+        .as_array()
+        .expect("selected operations")
+        .iter()
+        .any(|operation| operation["operation_id"] == "domain.verify"));
+
+    let explicit_path = temp.path().join("explicit-inventory.json");
+    let explicit_inventory = FuzzTargetInventory::from_value(serde_json::json!({
+        "id": "explicit-inventory",
+        "targets": [{
+            "id": "explicit-target",
+            "kind": "service",
+            "operations": [{ "id": "read", "kind": "read" }]
+        }]
+    }))
+    .expect("explicit inventory");
+    write_inventory(&explicit_path, &explicit_inventory);
+    let inventory = build_target_inventory(
+        "component-a",
+        &[workload.clone()],
+        Some(&workload),
+        Some("proof-2".to_string()),
+        Some(&explicit_path),
+    )
+    .expect("use explicit inventory");
+
+    assert_eq!(inventory.targets.len(), 1);
+    assert_eq!(inventory.targets[0].id, "explicit-target");
+    assert!(inventory.workloads.is_empty());
+    assert!(inventory
+        .metadata
+        .get("workload_inventory_source")
+        .is_none());
+}
+
+#[test]
 fn fuzz_workloads_include_rig_declared_paths() {
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
         "id": "package-fuzz",
@@ -41,6 +149,62 @@ fn fuzz_workloads_include_rig_declared_paths() {
             && workload.source
                 == "rig_workloads:generic:/tmp/homeboy-rigs/package/fuzz/checkout-create-order.json"
     }));
+}
+
+#[test]
+fn node_package_fuzz_script_is_listed_and_selected_for_run() {
+    with_isolated_home(|home| {
+        let extension_dir = home.path().join(".config/homeboy/extensions/nodejs");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("nodejs.json"),
+            serde_json::json!({
+                "name": "Node.js",
+                "version": "0.0.0",
+                "fuzz": {
+                    "extension_script": "fuzz.sh",
+                    "workload_json_probes": [{
+                        "path": "package.json",
+                        "pointer": "/scripts/fuzz",
+                        "id": "package-script-fuzz",
+                        "label": "package.json scripts.fuzz"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        let component_dir = tempfile::tempdir().expect("component dir");
+        fs::write(
+            component_dir.path().join("package.json"),
+            serde_json::json!({ "scripts": { "fuzz": "node scripts/fuzz.mjs" } }).to_string(),
+        )
+        .expect("package manifest");
+        let args = FuzzListArgs {
+            comp: PositionalComponentArgs {
+                component: Some("node-package".to_string()),
+                path: Some(component_dir.path().to_string_lossy().to_string()),
+            },
+            rig: None,
+            remote_discovery: false,
+            extension_override: ExtensionOverrideArgs {
+                extensions: vec!["nodejs".to_string()],
+            },
+            setting_args: SettingArgs::default(),
+        };
+
+        let listed = run_list(args).expect("list package fuzz script");
+
+        assert_eq!(listed.count, 1);
+        assert_eq!(listed.workloads[0].id, "package-script-fuzz");
+        assert_eq!(
+            select_workload(&listed.workloads, None)
+                .expect("select sole package workload")
+                .expect("package workload")
+                .id,
+            "package-script-fuzz"
+        );
+    });
 }
 
 #[test]

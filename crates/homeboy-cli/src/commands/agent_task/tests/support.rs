@@ -5,9 +5,6 @@
 
 pub(crate) use std::process::Command;
 
-pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch::{
-    DispatchArgs, DispatchCoreArgs,
-};
 pub(in crate::commands::agent_task) use super::super::args::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
@@ -18,7 +15,7 @@ pub(in crate::commands::agent_task) use super::super::args::{
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, LogsArgs,
     ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, SubmitArgs,
-    ValidatePlanArgs, VerifyGateArgs,
+    ValidatePlanArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
@@ -44,7 +41,6 @@ pub(crate) use homeboy::agents::agent_tasks::controller_service::{
 pub(crate) use homeboy::agents::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerFromSpecRequest,
 };
-pub(crate) use homeboy::agents::agent_tasks::gate::AgentTaskGateRevealPolicy;
 pub(crate) use homeboy::agents::agent_tasks::provider::{
     ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,

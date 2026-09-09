@@ -988,7 +988,7 @@ fn migrate_legacy_lifecycle(path: &Path) -> Result<MigrationOutcome> {
     let lock_path = path.join(LOCK_FILE);
     let lock = match fs::symlink_metadata(&lock_path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Ok(MigrationOutcome::Protected)
+            return Ok(MigrationOutcome::Protected);
         }
         Ok(_) => OpenOptions::new().read(true).write(true).open(&lock_path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
@@ -1006,13 +1006,13 @@ fn migrate_legacy_lifecycle(path: &Path) -> Result<MigrationOutcome> {
                 std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
             ) =>
         {
-            return Ok(MigrationOutcome::Protected)
+            return Ok(MigrationOutcome::Protected);
         }
         Err(error) => {
             return Err(io_error(
                 error,
                 "open shared Cargo target lock for lifecycle migration",
-            ))
+            ));
         }
     };
     match lock.try_lock_exclusive() {
@@ -1043,10 +1043,10 @@ fn remove_store_if_unleased(
         {
             Ok(lock) => lock,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Ok(RemoveOutcome::Protected)
+                return Ok(RemoveOutcome::Protected);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(RemoveOutcome::Missing)
+                return Ok(RemoveOutcome::Missing);
             }
             Err(error) => {
                 return Err(io_error(
@@ -1063,7 +1063,7 @@ fn remove_store_if_unleased(
         {
             Ok(lock) => lock,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(RemoveOutcome::Missing)
+                return Ok(RemoveOutcome::Missing);
             }
             Err(error) => return Err(io_error(error, "open shared Cargo target lock for cleanup")),
         }
@@ -1150,13 +1150,13 @@ fn store_is_active(
     let metadata = match fs::symlink_metadata(&lock_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return lease_is_fresh(path, now, lease_ttl)
+            return lease_is_fresh(path, now, lease_ttl);
         }
         Err(error) => {
             return Err(io_error(
                 error,
                 "stat shared Cargo target lock for inventory",
-            ))
+            ));
         }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -1169,7 +1169,7 @@ fn store_is_active(
             return Err(io_error(
                 error,
                 "open shared Cargo target lock for inventory",
-            ))
+            ));
         }
     };
     match lock.try_lock_exclusive() {

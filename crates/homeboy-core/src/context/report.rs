@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::Serialize;
 
@@ -181,8 +182,32 @@ pub struct ComponentWithState {
     pub gaps: Vec<ComponentGap>,
 }
 
+/// Structured progress for the expensive, independently executable parts of a
+/// context report. Callers can expose this across an isolation boundary without
+/// parsing human-oriented stderr.
+#[derive(Debug, Clone)]
+pub struct ReportProgress {
+    pub phase: &'static str,
+    pub current: Option<String>,
+    pub completed: usize,
+    pub total: usize,
+    pub unfinished: Vec<String>,
+}
+
+const CONTEXT_REPORT_WORKERS: usize = 4;
+
 pub fn build_report(show_all_flag: bool, command: &str) -> Result<ContextReport> {
-    build_report_at(show_all_flag, command, None, None)
+    build_report_with_progress(show_all_flag, command, |_| {})
+}
+
+/// Build a context report and expose the current inventory/release-state work.
+/// The caller retains ownership of enforcing the aggregate process deadline.
+pub fn build_report_with_progress(
+    show_all_flag: bool,
+    command: &str,
+    progress: impl Fn(ReportProgress) + Sync,
+) -> Result<ContextReport> {
+    build_report_at(show_all_flag, command, None, None, &progress)
 }
 
 pub fn build_report_for_component(
@@ -191,7 +216,7 @@ pub fn build_report_for_component(
     component: Component,
     path: Option<&str>,
 ) -> Result<ContextReport> {
-    build_report_at(show_all_flag, command, path, Some(component))
+    build_report_at(show_all_flag, command, path, Some(component), &|_| {})
 }
 
 fn build_report_at(
@@ -199,8 +224,18 @@ fn build_report_at(
     command: &str,
     path: Option<&str>,
     focused_component: Option<Component>,
+    progress: &(impl Fn(ReportProgress) + Sync),
 ) -> Result<ContextReport> {
-    let (context_output, _) = super::run(path)?;
+    let (context_output, all_components, _) =
+        super::run_with_inventory_with_progress(path, |phase, current| {
+            progress(ReportProgress {
+                phase,
+                current,
+                completed: 0,
+                total: 0,
+                unfinished: Vec::new(),
+            });
+        })?;
 
     let relevant_ids: HashSet<String> = context_output
         .matched_components
@@ -209,7 +244,6 @@ fn build_report_at(
         .cloned()
         .collect();
 
-    let all_components = component::inventory().unwrap_or_default();
     let all_projects = project::list().unwrap_or_default();
     let all_servers = server::list().unwrap_or_default();
     let all_extensions = load_all_extensions().unwrap_or_default();
@@ -232,26 +266,7 @@ fn build_report_at(
     let cwd = path
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
-    let components_with_state: Vec<ComponentWithState> = filtered_components
-        .into_iter()
-        .map(|component| {
-            let release_state = release_provider::calculate_release_state(&component);
-            let gaps = if let Some(ref cwd_path) = cwd {
-                if component::resolution::component_is_contained_in_path(&component, cwd_path) {
-                    build_component_info(&component).gaps
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-            ComponentWithState {
-                component,
-                release_state,
-                gaps,
-            }
-        })
-        .collect();
+    let components_with_state = build_component_states(filtered_components, cwd.clone(), progress);
 
     let bucket_entries: Vec<ReleaseStateEntry<'_>> = components_with_state
         .iter()
@@ -383,6 +398,95 @@ fn build_report_at(
         agent_context_files,
         warnings,
     })
+}
+
+fn build_component_states(
+    components: Vec<Component>,
+    cwd: Option<PathBuf>,
+    progress: &(impl Fn(ReportProgress) + Sync),
+) -> Vec<ComponentWithState> {
+    let total = components.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    struct ProbeState {
+        completed: usize,
+        unfinished: Vec<String>,
+    }
+    let probe_state = Mutex::new(ProbeState {
+        completed: 0,
+        unfinished: components
+            .iter()
+            .map(|component| component.id.clone())
+            .collect(),
+    });
+    let initial = probe_state.lock().expect("probe state lock");
+    progress(ReportProgress {
+        phase: "calculate_release_state",
+        current: None,
+        completed: initial.completed,
+        total,
+        unfinished: initial.unfinished.clone(),
+    });
+    drop(initial);
+
+    let work = Mutex::new(components.into_iter().enumerate());
+    let states = Mutex::new(
+        std::iter::repeat_with(|| None)
+            .take(total)
+            .collect::<Vec<Option<ComponentWithState>>>(),
+    );
+    let workers = total.min(CONTEXT_REPORT_WORKERS);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let Some((index, component)) = work.lock().expect("report work lock").next() else {
+                    break;
+                };
+                let state = probe_state.lock().expect("probe state lock");
+                let event = ReportProgress {
+                    phase: "calculate_release_state",
+                    current: Some(component.id.clone()),
+                    completed: state.completed,
+                    total,
+                    unfinished: state.unfinished.clone(),
+                };
+                drop(state);
+                progress(event);
+                let release_state = release_provider::calculate_release_state(&component);
+                let gaps = cwd
+                    .as_ref()
+                    .filter(|cwd_path| {
+                        component::resolution::component_is_contained_in_path(&component, cwd_path)
+                    })
+                    .map(|_| build_component_info(&component).gaps)
+                    .unwrap_or_default();
+                states.lock().expect("report states lock")[index] = Some(ComponentWithState {
+                    component: component.clone(),
+                    release_state,
+                    gaps,
+                });
+                let mut state = probe_state.lock().expect("probe state lock");
+                state.completed += 1;
+                state.unfinished.retain(|id| id != &component.id);
+                let event = ReportProgress {
+                    phase: "calculate_release_state",
+                    current: Some(component.id),
+                    completed: state.completed,
+                    total,
+                    unfinished: state.unfinished.clone(),
+                };
+                drop(state);
+                progress(event);
+            });
+        }
+    });
+    states
+        .into_inner()
+        .expect("report states lock")
+        .into_iter()
+        .map(|state| state.expect("every report component is processed"))
+        .collect()
 }
 
 fn collect_focused_components(
@@ -703,6 +807,40 @@ fn resolve_git_snapshot(
         baseline_ref: snapshot.baseline_ref,
         baseline_warning: snapshot.baseline_warning,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_state_progress_names_all_unfinished_probes_and_preserves_order() {
+        let components = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .map(|id| Component::new(id.to_string(), format!("/tmp/{id}"), String::new(), None))
+            .collect();
+        let progress = Mutex::new(Vec::new());
+
+        let states = build_component_states(components, None, &|event| {
+            progress.lock().expect("progress lock").push(event);
+        });
+
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| state.component.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta", "gamma"]
+        );
+        let progress = progress.into_inner().expect("progress lock");
+        assert_eq!(progress[0].unfinished, ["alpha", "beta", "gamma"]);
+        assert_eq!(progress.last().expect("completion event").completed, 3);
+        assert!(progress
+            .last()
+            .expect("completion event")
+            .unfinished
+            .is_empty());
+    }
 }
 
 fn resolve_changelog_snapshots(

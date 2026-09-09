@@ -217,8 +217,7 @@ pub(crate) fn trace_toolchain_provenance_requirements(
     if !manifest_path.exists() {
         return Ok(Vec::new());
     }
-    let manifest =
-        crate::extension::invoke::env_provider::load_manifest_from_dir(&context.extension_path)?;
+    let manifest = crate::extension::catalog::load_extension_from_dir(&context.extension_path)?;
     Ok(manifest.trace_toolchain_provenance().to_vec())
 }
 
@@ -1100,20 +1099,7 @@ mod tests {
         git(path, &["init", "--bare", "-b", "main"]);
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .unwrap_or_else(|err| panic!("git {:?} failed to start: {}", args, err));
-        assert!(
-            output.status.success(),
-            "git {:?} failed\nstdout: {}\nstderr: {}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     fn git_stdout(path: &std::path::Path, args: &[&str]) -> Option<String> {
         let output = Command::new("git")

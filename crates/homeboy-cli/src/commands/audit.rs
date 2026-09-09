@@ -159,6 +159,7 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
     let run_id = active_observation
         .as_ref()
         .map(|observation| observation.run_id().to_string());
+    emit_audit_lifecycle(run_id.as_deref());
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
         component_id: resolved_id.clone(),
         source_path: resolved_path.clone(),
@@ -218,6 +219,28 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
         )?;
     }
     Ok((output, exit_code))
+}
+
+/// Publish the durable run identity before scanning so an interrupted client can
+/// attach to the persisted audit instead of treating a long detector as a hang.
+fn emit_audit_lifecycle(run_id: Option<&str>) {
+    let Some(lifecycle) = audit_lifecycle(run_id) else {
+        return;
+    };
+    eprintln!("{lifecycle}");
+}
+
+fn audit_lifecycle(run_id: Option<&str>) -> Option<serde_json::Value> {
+    let run_id = run_id?;
+    Some(serde_json::json!({
+        "schema": "homeboy/audit-lifecycle/v1",
+        "event": "persisted",
+        "run_id": run_id,
+        "status": "running",
+        "show_command": format!("homeboy runs show {run_id}"),
+        "watch_command": format!("homeboy runs watch {run_id}"),
+        "cancel_command": format!("homeboy runs cancel {run_id}"),
+    }))
 }
 
 const AUDIT_FULL_REPORT_ARTIFACT_PREFIX: &str = "audit-report";
@@ -1136,6 +1159,21 @@ mod tests {
             assert_eq!(run.metadata_json["changed_since"], "origin/main");
             assert_eq!(run.metadata_json["observation_status"], "error");
         });
+    }
+
+    #[test]
+    fn audit_lifecycle_exposes_durable_run_controls_before_work_starts() {
+        let lifecycle = audit_lifecycle(Some("audit-run-123")).expect("lifecycle");
+
+        assert_eq!(lifecycle["schema"], "homeboy/audit-lifecycle/v1");
+        assert_eq!(lifecycle["event"], "persisted");
+        assert_eq!(lifecycle["run_id"], "audit-run-123");
+        assert_eq!(lifecycle["status"], "running");
+        assert_eq!(
+            lifecycle["watch_command"],
+            "homeboy runs watch audit-run-123"
+        );
+        assert!(audit_lifecycle(None).is_none());
     }
 
     #[test]

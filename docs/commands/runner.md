@@ -398,12 +398,12 @@ homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /run
 ```
 
 Plans a runner-backed refresh loop before dispatching matrix-style work, without
-executing the workload. It composes the existing runner/workspace/run artifact
-primitives into one envelope: a `RunnerExecutionEnvelope`, a handoff describing
-workspace mapping and Homeboy binary provenance (controller CLI vs. runner
-configured binary vs. active daemon, with version/build drift diagnostics),
-declared evidence/artifact paths, and the ordered `next_commands` to verify the
-runner, sync the workspace, run the refresh, and inspect the produced evidence.
+executing the workload. Its `RunnerExecutionEnvelope` owns typed dispatch,
+workspace mapping, secret and lifecycle policy, and declared artifacts. The v2
+handoff contains only the planned execution record and Homeboy binary provenance
+(controller CLI vs. runner configured binary vs. active daemon, with
+version/build drift diagnostics). Ordered `next_commands` verify the runner,
+sync the workspace, run the refresh, and inspect the produced evidence.
 Source and fixture paths passed with `--source`/`--fixture` must exist before the
 plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
 
@@ -713,6 +713,9 @@ full trust model.
 ### `job`
 
 ```sh
+homeboy runner job list <runner-id>
+homeboy runner job list <runner-id> --all
+homeboy runner job list <runner-id> --json
 homeboy runner job logs <runner-id> <job-id>
 homeboy runner job logs <runner-id> <job-id> --follow --poll-ms 1000
 homeboy runner job logs <runner-id> <job-id> --follow --cursor 65028
@@ -724,6 +727,10 @@ has submitted work to a connected runner. `logs` fetches the persisted job plus
 its event stream; `--follow` keeps polling until the job reaches a terminal state
 and prints newly observed events as they arrive. Use this when a controller exits
 after dispatching runner work and you need to inspect the already-started job.
+
+`job list` defaults to a compact table of live daemon jobs. Use `--all` (or
+`--retained`) to include retained durable projections, and `--json` for the
+structured response, including both live and retained counts.
 
 `cancel` requests cancellation for a queued or running durable runner daemon job
 through the connected runner daemon.
@@ -861,10 +868,17 @@ homeboy runner show <id>
 homeboy runner set <id> --json <JSON>
 homeboy runner set <id> --base64 <BASE64_JSON>
 homeboy runner set <id> --json '{"workspace_root":"/srv/homeboy","concurrency_limit":4}'
+homeboy runner set <id> --json '{"runner_exec_wait_timeout_secs":2400,"cancel_on_wait_timeout":true}'
 ```
 
 Updates a runner by merging a JSON object into the runner config. SSH runner settings live under `servers/<id>.json` as the server's `runner` capability; local runners live under `runners/<id>.json`.
 Arbitrary runner updates must use `--json` or `--base64`; positional `key=value` and trailing arbitrary `--key value` updates are not accepted.
+`runner_exec_wait_timeout_secs` controls how long the controller waits after a
+runner accepts a job (`0` returns an in-flight handoff immediately).
+`cancel_on_wait_timeout` controls whether an expired controller wait requests
+remote cancellation. Its unset default is `true` for agent-task workloads and
+`false` for other runner commands. If cancellation returns a terminal job,
+Homeboy returns its terminal non-success result rather than an in-flight handoff.
 
 ### `trust`
 

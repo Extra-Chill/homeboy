@@ -159,6 +159,10 @@ pub enum ErrorCode {
 
     ObservationStoreBusy,
 
+    /// Admission was refused because measured free capacity is below a policy
+    /// reserve, while the filesystem can still accept writes.
+    ResourceCapacityReserve,
+
     /// The filesystem could not accept a write because it is out of bytes or
     /// out of inodes. Distinct from [`ErrorCode::InternalIoError`] so callers
     /// can degrade instead of retrying, and so an operator reads "disk full"
@@ -229,6 +233,8 @@ impl ErrorCode {
             ErrorCode::GitCommandFailed => "git.command_failed",
 
             ErrorCode::ObservationStoreBusy => "observation_store.busy",
+
+            ErrorCode::ResourceCapacityReserve => "resource.capacity_reserve",
 
             ErrorCode::StorageExhausted => "storage.exhausted",
 
@@ -512,6 +518,17 @@ pub struct StorageExhaustedDetails {
     pub reserve_inodes: Option<u64>,
 }
 
+/// Evidence for an admission refusal that preserves configured capacity headroom.
+/// This is deliberately separate from [`StorageExhaustedDetails`]: a reserve
+/// breach is a policy decision, not proof that the next filesystem write fails.
+#[derive(Debug, Serialize)]
+pub struct CapacityReserveDetails {
+    pub filesystem: String,
+    pub available_bytes: u64,
+    pub reserve_bytes: u64,
+    pub shortfall_bytes: u64,
+}
+
 /// `ENOSPC` on every unix target homeboy builds for.
 ///
 /// Checked alongside [`std::io::ErrorKind::StorageFull`] rather than instead of
@@ -744,6 +761,20 @@ impl Error {
              store-independent categories: `homeboy cleanup --include orphaned-artifact-bytes \
              --include runtime-tmp --apply`.",
         )
+    }
+
+    /// Refuse new work below a configured capacity reserve without conflating
+    /// the policy guard with an actual ENOSPC write failure.
+    pub fn capacity_reserve(details: CapacityReserveDetails) -> Self {
+        Self::new(
+            ErrorCode::ResourceCapacityReserve,
+            format!(
+                "Filesystem reserve shortfall at {}: {} bytes available, {} bytes reserved, {} bytes short",
+                details.filesystem, details.available_bytes, details.reserve_bytes, details.shortfall_bytes
+            ),
+            to_details(details),
+        )
+        .with_retryable(false)
     }
 
     /// Classify a live `io::Error`, keeping storage exhaustion distinguishable.
@@ -1679,6 +1710,22 @@ mod storage_exhaustion_tests {
             Error::storage_exhausted("full", None).retryable,
             Some(false)
         );
+    }
+
+    #[test]
+    fn reserve_pressure_is_distinct_from_physical_storage_exhaustion() {
+        let error = Error::capacity_reserve(CapacityReserveDetails {
+            filesystem: "/var/lib/homeboy".to_string(),
+            available_bytes: 157_541_830_656,
+            reserve_bytes: 161_061_273_600,
+            shortfall_bytes: 3_519_442_944,
+        });
+
+        assert_eq!(error.code, ErrorCode::ResourceCapacityReserve);
+        assert!(!error.is_storage_exhausted());
+        assert_eq!(error.details["filesystem"], "/var/lib/homeboy");
+        assert_eq!(error.details["shortfall_bytes"], 3_519_442_944_u64);
+        assert!(error.message.contains("157541830656 bytes available"));
     }
 
     /// The remedy has to name the *store-independent* categories. Pointing a

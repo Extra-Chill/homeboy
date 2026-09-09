@@ -10,31 +10,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-/// The remote every Cook fixture checkout carries. Its repository name is the
-/// `homeboy` component these tests request, so destination validation resolves.
-pub(super) const FIXTURE_REPOSITORY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
-
 pub(super) fn git_init(path: &Path) {
     let mut command = Command::new("git");
     command.args(["init", "-b", "main"]).current_dir(path);
-    let output = bounded_output(command);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Give a fixture checkout the remote that binds it to a repository identity.
-///
-/// Cook resolves and validates its destination repository from the checkout's
-/// configured remote (#11987). A bare `git init` has none, so a fixture without
-/// this is not a checkout Cook can accept.
-pub(super) fn git_add_remote(path: &Path, remote_url: &str) {
-    let mut command = Command::new("git");
-    command
-        .args(["remote", "add", "origin", remote_url])
-        .current_dir(path);
     let output = bounded_output(command);
     assert!(
         output.status.success(),

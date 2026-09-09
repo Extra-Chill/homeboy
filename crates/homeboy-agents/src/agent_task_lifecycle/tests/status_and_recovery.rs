@@ -8,7 +8,7 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::reconcile_stale_active_runs;
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -236,6 +236,7 @@ fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
             &lifecycle_store,
             &run.run_id,
             (attempt != 1).then(|| format!("attempt {attempt} failed")),
+            false,
         )
         .expect("finish terminal adoption");
         runs.push(run);
@@ -465,7 +466,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     let adoption = finalizing.candidate_adoption.expect("attempt");
     assert_eq!(adoption.phase, "finalization");
     assert_eq!(adoption.active_gate, "finalize pull request");
-    finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None)
+    finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None, false)
         .expect("terminal completion");
     let completed = reconcile_status_in_store(
         &lifecycle_store,
@@ -475,6 +476,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     )
     .expect("completed status")
     .record;
+    assert_eq!(completed.state, AgentTaskRunState::Queued);
     let adoption = completed
         .candidate_adoption
         .expect("terminal attempt retained");
@@ -625,6 +627,7 @@ fn public_candidate_adoption_gate_progress_is_durable() {
             progress: Some(homeboy_engine_primitives::command::CommandProgress {
                 phase: "tests".to_string(),
                 current: Some("case".to_string()),
+                ..Default::default()
             }),
             output_tail: "running output tail".to_string(),
         },
@@ -703,6 +706,7 @@ fn private_candidate_adoption_gate_progress_is_redacted_before_persistence() {
             progress: Some(homeboy_engine_primitives::command::CommandProgress {
                 phase: "private-phase-secret".to_string(),
                 current: Some("sha256:private-digest-123 count=42".to_string()),
+                ..Default::default()
             }),
             output_tail: "private output secret".to_string(),
         },
@@ -1200,7 +1204,7 @@ fn pending_submission_owns_running_proxy_until_job_projection_arrives() {
         record_lab_offload_submission_request(run_id, &request)
             .expect("persist pending broker request");
         let accepted_job = store
-            .submit_remote_runner_job(request)
+            .submit_runner_api_fixture(request)
             .expect("broker accepts before response projection");
         rewrite_record_for_test(run_id, |record| {
             set_run_state(record, AgentTaskRunState::Running);
@@ -1443,7 +1447,7 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
             let request = replay_request(run_id, &command);
             record_lab_offload_submission_request(run_id, &request).expect("pending request");
             let job = store
-                .submit_remote_runner_job(request)
+                .submit_runner_api_fixture(request)
                 .expect("accepted broker job");
 
             if run_id == "accepted-then-expired" {
@@ -2433,6 +2437,14 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
 
     record_promotion_in_store(&lifecycle_store, run_id, gate_failed)
         .expect("gate failure recorded");
+    let gate_failed_record = lifecycle_store
+        .read_record(run_id)
+        .expect("gate failure lifecycle state");
+    assert_eq!(
+        gate_failed_record.state,
+        AgentTaskRunState::CandidateRecoverable,
+        "a promoted candidate blocked by gates remains recoverable rather than successful"
+    );
     let updated = record_promotion_in_store(&lifecycle_store, run_id, corrected.clone())
         .expect("correction recorded");
 
@@ -2451,6 +2463,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
             .len(),
         2
     );
+    assert_eq!(updated.state, AgentTaskRunState::CandidateRecoverable);
 }
 
 #[test]
@@ -3136,10 +3149,10 @@ impl RunnerContinuationProvider for CountingRunnerProvider {
         Err(Error::internal_unexpected("counted runner exec"))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         self.record();
         Err(Error::internal_unexpected("counted reverse broker job"))
@@ -3285,7 +3298,7 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
         assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
         assert_eq!(
             snapshot.unavailable_sources[0].reason_code,
-            "durable_read.unavailable"
+            "durable_read.authoritative_aggregate_absent"
         );
         assert_eq!(artifacts.run_id, "runner-backed-durable-read");
         assert_eq!(
@@ -3301,11 +3314,8 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
 /// itself names and read back through the sibling handed the same store, so the
 /// partial-read evidence asserted below is about this home's aggregate file.
 ///
-/// `store::DURABLE_AGGREGATE_MAX_BYTES` is the one surviving `store::` token in
-/// this body. It is a `pub(super)` byte-count constant, not a root resolution —
-/// there is no other path to it — so it reaches no ambient state.
 #[test]
-fn durable_aggregate_read_rejects_an_oversized_file_before_deserializing_it() {
+fn durable_aggregate_read_does_not_pair_a_record_with_an_unmirrored_cache() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -3326,11 +3336,17 @@ fn durable_aggregate_read_rejects_an_oversized_file_before_deserializing_it() {
 
     assert_eq!(snapshot.record.run_id, record.run_id);
     assert!(snapshot.aggregate.is_none());
+    assert!(
+        lifecycle_store
+            .read_aggregate_readonly(&record.run_id)
+            .is_err(),
+        "read-only admission must not fall back to independently cached aggregate bytes"
+    );
     assert_eq!(snapshot.unavailable_sources.len(), 1);
     assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
     assert_eq!(
         snapshot.unavailable_sources[0].reason_code,
-        "durable_read.oversized"
+        "durable_read.authoritative_aggregate_absent"
     );
 }
 

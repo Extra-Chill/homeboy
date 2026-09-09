@@ -268,6 +268,91 @@ fn explicit_local_shared_cargo_apply_succeeds_without_a_daemon() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let invocation_dir = fixture.path().join("operator-cwd");
+    let cargo_root = fixture.path().join("cargo-targets");
+    let historical = cargo_root.join(format!("homeboy-{}", "a".repeat(64)));
+    let current = cargo_root.join(format!("homeboy-{}", "b".repeat(64)));
+    std::fs::create_dir_all(&invocation_dir).expect("operator directory");
+    create_old_cargo_target(&historical);
+
+    let first = run_cleanup_with_cargo_root(
+        fixture.path(),
+        &invocation_dir,
+        &["--include", "shared-cargo-targets", "--apply"],
+        &cargo_root,
+    );
+    assert_eq!(first["success"], true, "{first:#}");
+    assert_eq!(first["data"]["submission"]["disposition"], "created");
+    let first_job_id = first["data"]["job_id"].as_str().expect("first job ID");
+    let first_completed = wait_for_cleanup_job(
+        fixture.path(),
+        &invocation_dir,
+        first_job_id,
+        &std::env::var("PATH").unwrap_or_default(),
+    );
+    assert_eq!(
+        first_completed["data"]["status"], "succeeded",
+        "{first_completed:#}"
+    );
+    assert!(!historical.exists(), "historical candidate must be removed");
+
+    create_old_cargo_target(&current);
+    let second = run_cleanup_with_cargo_root(
+        fixture.path(),
+        &invocation_dir,
+        &["--include", "shared-cargo-targets", "--apply"],
+        &cargo_root,
+    );
+    assert_eq!(second["success"], true, "{second:#}");
+    assert_eq!(second["data"]["submission"]["disposition"], "created");
+    let second_job_id = second["data"]["job_id"].as_str().expect("second job ID");
+    assert_ne!(second_job_id, first_job_id, "{second:#}");
+    let second_completed = wait_for_cleanup_job(
+        fixture.path(),
+        &invocation_dir,
+        second_job_id,
+        &std::env::var("PATH").unwrap_or_default(),
+    );
+    assert_eq!(
+        second_completed["data"]["status"], "succeeded",
+        "{second_completed:#}"
+    );
+    assert!(!current.exists(), "current candidate must be removed");
+
+    let stopped = run_homeboy(
+        fixture.path(),
+        &invocation_dir,
+        &["daemon", "stop"],
+        &std::env::var("PATH").unwrap_or_default(),
+    );
+    assert_eq!(stopped["success"], true, "{stopped:#}");
+}
+
+#[cfg(unix)]
+fn create_old_cargo_target(path: &Path) {
+    std::fs::create_dir_all(path).expect("cargo target store");
+    let artifact = path.join("artifact");
+    std::fs::write(&artifact, "artifact").expect("cargo target artifact");
+    let touch = Command::new("touch")
+        .args([
+            "-t",
+            "202001010000",
+            artifact.to_str().expect("artifact path"),
+            path.to_str().expect("store path"),
+        ])
+        .output()
+        .expect("age cargo target store");
+    assert!(
+        touch.status.success(),
+        "{}",
+        String::from_utf8_lossy(&touch.stderr)
+    );
+}
+
 fn run_cleanup(home: &Path, cwd: &Path, args: &[&str]) -> Value {
     run_cleanup_with_path(home, cwd, args, &std::env::var("PATH").unwrap_or_default())
 }
@@ -276,6 +361,28 @@ fn run_cleanup_with_path(home: &Path, cwd: &Path, args: &[&str], path: &str) -> 
     let mut command = vec!["cleanup"];
     command.extend_from_slice(args);
     run_homeboy(home, cwd, &command, path)
+}
+
+fn run_cleanup_with_cargo_root(home: &Path, cwd: &Path, args: &[&str], cargo_root: &Path) -> Value {
+    let mut command = vec!["cleanup"];
+    command.extend_from_slice(args);
+    let output = Command::new(homeboy_bin())
+        .args(command)
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("HOMEBOY_CARGO_TARGET_ROOT", cargo_root)
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .env_remove("HOMEBOY_LAB_EXECUTION_RUNNER_ID")
+        .env_remove("HOMEBOY_RUNNER_HOSTED_EXEC")
+        .output()
+        .expect("run cleanup");
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "cleanup output was not JSON ({error}); status={:?}; stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
 }
 
 fn run_homeboy(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {

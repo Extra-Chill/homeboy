@@ -74,6 +74,20 @@ Config entities:
 - **Stacks**: Combined-fixes branch specifications
 - **Extensions**: Domain-specific behaviors and tools
 
+### Rig Boundaries
+
+Rigs compose portable rig specifications and produce resolved plans or
+materialized rig resources. They do not own a parallel run lifecycle.
+
+| Concern | Owner |
+|---|---|
+| Portable rig composition and planning | Rig specification and `homeboy-rig-contract` resources |
+| Local rig materialization, services, and local state | `homeboy-rig` |
+| Durable orchestration and run lifecycle | Control plane |
+| Runner transport and remote execution | Runner API |
+| Extension-defined platform behavior | Extension API |
+| Review, bench, fuzz, and trace workloads | Their respective domain engines |
+
 ### Storage Layer
 
 **Location:** `crates/homeboy-engine-primitives/src/local_files.rs`

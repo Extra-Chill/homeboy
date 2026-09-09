@@ -15,11 +15,11 @@ use homeboy_core::code_audit::compiler_warning_provider::{
     register_compiler_warning_provider, AuditCompilerWarning, CompilerWarningProvider,
 };
 
-use super::compiler_warning_contract::{
-    extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
-    CompilerWarningContract,
+use super::{catalog::capability_provider_ids, invoke::invoke_api};
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiInvokeRequest, COMPILER_WARNINGS_CAPABILITY_ID,
+    EXTENSION_API_INVOKE_REQUEST_SCHEMA, EXTENSION_API_V1,
 };
-use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct CompilerWarning {
@@ -42,18 +42,15 @@ struct ExtensionCompilerWarningProvider;
 
 impl CompilerWarningProvider for ExtensionCompilerWarningProvider {
     fn compiler_warnings(&self, root: &Path) -> Vec<AuditCompilerWarning> {
-        extensions_for_compiler_warning_contract(root, CompilerWarningContract::Warnings)
+        capability_provider_ids(root, COMPILER_WARNINGS_CAPABILITY_ID)
             .into_iter()
-            .flat_map(|extension| run_extension_compiler_warnings(&extension, root))
+            .flat_map(|extension_id| run_extension_compiler_warnings(&extension_id, root))
             .collect()
     }
 }
 
-fn run_extension_compiler_warnings(
-    extension: &ExtensionManifest,
-    root: &Path,
-) -> Vec<AuditCompilerWarning> {
-    let Some(envelope) = run_compiler_warning_script(extension, root) else {
+fn run_extension_compiler_warnings(extension_id: &str, root: &Path) -> Vec<AuditCompilerWarning> {
+    let Some(envelope) = run_compiler_warning_script(extension_id, root) else {
         return Vec::new();
     };
 
@@ -69,27 +66,24 @@ fn run_extension_compiler_warnings(
         .collect()
 }
 
-fn run_compiler_warning_script(
-    extension: &ExtensionManifest,
-    root: &Path,
-) -> Option<CompilerWarningEnvelope> {
-    let input = serde_json::json!({
-        "root": root,
+fn run_compiler_warning_script(extension_id: &str, root: &Path) -> Option<CompilerWarningEnvelope> {
+    let response = invoke_api(&ExtensionApiInvokeRequest {
+        schema: EXTENSION_API_INVOKE_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        extension_id: extension_id.to_string(),
+        capability_id: COMPILER_WARNINGS_CAPABILITY_ID.to_string(),
+        working_directory: root.to_string_lossy().into_owned(),
+        input: serde_json::json!({
+            "root": root,
+        }),
     });
-    let stdout = match run_compiler_warning_contract_script(
-        extension,
-        CompilerWarningContract::Warnings,
-        root,
-        &input,
-    ) {
-        Ok(Some(stdout)) => stdout,
-        Ok(None) => return None,
-        Err(error) => {
-            homeboy_core::log_status!("audit", "{}", error);
-            return None;
-        }
-    };
-    serde_json::from_str(&stdout).ok()
+    if let Some(failure) = response.failure {
+        homeboy_core::log_status!("audit", "{}", failure.message);
+        return None;
+    }
+    response
+        .output
+        .and_then(|output| serde_json::from_value(output).ok())
 }
 
 /// Register the extension-backed compiler-warning provider. Called once at binary
@@ -161,6 +155,44 @@ printf '{"warnings":[{"code":"unused_imports","message":"unused import","file":"
             assert!(ExtensionCompilerWarningProvider
                 .compiler_warnings(dir.path())
                 .is_empty());
+        });
+    }
+
+    #[test]
+    fn provider_prefers_component_linked_extensions() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            for id in ["selected", "fallback"] {
+                let extension_dir = home.path().join(format!(".config/homeboy/extensions/{id}"));
+                fs::create_dir_all(extension_dir.join("scripts")).unwrap();
+                fs::write(
+                    extension_dir.join(format!("{id}.json")),
+                    format!(
+                        r#"{{
+                            "name": "{id}",
+                            "version": "1.0.0",
+                            "scripts": {{ "compiler_warnings": "scripts/warnings.sh" }}
+                        }}"#
+                    ),
+                )
+                .unwrap();
+                write_executable(
+                    &extension_dir.join("scripts/warnings.sh"),
+                    &format!(
+                        "#!/usr/bin/env bash\ncat >/dev/null\nprintf '{{\"warnings\":[{{\"code\":\"{id}\",\"message\":\"warning\",\"file\":\"src/lib.rs\",\"line\":1}}]}}'\n"
+                    ),
+                );
+            }
+            let root = TempDir::new().expect("temp dir");
+            fs::write(
+                root.path().join("homeboy.json"),
+                r#"{"id":"example","extensions":{"selected":{}}}"#,
+            )
+            .unwrap();
+
+            let warnings = ExtensionCompilerWarningProvider.compiler_warnings(root.path());
+
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].code, "selected");
         });
     }
 }

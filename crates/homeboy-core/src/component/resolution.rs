@@ -1651,19 +1651,7 @@ mod tests {
             .expect("standalone config");
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     fn write_portable(dir: &Path, id: &str) {
         fs::create_dir_all(dir).expect("component dir");
@@ -2650,6 +2638,69 @@ mod tests {
                 .message
                 .contains("multiple registered component configurations"));
             assert!(error.message.contains("fixture-a, fixture-b"));
+        });
+    }
+
+    #[test]
+    fn explicit_id_disambiguates_root_and_nested_components_in_one_repository() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("shared-repository");
+            let worktree = dir.path().join("shared-repository@feature");
+            let unrelated = dir.path().join("unrelated-repository");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            write_portable(&primary, "repository-root");
+            let nested = primary.join("components/nested");
+            write_portable(&nested, "nested-component");
+            git(&primary, &["add", "."]);
+            git(&primary, &["commit", "-m", "shared component manifests"]);
+            add_worktree(&primary, &worktree, "feature");
+            write_standalone_registration(home.path(), "repository-root", &primary);
+            write_standalone_registration(home.path(), "nested-component", &nested);
+            fs::create_dir_all(&unrelated).expect("unrelated dir");
+            git(&unrelated, &["init"]);
+            write_portable(&unrelated, "unrelated-component");
+            write_standalone_registration(home.path(), "unrelated-component", &unrelated);
+
+            let ambiguity = resolve_effective(None, worktree.to_str(), None)
+                .expect_err("path-only resolution must remain ambiguous");
+            assert_eq!(ambiguity.code.as_str(), "validation.invalid_argument");
+            assert!(ambiguity
+                .message
+                .contains("nested-component, repository-root"));
+
+            let root = resolve_effective(Some("repository-root"), worktree.to_str(), None)
+                .expect("explicit root component resolves");
+            assert_eq!(root.id, "repository-root");
+            assert_eq!(
+                Path::new(&root.local_path),
+                worktree.canonicalize().expect("canonical worktree")
+            );
+
+            let nested_worktree = worktree.join("components/nested");
+            let nested = resolve_effective(
+                Some("nested-component"),
+                Some(nested_worktree.to_string_lossy().as_ref()),
+                None,
+            )
+            .expect("explicit nested component resolves");
+            assert_eq!(nested.id, "nested-component");
+            assert_eq!(
+                Path::new(&nested.local_path),
+                nested_worktree
+                    .canonicalize()
+                    .expect("canonical nested path")
+            );
+
+            let mismatch = resolve_effective(Some("unrelated-component"), worktree.to_str(), None)
+                .expect_err("explicit component and portable path must agree");
+            assert_eq!(mismatch.code.as_str(), "validation.invalid_argument");
+            assert!(mismatch
+                .message
+                .contains("does not match homeboy.json id 'repository-root'"));
         });
     }
 

@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::process::Command;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
@@ -49,6 +49,41 @@ fn detached_daemon_owner_does_not_inherit_the_launcher_session() {
 struct FakeEnsureState {
     daemon: Option<super::DaemonStartResult>,
     starts: usize,
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_start_cleanup_waits_for_cook_generation_admission() {
+    with_isolated_home(|_| {
+        let cook_preflight = super::super::acquire_daemon_admission_lock(
+            super::super::DaemonAdmissionLockMode::Shared,
+        )
+        .expect("Cook preflight acquires generation admission");
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            attempt_tx.send(()).expect("report startup cleanup attempt");
+            super::stop_stale_generation_for_start().expect("stale startup cleanup");
+            finished_tx
+                .send(())
+                .expect("report startup cleanup completion");
+        });
+
+        attempt_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("startup cleanup attempts admission");
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "stale startup cleanup must wait for Cook admission"
+        );
+
+        drop(cook_preflight);
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stale startup cleanup proceeds after Cook admission");
+    });
 }
 
 #[test]

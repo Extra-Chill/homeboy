@@ -67,10 +67,6 @@ pub fn secret_env_status_with_fallbacks(
     )
 }
 
-pub fn secret_env_plan_status(plan: &SecretEnvPlan) -> Vec<AgentTaskSecretEnvStatus> {
-    secret_env_status(&plan.secret_env_names())
-}
-
 /// One provider-shaped secret-env scope: that provider's sources, plus the
 /// names it unconditionally requires even when it declares no source for them.
 ///

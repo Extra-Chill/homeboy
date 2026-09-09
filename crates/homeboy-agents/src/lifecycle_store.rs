@@ -5,8 +5,6 @@ use std::time::Duration;
 
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
 
@@ -18,7 +16,9 @@ use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::engine::local_files::{
     write_json_file as write_json, write_json_file_owner_only as write_private_json,
 };
-use homeboy_core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
+use homeboy_core::observation::{
+    ObservationStore, RunCursor as ObservationRunCursor, RunListFilter, RunRecord, RunStatus,
+};
 use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
 /// Durable agent-task lifecycle storage bound to immutable filesystem roots.
@@ -197,24 +197,32 @@ impl AgentTaskLifecycleStore {
         plan: &AgentTaskPlan,
         run_id: &str,
     ) -> Result<AgentTaskRunRecord> {
-        self.submit_plan_with_runtime_admission_status(
+        self.submit_plan_with_current_runtime_and_metadata(plan, run_id, None)
+    }
+
+    pub(crate) fn submit_plan_with_current_runtime_and_metadata(
+        &self,
+        plan: &AgentTaskPlan,
+        run_id: &str,
+        submission_metadata: Option<serde_json::Map<String, Value>>,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::submit_plan_with_runtime_admission_in_store(
+            self,
             plan,
-            run_id,
+            Some(run_id),
             super::lifecycle_ops::execution_runner_id(),
-            &crate::agent_task_service::cook_pre_execution::store_admission_status(self),
+            submission_metadata,
+            Some(&crate::agent_task_service::cook_pre_execution::store_admission_status(self)),
             |run_id| {
                 let runtime_root =
                     homeboy_core::controller_runtime::runtime_root_in(self.roots().data())?;
                 homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
-                    &runtime_root,
-                    run_id,
-                    || {
+                    &runtime_root, run_id, || {
                         Ok(crate::agent_task_service::cook_pre_execution::runtime_admission_cancellation_requested(
                             &self.read_record(run_id)?,
                         ))
                     },
-                )
-                .map(|admission| admission.runtime)
+                ).map(|admission| admission.runtime)
             },
         )
     }
@@ -406,14 +414,15 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        let aggregate = self.read_aggregate(&record.run_id)?;
-        let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("serialize agent-task aggregate {}", record.run_id)),
-            )
+        let path = self.aggregate_path(&record.run_id);
+        let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
+        serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(path.display().to_string()))
         })?;
-        Ok((raw, self.aggregate_path(&record.run_id)))
+        let raw = String::from_utf8(raw).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(path.display().to_string()))
+        })?;
+        Ok((raw, path))
     }
 
     pub fn operation_claim(
@@ -525,8 +534,14 @@ impl AgentTaskLifecycleStore {
         &self,
         run_id: &str,
         error: Option<String>,
+        supersede_pre_execution_failure: bool,
     ) -> Result<AgentTaskRunRecord> {
-        super::lifecycle_candidate_adoption::finish_candidate_adoption_in_store(self, run_id, error)
+        super::lifecycle_candidate_adoption::finish_candidate_adoption_in_store(
+            self,
+            run_id,
+            error,
+            supersede_pre_execution_failure,
+        )
     }
 
     pub fn record_candidate_adoption_result(&self, run_id: &str, result: Value) -> Result<()> {
@@ -580,6 +595,38 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_aggregate_bounded(&self, run_id: &str) -> Result<AgentTaskAggregate> {
         read_aggregate_bounded_in_store(self, run_id)
+    }
+
+    /// Observe only the aggregate mirrored in the authoritative SQLite row,
+    /// without initializing or migrating the observation database.
+    pub fn read_aggregate_readonly(&self, run_id: &str) -> Result<AgentTaskAggregate> {
+        let observations = self.open_observation_readonly()?;
+        let run = observations.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        let value = run
+            .metadata_json
+            .get("agent_task_aggregate")
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "agent_task_aggregate",
+                    "authoritative observation has no mirrored agent-task aggregate",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })?;
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse agent-task aggregate {}", run.id)),
+            )
+        })
     }
 
     pub fn write_cook_index_attempt(
@@ -776,6 +823,64 @@ impl AgentTaskLifecycleStore {
         })?)
     }
 
+    /// Read one immutable-keyset page of typed agent-task records without
+    /// loading the full historical registry.
+    pub(crate) fn read_record_page(
+        &self,
+        after: Option<ObservationRunCursor>,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
+        let page = self
+            .open_observation_readonly()?
+            .list_runs_page(RunListFilter {
+                kind: Some("agent-task".to_string()),
+                limit: Some(i64::try_from(limit.clamp(1, 101)).expect("bounded page limit")),
+                after,
+                ..Default::default()
+            })?;
+        let records = page
+            .runs
+            .iter()
+            .map(record_from_run)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((records, page.truncated, page.next_cursor))
+    }
+
+    pub(crate) fn read_mission_record_page(
+        &self,
+        mission_id: &str,
+        after: Option<ObservationRunCursor>,
+        limit: usize,
+    ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
+        let page = self.open_observation_readonly()?.list_mission_runs_page(
+            mission_id,
+            after.as_ref(),
+            limit,
+        )?;
+        let records = page
+            .runs
+            .iter()
+            .map(record_from_run)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((records, page.truncated, page.next_cursor))
+    }
+
+    pub(crate) fn read_mission(
+        &self,
+        mission_id: &str,
+    ) -> Result<Option<homeboy_core::observation::MissionRecord>> {
+        self.open_observation_readonly()?.get_mission(mission_id)
+    }
+
+    pub(crate) fn read_mission_page(
+        &self,
+        after: Option<&homeboy_core::observation::MissionCursor>,
+        limit: usize,
+    ) -> Result<homeboy_core::observation::MissionPage> {
+        self.open_observation_readonly()?
+            .list_missions_page(after, limit)
+    }
+
     /// Register a Cook attempt using this store's record, lock, index, and
     /// terminal-projection roots.
     pub fn record_cook_attempt(
@@ -821,6 +926,25 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_bounded_in_store(self, run_id)
+    }
+
+    /// Read one record and its mirrored aggregate from the same read-only
+    /// SQLite observation. A missing mirror is returned as `None`; callers must
+    /// not pair that record with the independently materialized aggregate cache.
+    pub fn read_record_with_aggregate_bounded(
+        &self,
+        run_id: &str,
+    ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
+        let store = self.open_observation_readonly()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        record_and_aggregate_from_run(&run)
     }
 
     pub fn write_record(&self, record: &AgentTaskRunRecord) -> Result<()> {
@@ -964,7 +1088,7 @@ impl AgentTaskLifecycleStore {
             Some(aggregate.clone()),
         )?;
         #[cfg(test)]
-        if INTERRUPT_AFTER_TERMINAL_COMMIT.swap(false, Ordering::SeqCst) {
+        if INTERRUPT_AFTER_TERMINAL_COMMIT.replace(false) {
             return Err(Error::internal_io(
                 "injected interruption after terminal lifecycle commit",
                 Some(record.run_id.clone()),
@@ -1053,9 +1177,9 @@ thread_local! {
     /// One-shot write failure owned by the test thread that armed it. A global
     /// atomic let unrelated parallel tests consume each other's fault (#11897).
     static FAIL_NEXT_RECORD_WRITE: Cell<bool> = const { Cell::new(false) };
+    /// One-shot post-commit failure owned by the test thread that armed it.
+    static INTERRUPT_AFTER_TERMINAL_COMMIT: Cell<bool> = const { Cell::new(false) };
 }
-#[cfg(test)]
-static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 
 /// A crashed notifier cannot release its provisional claim. A bounded lease
 /// keeps that crash window from permanently suppressing a detached resume.
@@ -1215,6 +1339,16 @@ pub(super) fn read_aggregate_bounded_in_store(
     run_id: &str,
 ) -> Result<AgentTaskAggregate> {
     let path = store.aggregate_path(run_id);
+    let raw = read_aggregate_bytes_bounded_in_store(store, run_id)?;
+    serde_json::from_slice(&raw)
+        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+}
+
+fn read_aggregate_bytes_bounded_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Vec<u8>> {
+    let path = store.aggregate_path(run_id);
     let metadata = fs::metadata(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     if metadata.len() > DURABLE_AGGREGATE_MAX_BYTES {
@@ -1247,8 +1381,7 @@ pub(super) fn read_aggregate_bounded_in_store(
         error.details = json!({ "reason_code": "durable_read.oversized" });
         return Err(error);
     }
-    serde_json::from_slice(&raw)
-        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+    Ok(raw)
 }
 
 pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
@@ -1285,7 +1418,7 @@ pub(super) fn fail_next_record_write_for_test() {
 
 #[cfg(test)]
 pub(super) fn interrupt_after_terminal_commit_for_test() {
-    INTERRUPT_AFTER_TERMINAL_COMMIT.store(true, Ordering::SeqCst);
+    INTERRUPT_AFTER_TERMINAL_COMMIT.set(true);
 }
 
 fn write_record_with_aggregate_without_workspace_authority(
@@ -1351,7 +1484,9 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         rig_id: None,
         metadata_json,
     };
-    if preserve_terminal {
+    if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
+        store.upsert_imported_run_with_mission(&projected, mission.as_str(), preserve_terminal)?;
+    } else if preserve_terminal {
         store.upsert_imported_run_preserving_terminal(&projected)?;
     } else {
         store.upsert_imported_run(&projected)?;
@@ -1467,6 +1602,7 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
             cook_id: cook_id.clone(),
             latest_run_id: run_id.clone(),
             latest_substantive_candidate: None,
+            cancellation_fence: None,
             attempts: Vec::new(),
         }
     };
@@ -1812,44 +1948,8 @@ fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
 }
 
 pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
-    record_from_run_with_schema_policy(run, true)
-}
-
-/// Read a durable record without enforcing the supported-schema guard.
-///
-/// Record health reconciliation exists to migrate legacy schemas, so it is the
-/// one caller that must be able to read one. #11446 added the guard inside
-/// `record_from_run`, which is exactly what the migration branch calls, making
-/// legacy migration unreachable: the reconciler reported the unsupported-schema
-/// diagnostic instead of migrating.
-pub(super) fn record_from_run_allowing_legacy_schema(
-    run: &RunRecord,
-) -> Result<AgentTaskRunRecord> {
-    record_from_run_with_schema_policy(run, false)
-}
-
-fn record_from_run_with_schema_policy(
-    run: &RunRecord,
-    enforce_schema: bool,
-) -> Result<AgentTaskRunRecord> {
-    let value = run.metadata_json.get("agent_task_run").ok_or_else(|| {
-        Error::new(
-            ErrorCode::InternalJsonError,
-            format!(
-                "observation run {} is missing agent_task_run metadata",
-                run.id
-            ),
-            json!({ "context": run.id }),
-        )
-    })?;
-    let mut record: AgentTaskRunRecord =
-        serde_json::from_value(value.clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("parse agent-task run {}", run.id)),
-            )
-        })?;
-    if enforce_schema && record.schema != super::records::schemas::RUN {
+    let record = parse_record_from_run(run)?;
+    if record.schema != super::records::schemas::RUN {
         return Err(Error::validation_invalid_argument(
             "agent_task_run.schema",
             format!(
@@ -1861,6 +1961,48 @@ fn record_from_run_with_schema_policy(
             None,
         ));
     }
+    normalize_decoded_record(run, record)
+}
+
+fn record_and_aggregate_from_run(
+    run: &RunRecord,
+) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
+    Ok((record_from_run(run)?, aggregate_from_run(run)?))
+}
+
+/// Decode a durable record without requiring the current schema.
+///
+/// Health reconciliation uses this boundary to classify and migrate legacy
+/// schemas. All normal reads go through [`record_from_run`], which accepts only
+/// the current schema.
+pub(super) fn decode_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+    let record = parse_record_from_run(run)?;
+    normalize_decoded_record(run, record)
+}
+
+fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+    let value = run.metadata_json.get("agent_task_run").ok_or_else(|| {
+        Error::new(
+            ErrorCode::InternalJsonError,
+            format!(
+                "observation run {} is missing agent_task_run metadata",
+                run.id
+            ),
+            json!({ "context": run.id }),
+        )
+    })?;
+    serde_json::from_value(value.clone()).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some(format!("parse agent-task run {}", run.id)),
+        )
+    })
+}
+
+fn normalize_decoded_record(
+    run: &RunRecord,
+    mut record: AgentTaskRunRecord,
+) -> Result<AgentTaskRunRecord> {
     record.hydrate_legacy_lab_handoff();
     if let Some(problem) = record.lab_handoff_validation_error() {
         return Err(Error::internal_json(
@@ -1894,12 +2036,17 @@ fn read_mirrored_aggregate_in_store(
     let Some(run) = store.get_run(run_id)? else {
         return Ok(None);
     };
-    let Some(value) = run.metadata_json.get("agent_task_aggregate") else {
+    aggregate_from_run(&run)
+}
+
+fn aggregate_from_run(run: &RunRecord) -> Result<Option<AgentTaskAggregate>> {
+    let Some(value) = run
+        .metadata_json
+        .get("agent_task_aggregate")
+        .filter(|value| !value.is_null())
+    else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
     serde_json::from_value(value.clone())
         .map(Some)
         .map_err(|error| {

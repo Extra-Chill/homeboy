@@ -144,7 +144,7 @@ mod store_init_tests {
         assert!(status.exists);
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 8);
+        assert_eq!(status.table_count, 12);
     }
 
     #[test]
@@ -158,7 +158,7 @@ mod store_init_tests {
 
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 8);
+        assert_eq!(status.table_count, 12);
     }
 
     #[test]
@@ -1803,6 +1803,13 @@ mod referential_integrity_tests {
             })
             .expect("record finding");
         store
+            .connection
+            .execute(
+                "INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, created_at) VALUES (?1, ?2, ?3, ?4, 1, '{}', 'now')",
+                rusqlite::params![&run.id, "a".repeat(64), "b".repeat(64), format!("{}:event:1", run.id)],
+            )
+            .expect("record control-plane event");
+        store
             .finish_run(&run.id, RunStatus::Pass, None)
             .expect("finish run");
 
@@ -1815,5 +1822,16 @@ mod referential_integrity_tests {
             .list_artifacts(&run.id)
             .expect("list artifacts")
             .is_empty());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM control_plane_event_appends WHERE run_id = ?1",
+                    [&run.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count retained events"),
+            0
+        );
     }
 }

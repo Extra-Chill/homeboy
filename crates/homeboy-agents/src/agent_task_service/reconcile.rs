@@ -7,10 +7,12 @@
 //! [`register_orchestration_driver`].
 
 use crate::agent_task_lifecycle;
-use homeboy_core::Result;
+use homeboy_core::{Error, Result};
 use std::collections::HashMap;
 
-use super::discovery::{discover_runs, AgentTaskDiscoveryFilter, AgentTaskLiveness};
+use super::discovery::{
+    discover_runs, discover_runs_in_store, AgentTaskDiscoveryFilter, AgentTaskLiveness,
+};
 
 /// Report returned by [`reconcile_stale_active_runs`]. Lists every active run
 /// that was classified non-active, and for the reconcilable ones records the
@@ -87,6 +89,49 @@ fn rooted_exact_status(
         true,
     )?
     .record)
+}
+
+/// Read back the durable record and its active discovery projection after an
+/// apply. A successful reconcile must mean the selected record is no longer a
+/// blocking projection, not merely that its cancellation write returned.
+fn verified_reconciled_status(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = rooted_exact_status(lifecycle_store, run_id)?;
+    let remains_active = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
+        .runs
+        .into_iter()
+        .any(|run| run.run_id == run_id);
+    let runner_projection_resolved = record.runner_id().is_none_or(|runner_id| {
+        agent_task_lifecycle::runner_live_job_authority(runner_id)
+            == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
+    });
+    verify_reconciled_postcondition(&record, remains_active, runner_projection_resolved)?;
+    Ok(record)
+}
+
+pub(super) fn verify_reconciled_postcondition(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    remains_active: bool,
+    runner_projection_resolved: bool,
+) -> Result<()> {
+    if record.state.is_terminal() && !remains_active && runner_projection_resolved {
+        return Ok(());
+    }
+
+    Err(Error::internal_unexpected(format!(
+        "agent-task reconciliation did not satisfy its postcondition for `{}`: durable state is {}, unresolved projection remains {}",
+        record.run_id,
+        run_state_label(record.state),
+        if remains_active {
+            "in active discovery"
+        } else if !runner_projection_resolved {
+            "on the runner"
+        } else {
+            "non-terminal"
+        },
+    )))
 }
 
 fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
@@ -301,11 +346,19 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
 /// reconciliation: a state or ownership change becomes a no-op rather than a
 /// reason to inspect or mutate any other record (#10001).
 pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileReport> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_run_in_store(&lifecycle_store, run_id, dry_run)
+}
+
+pub(crate) fn reconcile_run_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    dry_run: bool,
+) -> Result<AgentTaskReconcileReport> {
     // One store for the whole reconciliation: the scope resolution, every
     // authoritative read, and the expiry or cancellation that follows are one
     // answer about one run.
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let requested_run_id = run_id.to_string();
     let resolved_run_ids =
         agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)?;
@@ -318,7 +371,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
             .runner_id()
             .map(|runner_id| format!("runner:{runner_id}"))
             .unwrap_or_else(|| "local".to_string());
-        let candidate = discover_runs(AgentTaskDiscoveryFilter::Active)?
+        let candidate = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
             .runs
             .into_iter()
             .find(|run| run.run_id == *resolved_run_id);
@@ -330,12 +383,13 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                 let refreshed = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
                 let locally_reconcilable_after_runner_idle =
                     refreshed.is_locally_reconcilable_after_runner_idle();
-                let still_reconcilable = discover_runs(AgentTaskDiscoveryFilter::Active)?
-                    .runs
-                    .into_iter()
-                    .find(|run| run.run_id == *resolved_run_id)
-                    .and_then(|run| run.liveness)
-                    .is_some_and(AgentTaskLiveness::is_reconcilable);
+                let still_reconcilable =
+                    discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
+                        .runs
+                        .into_iter()
+                        .find(|run| run.run_id == *resolved_run_id)
+                        .and_then(|run| run.liveness)
+                        .is_some_and(AgentTaskLiveness::is_reconcilable);
                 if refreshed.state.is_terminal() || !still_reconcilable {
                     runs.push(AgentTaskReconcileRun {
                         run_id: resolved_run_id.clone(),
@@ -407,16 +461,30 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                             resolved_run_id,
                         ) {
                             Ok(true) => {
+                                let verified =
+                                    verified_reconciled_status(&lifecycle_store, resolved_run_id);
+                                let verified = match verified {
+                                    Ok(record) => record,
+                                    Err(error) => {
+                                        failed += 1;
+                                        runs.push(AgentTaskReconcileRun {
+                                            run_id: resolved_run_id.clone(),
+                                            liveness,
+                                            source: run.source,
+                                            authoritative_state: refreshed.state,
+                                            stale_reason: run.stale_reason,
+                                            action: "failed",
+                                            error: Some(error.message),
+                                        });
+                                        continue;
+                                    }
+                                };
                                 reconciled += 1;
                                 runs.push(AgentTaskReconcileRun {
                                     run_id: resolved_run_id.clone(),
                                     liveness,
                                     source: run.source,
-                                    authoritative_state: rooted_status(
-                                        &lifecycle_store,
-                                        resolved_run_id,
-                                    )?
-                                    .state,
+                                    authoritative_state: verified.state,
                                     stale_reason: run.stale_reason,
                                     action: "reconciled",
                                     error: None,
@@ -460,12 +528,30 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                         Some(&reason),
                     ) {
                         Ok(record) => {
+                            let verified =
+                                match verified_reconciled_status(&lifecycle_store, resolved_run_id)
+                                {
+                                    Ok(record) => record,
+                                    Err(error) => {
+                                        failed += 1;
+                                        runs.push(AgentTaskReconcileRun {
+                                            run_id: resolved_run_id.clone(),
+                                            liveness,
+                                            source: run.source,
+                                            authoritative_state: record.state,
+                                            stale_reason: run.stale_reason,
+                                            action: "failed",
+                                            error: Some(error.message),
+                                        });
+                                        continue;
+                                    }
+                                };
                             reconciled += 1;
                             runs.push(AgentTaskReconcileRun {
                                 run_id: resolved_run_id.clone(),
                                 liveness,
                                 source: run.source,
-                                authoritative_state: record.state,
+                                authoritative_state: verified.state,
                                 stale_reason: run.stale_reason,
                                 action: "reconciled",
                                 error: None,
@@ -2313,6 +2399,102 @@ mod tests {
             assert!(terminal.tasks.is_empty());
             assert!(terminal.metadata.get("worktree_provision").is_none());
             assert!(terminal.metadata.get("provider_execution").is_none());
+        });
+    }
+
+    #[test]
+    fn exhausted_unmaterialized_admission_retries_its_original_binding_once_after_runner_recovers()
+    {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-unmaterialized-retry-after-exhaustion";
+            let binding = serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-binding/v1",
+                "request_ref": "sha256:original-submission",
+                "worktree_ref": "homeboy@fix-unmaterialized-admission-retry",
+                "task": { "prompt_ref": "sha256:exact-task-prompt" },
+                "gates": { "verify": ["cargo test -p homeboy-agents"] },
+                "retry": { "max_attempts": 3, "provider_rotations": 0 },
+                "provider_runtime_refs": { "backend": "opencode", "model": "gpt-5.6" },
+                "placement": { "candidate_runner_refs": ["lab"], "local_fallback": false },
+                "replay_intent": {
+                    "cook_id": cook_id,
+                    "argv": ["agent-task", "cook", "--run-id", cook_id]
+                }
+            });
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                binding.clone(),
+                "blocked_runner_stale",
+                "runner stale",
+            )
+            .expect("admit original Cook");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["unmaterialized_cook_admission"]["retry"]["max_attempts"] =
+                    serde_json::json!(1);
+                record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("make original admission exhaust");
+
+            let exhausted = reconcile_unmaterialized_cook_admissions_with(
+                Some(cook_id),
+                |_| Ok(serde_json::json!({ "state": "blocked_runner_stale" })),
+                |_| panic!("exhausted admission must not replay"),
+            )
+            .expect("exhaust admission");
+            assert_eq!(exhausted["exhausted"], 1);
+            let source = agent_task_lifecycle::exact_record(cook_id).expect("failed source");
+            assert_eq!(
+                source.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+
+            let retry = crate::agent_task_service::retry(cook_id, None, false, false)
+                .expect("native retry reserves a successor admission");
+            assert!(retry.created);
+            assert!(retry.record.tasks.is_empty());
+            let admission = &retry.record.metadata["unmaterialized_cook_admission"];
+            assert_eq!(retry.record.metadata["retry_of"], cook_id);
+            assert_eq!(admission["binding"]["task"], binding["task"]);
+            assert_eq!(admission["binding"]["gates"], binding["gates"]);
+            assert_eq!(
+                admission["binding"]["worktree_ref"],
+                binding["worktree_ref"]
+            );
+            assert_eq!(admission["binding"]["retry"], binding["retry"]);
+            assert_eq!(
+                admission["binding"]["replay_intent"]["cook_id"],
+                retry.record.run_id
+            );
+
+            agent_task_lifecycle::rearm_unmaterialized_cook_admission(&retry.record.run_id)
+                .expect("runner readiness repair rearms the successor admission");
+            let replay_requests = std::cell::RefCell::new(Vec::new());
+            let recovered = reconcile_unmaterialized_cook_admissions_with(
+                Some(&retry.record.run_id),
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "repaired-lab" })),
+                |request| {
+                    replay_requests.borrow_mut().push(request.clone());
+                    Ok(serde_json::json!({ "worker_id": "repaired-worker" }))
+                },
+            )
+            .expect("repaired runner replays successor");
+            assert_eq!(recovered["replayed"], 1);
+            assert_eq!(replay_requests.borrow().len(), 1);
+            assert_eq!(
+                replay_requests.borrow()[0]["intent"]["argv"],
+                serde_json::json!(["agent-task", "cook", "--run-id", retry.record.run_id])
+            );
+
+            let duplicate = reconcile_unmaterialized_cook_admissions_with(
+                Some(&retry.record.run_id),
+                |_| panic!("active replay lease must prevent a duplicate runner selection"),
+                |_| panic!("active replay lease must prevent duplicate materialization"),
+            )
+            .expect("duplicate pass is inert");
+            assert_eq!(duplicate["replayed"], 0);
+            assert_eq!(replay_requests.borrow().len(), 1);
         });
     }
 }

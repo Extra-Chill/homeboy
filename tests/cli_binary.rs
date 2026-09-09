@@ -2,6 +2,8 @@
 mod agent_task_provider_flag_diagnostic;
 #[path = "cli_binary/agent_tool_dispatch.rs"]
 mod agent_tool_dispatch;
+#[path = "cli_binary/cook_continue_preflight.rs"]
+mod cook_continue_preflight;
 #[path = "cli_binary/cook_preview_lifecycle.rs"]
 mod cook_preview_lifecycle;
 #[path = "cli_binary/cook_prompt_stdin.rs"]
@@ -10,6 +12,8 @@ mod cook_prompt_stdin;
 mod fanout_supervisor_cli;
 #[path = "cli_binary/help_fast_path.rs"]
 mod help_fast_path;
+#[path = "cli_binary/notification_route_admission.rs"]
+mod notification_route_admission;
 #[path = "cli_binary/output_dispatch.rs"]
 mod output_dispatch;
 #[path = "cli_binary/output_errors.rs"]
@@ -20,5 +24,7 @@ mod product_identity_test;
 mod promotion_provider_stdin;
 #[path = "cli_binary/refactor_transform_test.rs"]
 mod refactor_transform_test;
+#[path = "cli_binary/review_dirty_preflight.rs"]
+mod review_dirty_preflight;
 #[path = "cli_binary/rig_local_artifact_registration.rs"]
 mod rig_local_artifact_registration;

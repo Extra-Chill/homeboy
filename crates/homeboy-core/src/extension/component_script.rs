@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::invoke::{read_extension_phase_timings, ExtensionRunner, RunnerOutput};
-use crate::extension::catalog::load_extension;
 use crate::extension::invoke::env_provider;
 use homeboy_core::component::Component;
 pub use homeboy_core::component_script_provider::ComponentScriptOutput;
@@ -272,7 +271,6 @@ fn component_script_env(
         let mut extension_ids = extensions.keys().collect::<Vec<_>>();
         extension_ids.sort();
         for extension_id in extension_ids {
-            let extension = load_extension(extension_id)?;
             let mut provider_env = env.clone();
             provider_env.extend(component_env.iter().cloned());
             provider_env.extend(extra_env.iter().cloned());
@@ -280,7 +278,8 @@ fn component_script_env(
                 &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
                     "homeboy",
                 ),
-                &extension,
+                extension_id,
+                None,
                 source_path,
                 &provider_env,
             )?);
