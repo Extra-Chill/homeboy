@@ -2718,6 +2718,13 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             )?;
             super::execution::preflight_plan_secret_env(&selected_plan)?;
             options.identity.initial_plan = selected_plan;
+            options.ai_disclosure.ai_model = options
+                .identity
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.executor.model())
+                .map(str::to_string);
         }
         Err(error) if error.retryable == Some(true) => {}
         Err(error) => return Err(error),
@@ -2726,8 +2733,8 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
 }
 
 /// Compile deterministic Cook inputs without invoking provider-owned live
-/// readiness. Preview callers use this boundary so their planner timeout never
-/// abandons a live provider process.
+/// readiness. Preview callers use this inside their static planner before a
+/// separate provider-owned admission receives the Cook deadline.
 pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
     mut options: CookRequest,
     dispatch: AgentTaskDispatchCommand,
