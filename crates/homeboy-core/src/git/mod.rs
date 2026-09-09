@@ -18,6 +18,7 @@ mod pr_refresh;
 mod primitives;
 mod primitives_query;
 pub mod release_download;
+mod remote_tracking_authority;
 
 #[cfg(test)]
 mod operation_tests;
@@ -102,6 +103,9 @@ pub use primitives_query::{
     output_optional_bytes, output_optional_within, remote_origin_url, remote_url, repo_root,
     rev_parse, short_head_revision, status_porcelain, status_porcelain_bytes,
     status_porcelain_scoped, toplevel, BoundedGitRead, DEFAULT_GIT_READ_PROBE_TIMEOUT,
+};
+pub use remote_tracking_authority::{
+    with_remote_tracking_authority, with_remote_tracking_authority_if_git,
 };
 
 use serde::{Deserialize, Serialize};

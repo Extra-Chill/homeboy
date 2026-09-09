@@ -12,7 +12,7 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
@@ -2710,17 +2710,23 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
             )
         })?
         .to_string();
-    let fetched = std::process::Command::new("git")
-        .args([
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &sha,
-        ])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let fetched = homeboy_core::git::with_remote_tracking_authority(
+        Path::new(path),
+        "materialize refreshed destination base",
+        || {
+            std::process::Command::new("git")
+                .args([
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    &sha,
+                ])
+                .current_dir(path)
+                .output()
+                .map_err(|error| Error::git_command_failed(error.to_string()))
+        },
+    )?;
     if !fetched.status.success() {
         return Err(Error::validation_invalid_argument(
             "base",

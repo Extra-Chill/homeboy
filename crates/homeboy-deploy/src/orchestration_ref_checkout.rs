@@ -396,19 +396,22 @@ fn ensure_resolved_commit_is_available(
         identity.requested_ref,
         identity.resolved_sha
     );
-    git::run_git_with_env_timeout(
-        source_root,
-        &[
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            &remote,
-            &format!("+{}:", identity.resolved_sha),
-        ],
-        "fetch preflighted exact deploy ref",
-        &transport_env,
-        REMOTE_REF_QUERY_TIMEOUT,
-    )
+    git::with_remote_tracking_authority(source_root, "fetch preflighted exact deploy ref", || {
+        git::run_git_with_env_timeout(
+            source_root,
+            &[
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                &remote,
+                &format!("+{}:", identity.resolved_sha),
+            ],
+            "fetch preflighted exact deploy ref",
+            &transport_env,
+            REMOTE_REF_QUERY_TIMEOUT,
+        )
+        .map(|_| ())
+    })
     .map_err(|error| remote_transport_error(&remote, &component.id, &error))?;
     let fetched = git::run_git(
         source_root,
