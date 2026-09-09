@@ -2714,18 +2714,20 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
         Path::new(path),
         "materialize refreshed destination base",
         std::time::Instant::now() + std::time::Duration::from_secs(30),
-        |_| {
-            std::process::Command::new("git")
-                .args([
+        |remaining| {
+            homeboy_core::git::run_git_output_with_env_timeout(
+                Path::new(path),
+                &[
                     "fetch",
                     "--no-tags",
                     "--no-write-fetch-head",
                     "origin",
                     &sha,
-                ])
-                .current_dir(path)
-                .output()
-                .map_err(|error| Error::git_command_failed(error.to_string()))
+                ],
+                "materialize refreshed destination base",
+                &[],
+                remaining,
+            )
         },
     )?;
     if !fetched.status.success() {

@@ -8128,8 +8128,8 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
         target,
         "materialize prepared Cook base",
         std::time::Instant::now() + std::time::Duration::from_secs(30),
-        |_| {
-            homeboy_core::git::run_git(
+        |remaining| {
+            homeboy_core::git::run_git_with_env_timeout(
                 target,
                 &[
                     "fetch",
@@ -8139,6 +8139,8 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
                     base_sha,
                 ],
                 "materialize prepared Cook base",
+                &[],
+                remaining,
             )
             .map(|_| ())
         },
