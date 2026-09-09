@@ -32,7 +32,9 @@ use crate::agent_task_promotion::{
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
-use crate::agent_task_timeout::{capture_cook_deadline, expired_cook_deadline, CookDeadline};
+use crate::agent_task_timeout::{
+    capture_cook_deadline, current_cook_deadline, expired_cook_deadline, CookDeadline,
+};
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
@@ -2672,6 +2674,61 @@ pub fn compile_cook_attempt_with_readiness_cache(
 /// Compile a Cook against one caller-supplied provider catalog. This keeps the
 /// preflight and plan construction on the same provider snapshot.
 pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
+    options: CookRequest,
+    dispatch: AgentTaskDispatchCommand,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+    readiness_cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
+) -> Result<CookRequest> {
+    let mut options = compile_cook_attempt_static_with_catalog_and_readiness_cache(
+        options,
+        dispatch,
+        catalog,
+        readiness_cache,
+    )?;
+    // Admission receives the Cook's already-resolved absolute deadline. The
+    // provider readiness owner applies it to cache waits and its process tree.
+    if let Some(deadline) = current_cook_deadline() {
+        let deadline_unix_ms = options
+            .identity
+            .initial_plan
+            .options
+            .execution_budget
+            .deadline_unix_ms
+            .map_or(deadline.deadline_unix_ms(), |existing| {
+                existing.min(deadline.deadline_unix_ms())
+            });
+        options
+            .identity
+            .initial_plan
+            .options
+            .execution_budget
+            .deadline_unix_ms = Some(deadline_unix_ms);
+    }
+    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &options.identity.initial_plan,
+        catalog,
+        readiness_cache,
+    ) {
+        Ok(selected_plan) => {
+            catalog.validate_selected_models(&selected_plan)?;
+            catalog.enforce_runtime_preflight_checks_for_plan(&selected_plan)?;
+            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
+                &selected_plan,
+                catalog.providers(),
+            )?;
+            super::execution::preflight_plan_secret_env(&selected_plan)?;
+            options.identity.initial_plan = selected_plan;
+        }
+        Err(error) if error.retryable == Some(true) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(options)
+}
+
+/// Compile deterministic Cook inputs without invoking provider-owned live
+/// readiness. Preview callers use this boundary so their planner timeout never
+/// abandons a live provider process.
+pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
     mut options: CookRequest,
     dispatch: AgentTaskDispatchCommand,
     catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
@@ -2710,32 +2767,14 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             &request,
             |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
         )?;
-    // The shared verdict considers the ordered rotation routes with their
-    // effective model/config before Cook can consume a provider execution.
-    // Persist the selected route and forward cursor without reducing the durable
-    // rotation policy. Deterministic exhaustion still fails compilation;
-    // retryable exhaustion reaches runtime with the fresh, unbound plan.
-    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    catalog.validate_selected_models(&options.identity.initial_plan)?;
+    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
         &options.identity.initial_plan,
-        catalog,
-        readiness_cache,
-    ) {
-        Ok(selected_plan) => {
-            catalog.validate_selected_models(&selected_plan)?;
-            catalog.enforce_runtime_preflight_checks_for_plan(&selected_plan)?;
-            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-                &selected_plan,
-                catalog.providers(),
-            )?;
-            super::execution::preflight_plan_secret_env(&selected_plan)?;
-            options.identity.initial_plan = selected_plan;
-        }
-        Err(error) if error.retryable == Some(true) => {}
-        Err(error) => return Err(error),
-    }
-    // Finalization disclosure is derived from the compiled provider invocation,
-    // not a pre-resolution CLI value. The plan is persisted in the recipe and
-    // remains authoritative across continuation.
+        catalog.providers(),
+    )?;
+    super::execution::preflight_plan_secret_env(&options.identity.initial_plan)?;
+    // Static compilation preserves the resolved provider identity. Live
+    // admission later selects a rotation and proves runtime readiness.
     options.ai_disclosure.ai_model = options
         .identity
         .initial_plan

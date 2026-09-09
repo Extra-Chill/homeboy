@@ -382,6 +382,7 @@ pub mod service {
         attempt_primary_failure_diagnostic, authorize_cook_continue_route,
         authorize_cook_continue_route_with_artifact, claim_continuation_for,
         claim_continuation_for_recovery_and_clear_failure_in_store,
+        compile_cook_attempt_static_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
         consume_claimed_with_dispatcher, continuation_state_in_store, control_plane_run,

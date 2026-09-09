@@ -378,6 +378,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
     cache: &mut ProviderRuntimeReadinessCache,
     deadline_unix_ms: Option<u64>,
 ) -> Result<ProviderReadinessInvocationResult> {
+    let started = Instant::now();
     ensure_readiness_deadline("probe", deadline_unix_ms)?;
     let base_key = readiness_request_key(provider, config)?;
     ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
@@ -444,6 +445,18 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                         return Err(error);
                     }
                     let result = result.clone();
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "provider_readiness_progress",
+                            "provider_id": provider.id,
+                            "backend": provider.backend,
+                            "state": "cache_hit",
+                            "elapsed_ms": started.elapsed().as_millis(),
+                            "cache": "hit",
+                            "deadline_unix_ms": deadline_unix_ms,
+                        })
+                    );
                     if registered_waiter {
                         release_cache_waiter(&mut state, &request_key);
                         cache.shared.changed.notify_all();
@@ -528,10 +541,23 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
         .unwrap_or(u64::MAX);
         let shared = Arc::clone(&cache.shared);
         let probe_request_key = request_key.clone();
+        eprintln!(
+            "{}",
+            json!({
+                "event": "provider_readiness_progress",
+                "provider_id": provider.id,
+                "backend": provider.backend,
+                "state": "started",
+                "elapsed_ms": started.elapsed().as_millis(),
+                "cache": "miss",
+                "deadline_unix_ms": deadline_unix_ms,
+            })
+        );
         drop(state);
         let spawn_result = std::thread::Builder::new()
             .name("provider-readiness-probe".to_string())
             .spawn(move || {
+                let started = Instant::now();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_readiness_probe_with_gate(
                         &provider,
@@ -543,6 +569,19 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                     )
                 }))
                 .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
+
+                eprintln!(
+                    "{}",
+                    json!({
+                        "event": "provider_readiness_progress",
+                        "provider_id": provider.id,
+                        "backend": provider.backend,
+                        "state": if result.is_ok() { "completed" } else { "failed" },
+                        "elapsed_ms": started.elapsed().as_millis(),
+                        "cache": "miss",
+                        "deadline_unix_ms": deadline_unix_ms,
+                    })
+                );
 
                 if deadline_limited
                     && result
