@@ -182,8 +182,7 @@ type CookAttemptDispatcherFactory = dyn Fn(
 
 const FANOUT_COORDINATOR_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
-/// Each static dependency gets an independent budget. Bounded inputs make this
-/// a per-phase cost ceiling rather than one workspace-size-dependent deadline.
+/// Static dry-run planning has one wall-clock budget across all phases.
 const DRY_RUN_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 const DRY_RUN_MAX_ISSUES: usize = 128;
 const DRY_RUN_MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
@@ -202,25 +201,22 @@ struct DryRunPlanner {
     phase: &'static str,
     deadline: Instant,
     phase_started_at: Instant,
-    phase_timeout: Duration,
+    configured_timeout_seconds: u64,
     replay_command: String,
     progress: Vec<Value>,
 }
 
 impl DryRunPlanner {
     fn new(args: &AgentTaskFanoutCookBatchArgs, placement: Placement) -> Self {
+        let configured_timeout_seconds = args
+            .dry_run_planner_timeout_seconds
+            .unwrap_or(DRY_RUN_PHASE_TIMEOUT.as_secs());
+        let started_at = Instant::now();
         Self {
             phase: "initializing",
-            deadline: Instant::now()
-                + Duration::from_secs(
-                    args.dry_run_planner_timeout_seconds
-                        .unwrap_or(DRY_RUN_PHASE_TIMEOUT.as_secs()),
-                ),
-            phase_started_at: Instant::now(),
-            phase_timeout: Duration::from_secs(
-                args.dry_run_planner_timeout_seconds
-                    .unwrap_or(DRY_RUN_PHASE_TIMEOUT.as_secs()),
-            ),
+            deadline: started_at + Duration::from_secs(configured_timeout_seconds),
+            phase_started_at: started_at,
+            configured_timeout_seconds,
             replay_command: dry_run_replay_command_with_placement(args, placement),
             progress: Vec::new(),
         }
@@ -326,7 +322,7 @@ impl DryRunPlanner {
             "fanout dry-run planner phase deadline exceeded",
             serde_json::json!({
                 "reason": "planner_deadline_exceeded",
-                "planner_timeout_seconds": self.phase_timeout.as_secs(),
+                "planner_timeout_seconds": self.configured_timeout_seconds,
                 "phase": self.phase,
                 "phase_elapsed_ms": elapsed.as_millis(),
                 "unresolved_dependency": unresolved_dependency,
@@ -10055,7 +10051,7 @@ fi
         )
         .expect("fanout plan");
         let mut planner = DryRunPlanner::new(&cook_batch_args(), Placement::Auto);
-        planner.phase_timeout = Duration::from_millis(20);
+        planner.deadline = Instant::now() + Duration::from_millis(20);
         planner
             .run_bounded("provider_selection", "static provider selection", || Ok(()))
             .expect("static planning stays within its own budget");
@@ -10097,7 +10093,7 @@ fi
     }
 
     #[test]
-    fn preview_readiness_probes_children_with_distinct_provider_configurations() {
+    fn preview_readiness_probes_children_with_distinct_explicit_client_contexts() {
         let root = tempfile::tempdir().expect("fixture directory");
         let invoked = root.path().join("invoked");
         let catalog = AgentTaskProviderCatalog {
@@ -10131,14 +10127,14 @@ fi
                     "prompt": "fix the first issue",
                     "to_worktree": "homeboy@configured-preview-first",
                     "backend": "configured",
-                    "provider_config": "{\"account\":\"first\"}",
+                    "provider_config": "{\"client_context\":{\"account\":\"first\"}}",
                     "verify": ["true"]
                 }, {
                     "cook_id": "second",
                     "prompt": "fix the second issue",
                     "to_worktree": "homeboy@configured-preview-second",
                     "backend": "configured",
-                    "provider_config": "{\"account\":\"second\"}",
+                    "provider_config": "{\"client_context\":{\"account\":\"second\"}}",
                     "verify": ["true"]
                 }]
             }),
@@ -10557,15 +10553,17 @@ fi
     fn dry_run_planner_enforces_the_slow_worktree_phase_budget() {
         let args = cook_batch_args();
         let mut planner = DryRunPlanner::new(&args, Placement::Auto);
-        planner.phase_timeout = Duration::from_millis(20);
+        planner.deadline = Instant::now() + Duration::from_millis(20);
+        let (release_worker, worker_released) = std::sync::mpsc::sync_channel(1);
 
         let started = Instant::now();
         let error = planner
-            .run_bounded("worktrees", "static worktree projection", || {
-                std::thread::sleep(Duration::from_secs(2));
+            .run_bounded("worktrees", "static worktree projection", move || {
+                worker_released.recv().expect("release planner worker");
                 Ok(())
             })
             .expect_err("slow static worktree phase must be bounded");
+        release_worker.send(()).expect("release planner worker");
 
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -10627,18 +10625,20 @@ fi
     fn dry_run_planner_attributes_a_slow_workspace_lookup_to_its_exact_phase() {
         let args = cook_batch_args();
         let mut planner = DryRunPlanner::new(&args, Placement::Auto);
-        planner.phase_timeout = Duration::from_millis(20);
+        planner.deadline = Instant::now() + Duration::from_millis(20);
+        let (release_worker, worker_released) = std::sync::mpsc::sync_channel(1);
 
         let error = planner
             .run_bounded(
                 "gate_workspace",
                 "authoritative registered workspace",
-                || {
-                    std::thread::sleep(Duration::from_secs(2));
+                move || {
+                    worker_released.recv().expect("release planner worker");
                     Ok(())
                 },
             )
             .expect_err("slow workspace lookup must be bounded");
+        release_worker.send(()).expect("release planner worker");
 
         assert_eq!(error.details["reason"], "planner_deadline_exceeded");
         assert_eq!(error.details["phase"], "gate_workspace");
@@ -10653,9 +10653,13 @@ fi
     fn dry_run_planner_timeout_is_configurable_and_replayable() {
         let mut args = cook_batch_args();
         args.dry_run_planner_timeout_seconds = Some(42);
-        let planner = DryRunPlanner::new(&args, Placement::Auto);
+        let mut planner = DryRunPlanner::new(&args, Placement::Auto);
+        planner.deadline = Instant::now() - Duration::from_millis(1);
+        let error = planner
+            .run_bounded("repository", "registered primary repository", || Ok(()))
+            .expect_err("expired configured deadline");
 
-        assert_eq!(planner.phase_timeout, Duration::from_secs(42));
+        assert_eq!(error.details["planner_timeout_seconds"], 42);
         assert!(dry_run_replay_command(&args).contains("--dry-run-planner-timeout-seconds 42"));
     }
 
