@@ -393,7 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn shallow_clone_fetches_remote_qualified_ref_from_its_named_remote() {
+    fn shallow_clone_fetches_and_unshallows_remote_qualified_ref_from_its_named_remote() {
+        use std::io::Write;
+
         let dir = tempfile::TempDir::new().expect("tempdir");
         let source = dir.path().join("source");
         let remote = dir.path().join("remote.git");
@@ -408,9 +410,46 @@ mod tests {
         execute_git(source_path, &["add", "."]).expect("stage base commit");
         execute_git(source_path, &["commit", "-qm", "base"]).expect("commit base");
         execute_git(source_path, &["switch", "-qc", "feature"]).expect("create feature branch");
-        std::fs::write(source.join("feature.txt"), "feature\n").expect("write feature commit");
-        execute_git(source_path, &["add", "."]).expect("stage feature commit");
-        execute_git(source_path, &["commit", "-qm", "feature"]).expect("commit feature");
+        let parent = String::from_utf8_lossy(
+            &execute_git(source_path, &["rev-parse", "HEAD"])
+                .expect("resolve feature parent")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        // The 50 and 200 deepen steps cannot reach this feature's base.
+        let mut history = String::new();
+        for index in 1..=300 {
+            let message = format!("feature {index}");
+            let previous = if index == 1 {
+                parent.clone()
+            } else {
+                format!(":{}", index - 1)
+            };
+            history.push_str(&format!(
+                "commit refs/heads/feature\nmark :{index}\nauthor test <test@example.com> 0 +0000\ncommitter test <test@example.com> 0 +0000\ndata {}\n{message}\nfrom {previous}\n\n",
+                message.len()
+            ));
+        }
+        let mut importer = Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(source_path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("start feature history importer");
+        importer
+            .stdin
+            .take()
+            .expect("feature history importer stdin")
+            .write_all(history.as_bytes())
+            .expect("write feature history");
+        assert!(
+            importer
+                .wait()
+                .expect("wait for feature history importer")
+                .success(),
+            "import feature history"
+        );
         execute_git(
             source_path,
             &[

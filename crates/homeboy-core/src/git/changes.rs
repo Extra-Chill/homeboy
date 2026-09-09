@@ -677,6 +677,71 @@ mod tests {
         assert!(files.contains(&"untracked.txt".to_string()));
     }
 
+    #[test]
+    fn resolve_merge_base_deepens_remote_qualified_ref_through_named_remote() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let source = dir.path().join("source");
+        let remote = dir.path().join("remote.git");
+        let checkout = dir.path().join("checkout");
+        fs::create_dir(&source).expect("create source");
+        let source_path = source.to_str().expect("utf-8 source path");
+        init_repo_with_initial_commit(source_path);
+        git(source_path, &["checkout", "-qb", "feature"]);
+        fs::write(source.join("feature.txt"), "feature\n").expect("write feature commit");
+        git(source_path, &["add", "."]);
+        git(source_path, &["commit", "-qm", "feature"]);
+        git(
+            source_path,
+            &[
+                "init",
+                "--bare",
+                "-q",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(
+            source_path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(source_path, &["push", "-q", "upstream", "main", "feature"]);
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--branch",
+                "feature",
+                &format!("file://{}", remote.display()),
+                checkout.to_str().expect("utf-8 checkout path"),
+            ])
+            .output()
+            .expect("clone shallow checkout");
+        assert!(clone.status.success(), "shallow clone must succeed");
+        let checkout_path = checkout.to_str().expect("utf-8 checkout path");
+        git(checkout_path, &["remote", "rename", "origin", "upstream"]);
+        git(
+            checkout_path,
+            &["remote", "add", "origin", "file:///missing/origin.git"],
+        );
+        git(
+            checkout_path,
+            &["config", "branch.feature.remote", "origin"],
+        );
+        git(
+            checkout_path,
+            &["config", "branch.feature.merge", "refs/heads/feature"],
+        );
+
+        let merge_base = resolve_merge_base(checkout_path, "upstream/main")
+            .expect("resolve through upstream rather than branch origin");
+        assert!(!merge_base.is_empty());
+    }
+
     fn init_repo_with_initial_commit(path: &str) {
         for args in [
             ["init", "-q", "-b", "main"].as_slice(),
