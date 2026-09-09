@@ -186,9 +186,6 @@ const DRY_RUN_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 const DRY_RUN_MAX_ISSUES: usize = 128;
 const DRY_RUN_MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
 const DRY_RUN_MAX_GATE_BYTES: usize = 8 * 1024;
-/// A preview is a point-in-time admission observation. Execution always probes
-/// again, but callers can use this short bound to avoid treating it as durable.
-const PREVIEW_PROVIDER_DISPATCHABILITY_FRESHNESS: Duration = Duration::from_secs(30);
 const COMPACT_FANOUT_FAILURE_LIMIT: usize = 3;
 
 #[cfg(test)]
@@ -204,6 +201,7 @@ struct DryRunPlanner {
     phase_started_at: Instant,
     phase_timeout: Duration,
     replay_command: String,
+    progress: Vec<Value>,
 }
 
 impl DryRunPlanner {
@@ -216,16 +214,14 @@ impl DryRunPlanner {
                     .unwrap_or(DRY_RUN_PHASE_TIMEOUT.as_secs()),
             ),
             replay_command: dry_run_replay_command_with_placement(args, placement),
+            progress: Vec::new(),
         }
     }
 
     fn begin(&mut self, phase: &'static str) {
         self.phase = phase;
         self.phase_started_at = Instant::now();
-        eprintln!(
-            "{{\"event\":\"dry_run_planning_progress\",\"phase\":{}}}",
-            serde_json::to_string(phase).expect("phase serializes"),
-        );
+        self.record_progress("started", None);
     }
 
     fn run<T>(
@@ -274,9 +270,10 @@ impl DryRunPlanner {
                 result
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                return Err(
-                    self.timeout_error(unresolved_dependency, self.phase_started_at.elapsed())
-                )
+                let error =
+                    self.timeout_error(unresolved_dependency, self.phase_started_at.elapsed());
+                self.record_progress("failed", Some(unresolved_dependency));
+                return Err(error);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = worker.join();
@@ -289,11 +286,14 @@ impl DryRunPlanner {
         result.map_err(|error| self.failure(error, unresolved_dependency))
     }
 
-    fn finish(&self, unresolved_dependency: &'static str) -> Result<()> {
+    fn finish(&mut self, unresolved_dependency: &'static str) -> Result<()> {
         let elapsed = self.phase_started_at.elapsed();
         if elapsed > self.phase_timeout {
-            return Err(self.timeout_error(unresolved_dependency, elapsed));
+            let error = self.timeout_error(unresolved_dependency, elapsed);
+            self.record_progress("failed", Some(unresolved_dependency));
+            return Err(error);
         }
+        self.record_progress("completed", Some(unresolved_dependency));
         Ok(())
     }
 
@@ -312,7 +312,9 @@ impl DryRunPlanner {
         )
     }
 
-    fn defer(&self, phase: &'static str, unresolved_dependency: &'static str) -> Error {
+    fn defer(&mut self, phase: &'static str, unresolved_dependency: &'static str) -> Error {
+        self.phase = phase;
+        self.record_progress("deferred", Some(unresolved_dependency));
         Error::new(
             ErrorCode::ValidationInvalidArgument,
             "fanout dry-run accepts static inputs only",
@@ -325,13 +327,31 @@ impl DryRunPlanner {
         )
     }
 
-    fn failure(&self, mut error: Error, unresolved_dependency: &'static str) -> Error {
+    fn failure(&mut self, mut error: Error, unresolved_dependency: &'static str) -> Error {
         error.details["phase"] = Value::String(self.phase.to_string());
         error.details["phase_elapsed_ms"] =
             Value::Number((self.phase_started_at.elapsed().as_millis() as u64).into());
         error.details["unresolved_dependency"] = Value::String(unresolved_dependency.to_string());
         error.details["replay_command"] = Value::String(self.replay_command.clone());
+        self.record_progress("failed", Some(unresolved_dependency));
         error
+    }
+
+    fn record_progress(&mut self, state: &'static str, unresolved_dependency: Option<&str>) {
+        let event = serde_json::json!({
+            "event": "fanout_dry_run_planning_progress",
+            "phase": self.phase,
+            "state": state,
+            "elapsed_ms": self.phase_started_at.elapsed().as_millis(),
+            "unresolved_dependency": unresolved_dependency,
+            "live": false,
+        });
+        eprintln!("{event}");
+        self.progress.push(event);
+    }
+
+    fn progress(&self) -> Vec<Value> {
+        self.progress.clone()
     }
 }
 
@@ -1729,7 +1749,8 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         Some(claim) => claim,
         None => claim_fanout_run_batch_coordinator(&plan, placement)?,
     };
-    let outcome = (|| {
+    let deadline = plan.cook_deadline();
+    let outcome = with_current_cook_deadline(deadline, || {
         let heartbeat = CoordinatorHeartbeat::start(
             plan.fanout_id.clone(),
             claim_id.clone(),
@@ -1745,11 +1766,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
             options.provider_transport.attempt_dispatcher = Some(attempt_dispatcher(options));
         })?;
         let concurrency = batch_concurrency(&plan, &cooks);
-        // Resolved once, here, and bound for the whole batch: every worker thread
-        // re-binds this same absolute instant, so the budget covers the batch
-        // rather than restarting per child.
-        let result = with_current_cook_deadline(plan.cook_deadline(), || {
-            batch::start_fanout_run_batch(&plan.fanout_id, &claim_id)?;
+        let result = batch::start_fanout_run_batch(&plan.fanout_id, &claim_id).and_then(|()| {
             agent_task_service::run_cook_batch_with_control(
                 agent_task_service::AgentTaskCookBatchOptions {
                     batch_id: plan.fanout_id.clone(),
@@ -1767,7 +1784,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
         let result = batch_cook_result(&plan, result, &concurrency);
         Ok(result)
-    })();
+    });
     if let Err(error) = &outcome {
         record_batch_failure(&plan, &claim_id, "coordinator", error);
     }
@@ -1799,7 +1816,8 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
         Some(claim) => claim,
         None => claim_fanout_run_batch_coordinator(&plan, placement)?,
     };
-    let outcome = (|| {
+    let deadline = plan.cook_deadline();
+    let outcome = with_current_cook_deadline(deadline, || {
         let heartbeat = CoordinatorHeartbeat::start(
             plan.fanout_id.clone(),
             claim_id.clone(),
@@ -1813,10 +1831,7 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
             record_gate_contract_validation(options, &gate_contract_validation);
         })?;
         let concurrency = batch_concurrency(&plan, &cooks);
-        // See the sibling runner: the budget is resolved once and bound for the
-        // whole batch so it does not restart per child.
-        let result = with_current_cook_deadline(plan.cook_deadline(), || {
-            batch::start_fanout_run_batch(&plan.fanout_id, &claim_id)?;
+        let result = batch::start_fanout_run_batch(&plan.fanout_id, &claim_id).and_then(|()| {
             agent_task_service::run_cook_batch_with_control(
                 agent_task_service::AgentTaskCookBatchOptions {
                     batch_id: plan.fanout_id.clone(),
@@ -1834,7 +1849,7 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
         notify_batch_wave_complete(&plan.fanout_id, &result.value, result.exit_code);
         let result = batch_cook_result(&plan, result, &concurrency);
         Ok(result)
-    })();
+    });
     if let Err(error) = &outcome {
         record_batch_failure(&plan, &claim_id, "coordinator", error);
     }
@@ -2982,9 +2997,9 @@ fn empty_causal_failure_projection() -> (Option<Value>, Value) {
     )
 }
 
-/// Preview stops before repository, workspace, gate-file, or evidence-file
-/// hydration. It does run the selected provider's bounded readiness admission,
-/// so a ready result is executable unless the environment changes before replay.
+/// Preview stops before repository, workspace, gate-file, evidence-file, and
+/// provider-runtime hydration. Provider readiness is owned by execution, where
+/// its contained process tree receives the batch admission deadline.
 fn cook_batch_dry_run(
     mut args: AgentTaskFanoutCookBatchArgs,
     placement: Placement,
@@ -3067,17 +3082,17 @@ fn cook_batch_dry_run(
     plan.ensure_placement(invocation_placement_directive(placement))?;
     let replay_args = pin_cook_batch_replay(&args, &plan.fanout_id);
     let plan_ref = batch_plan_reference(&plan)?;
-    let provider_dispatchability_plan = plan.clone();
-    let provider_dispatchability_plan_ref = plan_ref.clone();
+    let provider_selection_plan = plan.clone();
+    let provider_selection_plan_ref = plan_ref.clone();
     let provider_dispatchability = planner.run_bounded(
-        "provider_dispatchability",
-        "bounded provider dispatchability",
+        "provider_selection",
+        "static provider selection",
         move || {
             let catalog = AgentTaskProviderCatalog::discover();
-            preview_provider_dispatchability_evidence(
-                &provider_dispatchability_plan,
+            preview_provider_selection_evidence(
+                &provider_selection_plan,
                 &catalog,
-                &provider_dispatchability_plan_ref,
+                &provider_selection_plan_ref,
             )
         },
     )?;
@@ -3109,13 +3124,14 @@ fn cook_batch_dry_run(
             "fanout_id": plan.fanout_id,
             "status": "ready",
             "dry_run": true,
+            "progress": planner.progress(),
             "summary": { "issues": plan.cooks.len(), "worktrees_total": worktrees.rows.len(), "worktrees_blocked": 0 },
             "preflight": {
                 "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
                 "provider_selection": provider_selection_preflight(&args),
                 "provider_dispatchability": provider_dispatchability,
-                "deferred_live_checks": ["workspace_materialization"],
+                "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
                 "placement": fanout_placement_preflight(plan.placement.as_ref()),
                 "deterministic_gates": effective_batch_cook_gates(&plan),
             },
@@ -3935,10 +3951,10 @@ fn preflight_batch_cook_recipes(
     Ok(())
 }
 
-/// Preview the same provider admission used while compiling each coordinator
-/// child. The evidence is deliberately redacted and short lived: execution
-/// recompiles and revalidates it after workspace materialization.
-fn preview_provider_dispatchability_evidence(
+/// Project the compiled provider route without invoking live readiness. This is
+/// intentionally a static, replayable declaration rather than an admission
+/// verdict; execution owns the live probe and its cancellation boundary.
+fn preview_provider_selection_evidence(
     plan: &BatchCookFanoutPlan,
     catalog: &AgentTaskProviderCatalog,
     plan_ref: &Value,
@@ -3953,23 +3969,16 @@ fn preview_provider_dispatchability_evidence(
         if cook.cwd.is_none() && cook.workspace.is_none() {
             invocation.dispatch.workspace = None;
         }
-        let options = agent_task_service::compile_cook_attempt_with_catalog_and_readiness_cache(
-            invocation.options,
-            invocation.dispatch,
-            catalog,
-            &mut readiness_cache,
-        )?;
+        let options =
+            agent_task_service::compile_cook_attempt_static_with_catalog_and_readiness_cache(
+                invocation.options,
+                invocation.dispatch,
+                catalog,
+                &mut readiness_cache,
+            )?;
         let task = options.identity.initial_plan.tasks.first().ok_or_else(|| {
             Error::internal_unexpected("compiled fanout cook has no provider task")
         })?;
-        let dispatchability = preview_provider_dispatchability_for_executor(
-            catalog,
-            &task.executor.backend,
-            task.executor.selector.as_deref(),
-            task.executor.model(),
-            &task.executor.config,
-            &mut readiness_cache,
-        )?;
         children.push(serde_json::json!({
             "cook_id": cook.cook_id,
             "executor": {
@@ -3977,7 +3986,11 @@ fn preview_provider_dispatchability_evidence(
                 "selector": task.executor.selector,
                 "model": task.executor.model(),
             },
-            "dispatchability": dispatchability,
+            "admission": {
+                "state": "deferred",
+                "owner": "provider_runtime_readiness",
+                "revalidate_before_execution": true,
+            },
         }));
     }
     let checked_at_unix_ms = SystemTime::now()
@@ -3985,32 +3998,14 @@ fn preview_provider_dispatchability_evidence(
         .unwrap_or_default()
         .as_millis() as u64;
     Ok(serde_json::json!({
-        "schema": "homeboy/agent-task-fanout-provider-dispatchability/v1",
-        "state": "ready",
+        "schema": "homeboy/agent-task-fanout-provider-selection/v1",
+        "state": "deferred",
         "plan_ref": plan_ref,
         "checked_at_unix_ms": checked_at_unix_ms,
-        "freshness_window_seconds": PREVIEW_PROVIDER_DISPATCHABILITY_FRESHNESS.as_secs(),
+        "freshness_window_seconds": Value::Null,
         "revalidate_before_execution": true,
         "children": children,
     }))
-}
-
-fn preview_provider_dispatchability_for_executor(
-    catalog: &AgentTaskProviderCatalog,
-    backend: &str,
-    selector: Option<&str>,
-    model: Option<&str>,
-    config: &Value,
-    readiness_cache: &mut provider::ProviderRuntimeReadinessCache,
-) -> Result<provider::AgentTaskProviderDispatchability> {
-    provider::preflight_provider_dispatchability_with_config(
-        catalog,
-        backend,
-        selector,
-        model,
-        config,
-        readiness_cache,
-    )
 }
 
 fn load_fanout_agent_task_plan(
@@ -9849,7 +9844,9 @@ fi
     }
 
     #[test]
-    fn preview_provider_dispatchability_rejects_a_live_unready_provider() {
+    fn preview_provider_selection_defers_live_readiness_without_invoking_it() {
+        let root = tempfile::tempdir().expect("fixture directory");
+        let invoked = root.path().join("invoked");
         let catalog = AgentTaskProviderCatalog {
             providers: vec![serde_json::from_value(serde_json::json!({
                 "id": "live-unready-provider",
@@ -9858,7 +9855,7 @@ fi
                     "argv": [
                         "sh",
                         "-c",
-                        "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"unavailable\",\"retryable\":false,\"remediation\":\"start the provider\",\"reason\":\"provider is offline\",\"cache_key\":\"offline\",\"identity\":{}}'"
+                        format!("touch {}; sleep 11", invoked.display())
                     ]
                 }
             }))
@@ -9883,16 +9880,22 @@ fi
             &invocation_args,
         )
         .expect("fanout plan");
-        let error = preview_provider_dispatchability_evidence(
+        let evidence = preview_provider_selection_evidence(
             &plan,
             &catalog,
             &json!({"fanout_id": plan.fanout_id}),
         )
-        .expect_err("preview must reject a fanout whose provider live readiness fails");
+        .expect("static preview must not run provider readiness");
 
-        assert_eq!(error.details["field"], "provider_dispatchability");
-        assert!(error.message.contains("runtime_unavailable"), "{error}");
-        assert!(error.message.contains("provider is offline"), "{error}");
+        assert_eq!(evidence["state"], "deferred");
+        assert_eq!(
+            evidence["children"][0]["admission"]["owner"],
+            "provider_runtime_readiness"
+        );
+        assert!(
+            !invoked.exists(),
+            "preview must not invoke live provider readiness"
+        );
     }
 
     #[test]
@@ -10249,6 +10252,12 @@ fi
             .as_str()
             .expect("replay command")
             .contains("--preview"));
+        assert_eq!(planner.progress()[0]["state"], "started");
+        assert_eq!(planner.progress()[1]["state"], "failed");
+        assert_eq!(
+            planner.progress()[1]["unresolved_dependency"],
+            "static worktree projection"
+        );
     }
 
     #[test]
