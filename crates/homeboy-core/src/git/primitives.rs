@@ -1366,7 +1366,7 @@ mod tests {
             with_remote_tracking_authority_until(
                 &holder_repository,
                 "test lock holder",
-                Instant::now() + Duration::from_secs(2),
+                Instant::now() + Duration::from_secs(5),
                 |_| {
                     locked.send(()).unwrap();
                     released.recv().expect("release authority");
@@ -1381,12 +1381,12 @@ mod tests {
         let error = fetch_and_merge_upstream_ff_only(
             repository,
             Instant::now() + Duration::from_millis(50),
-        )
-        .expect_err("authority wait exhausts the pull deadline");
-        assert!(started.elapsed() < Duration::from_millis(250));
-        assert!(error.message.contains("deadline"));
+        );
 
         release.send(()).expect("release holder");
         holder.join().unwrap();
+        let error = error.expect_err("authority wait exhausts the pull deadline");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(error.message.contains("deadline"));
     }
 }

@@ -166,7 +166,19 @@ fn has_merge_base(path: &str, git_ref: &str) -> bool {
 /// Resolve the default remote of a repository: prefer `origin`, else a sole
 /// remote, else fall back to `origin`.
 fn resolve_default_remote(path: &str) -> String {
-    let remotes: Vec<String> = execute_git(path, &["remote"])
+    let remotes = remote_names(path);
+
+    if remotes.iter().any(|remote| remote == "origin") {
+        return "origin".to_string();
+    }
+    if let [only] = remotes.as_slice() {
+        return only.clone();
+    }
+    "origin".to_string()
+}
+
+fn remote_names(path: &str) -> Vec<String> {
+    execute_git(path, &["remote"])
         .ok()
         .filter(|out| out.status.success())
         .map(|out| {
@@ -177,15 +189,32 @@ fn resolve_default_remote(path: &str) -> String {
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    if remotes.iter().any(|remote| remote == "origin") {
-        return "origin".to_string();
+fn remote_and_ref(path: &str, git_ref: &str) -> (String, String) {
+    let remote_ref = git_ref.strip_prefix("refs/remotes/").unwrap_or(git_ref);
+    if let Some((remote, reference)) = remote_ref.split_once('/') {
+        if !reference.is_empty() && remote_names(path).iter().any(|name| name == remote) {
+            return (remote.to_string(), reference.to_string());
+        }
     }
-    if let [only] = remotes.as_slice() {
-        return only.clone();
+
+    (resolve_default_remote(path), git_ref.to_string())
+}
+
+fn fetch_until(path: &str, args: &[&str], deadline: Instant) -> Result<()> {
+    let output = execute_git_until(path, args, deadline)?;
+    if output.status.success() {
+        return Ok(());
     }
-    "origin".to_string()
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(Error::git_command_failed(format!(
+        "git {} failed: {}",
+        args.join(" "),
+        stderr.trim()
+    )))
 }
 
 /// In shallow clones, the merge base between a ref and HEAD may not be
@@ -222,12 +251,14 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
         deadline,
         |_| {
             // Fetch the ref itself if it's not already present.
-            let remote = resolve_default_remote(path);
-            let _ = execute_git_until(path, &["fetch", &remote, git_ref, "--depth=50"], deadline)?;
+            let (remote, reference) = remote_and_ref(path, git_ref);
+            let tracking_ref = reference.strip_prefix("refs/heads/").unwrap_or(&reference);
+            let refspec = format!("{reference}:refs/remotes/{remote}/{tracking_ref}");
+            fetch_until(path, &["fetch", &remote, &refspec, "--depth=50"], deadline)?;
 
             // Progressive deepening: try increasingly generous depths.
             for depth in &["50", "200"] {
-                let _ = execute_git_until(path, &["fetch", "--deepen", depth], deadline)?;
+                fetch_until(path, &["fetch", "--deepen", depth], deadline)?;
                 if has_merge_base(path, git_ref) {
                     eprintln!("Merge base found after deepening by {depth} commits");
                     return Ok(());
@@ -236,7 +267,7 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
 
             // Last resort: full unshallow.
             eprintln!("Merge base not found with depth 200, unshallowing repository");
-            let _ = execute_git_until(path, &["fetch", "--unshallow"], deadline)?;
+            fetch_until(path, &["fetch", "--unshallow"], deadline)?;
 
             if has_merge_base(path, git_ref) {
                 eprintln!("Merge base found after full unshallow");
@@ -328,6 +359,128 @@ mod tests {
             !files.contains(&"deleted.txt".to_string()),
             "deleted file excluded: {files:?}"
         );
+    }
+
+    #[test]
+    fn remote_qualified_refs_use_their_configured_remote() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        execute_git(path, &["init", "-q"]).expect("initialize repository");
+        execute_git(
+            path,
+            &["remote", "add", "origin", "https://origin.invalid/repo.git"],
+        )
+        .expect("configure origin");
+        execute_git(
+            path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://upstream.invalid/repo.git",
+            ],
+        )
+        .expect("configure upstream");
+
+        assert_eq!(
+            remote_and_ref(path, "upstream/main"),
+            ("upstream".to_string(), "main".to_string())
+        );
+        assert_eq!(
+            remote_and_ref(path, "refs/remotes/upstream/main"),
+            ("upstream".to_string(), "main".to_string())
+        );
+    }
+
+    #[test]
+    fn shallow_clone_fetches_remote_qualified_ref_from_its_named_remote() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let source = dir.path().join("source");
+        let remote = dir.path().join("remote.git");
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir(&source).expect("create source");
+        let source_path = source.to_str().expect("utf-8 source path");
+        execute_git(source_path, &["init", "-q", "-b", "main"]).expect("initialize source");
+        execute_git(source_path, &["config", "user.email", "test@example.com"])
+            .expect("configure author email");
+        execute_git(source_path, &["config", "user.name", "test"]).expect("configure author name");
+        std::fs::write(source.join("base.txt"), "base\n").expect("write base commit");
+        execute_git(source_path, &["add", "."]).expect("stage base commit");
+        execute_git(source_path, &["commit", "-qm", "base"]).expect("commit base");
+        execute_git(source_path, &["switch", "-qc", "feature"]).expect("create feature branch");
+        std::fs::write(source.join("feature.txt"), "feature\n").expect("write feature commit");
+        execute_git(source_path, &["add", "."]).expect("stage feature commit");
+        execute_git(source_path, &["commit", "-qm", "feature"]).expect("commit feature");
+        execute_git(
+            source_path,
+            &[
+                "init",
+                "--bare",
+                "-q",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        )
+        .expect("initialize remote");
+        execute_git(
+            source_path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        )
+        .expect("configure upstream remote");
+        execute_git(source_path, &["push", "-q", "upstream", "main", "feature"])
+            .expect("push source branches");
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--branch",
+                "feature",
+                &format!("file://{}", remote.display()),
+                checkout.to_str().expect("utf-8 checkout path"),
+            ])
+            .output()
+            .expect("clone shallow checkout");
+        assert!(clone.status.success(), "shallow clone must succeed");
+        let checkout_path = checkout.to_str().expect("utf-8 checkout path");
+        execute_git(checkout_path, &["remote", "rename", "origin", "upstream"])
+            .expect("rename checkout remote");
+        execute_git(
+            checkout_path,
+            &["remote", "add", "origin", "file:///missing/origin.git"],
+        )
+        .expect("configure default remote");
+
+        ensure_ancestry_for_ref(checkout_path, "upstream/main")
+            .expect("fetch named remote ref and resolve merge base");
+        assert!(has_merge_base(checkout_path, "upstream/main"));
+    }
+
+    #[test]
+    fn failed_fetch_status_is_returned_as_an_error() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        execute_git(path, &["init", "-q"]).expect("initialize repository");
+        execute_git(
+            path,
+            &["remote", "add", "origin", "file:///missing/repository.git"],
+        )
+        .expect("configure missing remote");
+
+        let error = fetch_until(
+            path,
+            &["fetch", "origin", "main", "--depth=50"],
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect_err("a failed fetch status must be returned");
+
+        assert!(error
+            .message
+            .contains("git fetch origin main --depth=50 failed"));
     }
 
     #[cfg(unix)]

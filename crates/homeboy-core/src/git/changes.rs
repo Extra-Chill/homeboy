@@ -232,36 +232,38 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
 
     eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
     let repository = Path::new(path);
-    let remote = resolve_default_remote(repository);
+    let (remote, reference) = remote_and_ref(path, git_ref);
+    let tracking_ref = reference.strip_prefix("refs/heads/").unwrap_or(&reference);
+    let refspec = format!("{reference}:refs/remotes/{remote}/{tracking_ref}");
     let deadline = Instant::now() + Duration::from_secs(30);
-    let _ = fetch_remote_tracking_refs_until(
+    fetch_remote_tracking_refs_until(
         repository,
-        &["fetch", &remote, git_ref, "--depth=50"],
+        &["fetch", &remote, &refspec, "--depth=50"],
         "git fetch changed-since ref",
         &[],
         deadline,
-    );
+    )?;
     for depth in ["50", "200"] {
-        let _ = fetch_remote_tracking_refs_until(
+        fetch_remote_tracking_refs_until(
             repository,
             &["fetch", "--deepen", depth],
             "git deepen changed-since history",
             &[],
             deadline,
-        );
+        )?;
         if has_merge_base(path, git_ref) {
             eprintln!("Merge base found after deepening by {depth} commits");
             return Ok(());
         }
     }
     eprintln!("Merge base not found with depth 200, unshallowing repository");
-    let _ = fetch_remote_tracking_refs_until(
+    fetch_remote_tracking_refs_until(
         repository,
         &["fetch", "--unshallow"],
         "git unshallow changed-since history",
         &[],
         deadline,
-    );
+    )?;
     if has_merge_base(path, git_ref) {
         eprintln!("Merge base found after full unshallow");
         Ok(())
@@ -270,6 +272,27 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
             "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
         )))
     }
+}
+
+fn remote_and_ref(path: &str, git_ref: &str) -> (String, String) {
+    let remote_ref = git_ref.strip_prefix("refs/remotes/").unwrap_or(git_ref);
+    if let Some((remote, reference)) = remote_ref.split_once('/') {
+        let remotes = execute_git(path, &["remote"])
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .any(|name| name == remote)
+            })
+            .unwrap_or(false);
+        if !reference.is_empty() && remotes {
+            return (remote.to_string(), reference.to_string());
+        }
+    }
+
+    (resolve_default_remote(Path::new(path)), git_ref.to_string())
 }
 
 fn is_shallow_repo(path: &str) -> bool {
