@@ -10,38 +10,18 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
 use homeboy_core::Result;
 
-use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
     promote_with_checkpoint, resume_promoted_patch, with_gate_supervision, with_promotion_progress,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, PromotionProgressCallback,
+    AgentTaskPromotionReport, AgentTaskPromotionRequest, PromotionProgressCallback,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentTaskPromotionRequest {
-    pub source: String,
-    pub source_run_id: Option<String>,
-    pub source_path: Option<std::path::PathBuf>,
-    pub source_worktree_path: Option<std::path::PathBuf>,
-    pub to_worktree: String,
-    pub base_ref: Option<String>,
-    pub task_base_sha: Option<String>,
-    pub candidate_ref: Option<String>,
-    pub task_id: Option<String>,
-    pub artifact_id: Option<String>,
-    #[serde(default)]
-    pub dry_run: bool,
-    #[serde(default)]
-    pub gates: VerifyGateOptions,
-    pub provider_command: Option<String>,
-    pub provider_invocation: Option<CommandInvocation>,
-}
+use crate::agent_task_gate::VerifyGateOptions;
 
 pub const AGENT_TASK_PROMOTION_JOB_TYPE: &str = "agent-task-promotion";
 pub const AGENT_TASK_PROMOTION_JOB_VERSION: u32 = 1;
@@ -312,26 +292,7 @@ pub fn register_promotion_job_driver() {
     });
 }
 
-impl AgentTaskPromotionRequest {
-    fn options(&self) -> AgentTaskPromotionOptions {
-        AgentTaskPromotionOptions {
-            source: self.source.clone(),
-            source_run_id: self.source_run_id.clone(),
-            source_path: self.source_path.clone(),
-            source_worktree_path: self.source_worktree_path.clone(),
-            base_ref: self.base_ref.clone(),
-            task_base_sha: self.task_base_sha.clone(),
-            candidate_ref: self.candidate_ref.clone(),
-            to_worktree: self.to_worktree.clone(),
-            task_id: self.task_id.clone(),
-            artifact_id: self.artifact_id.clone(),
-            dry_run: self.dry_run,
-            gates: self.gates.clone(),
-            provider_command: self.provider_command.clone(),
-            provider_invocation: self.provider_invocation.clone(),
-        }
-    }
-}
+impl AgentTaskPromotionRequest {}
 
 /// Execute or resume an immutable controller-owned promotion. The durable run
 /// is the operation key: each post-apply checkpoint is persisted before gates,
@@ -420,9 +381,12 @@ fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTa
             .ok()
             .and_then(|record| record.metadata.get("latest_promotion").cloned())
     });
-    let options = request.options();
+    // Promotion consumes the request, so capture the fields the finalization
+    // path needs before handing it over.
+    let source_run_id = request.source_run_id.clone();
+    let dry_run = request.dry_run;
     let report = if let Some(previous) = previous
-        .filter(|previous| promotion_is_resumable(previous, options.gates.rerun_completed_gates))
+        .filter(|previous| promotion_is_resumable(previous, request.gates.rerun_completed_gates))
     {
         let target_path = previous
             .pointer("/target/path")
@@ -435,12 +399,10 @@ fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTa
                     None,
                 )
             })?;
-        resume_promoted_patch(options, Path::new(target_path), &previous)?
+        resume_promoted_patch(request, Path::new(target_path), &previous)?
     } else {
-        let checkpoint_run_id = (!request.dry_run)
-            .then(|| request.source_run_id.clone())
-            .flatten();
-        promote_with_checkpoint(options, |checkpoint| {
+        let checkpoint_run_id = (!dry_run).then(|| source_run_id.clone()).flatten();
+        promote_with_checkpoint(request, |checkpoint| {
             if let Some(run_id) = checkpoint_run_id.as_deref() {
                 let mut checkpoint = checkpoint.clone();
                 bind_promotion_request_fingerprint(&mut checkpoint, &request_fingerprint);
@@ -464,7 +426,7 @@ fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTa
         None,
         Some("persisting promotion result".to_string()),
     );
-    if let Some(run_id) = request.source_run_id.filter(|_| !request.dry_run) {
+    if let Some(run_id) = source_run_id.filter(|_| !dry_run) {
         agent_task_lifecycle::record_promotion(
             &run_id,
             serde_json::to_value(&report).map_err(|error| {
@@ -505,6 +467,28 @@ mod tests {
     use super::*;
     use homeboy_core::api_jobs::JobEventKind;
     use homeboy_core::test_support::ControllerJobHarness;
+
+    /// The promotion request is the durable shape persisted under
+    /// `homeboy/agent-task-promotion-job/v1`. Round-trip every field so a field
+    /// added to the struct but dropped on the recovery path fails here rather
+    /// than silently losing its value after a restart (#13347).
+    #[test]
+    fn promotion_request_round_trips_every_field_through_its_durable_shape() {
+        let original = request();
+
+        let encoded = serde_json::to_value(&original).expect("serialize request");
+        assert!(
+            encoded.get("gates").is_some(),
+            "gates is a nested object in the durable shape: {encoded}"
+        );
+
+        let decoded: AgentTaskPromotionRequest =
+            serde_json::from_value(encoded).expect("deserialize request");
+        assert_eq!(
+            decoded, original,
+            "a field declared on the request was lost through its durable shape"
+        );
+    }
 
     fn request() -> AgentTaskPromotionRequest {
         AgentTaskPromotionRequest {

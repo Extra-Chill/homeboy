@@ -48,7 +48,7 @@ pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_conte
 use super::tests::FakePromotionWorkspaceProvider;
 use super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+    AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionSource,
     AgentTaskPromotionStatus, AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
     AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
@@ -133,14 +133,14 @@ pub(crate) fn with_gate_supervision<T>(
     })
 }
 
-pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
+pub fn promote(options: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
     promote_with_checkpoint(options, |_| Ok(()))
 }
 
 /// Promote a patch while recording the recoverable post-apply boundary before
 /// dependency materialization or verification is attempted.
 pub fn promote_with_checkpoint(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     // One promotion is one unit of work, so the store it records against
@@ -165,7 +165,7 @@ pub fn promote_with_checkpoint(
 }
 
 pub(crate) fn promote_with_checkpoint_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -187,7 +187,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
 /// The reverse apply check proves the original artifact remains in the candidate
 /// before any gate result is trusted.
 pub fn resume_promoted_patch(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
@@ -207,7 +207,7 @@ pub fn resume_promoted_patch(
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -226,7 +226,7 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
 /// Re-run corrected gates against an already-applied candidate while preserving
 /// all candidate, base, target, source, and artifact resume validation.
 pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     gate_workspace: Option<&Path>,
@@ -245,7 +245,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
 }
 
 fn resume_promoted_patch_internal<'a>(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -374,7 +374,7 @@ struct PatchArtifactAdmission {
 fn patch_artifact_admission(
     artifact: &AgentTaskArtifact,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PatchArtifactAdmission> {
     let path = resolve_artifact_path(
@@ -403,7 +403,7 @@ fn patch_artifact_admission(
 
 pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     let artifact = select_patch_artifact(outcome, options.artifact_id.as_deref())?;
@@ -412,7 +412,7 @@ pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
 }
 
 fn resume_promoted_patch_admission(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -457,7 +457,7 @@ fn resume_promoted_patch_admission(
 }
 
 fn validate_resume_provenance(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
 ) -> Result<()> {
@@ -503,7 +503,7 @@ fn validate_resume_provenance(
 }
 
 fn validate_resume_candidate(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     outcome: &AgentTaskOutcome,
@@ -704,7 +704,7 @@ fn verify_patch_is_present(
 #[cfg(test)]
 // Provider-injection seam: production promotes through `promote`.
 pub(crate) fn promote_with_provider(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
 ) -> Result<AgentTaskPromotionReport> {
     promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
@@ -713,7 +713,7 @@ pub(crate) fn promote_with_provider(
 #[cfg(test)]
 // Checkpoint seam reached only by the promotion test shards.
 pub(super) fn promote_with_provider_and_checkpoint(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -728,7 +728,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
@@ -739,7 +739,7 @@ pub(super) fn promote_with_provider_in_observation_store(
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -849,7 +849,7 @@ fn verify_promotion_gate(
 }
 
 fn promote_with_provider_and_checkpoint_internal(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
@@ -1558,7 +1558,7 @@ pub(crate) fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
 }
 
 fn has_recoverable_candidate_provenance(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     artifact: &AgentTaskArtifact,
 ) -> bool {
@@ -1604,7 +1604,7 @@ struct RecoverableCandidatePromotionAdmission {
 fn recoverable_candidate_promotion_admission(
     source: &Value,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<RecoverableCandidatePromotionAdmission> {
     let artifact = select_recoverable_patch_artifact(outcome, options, observation_store)?;
@@ -1630,7 +1630,7 @@ fn recoverable_candidate_promotion_admission(
 }
 
 pub(crate) fn preflight_recoverable_candidate_promotion_in_observation_store(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     validate_workspace_handle(&options.to_worktree)?;
@@ -1850,7 +1850,7 @@ mod declared_base_tests {
 }
 
 fn promote_committed_changes(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
     source_kind: &str,
@@ -2071,7 +2071,7 @@ fn promote_committed_changes(
 /// Retain the controller-generated committed delta before its producer path can
 /// be cleaned up. Only an existing controller run may own this projection.
 pub(super) fn retain_committed_changes_artifact(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     patch: &str,
     sha256: &str,
@@ -2133,7 +2133,7 @@ pub(super) fn retain_committed_changes_artifact(
 }
 
 fn run_promotion_gates(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
     gate_workspace: Option<&Path>,
@@ -2329,7 +2329,7 @@ fn run_promotion_gates(
 }
 
 fn run_declared_promotion_test(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     index: usize,
     plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
@@ -2374,7 +2374,7 @@ fn run_declared_promotion_test(
     result
 }
 
-fn gate_workspace_path(options: &AgentTaskPromotionOptions, worktree_path: &Path) -> PathBuf {
+fn gate_workspace_path(options: &AgentTaskPromotionRequest, worktree_path: &Path) -> PathBuf {
     options
         .source_worktree_path
         .as_ref()
@@ -2593,7 +2593,7 @@ fn git_output(path: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn run_promotion_gate(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     index: usize,
     command: &str,
@@ -2728,7 +2728,7 @@ fn finish_promotion_gate_run_dir(run_dir: &homeboy_core::engine::run_dir::RunDir
 fn promotion_source(
     source_kind: &str,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
 ) -> AgentTaskPromotionSource {
     AgentTaskPromotionSource {
         kind: source_kind.to_string(),
@@ -3224,7 +3224,7 @@ fn promotion_notification_with_gate_summary(
     reason = "report construction keeps durable promotion evidence explicit"
 )]
 fn post_apply_report(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     patch_artifact: AgentTaskPromotionArtifactRef,
@@ -3459,7 +3459,7 @@ pub(crate) fn select_patch_artifact(
 /// not turn one patch into a false review choice.
 fn select_recoverable_patch_artifact(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     let canonical =
@@ -3512,7 +3512,7 @@ pub struct CanonicalRecoverablePatchArtifacts {
 /// materialization, including controller projections and hydrated runner bytes.
 pub fn canonical_recoverable_patch_artifacts(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     // One call is one unit of work, so the store resolves once here rather
     // than at each projection lookup inside (#7505).
@@ -3522,7 +3522,7 @@ pub fn canonical_recoverable_patch_artifacts(
 
 pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)
@@ -3530,7 +3530,7 @@ pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
 
 fn canonical_recoverable_patch_artifacts_internal(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     let mut candidates = outcome

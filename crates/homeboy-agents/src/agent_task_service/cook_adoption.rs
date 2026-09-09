@@ -25,8 +25,8 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_model::normalize_concrete_model_identifier;
 use crate::agent_task_promotion::resolve_candidate_revision;
 use crate::agent_task_promotion::{
-    promote_with_checkpoint_in_observation_store, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport,
+    promote_with_checkpoint_in_observation_store, AgentTaskPromotionReport,
+    AgentTaskPromotionRequest,
 };
 use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use crate::agent_task_scheduler::SharedAgentTaskExecutor;
@@ -551,7 +551,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 || {
                     let observation_store = lifecycle_store.open_observation_initialized()?;
                     promote_with_checkpoint_in_observation_store(
-                        AgentTaskPromotionOptions {
+                        AgentTaskPromotionRequest {
                             source,
                             source_run_id: Some(record.run_id.clone()),
                             source_path,

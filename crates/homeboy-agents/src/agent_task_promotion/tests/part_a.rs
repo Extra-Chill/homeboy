@@ -7,7 +7,7 @@ use super::super::promote::{
     promote_with_provider_in_observation_store, resume_promoted_patch,
     retain_committed_changes_artifact,
 };
-use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
+use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
@@ -34,7 +34,7 @@ fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
             workspace_path: Some(temp.path().join("target")),
             ..Default::default()
         };
-        let options = || AgentTaskPromotionOptions {
+        let options = || AgentTaskPromotionRequest {
             source: source.clone(),
             source_run_id: Some(run_id.to_string()),
             source_path: None,
@@ -102,7 +102,7 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
         };
 
         let result = promote_with_provider_in_observation_store(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source: source.to_string(),
                 source_run_id: Some(run_id.to_string()),
                 source_path: None,
@@ -196,7 +196,7 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
     };
 
     let result = promote_with_provider_and_checkpoint_in_observation_store(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source: source.to_string(),
             source_run_id: Some(run_id.to_string()),
             source_path: None,
@@ -285,7 +285,7 @@ fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
     };
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source: source.to_string(),
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
@@ -339,7 +339,7 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run-empty-fail".to_string()),
             source_path: Some(source_path),
@@ -423,7 +423,7 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
         ..Default::default()
     };
 
-    let options = |base_ref: &str| AgentTaskPromotionOptions {
+    let options = |base_ref: &str| AgentTaskPromotionRequest {
         source: source.clone(),
         source_run_id: Some("run-no-artifact".to_string()),
         source_path: Some(source_path.clone()),
@@ -489,7 +489,7 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source: source.to_string(),
             source_run_id: None,
             source_path: Some(source_path),
@@ -562,7 +562,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     let mut checkpoints = Vec::new();
 
     let error = promote_with_provider_and_checkpoint(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source: source.clone(),
             source_run_id: Some("restartable-run".to_string()),
             source_path: Some(source_path.clone()),
@@ -623,7 +623,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         b" M src/lib.rs\n"
     );
 
-    let resume_options = || AgentTaskPromotionOptions {
+    let resume_options = || AgentTaskPromotionRequest {
         source: source.clone(),
         source_run_id: Some("restartable-run".to_string()),
         source_path: Some(source_path.clone()),
@@ -757,7 +757,7 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
         git(&worktree_path, &["push", "-u", "origin", "main"]);
 
         let (source_path, source) = write_patch_source(&temp);
-        let options = |base: &str| AgentTaskPromotionOptions {
+        let options = |base: &str| AgentTaskPromotionRequest {
             source: source.clone(),
             source_run_id: Some("cook-9400".to_string()),
             source_path: Some(source_path.clone()),

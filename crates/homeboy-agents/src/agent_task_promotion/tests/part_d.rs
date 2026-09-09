@@ -5,8 +5,8 @@ use super::super::promote::{
     normalize_promotion_patch, promote_with_provider, promote_with_provider_in_observation_store,
 };
 use super::super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
+    AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionReport,
+    AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
     AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::*;
@@ -45,7 +45,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
             };
 
             let report = promote_with_provider_in_observation_store(
-                AgentTaskPromotionOptions {
+                AgentTaskPromotionRequest {
                     source: source.clone(),
                     source_run_id: Some(run_id.to_string()),
                     source_path,
@@ -90,7 +90,7 @@ fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
     };
 
     promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: None,
             source_path: Some(source_path),
@@ -167,7 +167,7 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run-empty".to_string()),
             source_path: Some(source_path),
@@ -240,7 +240,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run-committed".to_string()),
             source_path: Some(source_path),
@@ -310,7 +310,7 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
         };
 
         let report = promote_with_provider_in_observation_store(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("baseline-run".to_string()),
                 source_path: Some(source_path),
@@ -412,7 +412,7 @@ fn promote_dry_run_validates_provider_request_without_applying() {
         ..Default::default()
     };
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: None,
             source_path: Some(source_path),
@@ -463,7 +463,7 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
         };
 
         let report = promote_with_provider(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("runner-only-run".to_string()),
                 source_path: Some(source_path),
@@ -525,7 +525,7 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: None,
             source_path: Some(source_path),

@@ -307,8 +307,8 @@ pub mod loop_definition {
 pub mod promotion {
     pub use super::super::agent_task_promotion::{
         canonical_recoverable_patch_artifacts, promote, AgentTaskPromotionArtifactRef,
-        AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-        AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
+        AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionReport,
+        AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
         AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase, PromotionProgressCallback,
     };
 }
