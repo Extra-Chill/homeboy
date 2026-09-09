@@ -856,6 +856,24 @@ pub(crate) fn exec_with_status_snapshot(
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
 ) -> Result<(RunnerExecOutput, i32)> {
+    exec_with_status_snapshot_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        options,
+        status_snapshot,
+    )
+}
+
+/// [`exec_with_status_snapshot`] against an explicitly injected root.
+///
+/// Process preparation otherwise re-resolves the runner ambiently, which would
+/// discard the injected root mid-execution (#14362).
+pub(crate) fn exec_with_status_snapshot_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerExecOptions,
+    status_snapshot: Option<RunnerStatusReport>,
+) -> Result<(RunnerExecOutput, i32)> {
     let explicit_generic_run_id = options
         .run_id_owns_generic_exec
         .then(|| options.run_id.clone())
@@ -890,7 +908,7 @@ pub(crate) fn exec_with_status_snapshot(
             "preflight",
         )?;
     }
-    let result = exec_with_status_snapshot_attempt(runner_id, options, status_snapshot);
+    let result = exec_with_status_snapshot_attempt(roots, runner_id, options, status_snapshot);
     if let (Some(run_id), Err(error)) = (explicit_generic_run_id.as_deref(), &result) {
         let accepted = error.details.get("runner_exec_accepted_handoff").is_some();
         if let Err(persistence_error) =
@@ -933,6 +951,7 @@ pub(super) fn accepted_handoff_persistence_error(
 }
 
 fn exec_with_status_snapshot_attempt(
+    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
@@ -956,7 +975,7 @@ fn exec_with_status_snapshot_attempt(
     let secret_env_names = secret_env_plan.secret_env_names();
     let mut plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
-        runner: None,
+        runner: Some(crate::load_in_roots(roots, runner_id)?),
         cwd: options.cwd.clone(),
         project_id: options.project_id.clone(),
         command: options.command.clone(),
@@ -1011,7 +1030,7 @@ fn exec_with_status_snapshot_attempt(
         let secret_env_names = secret_env_plan.secret_env_names();
         plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: runner_id.to_string(),
-            runner: None,
+            runner: Some(crate::load_in_roots(roots, runner_id)?),
             cwd: options.cwd.clone(),
             project_id: options.project_id.clone(),
             command: options.command.clone(),

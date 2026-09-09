@@ -1545,7 +1545,7 @@ fn select_without_materialization_sha_promotes_the_verified_binary() {
             &plan,
             || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
             |path, _| {
-                let patch = refreshed_runner_patch("lab-local", path)?;
+                let patch = refreshed_runner_patch_in_roots(&ambient_roots(), "lab-local", path)?;
                 match merge(Some("lab-local"), &patch.to_string(), &[])? {
                     MergeOutput::Single(result) => Ok((result.updated_fields, None)),
                     MergeOutput::Bulk(_) => Ok((Vec::new(), None)),
@@ -1575,7 +1575,8 @@ fn reconnect_rollback_restores_only_its_own_selected_binary() {
         )
         .expect("runner");
 
-        let restored = restore_runner_homeboy_path_if_selected(
+        let restored = restore_runner_homeboy_path_if_selected_in_roots(
+            &ambient_roots(),
             "lab-local",
             "/selected/homeboy",
             Some("/stable/homeboy"),
@@ -1603,7 +1604,8 @@ fn reconnect_rollback_restores_its_own_selected_binary() {
         )
         .expect("runner");
 
-        let restored = restore_runner_homeboy_path_if_selected(
+        let restored = restore_runner_homeboy_path_if_selected_in_roots(
+            &ambient_roots(),
             "lab-local",
             "/selected/homeboy",
             Some("/stable/homeboy"),
@@ -1631,7 +1633,8 @@ fn post_promotion_active_job_race_restores_prior_selection_without_stopping_daem
         )
         .expect("runner");
 
-        let deferred = defer_reconnect_after_promotion_race(
+        let deferred = defer_reconnect_after_promotion_race_in_roots(
+            &ambient_roots(),
             "lab-local",
             "/selected/homeboy",
             Some("/stable/homeboy"),
@@ -1662,7 +1665,8 @@ fn post_promotion_active_job_race_preserves_newer_selector_as_contention() {
         )
         .expect("runner");
 
-        let deferred = defer_reconnect_after_promotion_race(
+        let deferred = defer_reconnect_after_promotion_race_in_roots(
+            &ambient_roots(),
             "lab-local",
             "/selected/homeboy",
             Some("/stable/homeboy"),
