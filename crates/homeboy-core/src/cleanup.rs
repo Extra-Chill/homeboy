@@ -121,6 +121,8 @@ pub struct ArtifactCleanupOptions {
     pub temp_roots: Vec<PathBuf>,
     pub sort: ArtifactCleanupSort,
     pub limit: Option<usize>,
+    /// The next repository worktree to inspect from a previous bounded pass.
+    pub cursor: Option<ArtifactCleanupCursor>,
     /// Only reclaim artifacts from worktrees whose branch is already merged
     /// into its upstream (ancestor or patch-equivalent / squash-merged). This
     /// keeps in-progress cooks' build dirs intact while reclaiming the large
@@ -164,6 +166,24 @@ struct ArtifactInventoryBounds {
     deadline: Option<Instant>,
     inspection_limit: Option<usize>,
     automatic_policy: Option<AutomaticArtifactRetentionPolicy>,
+}
+
+/// A validated traversal checkpoint for repository-wide artifact inventory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactCleanupCursor {
+    pub root: String,
+    pub worktree: String,
+}
+
+pub fn parse_artifact_cleanup_cursor(value: &str) -> Result<ArtifactCleanupCursor> {
+    serde_json::from_str(value).map_err(|error| {
+        Error::validation_invalid_argument(
+            "cursor",
+            format!("invalid artifact cleanup cursor: {error}"),
+            None,
+            None,
+        )
+    })
 }
 
 /// Reclaim idle, reconstructable worktree artifacts before managed work writes
@@ -411,6 +431,7 @@ fn run_automatic_artifact_retention_in(
         scope: ArtifactCleanupScope::RepositoryWorktrees,
         sort: ArtifactCleanupSort::Size,
         limit: Some(policy.scan_limit()),
+        cursor: None,
         ..Default::default()
     };
     let automatic_policy = AutomaticArtifactRetentionPolicy {
@@ -514,6 +535,8 @@ pub struct ArtifactCleanupOutput {
     /// False when the automatic inspection budget or runtime deadline stopped
     /// discovery. Counts and estimates then describe only the inspected prefix.
     pub scan_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<ArtifactCleanupCursor>,
     pub candidate_count: usize,
     pub skipped_count: usize,
     pub applied_count: usize,
@@ -1317,6 +1340,39 @@ fn cleanup_artifacts_in_worktrees(
         inspection_limit,
         automatic_policy,
     } = bounds;
+    let start = if let Some(cursor) = &options.cursor {
+        if options.scope != ArtifactCleanupScope::RepositoryWorktrees
+            || cursor.root != root.to_string_lossy()
+        {
+            return Err(Error::validation_invalid_argument(
+                "cursor",
+                "artifact cleanup cursor does not match the selected repository worktrees",
+                None,
+                None,
+            ));
+        }
+        worktrees
+            .iter()
+            .position(|worktree| worktree.path.to_string_lossy() == cursor.worktree)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cursor",
+                    "artifact cleanup cursor worktree is no longer in the selected repository",
+                    None,
+                    None,
+                )
+            })?
+    } else {
+        0
+    };
+    let total_worktree_count = worktrees.len();
+    let worktrees = &worktrees[start..];
+    // Discovery order can resume only at a worktree boundary. Bound the number
+    // of visited worktrees rather than stopping partway through a worktree,
+    // which would make a cursor repeat its already inspected declarations.
+    let worktree_limit = (options.sort == ArtifactCleanupSort::Discovery)
+        .then_some(options.limit)
+        .flatten();
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
     let mut inspected_count = 0;
@@ -1327,15 +1383,32 @@ fn cleanup_artifacts_in_worktrees(
         active.available = false;
     }
 
+    let mut next_cursor = None;
     for (index, worktree) in worktrees.iter().enumerate() {
+        if worktree_limit.is_some_and(|limit| index >= limit) {
+            scan_complete = false;
+            next_cursor = Some(ArtifactCleanupCursor {
+                root: root.to_string_lossy().to_string(),
+                worktree: worktree.path.to_string_lossy().to_string(),
+            });
+            break;
+        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             scan_complete = false;
+            next_cursor = Some(ArtifactCleanupCursor {
+                root: root.to_string_lossy().to_string(),
+                worktree: worktree.path.to_string_lossy().to_string(),
+            });
             break;
         }
         let remaining_inspections =
             inspection_limit.map(|limit| limit.saturating_sub(inspected_count));
         if remaining_inspections == Some(0) {
             scan_complete = false;
+            next_cursor = Some(ArtifactCleanupCursor {
+                root: root.to_string_lossy().to_string(),
+                worktree: worktree.path.to_string_lossy().to_string(),
+            });
             break;
         }
         // A single stale/non-Git/vanished worktree candidate must not abort the
@@ -1361,12 +1434,20 @@ fn cleanup_artifacts_in_worktrees(
                 skipped.extend(worktree_skipped);
                 if !worktree_scan_complete {
                     scan_complete = false;
+                    next_cursor = Some(ArtifactCleanupCursor {
+                        root: root.to_string_lossy().to_string(),
+                        worktree: worktree.path.to_string_lossy().to_string(),
+                    });
                     break;
                 }
                 if inspection_limit.is_some_and(|limit| inspected_count >= limit)
                     && index + 1 < worktrees.len()
                 {
                     scan_complete = false;
+                    next_cursor = worktrees.get(index + 1).map(|next| ArtifactCleanupCursor {
+                        root: root.to_string_lossy().to_string(),
+                        worktree: next.path.to_string_lossy().to_string(),
+                    });
                     break;
                 }
             }
@@ -1377,6 +1458,10 @@ fn cleanup_artifacts_in_worktrees(
                 ));
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     scan_complete = false;
+                    next_cursor = worktrees.get(index + 1).map(|next| ArtifactCleanupCursor {
+                        root: root.to_string_lossy().to_string(),
+                        worktree: next.path.to_string_lossy().to_string(),
+                    });
                     break;
                 }
             }
@@ -1461,9 +1546,10 @@ fn cleanup_artifacts_in_worktrees(
         mode: if options.apply { "apply" } else { "dry_run" },
         scope: options.scope,
         root: root.to_string_lossy().to_string(),
-        worktree_count: worktrees.len(),
+        worktree_count: total_worktree_count,
         inspected_count,
         scan_complete,
+        next_cursor: next_cursor.clone(),
         candidate_count: candidates.len(),
         skipped_count: skipped.len(),
         applied_count: success_count,
@@ -1477,7 +1563,7 @@ fn cleanup_artifacts_in_worktrees(
         size_estimates_complete,
         observed_filesystem_available_delta_bytes,
         next_command: (remaining_count > 0 || !scan_complete)
-            .then(|| artifact_cleanup_apply_command(options)),
+            .then(|| artifact_cleanup_apply_command(options, next_cursor.as_ref())),
         summary,
         worktrees: worktree_rows,
         candidates,
@@ -1506,7 +1592,10 @@ fn cleanup_artifacts_in_worktrees(
     Ok(output)
 }
 
-fn artifact_cleanup_apply_command(options: &ArtifactCleanupOptions) -> String {
+fn artifact_cleanup_apply_command(
+    options: &ArtifactCleanupOptions,
+    cursor: Option<&ArtifactCleanupCursor>,
+) -> String {
     use crate::engine::shell::quote_arg;
 
     let mut command = "homeboy cleanup artifacts".to_string();
@@ -1538,6 +1627,11 @@ fn artifact_cleanup_apply_command(options: &ArtifactCleanupOptions) -> String {
     }
     if options.include_active_worktrees {
         command.push_str(" --include-active-worktrees");
+    }
+    if let Some(cursor) = cursor {
+        if let Ok(cursor) = serde_json::to_string(cursor) {
+            command.push_str(&format!(" --cursor {}", quote_arg(&cursor)));
+        }
     }
     command.push_str(" --apply");
     command
@@ -2829,6 +2923,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("dry-run cleanup");
 
@@ -3598,6 +3693,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect_err("reject ambiguous cleanup root");
 
@@ -3619,6 +3715,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect_err("reject non-git cleanup root");
 
@@ -3664,6 +3761,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("temp artifact candidates");
 
@@ -3712,6 +3810,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("apply cleanup");
 
@@ -3753,6 +3852,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("temp artifact candidates");
 
@@ -3789,6 +3889,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("apply cleanup");
 
@@ -3948,6 +4049,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("temp artifact candidates");
 
@@ -3978,6 +4080,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("temp artifact candidates");
 
@@ -4009,6 +4112,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("temp artifact candidates");
 
@@ -4037,6 +4141,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("apply cleanup");
 
@@ -4063,6 +4168,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("dry-run cleanup");
 
@@ -4096,6 +4202,7 @@ mod tests {
                 temp_roots: Vec::new(),
                 sort: ArtifactCleanupSort::Size,
                 limit: Some(1),
+                cursor: None,
                 merged_only: false,
                 min_age_days: None,
                 include_active_worktrees: true,
@@ -4184,6 +4291,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("dry-run cleanup");
 
@@ -4219,6 +4327,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("apply cleanup");
 
@@ -4255,6 +4364,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("apply cleanup");
 
@@ -4287,6 +4397,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("first apply cleanup");
 
@@ -4316,6 +4427,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("second apply cleanup");
 
@@ -4494,6 +4606,7 @@ mod tests {
             min_age_days: None,
             include_active_worktrees: false,
             max_scan_duration: None,
+            cursor: None,
         })
         .expect("apply cleanup");
 
@@ -4632,6 +4745,7 @@ mod tests {
             temp_roots: Vec::new(),
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
+            cursor: None,
             merged_only: true,
             min_age_days: None,
             include_active_worktrees: false,
@@ -4670,6 +4784,7 @@ mod tests {
                 temp_roots: Vec::new(),
                 sort: ArtifactCleanupSort::Discovery,
                 limit: None,
+                cursor: None,
                 merged_only: true,
                 min_age_days: None,
                 include_active_worktrees: false,
@@ -4695,6 +4810,7 @@ mod tests {
             ],
             sort: ArtifactCleanupSort::Size,
             limit: Some(7),
+            cursor: None,
             merged_only: true,
             min_age_days: None,
             include_active_worktrees: false,
@@ -4702,7 +4818,7 @@ mod tests {
         };
 
         assert_eq!(
-            artifact_cleanup_apply_command(&options),
+            artifact_cleanup_apply_command(&options, None),
             "homeboy cleanup artifacts --path '/tmp/review scope' --temp-root '/tmp/first root' --temp-root /tmp/second --sort size --limit 7 --merged-only --apply"
         );
 
@@ -4710,14 +4826,16 @@ mod tests {
             scope: ArtifactCleanupScope::RepositoryWorktrees,
             ..options.clone()
         };
-        assert!(artifact_cleanup_apply_command(&repository_options).contains("--all-worktrees"));
+        assert!(
+            artifact_cleanup_apply_command(&repository_options, None).contains("--all-worktrees")
+        );
 
         assert_eq!(
             artifact_cleanup_apply_command(&ArtifactCleanupOptions {
                 path: None,
                 self_artifacts: true,
                 ..options
-            }),
+            }, None),
             "homeboy cleanup artifacts --self --temp-root '/tmp/first root' --temp-root /tmp/second --sort size --limit 7 --merged-only --apply"
         );
     }
@@ -4839,6 +4957,69 @@ mod tests {
             scan.is_err(),
             "a non-Git worktree scan should fail so the caller can skip it"
         );
+    }
+
+    #[test]
+    fn discovery_limit_returns_a_valid_cursor_and_resumes_at_the_next_worktree() {
+        crate::test_support::with_isolated_home(|_| {
+            let first = git_repo();
+            let second = git_repo();
+            write_file(&first.path().join("target/first"), "artifact");
+            write_file(&second.path().join("target/second"), "artifact");
+            let worktrees = vec![
+                WorktreeInfo {
+                    path: first.path().to_path_buf(),
+                },
+                WorktreeInfo {
+                    path: second.path().to_path_buf(),
+                },
+            ];
+            let options = ArtifactCleanupOptions {
+                scope: ArtifactCleanupScope::RepositoryWorktrees,
+                sort: ArtifactCleanupSort::Discovery,
+                limit: Some(1),
+                ..ArtifactCleanupOptions::default()
+            };
+
+            let first_page = cleanup_artifacts_in_worktrees(
+                first.path().to_path_buf(),
+                worktrees.clone(),
+                &options,
+                false,
+                Vec::new(),
+                ArtifactInventoryBounds::default(),
+            )
+            .expect("bounded first page");
+            assert_eq!(first_page.inspected_count, 1);
+            assert!(!first_page.scan_complete);
+            assert_eq!(
+                first_page
+                    .next_cursor
+                    .as_ref()
+                    .map(|cursor| cursor.worktree.as_str()),
+                Some(second.path().to_string_lossy().as_ref())
+            );
+
+            let resumed = ArtifactCleanupOptions {
+                cursor: first_page.next_cursor,
+                ..options
+            };
+            let second_page = cleanup_artifacts_in_worktrees(
+                first.path().to_path_buf(),
+                worktrees,
+                &resumed,
+                false,
+                Vec::new(),
+                ArtifactInventoryBounds::default(),
+            )
+            .expect("resumed page");
+            assert_eq!(second_page.inspected_count, 1);
+            assert!(second_page.scan_complete);
+            assert_eq!(
+                second_page.candidates[0].worktree,
+                second.path().display().to_string()
+            );
+        });
     }
 
     #[test]
