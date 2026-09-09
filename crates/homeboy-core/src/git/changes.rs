@@ -246,7 +246,7 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     for depth in ["50", "200"] {
         fetch_remote_tracking_refs_until(
             repository,
-            &["fetch", "--deepen", depth],
+            &["fetch", &remote, "--deepen", depth],
             "git deepen changed-since history",
             &[],
             deadline,
@@ -259,7 +259,7 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     eprintln!("Merge base not found with depth 200, unshallowing repository");
     fetch_remote_tracking_refs_until(
         repository,
-        &["fetch", "--unshallow"],
+        &["fetch", &remote, "--unshallow"],
         "git unshallow changed-since history",
         &[],
         deadline,

@@ -258,7 +258,7 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
 
             // Progressive deepening: try increasingly generous depths.
             for depth in &["50", "200"] {
-                fetch_until(path, &["fetch", "--deepen", depth], deadline)?;
+                fetch_until(path, &["fetch", &remote, "--deepen", depth], deadline)?;
                 if has_merge_base(path, git_ref) {
                     eprintln!("Merge base found after deepening by {depth} commits");
                     return Ok(());
@@ -267,7 +267,7 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
 
             // Last resort: full unshallow.
             eprintln!("Merge base not found with depth 200, unshallowing repository");
-            fetch_until(path, &["fetch", "--unshallow"], deadline)?;
+            fetch_until(path, &["fetch", &remote, "--unshallow"], deadline)?;
 
             if has_merge_base(path, git_ref) {
                 eprintln!("Merge base found after full unshallow");
@@ -454,6 +454,16 @@ mod tests {
             &["remote", "add", "origin", "file:///missing/origin.git"],
         )
         .expect("configure default remote");
+        execute_git(
+            checkout_path,
+            &["config", "branch.feature.remote", "origin"],
+        )
+        .expect("configure unusable branch remote");
+        execute_git(
+            checkout_path,
+            &["config", "branch.feature.merge", "refs/heads/feature"],
+        )
+        .expect("configure tracked branch");
 
         ensure_ancestry_for_ref(checkout_path, "upstream/main")
             .expect("fetch named remote ref and resolve merge base");
