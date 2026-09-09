@@ -382,9 +382,7 @@ pub fn refresh_selected_mirrored_daemon_evidence(
                         "runner_id": runner_id,
                         "job_id": job_id,
                         "status": "evidence_unavailable",
-                        "lifecycle_state": "stale",
                         "stale_reason": "authoritative_generation_did_not_retain_job",
-                        "retryable": false,
                         "diagnostic": {
                             "code": err.code.as_str(),
                             "message": err.message,
@@ -451,9 +449,7 @@ fn finish_stale_runner_child_run(store: &ObservationStore, job: &StaleRunnerJobI
                 "runner_id": job.runner_id,
                 "job_id": job.job_id,
                 "status": job.status,
-                "lifecycle_state": job.lifecycle_state,
                 "stale_reason": job.stale_reason,
-                "retryable": job.retryable,
                 "reconciled_at": chrono::Utc::now().to_rfc3339(),
             }),
         );
@@ -515,9 +511,7 @@ mod stale_runner_tests {
                 runner_id: "homeboy-lab".to_string(),
                 job_id: "orphaned-child-run-run-1".to_string(),
                 status: "failed".to_string(),
-                lifecycle_state: Some("stale".to_string()),
                 stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
-                retryable: Some(true),
             };
 
             finish_stale_runner_child_run(&store, &job);
