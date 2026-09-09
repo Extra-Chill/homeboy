@@ -300,7 +300,13 @@ impl DryRunPlanner {
                 ));
             }
         };
-        result.map_err(|error| self.failure(error, unresolved_dependency))
+        match result {
+            Ok(value) => {
+                self.finish(unresolved_dependency)?;
+                Ok(value)
+            }
+            Err(error) => Err(self.failure(error, unresolved_dependency)),
+        }
     }
 
     fn finish(&mut self, unresolved_dependency: &'static str) -> Result<()> {
@@ -3112,7 +3118,7 @@ fn cook_batch_dry_run_with_deadline(
         "static provider selection",
         move || {
             apply_provider_profile(&mut selected_args);
-            resolve_and_validate_effective_backend(&mut selected_args)?;
+            resolve_effective_backend_without_admission(&mut selected_args)?;
             Ok(selected_args)
         },
     )?;
@@ -3140,23 +3146,6 @@ fn cook_batch_dry_run_with_deadline(
             )
         },
     )?;
-    // Do not put a live provider process behind the generic static-planning
-    // timeout. The readiness owner receives this absolute deadline and owns
-    // waiting for, completing, and terminating its process tree.
-    // Resolve once before admission. Every equivalent route shares this one
-    // absolute deadline through the readiness cache, rather than receiving a
-    // fresh budget for each child or provider phase.
-    planner.begin("provider_readiness");
-    planner.record_live_progress("started", Some("provider-owned readiness admission"));
-    let provider_dispatchability = (|| {
-        let catalog = AgentTaskProviderCatalog::discover();
-        preview_provider_dispatchability_evidence(&plan, &catalog, &plan_ref)
-    })()
-    .map_err(|error| {
-        planner.record_live_progress("failed", Some("provider-owned readiness admission"));
-        error
-    })?;
-    planner.record_live_progress("completed", Some("provider-owned readiness admission"));
     let workspace_args = args.clone();
     let workspace = planner.run_bounded(
         "gate_workspace",
@@ -3179,6 +3168,23 @@ fn cook_batch_dry_run_with_deadline(
                 .iter()
                 .any(|cook| !cook.private_verify.is_empty()))
         })?;
+    // Live readiness is terminal admission. Static projections must not resume
+    // after it because their deadline is intentionally independent of the
+    // provider-owned Cook deadline.
+    // Resolve once before admission. Every equivalent route shares this one
+    // absolute deadline through the readiness cache, rather than receiving a
+    // fresh budget for each child or provider phase.
+    planner.begin("provider_readiness");
+    planner.record_live_progress("started", Some("provider-owned readiness admission"));
+    let provider_dispatchability = (|| {
+        let catalog = AgentTaskProviderCatalog::discover();
+        preview_provider_dispatchability_evidence(&plan, &catalog, &plan_ref)
+    })()
+    .map_err(|error| {
+        planner.record_live_progress("failed", Some("provider-owned readiness admission"));
+        error
+    })?;
+    planner.record_live_progress("completed", Some("provider-owned readiness admission"));
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-batch/v1",
@@ -5769,6 +5775,35 @@ fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
 fn resolve_and_validate_effective_backend(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
     let catalog = AgentTaskProviderCatalog::discover();
     resolve_and_validate_effective_backend_with_catalog(args, &catalog)
+}
+
+/// Resolve the requested route for static preview planning. Child-plan
+/// projection validates its static contract, while terminal admission owns the
+/// provider's live readiness probe.
+fn resolve_effective_backend_without_admission(
+    args: &mut AgentTaskFanoutCookBatchArgs,
+) -> Result<()> {
+    let catalog = AgentTaskProviderCatalog::discover();
+    let command = fanout_provider_dispatch_command(
+        Some(args.repo.clone()),
+        args.component.clone(),
+        args.backend.clone(),
+        args.selector.clone(),
+        args.model.clone(),
+        args.secret_env.clone(),
+        args.provider_config.clone(),
+    );
+    let request = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
+        command,
+        provider::default_backend_for_component,
+        &catalog,
+    )
+    .map_err(with_provider_admission_remediation)?;
+
+    args.backend = Some(request.backend);
+    args.selector = request.selector;
+    args.model = request.model;
+    Ok(())
 }
 
 fn resolve_and_validate_effective_backend_with_catalog(
@@ -10090,6 +10125,93 @@ fi
             std::fs::read_to_string(invoked).expect("readiness count"),
             "1"
         );
+    }
+
+    #[test]
+    fn dry_run_planner_preview_readiness_can_outlive_static_budget_after_all_projections() {
+        with_isolated_home(|home| {
+            let primary = home.path().join("preview-primary");
+            init_git_primary(&primary);
+            write_component_registration(home.path(), "homeboy", &primary);
+            let runtime_id = "slow-preview-runtime";
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes")
+                .join(runtime_id);
+            std::fs::create_dir_all(&runtime_dir).expect("agent runtime directory");
+            let invoked = home.path().join("readiness-invoked");
+            std::fs::write(
+                runtime_dir.join(format!("{runtime_id}.json")),
+                serde_json::json!({
+                    "schema": "homeboy/agent-runtime-manifest/v1",
+                    "id": runtime_id,
+                    "runtime_path": runtime_dir,
+                    "agent_task_executors": [{
+                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "id": "slow-preview.executor-provider",
+                        "backend": "slow-preview",
+                        "invocation": { "argv": ["node", "{{runtime_path}}/runner.cjs"] },
+                        "readiness_invocation": {
+                            "argv": [
+                                "sh",
+                                "-c",
+                                format!(
+                                    "count=$(cat {0} 2>/dev/null || printf 0); printf '%s' \"$((count + 1))\" > {0}; sleep 1.1; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"ready\",\"identity\":{{}}}}'",
+                                    invoked.display()
+                                )
+                            ],
+                            "timeout_ms": 5_000
+                        },
+                        "request_schema": "homeboy/agent-task-request/v1",
+                        "outcome_schema": "homeboy/agent-task-outcome/v1"
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("agent runtime manifest");
+            AgentTaskProviderCatalog::refresh();
+
+            let mut args = cook_batch_args();
+            args.backend = Some("slow-preview".to_string());
+            args.selector = Some("slow-preview.executor-provider".to_string());
+            args.model = None;
+            args.issues.truncate(1);
+            args.dry_run_planner_timeout_seconds = Some(1);
+            args.max_duration = Some(3);
+            let started = Instant::now();
+            let (value, exit_code) = cook_batch(args).expect("complete dry-run preview");
+
+            assert!(started.elapsed() > Duration::from_secs(1));
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["status"], "ready");
+            assert_eq!(
+                std::fs::read_to_string(invoked).expect("readiness count"),
+                "1"
+            );
+            let progress = value["progress"].as_array().expect("progress");
+            let readiness_started = progress
+                .iter()
+                .position(|event| {
+                    event["phase"] == "provider_readiness" && event["state"] == "started"
+                })
+                .expect("readiness starts");
+            for phase in [
+                "repository",
+                "provider_selection",
+                "issues_and_gates",
+                "gate_workspace",
+                "gate_contracts",
+                "worktrees",
+                "recipe_declarations",
+            ] {
+                assert!(progress[..readiness_started]
+                    .iter()
+                    .any(|event| event["phase"] == phase && event["state"] == "completed"));
+            }
+            assert!(progress[readiness_started..]
+                .iter()
+                .all(|event| { event["phase"] == "provider_readiness" }));
+        });
     }
 
     #[test]
