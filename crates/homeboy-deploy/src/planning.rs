@@ -588,13 +588,13 @@ pub(super) fn calculate_component_status_with_git_cache(
 
 fn fetch_default_remote(path: &Path) {
     let remote = git::resolve_default_remote(path);
-    let _ = Command::new("git")
-        .args(["fetch", "--quiet", &remote])
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let _ = git::fetch_remote_tracking_refs_until(
+        path,
+        &["fetch", "--quiet", &remote],
+        "git fetch deploy planning remote",
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    );
 }
 
 fn git_output(path: &Path, args: &[&str]) -> Option<String> {

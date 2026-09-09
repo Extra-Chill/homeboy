@@ -663,16 +663,13 @@ struct PendingHandoffFreshness {
 
 fn prepare_handoff_freshness(source: &Path, base_ref: &str) -> Result<PendingHandoffFreshness> {
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    git::with_remote_tracking_authority(source, "git fetch origin for worktree handoff", || {
-        git::run_git_with_env_timeout(
-            source,
-            &["fetch", "origin"],
-            "git fetch origin for worktree handoff",
-            &[],
-            TIMEOUT,
-        )
-        .map(|_| ())
-    })?;
+    git::fetch_remote_tracking_refs_until(
+        source,
+        &["fetch", "origin"],
+        "git fetch origin for worktree handoff",
+        &[],
+        std::time::Instant::now() + TIMEOUT,
+    )?;
     let advertised = git::run_git_with_env_timeout(
         source,
         &["ls-remote", "--symref", "origin", "HEAD"],

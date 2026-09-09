@@ -161,9 +161,7 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
-    crate::git::with_remote_tracking_authority_if_git(path, "hydrate declared dependencies", || {
-        hydrate_declared_dependencies_unlocked(path, workspace, package_root, policy)
-    })
+    hydrate_declared_dependencies_unlocked(path, workspace, package_root, policy)
 }
 
 fn hydrate_declared_dependencies_unlocked(
