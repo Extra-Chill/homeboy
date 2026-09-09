@@ -1,4 +1,7 @@
 pub(crate) mod binding;
+#[cfg(test)]
+mod test_support;
+
 mod content_manifest;
 mod effect;
 mod execution;

@@ -206,6 +206,7 @@ pub(crate) mod transient_workspace_policy;
 #[doc(hidden)]
 pub mod test_support;
 pub mod update_check_cache;
+pub mod validation;
 pub mod validation_progress;
 pub mod workspace_claim;
 pub mod workspace_snapshot;

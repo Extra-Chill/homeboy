@@ -827,6 +827,7 @@ pub(super) fn run_post_deploy_hooks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::local_client;
     use homeboy_core::component::VersionTarget;
     use homeboy_core::server::SshClient;
     use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
@@ -836,18 +837,6 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::io::Write;
-
-    fn local_client() -> SshClient {
-        SshClient {
-            host: "localhost".to_string(),
-            user: "test".to_string(),
-            port: 22,
-            identity_file: None,
-            auth: None,
-            is_local: true,
-            env: HashMap::new(),
-        }
-    }
 
     fn extension() -> ExtensionManifest {
         serde_json::from_value(serde_json::json!({
