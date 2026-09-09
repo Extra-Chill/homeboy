@@ -271,8 +271,8 @@ fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigP
     let refresh_command = (!freshness_verified).then(|| {
         format!(
             "homeboy rig install {} --id {} --reinstall",
-            shell_arg(&metadata.source),
-            shell_arg(id)
+            homeboy_engine_primitives::shell::shell_arg(&metadata.source),
+            homeboy_engine_primitives::shell::shell_arg(id)
         )
     });
 
@@ -295,16 +295,6 @@ fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigP
         freshness_message,
         refresh_command,
     }
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Byte-compare the contents of two files.
