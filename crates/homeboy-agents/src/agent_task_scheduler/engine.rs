@@ -634,6 +634,7 @@ impl AgentTaskScheduler {
                             AgentTaskScheduleSupport::record_resource_wait(
                                 task,
                                 &running,
+                                &plan.options.resource_budget,
                                 &mut events,
                             );
                         }

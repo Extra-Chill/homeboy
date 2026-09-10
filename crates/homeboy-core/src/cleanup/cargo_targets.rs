@@ -311,6 +311,15 @@ fn acquire_managed_cargo_target_for_compatibility(
 
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
+    acquire_managed_cargo_target_for_compatibility_in(&root, owner, source_path, compatibility)
+}
+
+fn acquire_managed_cargo_target_for_compatibility_in(
+    root: &Path,
+    owner: &str,
+    source_path: &Path,
+    compatibility: &CargoTargetCompatibility,
+) -> Result<ManagedCargoTarget> {
     let base_owner = format!("{owner}:{}", compatibility.identity());
     let base_dir = shared_store_dir(&root, &base_owner);
     // Touch the base store's liveness so it isn't reclaimed as unused while
@@ -1669,6 +1678,76 @@ mod tests {
         assert!(lease.target_dir().join(LEASE_FILE).exists());
         drop(lease);
         assert!(!lease_path(root.path()).join(LEASE_FILE).exists());
+    }
+
+    #[test]
+    fn cleanup_reclaims_worktree_private_targets_after_their_leases_release() {
+        let root = TempDir::new().unwrap();
+        let worktree = TempDir::new().unwrap();
+        fs::write(worktree.path().join("Cargo.lock"), "lock-a").unwrap();
+        let compatibility = cargo_target_compatibility(worktree.path(), &[]);
+        let target = acquire_managed_cargo_target_for_compatibility_in(
+            root.path(),
+            "gate",
+            worktree.path(),
+            &compatibility,
+        )
+        .unwrap();
+        let target_path = target.target_dir().to_path_buf();
+        fs::write(target_path.join("artifact"), b"payload").unwrap();
+        drop(target);
+
+        let now = SystemTime::now();
+        write_last_used(
+            &target_path,
+            now.checked_sub(Duration::from_secs(61)).unwrap(),
+        )
+        .unwrap();
+        let mut cleanup_options = options(root.path(), true, now);
+        cleanup_options.max_bytes = 100;
+        let output = cleanup_shared_cargo_targets(cleanup_options).unwrap();
+
+        assert_eq!(output.applied_count, 1);
+        assert!(!target_path.exists());
+    }
+
+    #[test]
+    fn independent_worktrees_hold_distinct_private_target_locks_concurrently() {
+        let root = TempDir::new().unwrap();
+        let first_worktree = TempDir::new().unwrap();
+        let second_worktree = TempDir::new().unwrap();
+        for worktree in [&first_worktree, &second_worktree] {
+            fs::write(worktree.path().join("Cargo.lock"), "lock-a").unwrap();
+        }
+        let compatibility = cargo_target_compatibility(first_worktree.path(), &[]);
+        let barrier = std::sync::Barrier::new(2);
+        let targets = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                barrier.wait();
+                acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "gate",
+                    first_worktree.path(),
+                    &compatibility,
+                )
+                .unwrap()
+            });
+            let second = scope.spawn(|| {
+                barrier.wait();
+                acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "gate",
+                    second_worktree.path(),
+                    &compatibility,
+                )
+                .unwrap()
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        assert_ne!(targets.0.target_dir(), targets.1.target_dir());
+        assert!(targets.0.target_dir().join(LOCK_FILE).is_file());
+        assert!(targets.1.target_dir().join(LOCK_FILE).is_file());
     }
     fn lease_path(root: &Path) -> PathBuf {
         fs::read_dir(root).unwrap().next().unwrap().unwrap().path()
