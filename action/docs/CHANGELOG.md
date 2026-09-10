@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.25] - 2026-09-10
+
+### Fixed
+- guard failure digest renderer capability
+
 ## [2.15.24] - 2026-09-07
 
 ### Fixed
