@@ -3254,6 +3254,22 @@ fn build_runner_source_snapshot(
             "**/._*".to_string(),
         ],
     )?;
+    let source_commit = git_revision(source).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "homeboy_source",
+            "homeboy source snapshot requires an immutable git commit",
+            Some(source.display().to_string()),
+            None,
+        )
+    })?;
+    std::fs::write(
+        staged.join(".homeboy-source-snapshot"),
+        format!(
+            "git_commit={source_commit}\ngit_dirty={}\n",
+            if git_dirty(source) { "true" } else { "false" }
+        ),
+    )
+    .map_err(|err| Error::internal_io(err.to_string(), Some("write source provenance".into())))?;
     let archive =
         tempfile::NamedTempFile::new().map_err(|err| Error::internal_io(err.to_string(), None))?;
     let status = Command::new("tar")
@@ -3302,7 +3318,7 @@ fn build_runner_source_snapshot(
 
 fn source_snapshot_build_script(snapshot: &PreparedRunnerSourceSnapshot) -> String {
     format!(
-        "set -eu\narchive={archive}\nexpected={expected}\nslot={slot}\ntrap 'rm -f -- \"$archive\"' EXIT\nhash() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\n[ \"$(hash \"$archive\")\" = \"$expected\" ] || {{ echo source_snapshot_hash_mismatch >&2; exit 1; }}\nif [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then binary_sha=$(hash \"$slot/homeboy\"); else rm -rf -- \"$slot\"; mkdir -p \"$slot/source\"; tar -xf \"$archive\" -C \"$slot/source\"; [ -f \"$slot/source/Cargo.toml\" ] || {{ echo source_snapshot_missing_manifest >&2; exit 1; }}; cargo build --release --bin homeboy --manifest-path \"$slot/source/Cargo.toml\" --target-dir \"$slot/target\"; install -m 0755 \"$slot/target/release/homeboy\" \"$slot/homeboy.tmp\"; mv -f \"$slot/homeboy.tmp\" \"$slot/homeboy\"; printf '%s' \"$expected\" > \"$slot/.source-sha256\"; binary_sha=$(hash \"$slot/homeboy\"); fi\n[ \"$(dd if=\"$slot/homeboy\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = 7f454c46 ] || {{ echo runner_native_build_not_elf >&2; exit 1; }}\nprintf 'HOMEBOY_DEV_SOURCE_SHA256=%s\\nHOMEBOY_DEV_BINARY_SHA256=%s\\nHOMEBOY_DEV_BINARY_PATH=%s\\n' \"$expected\" \"$binary_sha\" \"$slot/homeboy\"\n",
+        "set -eu\narchive={archive}\nexpected={expected}\nslot={slot}\ntrap 'rm -f -- \"$archive\"' EXIT\nhash() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\n[ \"$(hash \"$archive\")\" = \"$expected\" ] || {{ echo source_snapshot_hash_mismatch >&2; exit 1; }}\nif [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then binary_sha=$(hash \"$slot/homeboy\"); else rm -rf -- \"$slot\"; mkdir -p \"$slot/source\"; tar -xf \"$archive\" -C \"$slot/source\"; [ -f \"$slot/source/Cargo.toml\" ] || {{ echo source_snapshot_missing_manifest >&2; exit 1; }}; {{ IFS= read -r commit_line && IFS= read -r dirty_line && ! IFS= read -r extra; }} < \"$slot/source/.homeboy-source-snapshot\" || {{ echo source_snapshot_missing_provenance >&2; exit 1; }}; source_commit=${{commit_line#git_commit=}}; source_dirty=${{dirty_line#git_dirty=}}; test \"$source_commit\" != \"$commit_line\" && test \"$source_dirty\" != \"$dirty_line\" && test ${{#source_commit}} = 40 && test \"$source_dirty\" = false || {{ echo source_snapshot_invalid_provenance >&2; exit 1; }}; HOMEBOY_PRODUCT_GIT_COMMIT=\"$source_commit\" HOMEBOY_PRODUCT_GIT_DIRTY=\"$source_dirty\" cargo build --release --bin homeboy --manifest-path \"$slot/source/Cargo.toml\" --target-dir \"$slot/target\"; install -m 0755 \"$slot/target/release/homeboy\" \"$slot/homeboy.tmp\"; mv -f \"$slot/homeboy.tmp\" \"$slot/homeboy\"; printf '%s' \"$expected\" > \"$slot/.source-sha256\"; binary_sha=$(hash \"$slot/homeboy\"); fi\n[ \"$(dd if=\"$slot/homeboy\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = 7f454c46 ] || {{ echo runner_native_build_not_elf >&2; exit 1; }}\nprintf 'HOMEBOY_DEV_SOURCE_SHA256=%s\\nHOMEBOY_DEV_BINARY_SHA256=%s\\nHOMEBOY_DEV_BINARY_PATH=%s\\n' \"$expected\" \"$binary_sha\" \"$slot/homeboy\"\n",
         archive = quote_path(&snapshot.remote_archive),
         expected = quote_path(&snapshot.sha256),
         slot = quote_path(&snapshot.build_slot),
