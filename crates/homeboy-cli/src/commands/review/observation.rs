@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
@@ -57,6 +58,18 @@ impl ReviewObservation {
             })
         );
     }
+
+    pub(super) fn transfer_owner_to(&self, owner_pid: u32) -> homeboy::core::Result<()> {
+        if self.0.transfer_owner_to(owner_pid)? {
+            return Ok(());
+        }
+        Err(homeboy::core::Error::validation_invalid_argument(
+            "run_id",
+            "running observation ended before detached ownership transfer",
+            Some(self.run_id().to_string()),
+            None,
+        ))
+    }
 }
 
 #[derive(Serialize)]
@@ -108,6 +121,43 @@ pub(super) fn start(start: ReviewObservationStart<'_>) -> homeboy::core::Result<
 
 pub(super) fn resume(run_id: &str) -> homeboy::core::Result<ReviewObservation> {
     ActiveObservation::resume(run_id).map(ReviewObservation)
+}
+
+/// A child must not start writing lifecycle state until the launcher has made
+/// its PID durable. This closes the launcher's exit-to-first-progress window.
+pub(super) fn resume_after_ownership_transfer(
+    run_id: &str,
+    deadline: Duration,
+) -> homeboy::core::Result<ReviewObservation> {
+    let started = Instant::now();
+    loop {
+        let store = ObservationStore::open_initialized_for_lifecycle()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "run_id",
+                "run record not found",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        if run.status != RunStatus::Running.as_str() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "run_id",
+                "detached observation ended before ownership transfer",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        if homeboy::core::observation::run_owner_pid(&run) == Some(std::process::id()) {
+            return ActiveObservation::resume(run_id).map(ReviewObservation);
+        }
+        if started.elapsed() >= deadline {
+            return Err(homeboy::core::Error::internal_unexpected(format!(
+                "timed out waiting {deadline:?} for detached review ownership transfer"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Emit a JSONL lifecycle event after persistence. The final stdout envelope is unchanged.
@@ -216,9 +266,34 @@ fn finish_if_running(
     status: RunStatus,
     metadata: Option<serde_json::Value>,
 ) {
-    let _ = observation
-        .store()
-        .finish_running_run(observation.run_id(), status, metadata);
+    let Some(metadata) = metadata else {
+        let _ = observation
+            .store()
+            .finish_running_run(observation.run_id(), status, None);
+        return;
+    };
+    // A heartbeat can race the terminal path. CAS against the metadata we read
+    // so the terminal record retains the newest progress instead of restoring
+    // the launcher's initial snapshot over it.
+    for _ in 0..3 {
+        let Ok(Some(current)) = observation.store().get_run(observation.run_id()) else {
+            return;
+        };
+        if current.status != RunStatus::Running.as_str() {
+            return;
+        }
+        let merged = merge_metadata(current.metadata_json.clone(), metadata.clone());
+        match observation.store().finish_running_run_if_metadata(
+            observation.run_id(),
+            status,
+            merged,
+            &current.metadata_json,
+        ) {
+            Ok(Some(_)) => return,
+            Ok(None) => continue,
+            Err(_) => return,
+        }
+    }
 }
 
 fn review_observation_command(component_id: &str, args: &ReviewArgs) -> String {
@@ -445,6 +520,59 @@ mod tests {
                 1,
                 "attaching must not create duplicate work"
             );
+        });
+    }
+
+    #[test]
+    fn detached_owner_transfer_survives_reconcile_and_preserves_progress_to_terminal_result() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let args = review_args();
+            let observation = start(ReviewObservationStart {
+                component_id: Some("homeboy"),
+                component_label: Some("homeboy"),
+                source_path: Some(Path::new("/tmp/homeboy")),
+                args: &args,
+                scope: "changed-only",
+                changed_file_count: Some(1),
+            })
+            .expect("launcher admission");
+            let run_id = observation.run_id().to_string();
+
+            // Model an exited launcher before it atomically hands the durable
+            // row to its detached child (this test process).
+            observation
+                .transfer_owner_to(u32::MAX)
+                .expect("launcher ownership");
+            observation
+                .transfer_owner_to(std::process::id())
+                .expect("child ownership transfer");
+            let store = ObservationStore::open_initialized().expect("store");
+            let owned = store.get_run(&run_id).expect("read").expect("admitted run");
+            assert_eq!(
+                homeboy::core::observation::run_owner_pid(&owned),
+                Some(std::process::id())
+            );
+            let watched = crate::commands::runs::poll_once_for_test(&store, &run_id)
+                .expect("watch/reconcile live child");
+            assert_eq!(watched.status, RunStatus::Running.as_str());
+
+            observation.progress("test_execution", "review.test", "heartbeat");
+            finish_direct_success(
+                Some(observation),
+                "test",
+                serde_json::json!({ "result": "pass" }),
+                0,
+            );
+            let terminal = store
+                .get_run(&run_id)
+                .expect("read terminal")
+                .expect("terminal run");
+            assert_eq!(terminal.status, RunStatus::Pass.as_str());
+            assert_eq!(
+                terminal.metadata_json["progress"]["phase"],
+                "test_execution"
+            );
+            assert_eq!(terminal.metadata_json["stages"][0]["name"], "test");
         });
     }
 

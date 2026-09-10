@@ -55,6 +55,14 @@ impl ActiveObservation {
         })
     }
 
+    /// Transfer the persisted liveness owner before a detached launcher exits.
+    pub fn transfer_owner_to(&self, owner_pid: u32) -> crate::Result<bool> {
+        Ok(self
+            .store
+            .transfer_running_run_owner(self.run_id(), owner_pid)?
+            .is_some())
+    }
+
     pub fn store(&self) -> &ObservationStore {
         &self.store
     }

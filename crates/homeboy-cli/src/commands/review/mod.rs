@@ -52,6 +52,9 @@ mod observation;
 pub(super) mod raw_output;
 
 const DETACHED_REVIEW_RUN_ID_ENV: &str = "HOMEBOY_DETACHED_REVIEW_RUN_ID";
+const DETACHED_OWNERSHIP_TRANSFER_DEADLINE: Duration = Duration::from_secs(5);
+const COMPONENT_DISCOVERY_DEADLINE: Duration = Duration::from_secs(30);
+const DEPENDENCY_HYDRATION_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Args)]
 pub struct ReviewArgs {
@@ -396,10 +399,13 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
 /// The launcher has already returned its continuation command; this worker owns
 /// the test process and its durable evidence.
 fn run_detached_test(args: test::TestArgs, run_id: &str) -> CmdResult<Value> {
-    let observation = Some(observation::resume(run_id)?);
+    let observation = Some(observation::resume_after_ownership_transfer(
+        run_id,
+        DETACHED_OWNERSHIP_TRANSFER_DEADLINE,
+    )?);
     observation::emit_early_lifecycle(&observation);
     progress(&observation, "component_discovery", "component", "running");
-    let component = match args.comp.load() {
+    let component = match load_component_with_deadline(&args.comp) {
         Ok(component) => component,
         Err(error) => {
             observation::finish_error(observation, &error);
@@ -555,7 +561,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component_args = args.effective_component_args();
-    let component = match component_args.load() {
+    let component = match load_component_with_deadline(&component_args) {
         Ok(component) => component,
         Err(error) => {
             observation::finish_error(review_observation, &error);
@@ -825,18 +831,24 @@ pub(crate) fn detach_changed_only_summary(
     {
         return Ok(None);
     }
-    let observation = observation::start(observation::ReviewObservationStart {
+    let observation = Some(observation::start(observation::ReviewObservationStart {
         component_id: args.comp.component.as_deref(),
         component_label: args.comp.component.as_deref(),
         source_path: None,
         args,
         scope: "pending-discovery",
         changed_file_count: None,
-    })?;
-    let run_id = observation.run_id().to_string();
-    observation::emit_early_lifecycle(&Some(observation));
-    let observation = observation::resume(&run_id)?;
-    observation.progress("handoff", "detached-worker", "accepted");
+    })?);
+    let run_id = observation
+        .as_ref()
+        .expect("observation is present")
+        .run_id()
+        .to_string();
+    observation::emit_early_lifecycle(&observation);
+    observation
+        .as_ref()
+        .expect("observation is present")
+        .progress("handoff", "detached-worker", "accepted");
     let executable = std::env::current_exe().map_err(|error| {
         homeboy::core::Error::internal_io(
             error.to_string(),
@@ -851,12 +863,27 @@ pub(crate) fn detach_changed_only_summary(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     homeboy::core::process::detach_from_caller_session(&mut command);
-    command.spawn().map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("spawn detached review worker".to_string()),
-        )
-    })?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let error = homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("spawn detached review worker".to_string()),
+            );
+            observation::finish_error(observation, &error);
+            return Err(error);
+        }
+    };
+    if let Err(error) = observation
+        .as_ref()
+        .expect("observation is present")
+        .transfer_owner_to(child.id())
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        observation::finish_error(observation, &error);
+        return Err(error);
+    }
     println!(
         "{}",
         serde_json::json!({
@@ -873,7 +900,10 @@ fn prepare_local_review_dependencies(
     component: &homeboy::core::component::Component,
     observation: &Option<observation::ReviewObservation>,
 ) -> homeboy::core::Result<()> {
-    let policy = homeboy::core::deps::DependencyHydrationPolicy::default();
+    let policy = homeboy::core::deps::DependencyHydrationPolicy {
+        timeout: DEPENDENCY_HYDRATION_DEADLINE,
+        ..Default::default()
+    };
     let deadline_ms = policy.timeout.as_millis();
     let started = Instant::now();
     emit_local_review_setup_progress(LocalReviewSetupProgress {
@@ -974,6 +1004,30 @@ fn prepare_local_review_dependencies(
     });
     progress(observation, "dependency_setup", "dependencies", "completed");
     Ok(())
+}
+
+fn load_component_with_deadline(
+    args: &PositionalComponentArgs,
+) -> homeboy::core::Result<homeboy::core::component::Component> {
+    let args = args.clone();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(args.load());
+    });
+    match receiver.recv_timeout(COMPONENT_DISCOVERY_DEADLINE) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(homeboy::core::Error::internal_unexpected(format!(
+                "component discovery exceeded its {:?} deadline",
+                COMPONENT_DISCOVERY_DEADLINE
+            )))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(homeboy::core::Error::internal_unexpected(
+                "component discovery worker stopped before returning a result".to_string(),
+            ))
+        }
+    }
 }
 
 fn progress(

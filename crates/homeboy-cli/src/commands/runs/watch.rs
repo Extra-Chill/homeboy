@@ -137,6 +137,14 @@ fn is_terminal_status(status: &str) -> bool {
         .unwrap_or(true)
 }
 
+#[cfg(test)]
+pub(crate) fn poll_once_for_test(
+    store: &ObservationStore,
+    run_id: &str,
+) -> homeboy::core::Result<RunRecord> {
+    StorePoller { store }.poll(run_id)
+}
+
 /// Map a terminal run status to a process exit code: `pass`/`skipped` succeed,
 /// every other settled status (including `stale` ghosts, `handed_off`
 /// dispatches, and unknown statuses) fails.

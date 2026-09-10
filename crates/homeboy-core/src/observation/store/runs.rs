@@ -947,6 +947,33 @@ impl ObservationStore {
         self.get_run(run_id)
     }
 
+    /// Atomically hand a running observation to a detached process. Keeping the
+    /// owner replacement in SQLite prevents a watcher from seeing the exited
+    /// launcher as the live work's owner between handoff and the child's first
+    /// progress update.
+    pub fn transfer_running_run_owner(
+        &self,
+        run_id: &str,
+        owner_pid: u32,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        let owner = serde_json::json!({
+            "pid": owner_pid,
+            "recorded_at": chrono::Utc::now().to_rfc3339(),
+        });
+        let owner = serialize_metadata(&owner)?;
+        let rows = execute_with_retry("transfer running run owner", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.homeboy_run_owner', json(?1)) WHERE id = ?2 AND status = ?3",
+                params![owner, run_id, RunStatus::Running.as_str()],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
+    }
+
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>> {
         validate_required("run_id", run_id)?;
         self.connection
@@ -1693,6 +1720,39 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn transfer_running_run_owner_replaces_only_the_live_owner() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({ "progress": { "phase": "handoff" } }))
+                        .build(),
+                    "detached-review".to_string(),
+                )
+                .expect("running review");
+
+            let transferred = store
+                .transfer_running_run_owner("detached-review", 42_424)
+                .expect("transfer")
+                .expect("running record");
+            assert_eq!(
+                transferred.metadata_json["homeboy_run_owner"]["pid"],
+                42_424
+            );
+            assert_eq!(transferred.metadata_json["progress"]["phase"], "handoff");
+
+            store
+                .finish_running_run("detached-review", RunStatus::Pass, None)
+                .expect("finish");
+            assert!(store
+                .transfer_running_run_owner("detached-review", 55_555)
+                .expect("terminal transfer")
+                .is_none());
+        });
+    }
 
     #[test]
     fn mission_index_is_transactional_forward_only_and_keyset_paginated() {
