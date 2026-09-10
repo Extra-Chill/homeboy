@@ -17,7 +17,9 @@ use crate::api_jobs::Job;
 use crate::error::{Error, ErrorCode, Result};
 use crate::runner_execution_envelope::RunnerExecutionEnvelope;
 
-pub const RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA: &str = "homeboy/runner-job-execution-context/v1";
+/// Re-exported from the owning contract so the wire identifier has one
+/// definition rather than two that can drift apart at a version bump.
+pub use homeboy_runner_contract::RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA;
 pub const RUNNER_JOB_EXECUTION_CONTEXT_EVIDENCE_SCHEMA: &str =
     "homeboy/runner-job-execution-context-evidence/v1";
 pub const RUNNER_JOB_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_ID";
