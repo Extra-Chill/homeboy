@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.47.0] - 2026-09-10
+
+### Added
+- preload WP-CLI API for managed PHPUnit
+
 ## [3.45.9] - 2026-09-08
 
 ### Fixed
