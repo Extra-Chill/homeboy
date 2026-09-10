@@ -22,14 +22,16 @@ chmod +x "$binary"
     );
     write_executable(
         &tools.join("jq"),
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$HOMEBOY_TEST_BINARY_COMMIT\"\n",
+        "#!/usr/bin/env bash\ncat >/dev/null\nprintf '%s\\n' \"$HOMEBOY_TEST_BINARY_COMMIT\"\n",
     );
 
     let expected = git_head();
     let matching = run_dev_build(&tools, &target, &expected);
     assert!(
         matching.status.success(),
-        "matching full identity failed: {}",
+        "matching full identity failed with {}:\nstdout: {}\nstderr: {}",
+        matching.status,
+        String::from_utf8_lossy(&matching.stdout),
         String::from_utf8_lossy(&matching.stderr)
     );
     assert!(String::from_utf8_lossy(&matching.stdout).contains(&expected));
