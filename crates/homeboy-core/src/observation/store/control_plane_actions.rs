@@ -419,6 +419,90 @@ impl ObservationStore {
         }
     }
 
+    /// Reconcile an ambiguous external-effect crash window. The caller supplies
+    /// authoritative domain evidence; this store verifies the immutable intent
+    /// digest and recovery fence before atomically recording its terminal fact.
+    /// An identical replay is idempotent, while every stale or changed fact
+    /// remains a conflict and cannot make the effect leaseable again.
+    pub fn reconcile_control_plane_effect(
+        &self,
+        effect_id: &EffectId,
+        request_digest: &str,
+        recovery_fence: u64,
+        terminal: &ControlPlaneEffectTerminal,
+    ) -> Result<ControlPlaneEffectStatus> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane effect reconciliation"))?;
+        let result = (|| {
+            let existing = self.effect_status(effect_id)?.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "effect_id",
+                    "control-plane effect not found",
+                    Some(effect_id.0.clone()),
+                    None,
+                )
+            })?;
+            if existing.intent.request_digest != request_digest {
+                return Err(Error::validation_invalid_argument(
+                    "request_digest",
+                    "reconciliation evidence does not match the immutable effect intent",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            if let Some(ref current) = existing.terminal {
+                if current == terminal {
+                    return Ok(existing);
+                }
+                return Err(Error::validation_invalid_argument(
+                    "effect_id",
+                    "effect is already terminal with different authoritative evidence",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            if !existing.recovery_required || existing.lease_fence != recovery_fence {
+                return Err(Error::validation_invalid_argument(
+                    "recovery_fence",
+                    "effect is not in the requested recovery state or its recovery fence is stale",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            let encoded = serde_json::to_string(terminal)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            let audit = serde_json::to_string(&terminal.audit)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            let changed = self.connection.execute(
+                "UPDATE control_plane_action_claims SET state = 'completed', outbox_state = 'terminal', terminal_json = ?4, audit_json = ?5, acknowledgement_json = ?6, completed_at = ?7 WHERE effect_id = ?1 AND outbox_state = 'recovery_required' AND lease_fence = ?2 AND request_digest = ?3",
+                params![effect_id.0, recovery_fence, request_digest, encoded, audit, serde_json::to_string(&terminal.acknowledgement).map_err(|e| Error::internal_json(e.to_string(), None))?, terminal.completed_at],
+            ).map_err(sqlite_error("reconcile control-plane effect terminalization"))?;
+            if changed != 1 {
+                return Err(Error::validation_invalid_argument(
+                    "recovery_fence",
+                    "control-plane effect recovery state changed before terminalization",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            self.effect_status(effect_id)?.ok_or_else(|| {
+                Error::internal_unexpected("reconciled control-plane effect was not readable")
+            })
+        })();
+        match result {
+            Ok(value) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error("commit control-plane effect reconciliation"))
+                .map(|_| value),
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn control_plane_effect_status(
         &self,
         effect_id: &EffectId,

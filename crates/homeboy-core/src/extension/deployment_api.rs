@@ -16,7 +16,9 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiDeploymentProviderDescriptor, ExtensionApiDeploymentProviderDiagnostic,
     ExtensionApiDeploymentProviderDiagnosticKind, ExtensionApiDeploymentProviderEffectState,
     ExtensionApiDeploymentProviderInventoryRequest,
-    ExtensionApiDeploymentProviderInventoryResponse, ExtensionApiDeploymentProviderResolveRequest,
+    ExtensionApiDeploymentProviderInventoryResponse,
+    ExtensionApiDeploymentProviderReconcileRequest,
+    ExtensionApiDeploymentProviderReconcileResponse, ExtensionApiDeploymentProviderResolveRequest,
     ExtensionApiDeploymentProviderResolveResponse, ExtensionApiDeploymentProviderResult,
     ExtensionApiDeploymentProviderStatusRequest, ExtensionApiDeploymentProviderStatusResponse,
     ExtensionApiDeploymentProviderSubmitRequest, ExtensionApiDeploymentProviderSubmitResponse,
@@ -24,6 +26,8 @@ use homeboy_extension_contract::api::v1::{
     DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_RESPONSE_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_REQUEST_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_RESPONSE_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_RESPONSE_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA,
@@ -405,6 +409,75 @@ impl DeploymentProviderApi {
         provider_effect_status(request)
     }
 
+    /// Terminalize an ambiguous effect from provider evidence without invoking
+    /// the provider command again.
+    pub fn reconcile_api(
+        &self,
+        request: &ExtensionApiDeploymentProviderReconcileRequest,
+    ) -> ExtensionApiDeploymentProviderReconcileResponse {
+        if let Some(failure) = validate_operation_request(
+            &request.schema,
+            EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_REQUEST_SCHEMA,
+            request.api_version,
+        ) {
+            return reconcile_failure(request, failure);
+        }
+        if request.request_digest.is_empty() || request.recovery_fence == 0 {
+            return reconcile_failure(
+                request,
+                internal_failure(
+                    "reconciliation requires a request digest and recovery fence".to_string(),
+                ),
+            );
+        }
+        let store = match crate::observation::ObservationStore::open_initialized() {
+            Ok(store) => store,
+            Err(error) => return reconcile_failure(request, internal_failure(error.to_string())),
+        };
+        let effect = match store.control_plane_effect_status(&request.effect_id) {
+            Ok(Some(effect)) => effect,
+            Ok(None) => {
+                return reconcile_failure(
+                    request,
+                    internal_failure("control-plane effect not found".to_string()),
+                )
+            }
+            Err(error) => return reconcile_failure(request, internal_failure(error.to_string())),
+        };
+        if let Some(terminal) = effect.terminal.as_ref() {
+            let same_result = serde_json::to_value(&request.result).ok()
+                == Some(terminal.acknowledgement.result.data.clone());
+            let same_evidence =
+                terminal.audit.evidence.get("evidence") == Some(&request.authoritative_evidence);
+            if effect.intent.request_digest != request.request_digest
+                || !same_result
+                || !same_evidence
+            {
+                return reconcile_failure(
+                    request,
+                    internal_failure(
+                        "reconciliation evidence conflicts with the recorded terminal effect"
+                            .to_string(),
+                    ),
+                );
+            }
+            return provider_terminal_reconcile_response(request, Some(terminal));
+        }
+        let terminal = match provider_reconciliation_terminal(request, &effect) {
+            Ok(terminal) => terminal,
+            Err(error) => return reconcile_failure(request, internal_failure(error.to_string())),
+        };
+        match store.reconcile_control_plane_effect(
+            &request.effect_id,
+            &request.request_digest,
+            request.recovery_fence,
+            &terminal,
+        ) {
+            Ok(effect) => provider_terminal_reconcile_response(request, effect.terminal.as_ref()),
+            Err(error) => reconcile_failure(request, internal_failure(error.to_string())),
+        }
+    }
+
     fn select(
         &self,
         extension_id: &str,
@@ -670,6 +743,83 @@ fn provider_terminal_response(
         },
         serde_json::from_value(terminal.acknowledgement.result.data.clone()).ok(),
     )
+}
+
+fn reconcile_failure(
+    request: &ExtensionApiDeploymentProviderReconcileRequest,
+    failure: ExtensionApiOperationFailure,
+) -> ExtensionApiDeploymentProviderReconcileResponse {
+    ExtensionApiDeploymentProviderReconcileResponse {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        effect_id: request.effect_id.clone(),
+        state: ExtensionApiDeploymentProviderEffectState::Unknown,
+        result: None,
+        failure: Some(failure),
+    }
+}
+
+fn provider_terminal_reconcile_response(
+    request: &ExtensionApiDeploymentProviderReconcileRequest,
+    terminal: Option<&ControlPlaneEffectTerminal>,
+) -> ExtensionApiDeploymentProviderReconcileResponse {
+    let result = terminal.and_then(|terminal| {
+        serde_json::from_value(terminal.acknowledgement.result.data.clone()).ok()
+    });
+    ExtensionApiDeploymentProviderReconcileResponse {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        effect_id: request.effect_id.clone(),
+        state: if request.result.exit_code == 0 {
+            ExtensionApiDeploymentProviderEffectState::Succeeded
+        } else {
+            ExtensionApiDeploymentProviderEffectState::Failed
+        },
+        result,
+        failure: None,
+    }
+}
+
+fn provider_reconciliation_terminal(
+    request: &ExtensionApiDeploymentProviderReconcileRequest,
+    effect: &crate::observation::store::ControlPlaneEffectStatus,
+) -> crate::error::Result<ControlPlaneEffectTerminal> {
+    let completed_at = chrono::Utc::now().to_rfc3339();
+    let run = effect.intent.resource.run.clone();
+    let acknowledgement = homeboy_control_plane_contract::ControlPlaneActionAcknowledgement {
+        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+            .to_string(),
+        acknowledgement: format!("{}:provider-reconciliation", request.effect_id.0),
+        run: run.clone(),
+        action: ControlPlaneAction::Resume,
+        idempotency_key: request.effect_id.0.clone(),
+        actor: "deployment-provider-reconciler".to_string(),
+        accepted_at: effect.intent.accepted_at.clone(),
+        completed_at: completed_at.clone(),
+        outcome: if request.result.exit_code == 0 {
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        } else {
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+        },
+        resource: homeboy_control_plane_contract::ControlPlaneRun::new(run),
+        result: ControlPlaneActionPayload {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA
+                .to_string(),
+            data: serde_json::to_value(&request.result)
+                .map_err(|error| crate::Error::internal_json(error.to_string(), None))?,
+        },
+        message: request.result.error.clone(),
+    };
+    Ok(ControlPlaneEffectTerminal {
+        schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(),
+        completed_at: completed_at.clone(),
+        acknowledgement,
+        audit: ControlPlaneEffectAudit {
+            schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(),
+            observed_at: completed_at,
+            evidence: serde_json::json!({ "reconciliation": "authoritative_provider_evidence", "evidence": request.authoritative_evidence }),
+        },
+    })
 }
 
 fn admit_provider_effect(
@@ -1200,6 +1350,97 @@ mod tests {
                 ExtensionApiDeploymentProviderEffectState::Failed
             );
             assert_eq!(failed.result.expect("failed result").exit_code, 1);
+        });
+    }
+
+    #[test]
+    fn expired_provider_effect_requires_evidence_and_never_redispatches() {
+        crate::test_support::with_isolated_home(|home| {
+            let counter = home.path().join("provider-calls");
+            write_extension(
+                "reconcile-provider",
+                serde_json::json!([{"id":"fixture.deploy","command":"echo call >> '".to_string() + counter.to_string_lossy().as_ref() + "'"}]),
+                "",
+            );
+            let api = discover();
+            let request = ExtensionApiDeploymentProviderSubmitRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: "reconcile-provider".to_string(),
+                provider_id: "fixture.deploy".to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "test:crash-window".to_string(),
+                ),
+                project_id: "site".to_string(),
+                component_id: "fixture".to_string(),
+                dry_run: false,
+            };
+            let effect = admit_provider_effect(&request).expect("admit intent");
+            let store = crate::observation::ObservationStore::open_initialized().expect("store");
+            store
+                .lease_control_plane_effect_by_id(
+                    &request.effect_id,
+                    "crashed-worker",
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:01Z",
+                )
+                .expect("lease effect");
+            let status = api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                effect_id: request.effect_id.clone(),
+            });
+            assert_eq!(
+                status.state,
+                ExtensionApiDeploymentProviderEffectState::Unknown
+            );
+            let recovery = crate::observation::ObservationStore::open_initialized()
+                .expect("store")
+                .control_plane_effect_status(&request.effect_id)
+                .expect("effect")
+                .expect("effect exists");
+            assert!(recovery.recovery_required);
+            let reconcile = ExtensionApiDeploymentProviderReconcileRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                effect_id: request.effect_id.clone(),
+                request_digest: effect.intent.request_digest.clone(),
+                recovery_fence: recovery.lease_fence,
+                result: ExtensionApiDeploymentProviderResult {
+                    exit_code: 0,
+                    evidence: serde_json::json!({"provider":"authoritative"}),
+                    error: None,
+                },
+                authoritative_evidence: serde_json::json!({"provider_job":"verified-42"}),
+            };
+            assert_eq!(
+                api.reconcile_api(&reconcile).state,
+                ExtensionApiDeploymentProviderEffectState::Succeeded
+            );
+            assert_eq!(
+                api.reconcile_api(&reconcile).state,
+                ExtensionApiDeploymentProviderEffectState::Succeeded
+            );
+            let input = tempfile::NamedTempFile::new().expect("input");
+            let component = tempfile::tempdir().expect("component");
+            assert_eq!(
+                api.submit_api(
+                    &request,
+                    DeploymentProviderInvocationContext {
+                        component_path: component.path(),
+                        input_path: input.path()
+                    }
+                )
+                .state,
+                ExtensionApiDeploymentProviderEffectState::Succeeded
+            );
+            assert!(
+                !counter.exists(),
+                "terminal reconciliation must prevent redispatch"
+            );
+            let mut mismatched = reconcile.clone();
+            mismatched.authoritative_evidence = serde_json::json!({"provider_job":"other"});
+            assert!(api.reconcile_api(&mismatched).failure.is_some());
         });
     }
 }
