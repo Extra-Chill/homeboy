@@ -1549,6 +1549,27 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             },
         )
         .expect("persist terminal legacy candidate");
+        test_lifecycle_store()
+            .mutate_record(run_id, |record| {
+                let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                    repository: "fixture".to_string(),
+                    workspace: "fixture".to_string(),
+                    task: "provider".to_string(),
+                    candidate: None,
+                    base: None,
+                };
+                record.metadata["execution_placement_decision"] = serde_json::to_value(
+                    homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                        "fixture",
+                        "v1",
+                        identity,
+                        homeboy_lab_runner_contract::Placement::Local,
+                    ),
+                )
+                .unwrap();
+                true
+            })
+            .expect("persist local continuation placement");
         let before = filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
 
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
@@ -1574,11 +1595,11 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         assert_eq!(report["selected_artifact"]["artifact_id"], "retained-patch");
         assert_eq!(
             report["continuation_command"],
-            format!("homeboy agent-task cook-continue {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task cook-continue {run_id} --artifact-id retained-patch")
         );
         assert_eq!(
             report["failure_context"]["next_action"]["command"],
-            format!("homeboy agent-task cook-continue {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task cook-continue {run_id} --artifact-id retained-patch")
         );
         assert!(report["failure_context"]["diagnostic"]["message"]
             .as_str()
@@ -1591,7 +1612,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         assert_eq!(bounded["run_id"], run_id);
         assert_eq!(
             bounded["actionable"]["next_action"]["command"],
-            format!("homeboy agent-task cook-continue {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task cook-continue {run_id} --artifact-id retained-patch")
         );
         assert!(bounded["actionable"]["blocker"]
             .as_str()

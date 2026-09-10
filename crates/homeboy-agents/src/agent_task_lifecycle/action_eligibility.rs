@@ -151,6 +151,16 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
     }
+    if super::has_pending_detached_cook_handoff(record)
+        && matches!(
+            record.metadata["detached_cook_handoff"]["admission_state"].as_str(),
+            Some("pre_supervisor") | None
+        )
+    {
+        return unavailable(
+            "pre-supervisor Cook admission has no replayable request; rerun the original Cook invocation to reclaim a dead or expired launcher",
+        );
+    }
     match record.state {
         AgentTaskRunState::Queued => {
             if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {

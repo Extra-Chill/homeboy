@@ -112,6 +112,30 @@ pub fn cook_continue_command(
     let executable = executable
         .map(quote_arg)
         .unwrap_or_else(|| cook_recovery_command_prefix(cook_or_attempt_id));
+    cook_continue_command_with_prefix(&executable, cook_or_attempt_id, rearm, artifact_id)
+}
+
+/// Render a continuation from placement already authenticated by its record.
+pub fn cook_continue_command_for_record(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    cook_or_attempt_id: &str,
+    rearm: bool,
+    artifact_id: Option<&str>,
+) -> String {
+    cook_continue_command_with_prefix(
+        &cook_recovery_command_prefix_for_record(record),
+        cook_or_attempt_id,
+        rearm,
+        artifact_id,
+    )
+}
+
+fn cook_continue_command_with_prefix(
+    executable: &str,
+    cook_or_attempt_id: &str,
+    rearm: bool,
+    artifact_id: Option<&str>,
+) -> String {
     let mut command = format!(
         "{} agent-task cook-continue {}",
         executable,

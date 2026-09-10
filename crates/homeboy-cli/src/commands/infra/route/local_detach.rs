@@ -803,14 +803,19 @@ pub(super) fn intercept_local_detached_cook(
             return Err(error);
         }
     };
-    let controller_job =
-        match submit_cook_controller_job(&controller_client, &cook_id, pid, &start_identity) {
-            Ok(job) => job,
-            Err(error) => {
-                terminate_and_reap_detached_child(&mut child);
-                return Err(error);
-            }
-        };
+    let controller_job = match submit_cook_controller_job(
+        &controller_client,
+        &cook_id,
+        &admission.launcher_id,
+        pid,
+        &start_identity,
+    ) {
+        Ok(job) => job,
+        Err(error) => {
+            terminate_and_reap_detached_child(&mut child);
+            return Err(error);
+        }
+    };
     pause_after_controller_start_for_test()?;
     if let Err(error) =
         agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
@@ -968,21 +973,27 @@ impl ControllerJobHandoff {
 fn submit_cook_controller_job(
     client: &homeboy::core::daemon::LocalControllerJobClient,
     cook_id: &str,
+    launcher_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
 ) -> homeboy::core::Result<ControllerJobHandoff> {
-    submit_cook_controller_job_inner(client, cook_id, pid, start_identity)
+    submit_cook_controller_job_inner(client, cook_id, launcher_id, pid, start_identity)
         .map(|job_id| ControllerJobHandoff::Owned { job_id })
 }
 
 fn submit_cook_controller_job_inner(
     client: &homeboy::core::daemon::LocalControllerJobClient,
     cook_id: &str,
+    launcher_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
 ) -> homeboy::core::Result<String> {
-    let submission =
-        homeboy::agents::agent_task_service::cook_job_submission(cook_id, pid, start_identity)?;
+    let submission = homeboy::agents::agent_task_service::cook_job_submission_for_launcher(
+        cook_id,
+        Some(launcher_id),
+        pid,
+        start_identity,
+    )?;
     let job = client.submit(submission)?;
     let job_id = job.id.to_string();
     client.start(&job_id)?;

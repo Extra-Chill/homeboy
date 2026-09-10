@@ -555,6 +555,14 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let claimed = lifecycle_store
+        .read_record(cook_id)
+        .expect("read paused launcher claim");
+    let launcher_owner_pid = claimed.metadata["detached_cook_handoff"]["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .expect("persisted launcher owner PID");
 
     let mut cancel = context.command(TestBinary::HomeboyFixture);
     cancel.args(["agent-task", "cancel", cook_id]);
@@ -564,7 +572,8 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
         "cancel interrupted launcher: {}",
         String::from_utf8_lossy(&cancelled.stdout)
     );
-    launcher.kill().expect("interrupt paused launcher");
+    let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };
+    assert_eq!(killed, 0, "interrupt routed launcher owner");
     launcher.wait().expect("reap interrupted launcher");
 
     let mut status = context.command(TestBinary::HomeboyFixture);
@@ -579,7 +588,30 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
         lifecycle["data"]["run"].as_str() == Some(cook_id),
         "the requested durable parent remains the cancellation handle: {status_stdout}"
     );
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let crashed_parent = lifecycle_store
+        .read_record(cook_id)
+        .expect("read crashed launcher ownership");
+    let launcher_pid = crashed_parent.metadata["detached_cook_handoff"]["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("crashed launcher pid");
+    let launcher_identity = serde_json::from_value(
+        crashed_parent.metadata["detached_cook_handoff"]["launcher_start_identity"].clone(),
+    )
+    .expect("crashed launcher identity");
+    let launcher_state = homeboy::core::process::process_identity_state_with_start_identity(
+        launcher_pid,
+        None,
+        Some(&launcher_identity),
+    );
+    assert!(
+        matches!(
+            launcher_state,
+            homeboy::core::process::ProcessIdentityState::Dead
+                | homeboy::core::process::ProcessIdentityState::IdentityMismatch
+        ),
+        "crashed launcher {launcher_pid} remained {launcher_state:?}: {crashed_parent:?}"
+    );
     assert!(
         !lifecycle_store.cook_index_path(cook_id).exists(),
         "an interrupted pre-projection launcher must not admit an executable Cook"
@@ -646,8 +678,17 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let claimed = lifecycle_store
+        .read_record(cook_id)
+        .expect("read paused launcher claim");
+    let launcher_owner_pid = claimed.metadata["detached_cook_handoff"]["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .expect("persisted launcher owner PID");
 
-    launcher.kill().expect("crash paused launcher");
+    let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };
+    assert_eq!(killed, 0, "crash routed launcher owner");
     launcher.wait().expect("reap crashed launcher");
 
     let mut status = context.command(TestBinary::HomeboyFixture);
@@ -663,13 +704,51 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
             .as_array()
             .and_then(|actions| actions.iter().find(|action| action["action"] == "resume"))
             .and_then(|action| action["availability"].as_str()),
-        Some("available"),
+        Some("unavailable"),
         "{status_stdout}"
     );
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
     assert!(
         !lifecycle_store.cook_index_path(cook_id).exists(),
         "a crashed pre-projection launcher must not admit an executable Cook"
+    );
+
+    let mut replacement = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    replacement
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "10000")
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--run-id",
+            cook_id,
+            "--repo",
+            "pre-projection-crash",
+            "--backend",
+            "fixture",
+            "--prompt",
+            "crash before child projection",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
+            "--to-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--verify",
+            "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ]);
+    let replacement = bounded_output(replacement);
+    assert!(
+        replacement.status.success(),
+        "replacement launcher failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&replacement.stdout),
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    assert!(
+        lifecycle_store.cook_index_path(cook_id).exists(),
+        "replacement launcher must complete durable Cook admission"
     );
 }
 
