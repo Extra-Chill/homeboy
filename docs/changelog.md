@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.6] - 2026-09-10
+
+### Changed
+- Make agent-task inspection scoped and bounded
+
+### Fixed
+- preflight deferred worktrees
+
 ## [0.371.5] - 2026-09-10
 
 ### Changed
