@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.8] - 2026-09-10
+
+### Changed
+- give each wire identifier one definition
+- Accept review options after actions
+
+### Fixed
+- Fix lifecycle-owned snapshot recovery projection
+
 ## [0.371.7] - 2026-09-10
 
 ### Changed
