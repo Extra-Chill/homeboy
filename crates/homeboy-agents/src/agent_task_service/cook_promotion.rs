@@ -2194,10 +2194,39 @@ pub(crate) fn next_moving_base_recovery(
     recovery
 }
 
+#[cfg(test)]
 pub(crate) fn moving_base_recovery_from_promotion(
     cook_id: &str,
     run_id: &str,
     promotion: AgentTaskPromotionReport,
+) -> MovingBaseCookRecovery {
+    moving_base_recovery_from_promotion_with_command(
+        cook_id,
+        run_id,
+        promotion,
+        super::cook_recovery_command(run_id, &["cook-continue", run_id]),
+    )
+}
+
+pub(crate) fn moving_base_recovery_from_promotion_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+    promotion: AgentTaskPromotionReport,
+) -> MovingBaseCookRecovery {
+    moving_base_recovery_from_promotion_with_command(
+        cook_id,
+        run_id,
+        promotion,
+        super::cook_recovery_command_in_store(lifecycle_store, run_id, &["cook-continue", run_id]),
+    )
+}
+
+fn moving_base_recovery_from_promotion_with_command(
+    cook_id: &str,
+    run_id: &str,
+    promotion: AgentTaskPromotionReport,
+    continuation: String,
 ) -> MovingBaseCookRecovery {
     MovingBaseCookRecovery {
         schema: "homeboy/agent-task-cook-moving-base-recovery/v1".to_string(),
@@ -2213,7 +2242,7 @@ pub(crate) fn moving_base_recovery_from_promotion(
         blocker: String::new(),
         // This recovery belongs to one immutable Cook attempt. `run-next` is a
         // global scheduler operation and must never be offered as its recovery.
-        continuation: super::cook_recovery_command(run_id, &["cook-continue", run_id]),
+        continuation,
         base_movements: 0,
     }
 }

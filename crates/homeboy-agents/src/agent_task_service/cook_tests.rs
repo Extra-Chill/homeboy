@@ -17,7 +17,8 @@ use super::super::cook_promotion::{
     finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
     mark_replacement_gate_execution_started, moving_base_recovery_for_run,
     moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
-    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
+    moving_base_recovery_from_promotion_in_store, moving_base_recovery_report,
+    next_moving_base_recovery, persist_manual_finalization_intent,
     persist_manual_finalization_receipt, persisted_promotion_for_attempt,
     persisted_promotion_for_attempt_in_store, preflight_cook_promotion_in_store,
     prepare_manual_finalization_identity, record_replacement_gate_proof,
@@ -3221,6 +3222,17 @@ fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
             true
         })
         .unwrap();
+
+    let rooted = moving_base_recovery_from_promotion_in_store(
+        &left_lifecycle_store,
+        cook_id,
+        run_id,
+        promotion(run_id),
+    );
+    assert_eq!(
+        rooted.continuation,
+        format!("homeboy --placement local agent-task cook-continue {run_id}")
+    );
 
     let left =
         moving_base_recovery_for_run_with_stores(&left_recipe_store, &left_lifecycle_store, run_id)

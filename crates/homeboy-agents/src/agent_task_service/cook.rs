@@ -64,7 +64,7 @@ use super::cook_pre_execution::{
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
     finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
-    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion_in_store,
     moving_base_recovery_report, next_moving_base_recovery,
     persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
     promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
@@ -182,6 +182,18 @@ fn cook_recovery_command_prefix_for_decision(
 /// Build an owner-bound recovery command from the durable placement decision.
 pub fn cook_recovery_command(run_id: &str, args: &[&str]) -> String {
     let prefix = cook_recovery_command_prefix(run_id);
+    cook_recovery_command_with_prefix(&prefix, args)
+}
+
+pub(super) fn cook_recovery_command_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    args: &[&str],
+) -> String {
+    let prefix = lifecycle_store
+        .read_record(run_id)
+        .map(|record| cook_recovery_command_prefix_for_record(&record))
+        .unwrap_or_else(|_| "homeboy".to_string());
     cook_recovery_command_with_prefix(&prefix, args)
 }
 
@@ -1617,9 +1629,21 @@ fn cook_completion_with_stores(
     let next_action = (state == "candidate_awaiting_finalization")
         .then_some(recovery_run_id)
         .flatten()
-        .map(|run_id| AgentTaskCookRecoveryAction {
-            action: "finalize_pr".to_string(),
-            command: cook_recovery_command(&run_id, &["finalize-pr", "--recover", &run_id]),
+        .map(|run_id| {
+            let command = stores.map_or_else(
+                || cook_recovery_command(&run_id, &["finalize-pr", "--recover", &run_id]),
+                |(_, lifecycle)| {
+                    cook_recovery_command_in_store(
+                        lifecycle,
+                        &run_id,
+                        &["finalize-pr", "--recover", &run_id],
+                    )
+                },
+            );
+            AgentTaskCookRecoveryAction {
+                action: "finalize_pr".to_string(),
+                command,
+            }
         });
     Some(AgentTaskCookCompletion {
         schema: "homeboy/agent-task-cook-completion/v1",
@@ -7523,8 +7547,11 @@ fn run_cook_spine(
                         Err(error) if is_moving_base_finalization_error(&error) => {
                             let recovery = next_moving_base_recovery(
                                 active_moving_base_recovery.unwrap_or_else(|| {
-                                    moving_base_recovery_from_promotion(
-                                        &cook_id, &run_id, promotion,
+                                    moving_base_recovery_from_promotion_in_store(
+                                        lifecycle_store,
+                                        &cook_id,
+                                        &run_id,
+                                        promotion,
                                     )
                                 }),
                                 error.to_string(),
@@ -7557,7 +7584,8 @@ fn run_cook_spine(
                                 "status": "awaiting_acceptance",
                                 "reason": error.message,
                                 "run_id": run_id,
-                                "status_command": cook_recovery_command(
+                                "status_command": cook_recovery_command_in_store(
+                                    lifecycle_store,
                                     &run_id,
                                     &["status", &run_id, "--full"],
                                 ),
