@@ -1909,6 +1909,20 @@ fn reconcile_stale_running_runs_for_read(store: &ObservationStore) -> Result<()>
         limit: Some(1000),
         ..RunListFilter::default()
     })? {
+        // A detached worker owns a transferring row through its durable
+        // deadline, even when the launcher is gone. Settle an expired handoff
+        // before considering generic stale-owner evidence.
+        if store.expire_running_run_handoff(&run.id)?.is_some() {
+            continue;
+        }
+        if run
+            .metadata_json
+            .pointer("/homeboy_ownership_handoff/state")
+            .and_then(Value::as_str)
+            == Some("transferring")
+        {
+            continue;
+        }
         let Some(reason) = api_stale_running_reason(&run) else {
             continue;
         };
