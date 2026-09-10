@@ -337,6 +337,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         0
     };
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
+    if let Ok(record) = agent_task_lifecycle::exact_record(&target.run_id) {
+        attach_lab_snapshot_failure_projection(&mut value, &record);
+    }
     if value["action_eligibility"]["actions"]
         .as_array()
         .is_some_and(|actions| {
@@ -1386,6 +1389,89 @@ fn lab_transport_repair_action_for_receipt(
     .with_kind(CommandNextActionKind::Repair)
 }
 
+/// Snapshot construction happens before a provider or runner owns work. Its
+/// producer deliberately records no command: only the durable lifecycle can
+/// decide whether this exact record admits a replay.
+fn lab_snapshot_recovery_projection(
+    record: &AgentTaskRunRecord,
+    retry: &RetryReplayAction,
+) -> Option<Value> {
+    let recovery = record
+        .metadata
+        .pointer("/pre_execution_failure/details/recovery")?;
+    if record
+        .metadata
+        .pointer("/pre_execution_failure/details/classification")?
+        .as_str()
+        != Some("snapshot_construction")
+        || recovery.get("owner").and_then(Value::as_str) != Some("durable_lifecycle")
+        || recovery.get("action").and_then(Value::as_str) != Some("project_lifecycle_recovery")
+    {
+        return None;
+    }
+    let reason = recovery.get("reason").and_then(Value::as_str)?;
+    let remediation = recovery.get("remediation").and_then(Value::as_str)?;
+    // Snapshot construction has no provider-side state to continue. A Cook
+    // therefore needs corrected inputs and a replacement lifecycle run, even
+    // when an older generic replay plan remains readable.
+    let cook_owned = record.metadata["cook_id"].is_string();
+    let (readiness, admission, action, projected_reason) = if cook_owned {
+        (
+            "unavailable",
+            json!({ "admitted": false, "reason": reason }),
+            None,
+            json!(reason),
+        )
+    } else {
+        (
+            retry.readiness,
+            retry.admission.clone(),
+            retry
+                .action
+                .as_ref()
+                .and_then(|action| action.action.clone()),
+            if retry.action.is_some() {
+                Value::Null
+            } else {
+                json!(reason)
+            },
+        )
+    };
+    Some(json!({
+        "owner": {
+            "run_id": record.run_id,
+            "lifecycle": if cook_owned { "cook" } else { "agent_task" },
+        },
+        "readiness": readiness,
+        "reason": projected_reason,
+        "admission": admission,
+        "action": action,
+        "remediation": remediation,
+    }))
+}
+
+fn attach_lab_snapshot_failure_projection(value: &mut Value, record: &AgentTaskRunRecord) {
+    let retry = retry_replay_action(record);
+    if let Some(projection) = lab_snapshot_recovery_projection(record, &retry) {
+        if projection["admission"]["admitted"] == false {
+            let reason = projection["admission"]["reason"].clone();
+            if let Some(actions) = value
+                .pointer_mut("/action_eligibility/actions")
+                .and_then(Value::as_array_mut)
+            {
+                for action in actions
+                    .iter_mut()
+                    .filter(|action| action["action"] == "retry")
+                {
+                    action["availability"] = json!("unavailable");
+                    action["reason"] = reason.clone();
+                }
+            }
+        }
+        value["lab_snapshot_failure"] = projection;
+    }
+}
+
 const DISCOVERY_NEXT_ACTION_LIMIT: usize = 8;
 
 fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Option<&str>) {
@@ -1769,7 +1855,15 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
             }));
         }
     }
-    let retry = retry_replay_action(&record);
+    let mut retry = retry_replay_action(&record);
+    let lab_snapshot_failure = lab_snapshot_recovery_projection(&record, &retry);
+    if let Some(reason) = lab_snapshot_failure
+        .as_ref()
+        .filter(|projection| projection["admission"]["admitted"] == false)
+        .and_then(|projection| projection["reason"].as_str())
+    {
+        retry = RetryReplayAction::unavailable(retry.owner.clone(), reason);
+    }
     let next_commands = diagnose_next_commands(
         &record,
         retry.action.as_ref(),
@@ -1793,11 +1887,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "runner_diagnostic_probe": runner_diagnostic_probe,
         "continuation_admission": record.metadata.get("cook_continuation_admission"),
         "retry_replay": retry.projection(),
+        "lab_snapshot_failure": lab_snapshot_failure,
         "next_commands": next_commands,
     });
     if let Some(projection) = lab_transport_failure_projection(&record, run_id) {
         value["lab_transport_failure"] = projection;
     }
+    let has_lab_snapshot_failure = value["lab_snapshot_failure"].is_object();
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
     if let Some(selection) = target.selection {
@@ -1828,6 +1924,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         runner_cancellation.is_some(),
         queued_runner_ownership.is_some(),
         current_lifecycle_diagnostic.is_some(),
+        has_lab_snapshot_failure,
     );
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
@@ -1966,8 +2063,29 @@ fn attach_diagnose_actionable(
     runner_cancellation: bool,
     queued_runner_ownership: bool,
     current_lifecycle_denial: bool,
+    lab_snapshot_failure: bool,
 ) {
     let run_id = record.run_id.as_str();
+    if lab_snapshot_failure {
+        if let Value::Object(map) = value {
+            map.insert(
+                "next_action_basis".to_string(),
+                Value::String(DIAGNOSE_ACTION_BASIS_DIAGNOSIS.to_string()),
+            );
+        }
+        attach_actionable_metadata(
+            value,
+            CommandActionableMetadata {
+                run: Some(diagnose_run_ref(record, runner_id)),
+                refs: CommandResultRefs {
+                    agent_tasks: vec![agent_task_ref(run_id)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        return;
+    }
     if let Some(action) = lab_transport_repair_action(record) {
         if let Value::Object(map) = value {
             map.insert(

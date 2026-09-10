@@ -2157,6 +2157,12 @@ fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift
     )
     .expect_err("construction failure must reject transport");
     assert_eq!(error.details["classification"], "snapshot_construction");
+    assert_eq!(error.details["recovery"]["owner"], "durable_lifecycle");
+    assert_eq!(
+        error.details["recovery"]["action"],
+        "project_lifecycle_recovery"
+    );
+    assert!(error.details["recovery"]["command"].is_null());
     assert!(
         !marker.path().exists(),
         "transport must not start after staging failure"
