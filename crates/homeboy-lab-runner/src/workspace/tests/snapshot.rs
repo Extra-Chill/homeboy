@@ -1954,6 +1954,44 @@ fn snapshot_staging_uses_one_manifest_policy_for_nested_ignored_directories() {
 }
 
 #[test]
+#[cfg(unix)]
+fn snapshot_staging_materializes_nested_guidance_links_when_the_target_is_excluded() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    let guidance = source.join("wp-content/lib/example/policies");
+    fs::create_dir_all(&guidance).expect("guidance directory");
+    fs::write(guidance.join("AGENTS.md"), "guidance\n").expect("guidance target");
+    symlink("AGENTS.md", guidance.join("CLAUDE.md")).expect("guidance link");
+    let excludes = vec!["**/AGENTS.md".to_string()];
+
+    let before = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(&source, &excludes, &manifest, None).expect("stage");
+    let staged_source = stage.path().join("source");
+    let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
+    let after = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
+
+    validate_snapshot_stability(&before, &staged, &after, &source, &staged_source)
+        .expect("the finalized stage has the source content identity");
+    assert!(
+        !staged_source
+            .join("wp-content/lib/example/policies/CLAUDE.md")
+            .symlink_metadata()
+            .expect("staged guidance")
+            .file_type()
+            .is_symlink(),
+        "a link whose excluded target would be dangling is materialized"
+    );
+    assert_eq!(
+        fs::read_to_string(staged_source.join("wp-content/lib/example/policies/CLAUDE.md"))
+            .expect("materialized guidance"),
+        "guidance\n"
+    );
+}
+
+#[test]
 fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_execution() {
     let workspace = tempfile::tempdir().expect("workspace");
     let source = workspace.path().join("source");
