@@ -17,7 +17,7 @@ use homeboy::runner::runners::{self, RunnerExecOptions};
 use homeboy_lab_contract::lab::transport_failure::{
     preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportOperation,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
@@ -1847,6 +1847,28 @@ fn renew_unmaterialized_replay_claim_before_materialization() -> homeboy::core::
 #[derive(Debug)]
 struct CliCookAdmissionReplayDriver;
 
+#[derive(Debug)]
+struct CliQueuedRetryReplayDriver;
+
+impl homeboy::core::daemon::orchestration::QueuedRetryReplayDriver for CliQueuedRetryReplayDriver {
+    fn replay(&self, run_id: &str) -> homeboy::core::Result<serde_json::Value> {
+        let scoped_run_ids = HashSet::from([run_id.to_string()]);
+        let result = crate::agents::agent_task_service::run_next_with_cook_dispatcher(
+            Arc::new(
+                crate::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+            ),
+            reconstruct_cook_attempt_dispatcher,
+            Some(&scoped_run_ids),
+        )?;
+        Ok(serde_json::json!({
+            "claimed": result.value.is_some(),
+            "exit_code": result.exit_code,
+            "queue_skips": result.skipped,
+            "queue_admission": result.queue_admission,
+        }))
+    }
+}
+
 impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
     for CliCookAdmissionReplayDriver
 {
@@ -2054,6 +2076,9 @@ fn validate_replay_intent(
 pub(crate) fn register_unmaterialized_cook_replay_driver() {
     homeboy::core::daemon::orchestration::register_cook_admission_replay_driver(Arc::new(
         CliCookAdmissionReplayDriver,
+    ));
+    homeboy::core::daemon::orchestration::register_queued_retry_replay_driver(Arc::new(
+        CliQueuedRetryReplayDriver,
     ));
 }
 

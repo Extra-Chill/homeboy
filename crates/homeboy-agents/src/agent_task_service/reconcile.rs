@@ -605,6 +605,40 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
     fn reconcile_unmaterialized_cook_admissions(&self) -> Result<serde_json::Value> {
         reconcile_unmaterialized_cook_admissions()
     }
+
+    fn reconcile_queued_retries(&self) -> Result<serde_json::Value> {
+        reconcile_queued_retries()
+    }
+}
+
+/// Resume one retry reservation after the accepting process dies between the
+/// durable action acknowledgement and optional dispatch. Selecting it is a
+/// read; the registered queue consumer owns the atomic queued-to-running claim.
+pub fn reconcile_queued_retries() -> Result<serde_json::Value> {
+    reconcile_queued_retries_with(|run_id| {
+        homeboy_core::daemon::orchestration::replay_queued_retry(run_id)
+    })
+}
+
+fn reconcile_queued_retries_with(
+    replay: impl FnOnce(&str) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let (mut records, _) = agent_task_lifecycle::read_all_records_with_health()?;
+    records.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    let Some(record) = records.into_iter().find(|record| {
+        record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+            && record.metadata["retry_of"].is_string()
+            && record.metadata.get("queue_quarantine").is_none()
+    }) else {
+        return Ok(serde_json::json!({ "claimed": false }));
+    };
+
+    let receipt = replay(&record.run_id)?;
+    Ok(serde_json::json!({
+        "claimed": receipt["claimed"].as_bool().unwrap_or(!receipt.is_null()),
+        "run_id": record.run_id,
+        "receipt": receipt,
+    }))
 }
 
 /// Advance reference-only Cook admissions from the daemon's serialized tick.
@@ -1004,6 +1038,55 @@ mod tests {
                 serde_json::json!("2000-01-01T00:00:00+00:00");
         })
         .expect("make admission due");
+    }
+
+    #[test]
+    fn queued_retry_reconciliation_replays_a_crash_reserved_successor_once() {
+        with_isolated_home(|_| {
+            let source_run_id = "retry-source";
+            let successor_run_id = "retry-successor";
+            let plan = AgentTaskPlan::new("queued-retry", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(source_run_id)).expect("source");
+            agent_task_lifecycle::rewrite_record_for_test(source_run_id, |record| {
+                record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+            })
+            .expect("terminal source");
+            agent_task_lifecycle::submit_plan(&plan, Some(successor_run_id)).expect("successor");
+            agent_task_lifecycle::rewrite_record_for_test(successor_run_id, |record| {
+                record.metadata["retry_of"] = serde_json::json!(source_run_id);
+            })
+            .expect("durable retry reservation");
+
+            // The restart boundary is after the Retry action committed this
+            // successor but before any dispatcher ran. Fleet cleanup must not
+            // mistake the now-dead launcher for lost queued work.
+            let fleet = reconcile_stale_active_runs(false).expect("fleet reconciliation");
+            assert_eq!(fleet.considered, 0, "{fleet:?}");
+            assert_eq!(
+                agent_task_lifecycle::exact_record(successor_run_id)
+                    .expect("reserved successor")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+
+            let calls = std::cell::Cell::new(0usize);
+            let first = reconcile_queued_retries_with(|run_id| {
+                assert_eq!(run_id, successor_run_id);
+                calls.set(calls.get() + 1);
+                agent_task_lifecycle::mark_running(run_id)?;
+                Ok(serde_json::json!({ "claimed": true }))
+            })
+            .expect("replay queued successor after launcher crash");
+            assert_eq!(first["run_id"], successor_run_id);
+            assert_eq!(calls.get(), 1);
+
+            let replay = reconcile_queued_retries_with(|_| {
+                panic!("a claimed successor must not be replayed")
+            })
+            .expect("idempotent restart reconciliation");
+            assert_eq!(replay["claimed"], false);
+            assert_eq!(calls.get(), 1);
+        });
     }
 
     #[test]

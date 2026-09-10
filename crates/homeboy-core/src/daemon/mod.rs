@@ -1813,6 +1813,9 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             let _ = orchestration::reconcile_unmaterialized_cook_admissions();
         });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_queued_retries();
+        });
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
         // supervisor died without persisting anything.
