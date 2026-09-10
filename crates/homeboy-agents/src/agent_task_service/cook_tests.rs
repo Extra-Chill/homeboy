@@ -805,9 +805,43 @@ fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
 
 #[test]
 fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
-    let mut plan = compile_options("timeout-report").identity.initial_plan;
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let options = compile_options("timeout-report");
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist timeout recipe");
+    let mut plan = options.identity.initial_plan.clone();
     plan.options.timeout_ms = Some(1_200_000);
     plan.tasks[0].limits.timeout_ms = Some(1_200_000);
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "timeout-run", |_| Ok(serde_json::json!({})))
+        .expect("persist timeout run");
+    lifecycle_store
+        .record_cook_attempt("timeout-report", 1, "timeout-run")
+        .expect("index timeout run");
+    lifecycle_store
+        .mutate_record("timeout-run", |record| {
+            let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "fixture".to_string(),
+                workspace: "fixture".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            };
+            record.metadata["execution_placement_decision"] = serde_json::to_value(
+                homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                    "fixture",
+                    "v1",
+                    identity,
+                    homeboy_lab_runner_contract::Placement::Local,
+                ),
+            )
+            .unwrap();
+            true
+        })
+        .expect("persist rooted placement");
     let mut aggregate = review_form_aggregate(&plan);
     aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
@@ -863,6 +897,7 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     };
 
     make_provider_timeout_actionable(
+        Some(&lifecycle_store),
         &mut report,
         &aggregate,
         &plan,
@@ -883,12 +918,28 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     let context = report.value.failure_context.expect("failure context");
     assert_eq!(context.reason_code, "provider_timeout");
     assert_eq!(
-        context.diagnostic.unwrap()["data"]["remaining_provider_executions"],
+        context.diagnostic.as_ref().unwrap()["data"]["remaining_provider_executions"],
         1
     );
     assert_eq!(
         context.legal_actions[0].command,
-        "homeboy agent-task cook-continue timeout-run --timeout-ms 2400000"
+        "homeboy --placement local agent-task cook-continue timeout-run --timeout-ms 2400000"
+    );
+
+    report.value.failure_context = Some(context);
+    bind_report_to_stores(&mut report.value, &recipe_store, &lifecycle_store, true);
+    let rebound = report
+        .value
+        .failure_context
+        .expect("rebound failure context");
+    assert_eq!(rebound.reason_code, "provider_timeout");
+    assert_eq!(
+        rebound.diagnostic.expect("timeout diagnostic")["class"],
+        "agent_task.provider_timeout"
+    );
+    assert_eq!(
+        rebound.legal_actions[0].command,
+        "homeboy --placement local agent-task cook-continue timeout-run --timeout-ms 2400000"
     );
 }
 
@@ -982,7 +1033,7 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
         exit_code: 1,
     };
 
-    make_provider_rotation_actionable(&mut report, &aggregate, "rotation-run");
+    make_provider_rotation_actionable(None, &mut report, &aggregate, "rotation-run");
 
     assert_eq!(
         report.value.terminal_failure_classification.as_deref(),
@@ -1130,6 +1181,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
     };
 
     make_provider_timeout_actionable(
+        None,
         &mut report,
         &aggregate,
         &plan,

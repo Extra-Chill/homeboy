@@ -5785,6 +5785,12 @@ pub(crate) fn bind_report_to_stores(
         &report.cook_id,
         &report.invocation_run_ids,
     );
+    let enriched_failure_context = report.failure_context.take().filter(|context| {
+        matches!(
+            context.reason_code.as_str(),
+            "provider_timeout" | "review_form_timeout" | "provider_rotation_exhausted"
+        )
+    });
     report.failure_context = failure_context_required
         .then(|| {
             cook_failure_context_with_stores(
@@ -5796,6 +5802,22 @@ pub(crate) fn bind_report_to_stores(
             )
         })
         .flatten();
+    if let (Some(context), Some(enriched)) =
+        (report.failure_context.as_mut(), enriched_failure_context)
+    {
+        context.phase = enriched.phase;
+        context.reason_code = enriched.reason_code;
+        context.diagnostic = enriched.diagnostic;
+        if matches!(
+            context.reason_code.as_str(),
+            "provider_timeout" | "review_form_timeout"
+        ) {
+            context.recovery_legal = enriched.recovery_legal;
+            context.recovery_reason = enriched.recovery_reason;
+            context.legal_actions = enriched.legal_actions;
+            context.next_actions = enriched.next_actions;
+        }
+    }
     report.report_stores = Some((recipe_store.clone(), lifecycle_store.clone()));
 }
 

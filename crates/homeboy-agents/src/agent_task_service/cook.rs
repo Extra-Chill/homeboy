@@ -813,7 +813,11 @@ fn promote_with_operation_claim_in_store(
                 "promotion_operation",
                 "operation_in_progress",
                 Some(operation_key),
-                Some(vec![cook_continue_command(None, run_id, false, None)]),
+                Some(vec![cook_recovery_command_in_store(
+                    lifecycle_store,
+                    run_id,
+                    &["cook-continue", run_id],
+                )]),
             );
             error.details["claim"] = serde_json::to_value(claim).unwrap_or(Value::Null);
             Err(error)
@@ -4304,6 +4308,7 @@ fn provider_timeout_ms(
 }
 
 fn make_provider_timeout_actionable(
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
     report: &mut AgentTaskRunResult<AgentTaskCookReport>,
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
     plan: &AgentTaskPlan,
@@ -4313,6 +4318,7 @@ fn make_provider_timeout_actionable(
 ) {
     if plan_is_review_form_only(plan) {
         make_review_form_timeout_actionable(
+            lifecycle_store,
             report,
             aggregate,
             plan,
@@ -4347,10 +4353,11 @@ fn make_provider_timeout_actionable(
         && next_timeout_ms > timeout_ms
         && !deadline_expired;
     let command = can_retry.then(|| {
-        format!(
-            "{} --timeout-ms {next_timeout_ms}",
-            cook_continue_command(None, run_id, false, None)
-        )
+        let continuation = lifecycle_store.map_or_else(
+            || cook_continue_command(None, run_id, false, None),
+            |store| cook_recovery_command_in_store(store, run_id, &["cook-continue", run_id]),
+        );
+        format!("{} --timeout-ms {next_timeout_ms}", continuation)
     });
     let recovery_guidance = if deadline_expired {
         "The durable provider execution deadline is exhausted.".to_string()
@@ -4404,7 +4411,16 @@ fn make_provider_timeout_actionable(
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
-                command: format!("homeboy agent-task diagnose {run_id} --full"),
+                command: lifecycle_store.map_or_else(
+                    || format!("homeboy agent-task diagnose {run_id} --full"),
+                    |store| {
+                        cook_recovery_command_in_store(
+                            store,
+                            run_id,
+                            &["diagnose", run_id, "--full"],
+                        )
+                    },
+                ),
             });
         }
         if let Some(command) = command {
@@ -4426,6 +4442,7 @@ fn make_provider_timeout_actionable(
 /// terminal Cook surface. The aggregate remains the complete record; this is a
 /// bounded top-level explanation for the no-candidate terminal path.
 fn make_provider_rotation_actionable(
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
     report: &mut AgentTaskRunResult<AgentTaskCookReport>,
     aggregate: &AgentTaskAggregate,
     run_id: &str,
@@ -4495,7 +4512,12 @@ fn make_provider_rotation_actionable(
         evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
         next_action: AgentTaskCookRecoveryAction {
             action: "diagnose".to_string(),
-            command: format!("homeboy agent-task diagnose {run_id} --full"),
+            command: lifecycle_store.map_or_else(
+                || format!("homeboy agent-task diagnose {run_id} --full"),
+                |store| {
+                    cook_recovery_command_in_store(store, run_id, &["diagnose", run_id, "--full"])
+                },
+            ),
         },
         diagnostic: Some(diagnostic_value.clone()),
     });
@@ -4507,6 +4529,7 @@ fn make_provider_rotation_actionable(
 }
 
 fn make_review_form_timeout_actionable(
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
     report: &mut AgentTaskRunResult<AgentTaskCookReport>,
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
     plan: &AgentTaskPlan,
@@ -4541,9 +4564,13 @@ fn make_review_form_timeout_actionable(
         && next_timeout_ms > timeout_ms
         && !deadline_expired;
     let command = can_retry.then(|| {
+        let continuation = lifecycle_store.map_or_else(
+            || cook_continue_command(None, run_id, false, None),
+            |store| cook_recovery_command_in_store(store, run_id, &["cook-continue", run_id]),
+        );
         format!(
             "{} --review-form-timeout-ms {next_timeout_ms}",
-            cook_continue_command(None, run_id, false, None)
+            continuation
         )
     });
     let recovery_guidance = if deadline_expired {
@@ -4632,7 +4659,16 @@ fn make_review_form_timeout_actionable(
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
-                command: format!("homeboy agent-task diagnose {run_id} --full"),
+                command: lifecycle_store.map_or_else(
+                    || format!("homeboy agent-task diagnose {run_id} --full"),
+                    |store| {
+                        cook_recovery_command_in_store(
+                            store,
+                            run_id,
+                            &["diagnose", run_id, "--full"],
+                        )
+                    },
+                ),
             });
         }
         if let Some(command) = command {
@@ -7106,6 +7142,7 @@ fn run_cook_spine(
                 invocation_latest_run_id: Some(&run_id),
             });
             make_provider_timeout_actionable(
+                Some(lifecycle_store),
                 &mut report,
                 &aggregate,
                 &plan,
@@ -7117,7 +7154,12 @@ fn run_cook_spine(
                 )
                 .unwrap_or(true),
             );
-            make_provider_rotation_actionable(&mut report, &aggregate, &run_id);
+            make_provider_rotation_actionable(
+                Some(lifecycle_store),
+                &mut report,
+                &aggregate,
+                &run_id,
+            );
             if report.value.terminal_phase.is_none() {
                 if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
                     record.metadata["provider_executions_consumed"]
