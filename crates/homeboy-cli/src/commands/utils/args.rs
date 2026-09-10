@@ -6,9 +6,9 @@
 //!
 //! See: https://github.com/Extra-Chill/homeboy/issues/436
 
-use clap::{Arg, ArgAction, Args, Command, CommandFactory};
+use clap::{Arg, ArgAction, Args, Command, CommandFactory, Parser};
 
-use crate::cli_surface::Cli;
+use crate::cli_surface::{Cli, Commands};
 use crate::command_capability::argv_separator_index;
 use homeboy::core::component::{self, Component};
 use homeboy::core::scope::{Scope, ScopeKind};
@@ -103,15 +103,24 @@ pub(crate) fn filter_passthrough_args(command: PassthroughCommand, args: &[Strin
 /// argument — `homeboy bench comp -- sh -c -- inner` — and marking it injected
 /// the sentinel into the argv Homeboy forwards verbatim.
 pub(crate) fn mark_explicit_passthrough(args: Vec<String>) -> Vec<String> {
-    let explicit_passthrough = matches!(args.get(1).map(String::as_str), Some("bench"))
-        || review_action_index(&args).is_some_and(|index| args[index] == "test");
-    if !explicit_passthrough {
-        return args;
-    }
-
     let Some(separator) = argv_separator_index(&args) else {
         return args;
     };
+    // Let Clap identify the command path. Scanning tokens for `review test`
+    // mistakes values of root options (for example `--runner test`) for actions.
+    let supports_passthrough = Cli::try_parse_from(&args).is_ok_and(|cli| {
+        matches!(
+            cli.command,
+            Commands::Bench(_)
+                | Commands::Review(crate::commands::review::ReviewArgs {
+                    command: Some(crate::commands::review::ReviewCommand::Test(_)),
+                    ..
+                })
+        )
+    });
+    if !supports_passthrough {
+        return args;
+    }
 
     let mut result = args;
     result.insert(separator + 1, EXPLICIT_PASSTHROUGH_SENTINEL.to_string());
@@ -275,59 +284,6 @@ fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
-/// Locate the review action solely to preserve explicit `review test --`
-/// passthrough. Parsing and option placement remain Clap's responsibility.
-fn review_action_index(args: &[String]) -> Option<usize> {
-    let separator = args
-        .iter()
-        .position(|arg| arg == "--")
-        .unwrap_or(args.len());
-    let review_index = args[..separator].iter().position(|arg| arg == "review")?;
-
-    let mut index = review_index + 1;
-    while index < separator {
-        if matches!(
-            args[index].as_str(),
-            "audit" | "audit-baseline" | "lint" | "test" | "build" | "ci"
-        ) {
-            return Some(index);
-        }
-        index += review_shared_option_width(args, index).unwrap_or(1);
-    }
-    None
-}
-
-fn review_shared_option_width(args: &[String], index: usize) -> Option<usize> {
-    let option = args.get(index)?;
-    let takes_value = [
-        "--run-id",
-        "--path",
-        "--extension",
-        "--changed-since",
-        "--lab-changed-files-json",
-        "--ci-profile",
-        "--audit-profile",
-        "--report",
-        "--banner",
-    ];
-    let flags = [
-        "--changed-only",
-        "--summary",
-        "--baseline",
-        "--ignore-baseline",
-        "--ratchet",
-    ];
-
-    if flags.contains(&option.as_str()) {
-        return Some(1);
-    }
-    takes_value.iter().find_map(|flag| {
-        (option == flag)
-            .then_some(2)
-            .or_else(|| option.starts_with(&format!("{flag}=")).then_some(1))
-    })
-}
-
 #[cfg(test)]
 mod review_option_order_tests {
     use super::*;
@@ -361,6 +317,34 @@ mod review_option_order_tests {
                 EXPLICIT_PASSTHROUGH_SENTINEL,
                 "--changed-since",
                 "main",
+            ]
+            .map(str::to_string)
+            .to_vec()
+        );
+    }
+
+    #[test]
+    fn parser_identifies_review_test_passthrough_when_root_global_values_match_actions() {
+        let command = [
+            "homeboy", "--runner", "audit", "review", "test", "fixture", "--", "--filter",
+            "focused",
+        ]
+        .map(str::to_string)
+        .to_vec();
+
+        assert_eq!(
+            normalize(command),
+            [
+                "homeboy",
+                "--runner",
+                "audit",
+                "review",
+                "test",
+                "fixture",
+                "--",
+                EXPLICIT_PASSTHROUGH_SENTINEL,
+                "--filter",
+                "focused",
             ]
             .map(str::to_string)
             .to_vec()

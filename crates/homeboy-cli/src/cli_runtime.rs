@@ -1132,6 +1132,17 @@ impl CliRuntime {
         };
         let mut cli = compiled.value;
         let command_provenance = compiled.provenance;
+        if let Commands::Review(args) = &mut cli.command {
+            if let Err(error) = args.project_effective_child_args() {
+                output_runtime::emit_json_result_for_identity(
+                    Err(error),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(2);
+            }
+        }
         let mut notification_resolution =
             match crate::core::notification_route_resolver::resolve_from_cli_or_env_with_evidence(
                 cli.notification_transport.as_deref(),

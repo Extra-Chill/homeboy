@@ -165,6 +165,81 @@ pub struct ReviewAuditArgs {
 const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
 
 impl ReviewArgs {
+    /// Project review-level options into the selected action before routing or
+    /// execution. This keeps parent-first and action-first forms identical.
+    pub(crate) fn project_effective_child_args(&mut self) -> homeboy::core::Result<()> {
+        let Some(command) = self.command.take() else {
+            return Ok(());
+        };
+
+        if self.run_id.is_some() {
+            return Err(unsupported_nested_option("--run-id"));
+        }
+        if self.report.is_some() || !self.banner.is_empty() || self.ci_profile.is_some() {
+            return Err(unsupported_nested_option(
+                "--report, --banner, or --ci-profile",
+            ));
+        }
+
+        self.command = Some(match command {
+            ReviewCommand::Audit(args) => {
+                let child = apply_review_args_to_audit(self, args.audit);
+                // A changed-only review audit becomes a HEAD-based audit after
+                // its source checkout is resolved, so its Lab contract must be
+                // local before routing reaches that resolution.
+                ReviewCommand::Audit(ReviewAuditArgs { audit: child })
+            }
+            ReviewCommand::Lint(args) => ReviewCommand::Lint(apply_review_args_to_lint(self, args)),
+            ReviewCommand::Test(args) => {
+                if self.changed.changed_only {
+                    return Err(unsupported_nested_option("--changed-only"));
+                }
+                ReviewCommand::Test(apply_review_args_to_test(self, args))
+            }
+            ReviewCommand::Build(mut args) => {
+                if self.changed.changed_only
+                    || self.summary
+                    || self.baseline_args.baseline
+                    || self.baseline_args.ignore_baseline
+                    || self.baseline_args.ratchet
+                    || !self.extension_override.extensions.is_empty()
+                    || self.audit_profile.is_some()
+                {
+                    return Err(unsupported_nested_option(
+                        "--changed-only, --summary, baseline options, --extension, or --audit-profile",
+                    ));
+                }
+                if args.target_id.is_none() {
+                    args.target_id = self.comp.component.clone();
+                }
+                if args.scope.path.is_none() {
+                    args.scope.path = self.comp.path.clone();
+                }
+                if args.changed.changed_since.is_none() {
+                    args.changed.changed_since = self.changed.changed_since().map(str::to_string);
+                }
+                ReviewCommand::Build(args)
+            }
+            ReviewCommand::AuditBaseline(args) => ReviewCommand::AuditBaseline(args),
+            ReviewCommand::Ci(args) => {
+                if self.comp.component.is_some()
+                    || self.comp.path.is_some()
+                    || !self.extension_override.extensions.is_empty()
+                    || self.changed.is_scoped()
+                    || self.summary
+                    || self.baseline_args.baseline
+                    || self.baseline_args.ignore_baseline
+                    || self.baseline_args.ratchet
+                    || self.audit_profile.is_some()
+                {
+                    return Err(unsupported_nested_option("review scope or quality options"));
+                }
+                ReviewCommand::Ci(args)
+            }
+        });
+        Ok(())
+    }
+
     pub(crate) fn nested_component_args(&self) -> Option<&PositionalComponentArgs> {
         match self.command.as_ref()? {
             ReviewCommand::Audit(args) => Some(&args.audit.comp),
@@ -200,6 +275,14 @@ impl ReviewArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        if self.changed.changed_only {
+            return Some(LabCommandContract::local_only(
+                self.command
+                    .as_ref()
+                    .map_or(REVIEW_LAB_LABEL, ReviewCommand::lab_label),
+                REVIEW_SCOPED_LAB_UNSUPPORTED_REASON,
+            ));
+        }
         if let Some(command) = &self.command {
             return match command {
                 ReviewCommand::Audit(args) => args
@@ -233,6 +316,15 @@ impl ReviewArgs {
     pub(crate) fn effective_component_args(&self) -> &PositionalComponentArgs {
         self.nested_component_args().unwrap_or(&self.comp)
     }
+}
+
+fn unsupported_nested_option(option: &str) -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "review option",
+        format!("{option} is not supported by this review action"),
+        None,
+        None,
+    )
 }
 
 /// True when the caller asked for a markdown PR-comment section instead of
@@ -355,7 +447,7 @@ fn dispatch_review_plan_step(
 pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
     match args.command.take() {
         Some(ReviewCommand::Audit(review_audit)) => {
-            let audit_args = apply_review_args_to_audit(&args, review_audit.audit);
+            let audit_args = review_audit.audit;
             let requested_source = audit_args.release_readiness_source.clone();
             let component = audit_args.comp.load()?;
             prepare_local_review_dependencies(&component)?;
@@ -369,7 +461,7 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
         }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
         Some(ReviewCommand::Lint(child_args)) => {
-            let lint_args = apply_review_args_to_lint(&args, child_args);
+            let lint_args = child_args;
             let requested_source = lint_args.release_readiness_source.clone();
             let component = lint_args.comp.load()?;
             reject_manual_changelog_edit_for_lint(&component, &lint_args)?;
@@ -382,7 +474,7 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
             )
         }
         Some(ReviewCommand::Test(child_args)) => {
-            let test_args = apply_review_args_to_test(&args, child_args);
+            let test_args = child_args;
             let requested_source = test_args.release_readiness_source.clone();
             let component = test_args.comp.load()?;
             prepare_local_review_dependencies(&component)?;
@@ -393,12 +485,7 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
                 "test",
             )
         }
-        Some(ReviewCommand::Build(mut build_args)) => {
-            if args.changed.changed_since().is_some() {
-                build_args.changed = args.changed.lab.since.clone();
-            }
-            to_value(build::run(build_args))
-        }
+        Some(ReviewCommand::Build(build_args)) => to_value(build::run(build_args)),
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
         None => to_value(run_umbrella(args)),
     }
@@ -1370,6 +1457,7 @@ fn print_stage_line<T: Serialize>(stage: &ReviewStage<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_surface::{Cli, Commands};
     use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs};
     use clap::Parser;
 
@@ -1378,6 +1466,187 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         review: ReviewArgs,
+    }
+
+    fn projected_review(argv: &[&str]) -> ReviewArgs {
+        let cli = Cli::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("review command should parse: {argv:?}\n{error}"));
+        let Commands::Review(mut review) = cli.command else {
+            panic!("expected review command");
+        };
+        review
+            .project_effective_child_args()
+            .expect("review child projection should succeed");
+        review
+    }
+
+    #[test]
+    fn review_action_projection_makes_parent_and_action_options_identical() {
+        let audit_before = projected_review(&[
+            "homeboy",
+            "review",
+            "--path",
+            "fixture-path",
+            "--extension",
+            "fixture-extension",
+            "--changed-since",
+            "main",
+            "--summary",
+            "--baseline",
+            "--audit-profile",
+            "architecture",
+            "audit",
+            "fixture",
+        ]);
+        let audit_after = projected_review(&[
+            "homeboy",
+            "review",
+            "audit",
+            "fixture",
+            "--path",
+            "fixture-path",
+            "--extension",
+            "fixture-extension",
+            "--changed-since",
+            "main",
+            "--summary",
+            "--baseline",
+            "--audit-profile",
+            "architecture",
+        ]);
+        for review in [&audit_before, &audit_after] {
+            let Some(ReviewCommand::Audit(args)) = review.command.as_ref() else {
+                panic!("expected audit action");
+            };
+            assert_eq!(args.audit.comp.path.as_deref(), Some("fixture-path"));
+            assert_eq!(
+                args.audit.extension_override.extensions,
+                ["fixture-extension"]
+            );
+            assert_eq!(args.audit.changed.changed_since.as_deref(), Some("main"));
+            assert!(args.audit.json_summary && args.audit.baseline_args.baseline);
+            assert_eq!(args.audit.profile, "architecture");
+        }
+
+        let lint_before = projected_review(&[
+            "homeboy",
+            "review",
+            "--changed-only",
+            "--summary",
+            "lint",
+            "fixture",
+        ]);
+        let lint_after = projected_review(&[
+            "homeboy",
+            "review",
+            "lint",
+            "fixture",
+            "--changed-only",
+            "--summary",
+        ]);
+        for review in [&lint_before, &lint_after] {
+            let Some(ReviewCommand::Lint(args)) = review.command.as_ref() else {
+                panic!("expected lint action");
+            };
+            assert!(args.changed.changed_only && args.summary);
+        }
+
+        let test_before = projected_review(&[
+            "homeboy",
+            "review",
+            "--changed-since",
+            "main",
+            "--summary",
+            "test",
+            "fixture",
+        ]);
+        let test_after = projected_review(&[
+            "homeboy",
+            "review",
+            "test",
+            "fixture",
+            "--changed-since",
+            "main",
+            "--summary",
+        ]);
+        for review in [&test_before, &test_after] {
+            let Some(ReviewCommand::Test(args)) = review.command.as_ref() else {
+                panic!("expected test action");
+            };
+            assert_eq!(args.changed.changed_since(), Some("main"));
+            assert!(args.json_summary);
+        }
+
+        let build_before = projected_review(&[
+            "homeboy",
+            "review",
+            "--changed-since",
+            "main",
+            "build",
+            "fixture",
+        ]);
+        let build_after = projected_review(&[
+            "homeboy",
+            "review",
+            "build",
+            "fixture",
+            "--changed-since",
+            "main",
+        ]);
+        for review in [&build_before, &build_after] {
+            let Some(ReviewCommand::Build(args)) = review.command.as_ref() else {
+                panic!("expected build action");
+            };
+            assert_eq!(args.target_id.as_deref(), Some("fixture"));
+            assert_eq!(args.changed.changed_since(), Some("main"));
+        }
+    }
+
+    #[test]
+    fn review_action_projection_rejects_options_not_shared_by_the_action() {
+        for argv in [
+            ["homeboy", "review", "test", "fixture", "--changed-only"].as_slice(),
+            ["homeboy", "review", "--summary", "build", "fixture"].as_slice(),
+            [
+                "homeboy",
+                "review",
+                "--extension",
+                "fixture",
+                "build",
+                "fixture",
+            ]
+            .as_slice(),
+        ] {
+            let mut cli = Cli::try_parse_from(argv).expect("command parses before projection");
+            let Commands::Review(review) = &mut cli.command else {
+                panic!("expected review command");
+            };
+            let error = review
+                .project_effective_child_args()
+                .expect_err("unsupported child option must fail before routing");
+            assert!(error.message.contains("not supported"), "{error}");
+        }
+    }
+
+    #[test]
+    fn review_action_scope_conflicts_are_rejected_in_action_first_order() {
+        for action in ["audit", "lint", "test", "build"] {
+            let error = match Cli::try_parse_from([
+                "homeboy",
+                "review",
+                action,
+                "fixture",
+                "--changed-only",
+                "--changed-since",
+                "main",
+            ]) {
+                Ok(_) => panic!("changed scopes must conflict"),
+                Err(error) => error,
+            };
+            let message = error.to_string();
+            assert!(message.contains("--changed-only"), "{action}: {message}");
+            assert!(message.contains("--changed-since"), "{action}: {message}");
+        }
     }
 
     #[test]
