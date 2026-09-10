@@ -1026,6 +1026,10 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     if !store_dir.exists() {
         return Ok(WorktreeListOutput {
             worktrees,
+            cursor: None,
+            next_cursor: None,
+            limit: usize::MAX,
+            truncated: false,
             diagnostics,
         });
     }
@@ -1052,6 +1056,80 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     worktrees.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(WorktreeListOutput {
         worktrees,
+        cursor: None,
+        next_cursor: None,
+        limit: usize::MAX,
+        truncated: false,
+        diagnostics,
+    })
+}
+
+pub(super) fn list_page_with_store(
+    store_dir: &Path,
+    options: WorktreeListOptions,
+) -> Result<WorktreeListOutput> {
+    let limit = options.limit.clamp(1, 500);
+    // The cursor is only compared to discovered manifest names; it never forms
+    // a filesystem path, so preserve its exact opaque boundary.
+    let cursor = options.cursor.as_deref();
+    let mut entries = if store_dir.exists() {
+        fs::read_dir(store_dir)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(store_dir.display().to_string()))
+            })?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    entries.sort_by_key(|entry| entry.file_name());
+    let start = cursor.as_ref().map_or(0, |cursor| {
+        entries.partition_point(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                <= *cursor
+        })
+    });
+    let entries = entries
+        .into_iter()
+        .skip(start)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let truncated = entries.len() > limit;
+    let entries = entries.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = truncated.then(|| {
+        entries
+            .last()
+            .expect("a truncated page has a boundary entry")
+            .file_name()
+            .to_string_lossy()
+            .trim_end_matches(".json")
+            .to_string()
+    });
+    let mut worktrees = Vec::new();
+    let mut diagnostics = Vec::new();
+    for entry in entries {
+        match read_record_path(&entry.path()) {
+            Ok(record) => worktrees.push(record),
+            Err(error) => diagnostics.push(WorktreeListDiagnostic::from_error(
+                error,
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.trim_end_matches(".json").to_string()),
+                Some(entry.path().display().to_string()),
+            )),
+        }
+    }
+    Ok(WorktreeListOutput {
+        worktrees,
+        cursor: options.cursor,
+        next_cursor,
+        limit,
+        truncated,
         diagnostics,
     })
 }

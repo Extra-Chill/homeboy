@@ -26,8 +26,9 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
 use super::args::{
-    CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
-    ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
+    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs,
 };
 #[cfg(test)]
 use super::candidate::CandidateState;
@@ -1208,6 +1209,30 @@ pub(super) fn list_runs(
     Ok((value, 0))
 }
 
+pub(super) fn list_runs_page(
+    filter: agent_task_service::AgentTaskDiscoveryFilter,
+    args: ListArgs,
+) -> CmdResult<Value> {
+    let limit = args.limit.unwrap_or(100);
+    let report = agent_task_service_direct::discover_runs_page(
+        filter,
+        agent_task_service_direct::AgentTaskDiscoveryPageOptions {
+            limit,
+            cursor: args.cursor,
+            repo: args.repo,
+            workspace: args.worktree,
+            task_url: args.task_url,
+            submitted_after: args.submitted_after,
+            state: args.state,
+            placement: args.run_placement,
+            parent_id: args.parent_id,
+        },
+    )?;
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+    attach_agent_task_discovery_actionable(&mut value, Some("homeboy agent-task list"));
+    Ok((value, 0))
+}
+
 pub(super) fn list_filtered_latest_runs(
     options: agent_task_service_direct::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
@@ -1234,9 +1259,31 @@ pub(super) fn list_active(
     )?;
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
 
-    let buckets = active_liveness_buckets(&report);
+    let buckets = active_liveness_buckets(&report.runs);
     if let Value::Object(map) = &mut value {
         map.insert("buckets".to_string(), buckets);
+        map.insert(
+            "reconcile_hint".to_string(),
+            json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
+        );
+    }
+    attach_agent_task_discovery_actionable(&mut value, Some("homeboy agent-task active"));
+    Ok((value, 0))
+}
+
+pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
+    let limit = args.limit.unwrap_or(100);
+    let report = agent_task_service_direct::discover_runs_page(
+        agent_task_service::AgentTaskDiscoveryFilter::Active,
+        agent_task_service_direct::AgentTaskDiscoveryPageOptions {
+            limit,
+            cursor: args.cursor,
+            ..Default::default()
+        },
+    )?;
+    let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
+    if let Value::Object(map) = &mut value {
+        map.insert("buckets".to_string(), active_liveness_buckets(&report.runs));
         map.insert(
             "reconcile_hint".to_string(),
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
@@ -1318,7 +1365,7 @@ pub(super) fn reconcile_records(dry_run: bool) -> CmdResult<Value> {
 /// four-way mapping in the CLI, which is precisely the duplication #W3-4 is
 /// about: an orchestrator reading `liveness: "suspect"` had to reimplement the
 /// same table to know whether it was allowed to reconcile.
-fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport) -> Value {
+fn active_liveness_buckets(runs: &[agent_task_service_direct::AgentTaskDiscoveryRun]) -> Value {
     use agent_task_service_direct::AgentTaskLiveness;
 
     let mut buckets = serde_json::Map::new();
@@ -1326,7 +1373,7 @@ fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport
         buckets.insert(liveness.as_str().to_string(), Value::Array(Vec::new()));
     }
 
-    for run in &report.runs {
+    for run in runs {
         // A run with no classification (the `all`/`latest` filters do not
         // classify) is treated as active — the behaviour the previous
         // `Some(Active) | None` arm encoded.
@@ -1419,13 +1466,13 @@ fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Opt
     }
     if let (Some(command), Some(cursor), Some(limit)) = (
         active_command,
-        value.get("next_cursor").and_then(Value::as_u64),
+        value.get("next_cursor").and_then(Value::as_str),
         value.get("limit").and_then(Value::as_u64),
     ) {
         metadata.next_actions.push(
             CommandNextAction::new(
                 "show next page",
-                format!("{command} --limit {limit} --cursor {cursor}"),
+                format!("{command} --limit {limit} --cursor {}", quote_arg(cursor)),
             )
             .with_kind(CommandNextActionKind::Show),
         );

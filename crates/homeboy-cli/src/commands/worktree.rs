@@ -11,7 +11,7 @@ use homeboy::core::worktree::{
     self, CleanupPolicy, TaskWorktreeRecord, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions,
     WorktreeAdoptOutput, WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCreateOptions,
     WorktreeCreateOutput, WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryOptions,
-    WorktreeInventoryOutput, WorktreeListOutput, WorktreeOwnershipProbe,
+    WorktreeInventoryOutput, WorktreeListOptions, WorktreeListOutput, WorktreeOwnershipProbe,
     WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
     WorktreeRemoveOutput, WorktreeStatusOutput,
 };
@@ -126,8 +126,15 @@ enum WorktreeCommand {
         #[arg(long, default_value_t = 60)]
         retry_after_seconds: u64,
     },
-    /// List native task worktrees
-    List,
+    /// List native task worktrees in a bounded keyset page
+    List {
+        /// Maximum manifests to inspect
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Start after this task-worktree record ID
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Report bounded local task-worktree inventory and reconcile only leased terminal snapshots
     Inventory {
         /// Maximum task-worktree manifests to inspect
@@ -554,7 +561,9 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             dry_run,
             retry_after_seconds,
         })?),
-        WorktreeCommand::List => WorktreeOutput::List(worktree::list()?),
+        WorktreeCommand::List { limit, cursor } => {
+            WorktreeOutput::List(worktree::list_page(WorktreeListOptions { limit, cursor })?)
+        }
         WorktreeCommand::Inventory {
             limit,
             cursor,
@@ -824,6 +833,10 @@ mod tests {
     fn worktree_list_serializes_native_diagnostics_per_record() {
         let output = serde_json::to_value(WorktreeOutput::List(WorktreeListOutput {
             worktrees: Vec::new(),
+            cursor: None,
+            next_cursor: None,
+            limit: 100,
+            truncated: false,
             diagnostics: Vec::new(),
         }))
         .expect("serialize worktree list");

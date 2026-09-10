@@ -2260,6 +2260,66 @@ fn list_retains_valid_records_and_diagnoses_malformed_manifests() {
 }
 
 #[test]
+fn list_page_walks_manifest_keysets_without_parsing_the_remainder() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    for id in ["fixture@a", "fixture@b", "fixture@c"] {
+        let mut record = fixture_record(source.path(), &dir.path().join(id));
+        record.id = id.to_string();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(
+            store.join(format!("{id}.json")),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+    }
+    // This would be reported only on a page that reaches it, not parsed during
+    // the first page's bounded walk.
+    fs::write(store.join("fixture@z.json"), "not json\n").unwrap();
+
+    let first = list_page_with_store(
+        &store,
+        WorktreeListOptions {
+            limit: 2,
+            cursor: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        first
+            .worktrees
+            .iter()
+            .map(|record| &record.id)
+            .collect::<Vec<_>>(),
+        ["fixture@a", "fixture@b"]
+    );
+    assert!(first.diagnostics.is_empty());
+    assert_eq!(first.next_cursor.as_deref(), Some("fixture@b"));
+    assert!(first.truncated);
+
+    let second = list_page_with_store(
+        &store,
+        WorktreeListOptions {
+            limit: 2,
+            cursor: first.next_cursor,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        second
+            .worktrees
+            .iter()
+            .map(|record| &record.id)
+            .collect::<Vec<_>>(),
+        ["fixture@c"]
+    );
+    assert_eq!(second.diagnostics.len(), 1);
+    assert!(second.next_cursor.is_none());
+    assert!(!second.truncated);
+}
+
+#[test]
 fn cleanup_skips_unrepairable_missing_source_and_continues() {
     use crate::test_support::with_isolated_home;
 

@@ -404,6 +404,13 @@ pub struct WorktreeAdoptOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeListOutput {
     pub worktrees: Vec<TaskWorktreeRecord>,
+    /// The page starts strictly after this manifest identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub limit: usize,
+    pub truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<WorktreeListDiagnostic>,
 }
@@ -629,6 +636,12 @@ pub struct WorktreeInventoryOptions {
     /// Testable monotonic deadline for the complete apply page. Production
     /// callers leave this unset and use the bounded default.
     pub apply_deadline: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorktreeListOptions {
+    pub limit: usize,
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

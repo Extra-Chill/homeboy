@@ -216,6 +216,9 @@ pub struct AgentTaskLivenessSummary {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskDiscoveryRun {
     pub run_id: String,
+    /// Exact branch recorded for this run when its scoped worktree was materialized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub state: agent_task_lifecycle::AgentTaskRunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
@@ -1114,6 +1117,8 @@ fn discovery_run(
 
     AgentTaskDiscoveryRun {
         run_id: run_id.clone(),
+        branch: metadata_string(&record.metadata, "branch")
+            .or_else(|| metadata_string(&record.metadata, "worktree_branch")),
         state: record.state,
         repo: identity.repo,
         component,
@@ -1298,5 +1303,19 @@ mod tests {
 
         let error = decode_page_cursor("not-a-page-cursor").unwrap_err();
         assert_eq!(error.details["field"], "cursor");
+    }
+
+    #[test]
+    fn sparse_state_filter_does_not_turn_an_empty_physical_page_into_completion() {
+        let options = AgentTaskDiscoveryOptions {
+            state: Some("running".to_string()),
+            ..Default::default()
+        };
+        let queued = queued_record(json!({}));
+
+        assert!(
+            !matches_discovery_options(&queued, &options, None),
+            "a bounded page may have no matches while its keyset continuation still points to later rows"
+        );
     }
 }
