@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.47.1] - 2026-09-10
+
+### Changed
+- Forward declared PHPUnit extra plugins
+
 ## [3.47.0] - 2026-09-10
 
 ### Added
