@@ -17,7 +17,6 @@ const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
-const SEED_MARKER_FILE: &str = ".homeboy-seeded-at-ms";
 const LEGACY_LIFECYCLE_INFERRED: &str = "legacy lifecycle metadata inferred";
 static ISOLATED_TARGET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -193,11 +192,12 @@ pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
 }
 
-/// Resolve Cargo output for an explicit managed-execution declaration.
+/// Resolve Cargo output for managed execution.
 ///
-/// An explicit caller target is authoritative, including a relative target
-/// used to intentionally keep output in the checkout. Otherwise this acquires
-/// a stable shared-store lease for the complete child lifetime.
+/// Managed children always receive a leased target of their own. In particular,
+/// an inherited or declared `CARGO_TARGET_DIR` cannot make concurrent managed
+/// work write into the same Cargo directory. The shared store is only a warm
+/// artifact cache, not a build destination.
 pub fn acquire_managed_cargo_target(
     owner: &str,
     source_path: &Path,
@@ -208,16 +208,11 @@ pub fn acquire_managed_cargo_target(
 
 /// Acquire a fresh, leased target for a single managed run. This prevents a
 /// mutable checkout's local output from becoming part of the build lifecycle.
-/// An explicit target remains authoritative for callers that deliberately
-/// manage their own output location.
 pub fn acquire_isolated_cargo_target(
     owner: &str,
-    source_path: &Path,
-    explicit_target: Option<&str>,
+    _source_path: &Path,
+    _explicit_target: Option<&str>,
 ) -> Result<ManagedCargoTarget> {
-    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
-        return Ok(local_managed_cargo_target(owner, source_path, target));
-    }
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
     let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -259,8 +254,8 @@ pub fn acquire_managed_cargo_target_with_compatibility(
 }
 
 /// Acquire a target using compatibility collected from the exact child
-/// environment. This keeps provider attempts, retries, and controller gates in
-/// the same store when their execution declarations are the same.
+/// environment. Compatibility selects the shared warm cache used to seed each
+/// run-private store.
 pub fn acquire_managed_cargo_target_for_environment(
     owner: &str,
     source_path: &Path,
@@ -281,7 +276,7 @@ pub fn acquire_managed_cargo_target_for_environment(
     )
 }
 
-/// Acquire a worktree-private Cargo target seeded from the shared,
+/// Acquire a run-private Cargo target seeded from the shared,
 /// repository-identity-keyed base store.
 ///
 /// Every worktree compatible with a given repository identity used to
@@ -291,24 +286,19 @@ pub fn acquire_managed_cargo_target_for_environment(
 /// parallel cost roughly one build's wall time each, one at a time, rather
 /// than running concurrently.
 ///
-/// Instead, each worktree gets its own physical store, keyed by the
-/// repository identity plus its own canonical checkout path, so concurrent
-/// worktrees never contend for the same Cargo lock. A freshly created
-/// worktree store is seeded once from the base store via hard links (an
-/// inode-table update, not a data copy, so it costs no meaningful time or
-/// disk regardless of target size); releasing a worktree store promotes the
-/// artifacts it produced back to base, so the next worktree provisioned
-/// against the same identity seeds warm too.
+/// Instead, each managed run gets its own physical store. A worktree-local
+/// store is not enough: direct gates and controller recovery can overlap in
+/// one checkout, and Cargo would serialize those builds behind its target lock.
+/// A freshly created store is seeded from the base store via hard links (an
+/// inode-table update, not a data copy, so it costs no meaningful time or disk
+/// regardless of target size); releasing it promotes its new artifacts back to
+/// base, so later runs still start warm.
 fn acquire_managed_cargo_target_for_compatibility(
     owner: &str,
     source_path: &Path,
-    explicit_target: Option<&str>,
+    _explicit_target: Option<&str>,
     compatibility: &CargoTargetCompatibility,
 ) -> Result<ManagedCargoTarget> {
-    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
-        return Ok(local_managed_cargo_target(owner, source_path, target));
-    }
-
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
     acquire_managed_cargo_target_for_compatibility_in(&root, owner, source_path, compatibility)
@@ -317,7 +307,7 @@ fn acquire_managed_cargo_target_for_compatibility(
 fn acquire_managed_cargo_target_for_compatibility_in(
     root: &Path,
     owner: &str,
-    source_path: &Path,
+    _source_path: &Path,
     compatibility: &CargoTargetCompatibility,
 ) -> Result<ManagedCargoTarget> {
     let base_owner = format!("{owner}:{}", compatibility.identity());
@@ -331,38 +321,33 @@ fn acquire_managed_cargo_target_for_compatibility_in(
         SystemTime::now(),
     )?);
 
-    let canonical_source =
-        fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
-    let worktree_owner = format!(
-        "{base_owner}:worktree:{}",
-        canonical_source.to_string_lossy()
+    let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let run_owner = format!(
+        "{base_owner}:run:{}:{started}:{sequence}",
+        std::process::id()
     );
-    let lease = acquire_shared_cargo_target_in(&root, &worktree_owner, SystemTime::now())?;
+    let lease = acquire_shared_cargo_target_in(&root, &run_owner, SystemTime::now())?;
     let seeded_at = seed_worktree_cargo_target(&base_dir, lease.target_dir())?;
 
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
-        resolution: "shared",
+        resolution: "isolated",
         owner: owner.to_string(),
         promote_to: Some((base_dir, seeded_at)),
         _lease: Some(lease),
     })
 }
 
-/// Seed a freshly created worktree-private Cargo target from the shared base
-/// store once, recorded by a marker so later acquisitions of the same
-/// worktree store (repeat gate/provider runs in one worktree) skip the walk
-/// and simply keep using the store as Cargo left it.
+/// Seed a freshly created run-private Cargo target from the shared base store.
 fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<SystemTime> {
-    let marker = private_dir.join(SEED_MARKER_FILE);
-    if let Some(seeded_at) = read_marker_time(&marker) {
-        return Ok(seeded_at);
-    }
     let seeded_at = SystemTime::now();
     if base_dir.exists() {
         hardlink_tree_since(base_dir, private_dir, None);
     }
-    write_marker_time(&marker, seeded_at)?;
     Ok(seeded_at)
 }
 
@@ -373,30 +358,10 @@ fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
     ))
 }
 
-fn read_marker_time(path: &Path) -> Option<SystemTime> {
-    let millis: u64 = fs::read_to_string(path).ok()?.trim().parse().ok()?;
-    Some(UNIX_EPOCH + Duration::from_millis(millis))
-}
-
-fn write_marker_time(path: &Path, time: SystemTime) -> Result<()> {
-    fs::write(
-        path,
-        time.duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .to_string(),
-    )
-    .map_err(|error| io_error(error, "write Cargo target seed marker"))
-}
-
 /// Homeboy's own store-lifecycle sidecars. These describe the store, not
 /// Cargo's output, and must never be seeded or promoted between stores.
 fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
-    name == LOCK_FILE
-        || name == LEASE_FILE
-        || name == OWNER_FILE
-        || name == LAST_USED_FILE
-        || name == SEED_MARKER_FILE
+    name == LOCK_FILE || name == LEASE_FILE || name == OWNER_FILE || name == LAST_USED_FILE
 }
 
 /// Hard-link every regular file under `from` into `to`, mirroring the
@@ -439,22 +404,6 @@ fn hardlink_tree_since(from: &Path, to: &Path, since: Option<SystemTime>) {
             continue;
         }
         let _ = fs::hard_link(&source, &dest);
-    }
-}
-
-fn local_managed_cargo_target(owner: &str, source_path: &Path, target: &str) -> ManagedCargoTarget {
-    let target_dir = PathBuf::from(target);
-    let target_dir = if target_dir.is_absolute() {
-        target_dir
-    } else {
-        source_path.join(target_dir)
-    };
-    ManagedCargoTarget {
-        target_dir,
-        resolution: "local",
-        owner: owner.to_string(),
-        promote_to: None,
-        _lease: None,
     }
 }
 
@@ -507,7 +456,6 @@ fn cargo_compatibility_environment_name(name: &str) -> bool {
             | "CARGO_ENCODED_RUSTFLAGS"
             | "CARGO_INCREMENTAL"
             | "CARGO_PROFILE"
-            | "CARGO_TARGET_DIR"
             | "RUSTC"
             | "RUSTC_WRAPPER"
             | "RUSTC_WORKSPACE_WRAPPER"

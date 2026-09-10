@@ -1094,8 +1094,11 @@ pub fn materialize_source_commit(source: &str, commit: &str, identity: &str) -> 
             None,
         ));
     }
-    let target =
-        crate::cleanup::acquire_shared_cargo_target(&format!("controller-runtime:{commit}"))?;
+    let target = crate::cleanup::acquire_managed_cargo_target(
+        &format!("controller-runtime:{commit}"),
+        &checkout,
+        None,
+    )?;
     let build = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy"])
         .env("CARGO_TARGET_DIR", target.target_dir())
@@ -1593,8 +1596,11 @@ fn recover_pin_unlocked(
             &revision,
         ],
     )?;
-    let target =
-        crate::cleanup::acquire_shared_cargo_target(&format!("controller-runtime:{revision}"))?;
+    let target = crate::cleanup::acquire_managed_cargo_target(
+        &format!("controller-runtime:{revision}"),
+        &checkout,
+        None,
+    )?;
     let build = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy"])
         .env("CARGO_TARGET_DIR", target.target_dir())

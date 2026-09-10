@@ -2365,11 +2365,11 @@ impl SelectedGateEnvironment {
         // Store sizing is evidence only. A concurrent gate may update the
         // shared target while this observation walks it.
         let bytes_before = target.size_bytes().ok();
-        // The managed store identity is repository-scoped. Cargo separates all
-        // source, feature, profile, target, and toolchain fingerprints within it.
-        let identity = (target.resolution() == "shared")
-            .then(|| target.target_dir().file_name())
-            .flatten()
+        // Report the target this gate actually owns, rather than the shared
+        // warm-cache identity from which it may have been seeded.
+        let identity = target
+            .target_dir()
+            .file_name()
             .map(|name| name.to_string_lossy().to_string());
         self.values.insert(
             "CARGO_TARGET_DIR".to_string(),
@@ -4555,7 +4555,7 @@ mod tests {
 
             assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
             let target = report.environment.cargo_target.expect("target evidence");
-            assert_eq!(target.resolution, "shared");
+            assert_eq!(target.resolution, "isolated");
             assert!(target.path.contains("cargo-target"));
             assert!(target.owner.starts_with("agent-task-gate"));
         });
@@ -4594,13 +4594,13 @@ mod tests {
                     .cargo_target
                     .expect("target evidence")
                     .resolution,
-                "shared"
+                "isolated"
             );
         });
     }
 
     #[test]
-    fn shared_cargo_target_reports_miss_then_hit_and_metrics() {
+    fn isolated_cargo_targets_report_warm_cache_hits_and_distinct_allocations() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("gate fixture");
             let mut policy = AgentTaskGateEnvironmentPolicy::default();
@@ -4645,24 +4645,36 @@ mod tests {
                 .cargo_target
                 .expect("second target evidence");
             assert_eq!(second.state.as_deref(), Some("hit"));
-            assert_eq!(first.identity, second.identity);
-            assert_eq!(first.path, second.path);
+            assert_ne!(first.identity, second.identity);
+            assert_ne!(first.path, second.path);
         });
     }
 
     #[test]
-    fn concurrent_shared_cargo_target_gates_reuse_one_live_store() {
+    fn concurrent_cargo_build_gates_with_one_declared_target_get_isolated_stores() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("gate fixture");
+            let temp = tempfile::tempdir().expect("gate fixture root");
+            let first_worktree = temp.path().join("first");
+            let second_worktree = temp.path().join("second");
+            for worktree in [&first_worktree, &second_worktree] {
+                std::fs::create_dir_all(worktree.join("src")).expect("fixture source directory");
+                std::fs::write(
+                    worktree.join("Cargo.toml"),
+                    "[package]\nname = \"parallel-gate-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                )
+                .expect("fixture manifest");
+                std::fs::write(worktree.join("src/lib.rs"), "pub fn fixture() {}\n")
+                    .expect("fixture source");
+            }
             let barrier = std::sync::Barrier::new(2);
             let reports = std::thread::scope(|scope| {
                 let first = scope.spawn(|| {
                     barrier.wait();
-                    run_shared_target_fixture_gate(temp.path(), 1)
+                    run_shared_target_fixture_gate(&first_worktree, 1, temp.path())
                 });
                 let second = scope.spawn(|| {
                     barrier.wait();
-                    run_shared_target_fixture_gate(temp.path(), 2)
+                    run_shared_target_fixture_gate(&second_worktree, 2, temp.path())
                 });
                 [
                     first.join().expect("first gate thread"),
@@ -4684,22 +4696,32 @@ mod tests {
                 .cargo_target
                 .as_ref()
                 .expect("second target evidence");
-            assert_eq!(first.path, second.path);
-            assert_eq!(first.identity, second.identity);
+            assert_ne!(first.path, second.path);
+            assert_ne!(first.identity, second.identity);
             assert!(std::path::Path::new(&first.path).is_dir());
+            assert!(std::path::Path::new(&first.path).join("debug").is_dir());
+            assert!(std::path::Path::new(&second.path).join("debug").is_dir());
         });
     }
 
-    fn run_shared_target_fixture_gate(cwd: &Path, index: usize) -> Result<AgentTaskGateReport> {
+    fn run_shared_target_fixture_gate(
+        cwd: &Path,
+        index: usize,
+        declared_target: &Path,
+    ) -> Result<AgentTaskGateReport> {
         let mut policy = AgentTaskGateEnvironmentPolicy::default();
         policy.shared_cargo_target = Some(true);
-        policy
-            .variables
-            .insert("CARGO_TARGET_DIR".to_string(), String::new());
+        policy.variables.insert(
+            "CARGO_TARGET_DIR".to_string(),
+            declared_target
+                .join("declared-shared-target")
+                .display()
+                .to_string(),
+        );
         run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
             cwd,
             index,
-            "sleep 0.1; printf artifact > \"$CARGO_TARGET_DIR/artifact-$$\"",
+            "cargo build --quiet",
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
             None,

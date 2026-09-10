@@ -653,15 +653,10 @@ mod tests {
         )
         .expect("self-check should run");
 
-        assert_eq!(output.stdout, format!("local:{}", target.display()));
-        assert_eq!(
-            output.cargo_target,
-            Some(homeboy_core::CargoTargetEvidence {
-                path: target.to_string_lossy().to_string(),
-                resolution: "local".to_string(),
-                owner: "component:fixture".to_string(),
-            })
-        );
+        let evidence = output.cargo_target.expect("managed target evidence");
+        assert_eq!(evidence.resolution, "isolated");
+        assert_ne!(evidence.path, target.to_string_lossy());
+        assert_eq!(output.stdout, format!("isolated:{}", evidence.path));
     }
 
     #[test]
@@ -693,15 +688,10 @@ mod tests {
         )
         .expect("self-check should run");
 
-        assert_eq!(output.stdout, format!("local:{}", target.display()));
-        assert_eq!(
-            output.cargo_target,
-            Some(homeboy_core::CargoTargetEvidence {
-                path: target.to_string_lossy().to_string(),
-                resolution: "local".to_string(),
-                owner: "component:fixture".to_string(),
-            })
-        );
+        let evidence = output.cargo_target.expect("managed target evidence");
+        assert_eq!(evidence.resolution, "isolated");
+        assert_ne!(evidence.path, target.to_string_lossy());
+        assert_eq!(output.stdout, format!("isolated:{}", evidence.path));
     }
 
     #[test]
@@ -734,7 +724,7 @@ mod tests {
             let evidence = output.cargo_target.expect("managed target evidence");
 
             assert!(output.success);
-            assert_eq!(evidence.resolution, "shared");
+            assert_eq!(evidence.resolution, "isolated");
             assert!(!Path::new(&evidence.path).join(".homeboy-lease").exists());
         });
     }
