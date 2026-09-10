@@ -2684,14 +2684,15 @@ fn list_and_active_default_to_the_compact_page_limit() {
 }
 
 fn persist_discovery_record(run_id: &str, branch: &str, state: AgentTaskRunState) {
-    agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist discovery run");
+    let mut plan = test_plan();
+    plan.tasks[0].workspace.branch = Some(branch.to_string());
+    agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist discovery run");
     agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
         record.submitted_at = "2026-09-10T00:00:00Z".to_string();
         record.updated_at = Some("2026-09-10T00:00:00Z".to_string());
         record.state = state;
-        record.metadata["branch"] = json!(branch);
     })
-    .expect("set discovery fixture keyset and branch");
+    .expect("set discovery fixture keyset and state");
 }
 
 #[test]
@@ -2774,6 +2775,33 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
     with_isolated_home(|_| {
         persist_discovery_record("sparse-a", "fix/sparse", AgentTaskRunState::Running);
         persist_discovery_record("sparse-z", "fix/sparse", AgentTaskRunState::Queued);
+
+        let lifecycle =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+        assert_eq!(
+            lifecycle
+                .read_record("sparse-a")
+                .expect("reload submitted record")
+                .metadata["branch"],
+            "fix/sparse"
+        );
+
+        let active = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "active".to_string(),
+            "--branch".to_string(),
+            "fix/sparse".to_string(),
+            "--limit".to_string(),
+            "10".to_string(),
+        ]);
+        assert_eq!(active["count"], 2);
+        assert!(active["runs"]
+            .as_array()
+            .expect("active branch-scoped runs")
+            .iter()
+            .all(|run| run["branch"] == "fix/sparse"));
 
         let first = run_discovery_page(vec![
             "homeboy".to_string(),
