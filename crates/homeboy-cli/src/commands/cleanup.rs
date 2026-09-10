@@ -2548,19 +2548,7 @@ fn cleanup_inventory_with_deadline(
                         }),
                     },
                 )?;
-                category_from_output(
-                    EXTERNAL_STORAGE_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.candidate_count,
-                        applied_count: output.applied_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.estimated_bytes,
-                        reclaimed_bytes: output.reclaimed_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
+                external_storage_category(output, apply)
             },
         );
     }
@@ -3700,6 +3688,31 @@ fn category_from_output<T: Serialize>(
         metrics,
         output,
     )
+}
+
+fn external_storage_category(
+    output: cleanup::ExternalStorageCleanupOutput,
+    apply: bool,
+) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
+    let inventory_complete = output.inventory_complete;
+    category_from_output(
+        EXTERNAL_STORAGE_METADATA,
+        apply,
+        CleanupCategoryMetrics {
+            candidate_count: output.candidate_count,
+            applied_count: output.applied_count,
+            skipped_count: output.skipped_count,
+            estimated_bytes: output.estimated_bytes,
+            reclaimed_bytes: output.reclaimed_bytes,
+        },
+        output,
+    )
+    .map(|mut category| {
+        if !inventory_complete {
+            category.inventory_completeness = "partial".to_string();
+        }
+        vec![category]
+    })
 }
 
 fn category_from_command<T: Serialize>(
@@ -6149,6 +6162,30 @@ mod tests {
         );
         assert!(summary.contains("Observed filesystem availability increase: 4.0 KiB\n"));
         assert!(summary.contains("size not measured (pressure) /tmp/homeboy/target\n"));
+    }
+
+    #[test]
+    fn external_storage_category_propagates_partial_inventory() {
+        let category = external_storage_category(
+            cleanup::ExternalStorageCleanupOutput {
+                provider_count: 1,
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                unknown_bytes: 12,
+                unknown_bytes_is_lower_bound: true,
+                inventory_complete: false,
+                incomplete_roots: Vec::new(),
+                providers: Vec::new(),
+            },
+            false,
+        )
+        .expect("external storage category");
+        assert_eq!(category[0].category, "external_storage");
+        assert_eq!(category[0].inventory_completeness, "partial");
+        assert_eq!(category[0].output["unknown_bytes"], 12);
     }
 
     #[test]

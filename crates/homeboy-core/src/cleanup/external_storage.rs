@@ -15,9 +15,9 @@ use homeboy_engine_primitives::command::{
     SupervisedCommandTermination,
 };
 use homeboy_extension_contract::{
-    ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
-    ExternalStorageReclaimResult, ExternalStorageReclaimTarget, ExternalStorageRequest,
-    ExternalStorageResourceClass, ExternalStorageRetentionProviderConfig,
+    ExternalStorageIncompleteRoot, ExternalStorageInventory, ExternalStorageItem,
+    ExternalStorageOperation, ExternalStorageReclaimResult, ExternalStorageReclaimTarget,
+    ExternalStorageRequest, ExternalStorageResourceClass, ExternalStorageRetentionProviderConfig,
     EXTERNAL_STORAGE_RETENTION_SCHEMA, MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS,
     MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
 };
@@ -47,6 +47,10 @@ pub struct ExternalStorageCleanupOutput {
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub unknown_bytes: u64,
+    /// `unknown_bytes` is a lower bound when any provider inventory is partial.
+    pub unknown_bytes_is_lower_bound: bool,
+    pub inventory_complete: bool,
+    pub incomplete_roots: Vec<ExternalStorageIncompleteRoot>,
     pub providers: Vec<ExternalStorageProviderOutput>,
 }
 
@@ -59,6 +63,9 @@ pub struct ExternalStorageProviderOutput {
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub unknown_bytes: u64,
+    pub unknown_bytes_is_lower_bound: bool,
+    pub inventory_complete: bool,
+    pub incomplete_roots: Vec<ExternalStorageIncompleteRoot>,
     pub candidates: Vec<ExternalStorageEvidence>,
     pub applied: Vec<ExternalStorageEvidence>,
 }
@@ -97,6 +104,9 @@ pub fn cleanup_external_storage_with_providers(
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         unknown_bytes: 0,
+        unknown_bytes_is_lower_bound: false,
+        inventory_complete: true,
+        incomplete_roots: Vec::new(),
         providers: Vec::new(),
     };
     let mut remaining_count = options.limit;
@@ -192,6 +202,18 @@ pub fn cleanup_external_storage_with_providers(
             estimated_bytes,
             reclaimed_bytes,
             unknown_bytes: inventory.unknown_bytes,
+            unknown_bytes_is_lower_bound: inventory
+                .completeness
+                .as_ref()
+                .is_some_and(|value| !value.complete),
+            inventory_complete: inventory
+                .completeness
+                .as_ref()
+                .is_none_or(|value| value.complete),
+            incomplete_roots: inventory
+                .completeness
+                .as_ref()
+                .map_or_else(Vec::new, |value| value.incomplete_roots.clone()),
             candidates: candidate_evidence,
             applied: applied_evidence,
         };
@@ -213,6 +235,11 @@ pub fn cleanup_external_storage_with_providers(
             provider_output.unknown_bytes,
             "external storage unknown bytes",
         )?;
+        output.inventory_complete &= provider_output.inventory_complete;
+        output.unknown_bytes_is_lower_bound |= provider_output.unknown_bytes_is_lower_bound;
+        output
+            .incomplete_roots
+            .extend(provider_output.incomplete_roots.clone());
         output.providers.push(provider_output);
     }
     Ok(output)
@@ -904,6 +931,44 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_inventory_metadata_propagates_to_cleanup_output() {
+        let inventory = serde_json::json!({
+            "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA, "provider_id": "partial", "generation": "g1",
+            "completeness": { "complete": false, "incomplete_roots": [{
+                "root_id": "temp", "reason": "entry_limit", "observed_entries": 10_000, "observed_bytes": 42
+            }] }
+        });
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "partial".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("printf '%s' '{}'", inventory),
+                "fixture".to_string(),
+            ],
+            timeout_seconds: 1,
+        };
+        let output = cleanup_external_storage_with_providers(
+            &[provider],
+            ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: 0,
+                reserve_bytes: 0,
+                limit: 1,
+                evidence_limit: 1,
+                deadline: None,
+            },
+        )
+        .expect("partial inventory");
+        assert!(!output.inventory_complete);
+        assert!(output.unknown_bytes_is_lower_bound);
+        assert_eq!(output.incomplete_roots[0].reason, "entry_limit");
+        assert!(!output.providers[0].inventory_complete);
     }
 
     #[cfg(unix)]
