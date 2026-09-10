@@ -2686,6 +2686,9 @@ fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
         ]);
 
         assert_eq!(active["liveness_summary"]["reconcilable"], 1);
+        assert!(active["liveness_summary"]
+            .get("reconcile_command")
+            .is_none());
         assert_eq!(active["runs"][0]["run_id"], "branch-scoped-stale");
         let commands = active["_homeboy_actionable"]["next_actions"]
             .as_array()
@@ -2699,6 +2702,11 @@ fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
         assert!(!commands
             .iter()
             .any(|command| command.contains("agent-task active --reconcile")));
+        let full_payload = serde_json::to_string(&active).expect("serialize full active payload");
+        assert!(
+            !full_payload.contains("homeboy agent-task active --reconcile --dry-run"),
+            "branch-scoped output leaked fleet reconciliation guidance: {full_payload}"
+        );
     });
 }
 

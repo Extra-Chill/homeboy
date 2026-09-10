@@ -1483,6 +1483,17 @@ fn attach_agent_task_discovery_actionable(
     active_command: Option<&str>,
     branch_scoped: bool,
 ) {
+    if branch_scoped {
+        // The service summary is reusable across discovery callers and carries
+        // fleet reconciliation guidance. A branch-filtered CLI response must
+        // only offer its per-run reconciliation commands.
+        if let Some(summary) = value
+            .get_mut("liveness_summary")
+            .and_then(Value::as_object_mut)
+        {
+            summary.remove("reconcile_command");
+        }
+    }
     let runs = value
         .get("runs")
         .and_then(Value::as_array)
