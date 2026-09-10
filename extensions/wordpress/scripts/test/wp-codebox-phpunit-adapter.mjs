@@ -37,6 +37,8 @@ const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMP
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(scriptDirectory, '../..');
 const harnessSource = path.join(extensionRoot, 'vendor');
+const wpCliBootstrapSource = path.join(scriptDirectory, 'wp-cli-phpunit-bootstrap.php');
+const wpCliBootstrapTarget = '/wp-codebox-wp-cli-bootstrap.php';
 // Resolved WP Codebox invocation as an argv array, e.g.
 // ['node', '/abs/packages/cli/dist/index.js'] or ['/abs/bin/wp-codebox'].
 // Declared with the module's other top-level bindings: the statements below run
@@ -136,8 +138,11 @@ const options = clean({
   bootstrapMode: phpunitBootstrap.mode,
   projectBootstrap: phpunitBootstrap.projectBootstrap,
   multisite: discoveryOnly ? false : topology.multisite,
-  preloadFiles: activeSuite.preloadFiles === null ? settings.wp_codebox_phpunit_preload_files : activeSuite.preloadFiles,
-  mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), ...(!discoveryOnly ? [{ source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' }] : [])],
+  preloadFiles: managedPreloadFiles(phpunitBootstrap.mode, activeSuite.preloadFiles === null ? settings.wp_codebox_phpunit_preload_files : activeSuite.preloadFiles),
+  mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), ...(!discoveryOnly ? [
+    { source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' },
+    { source: wpCliBootstrapSource, target: wpCliBootstrapTarget, mode: 'readonly' },
+  ] : [])],
 });
 
 try {
@@ -244,7 +249,7 @@ async function runAdditionalSuite(suite) {
       // A declared list replaces the component-wide one rather than adding to
       // it, so a suite can state exactly what it needs without inheriting
       // another suite's bootstrap.
-      preloadFiles: suite.preloadFiles === null ? options.preloadFiles : suite.preloadFiles,
+      preloadFiles: managedPreloadFiles(bootstrap.mode, suite.preloadFiles === null ? settings.wp_codebox_phpunit_preload_files : suite.preloadFiles),
     });
     const suiteOptionsPath = path.join(suiteDirectory, 'options.json');
     const suiteRecipePath = path.join(suiteDirectory, 'recipe.json');
@@ -642,6 +647,10 @@ function phpunitChangedTestFiles() {
 }
 function canonicalMounts(value) {
   return Array.isArray(value) ? value : [];
+}
+function managedPreloadFiles(bootstrapMode, preloadFiles) {
+  const configured = Array.isArray(preloadFiles) ? preloadFiles : [];
+  return !discoveryOnly && bootstrapMode === 'managed' ? [wpCliBootstrapTarget, ...configured] : configured;
 }
 // WP Codebox normalizes the changed-file scope and the discovered test files
 // against the SAME root, and that root is the PHPUnit test root — not the

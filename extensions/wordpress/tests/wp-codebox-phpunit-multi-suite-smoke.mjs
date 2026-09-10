@@ -190,8 +190,8 @@ for (const [label, suites, expected] of [
   });
   assert.equal(run.status, 0, `expected a passing run, got ${run.status}\n${run.stdout}\n${run.stderr}`);
   const preloads = (await readFile(capturedPreloads, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.deepEqual(preloads[0], ['/shared/boot.php'], 'a suite without preload_files inherits the component-wide list');
-  assert.deepEqual(preloads[1], ['/suite/beta-boot.php'], "a suite's own preload_files replace the shared list");
+  assert.deepEqual(preloads[0], ['/wp-codebox-wp-cli-bootstrap.php', '/shared/boot.php'], 'a suite without preload_files receives the managed WP-CLI API and inherits component files');
+  assert.deepEqual(preloads[1], ['/wp-codebox-wp-cli-bootstrap.php', '/suite/beta-boot.php'], "a suite's own preload_files replace component files but retain the managed WP-CLI API");
 }
 
 await rm(root, { recursive: true, force: true });

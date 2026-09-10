@@ -160,6 +160,7 @@ try {
     assert.equal(options.autoloadFile, '/wp-codebox-vendor/autoload.php');
     assert.equal(options.bootstrapMode, testCase.bootstrapMode || (testCase.settings?.wp_codebox_phpunit_bootstrap_mode === 'managed' ? 'managed' : 'project'));
     assert.equal(options.projectBootstrap || '', testCase.projectBootstrap || '');
+    assert.deepEqual(options.preloadFiles || [], options.bootstrapMode === 'managed' ? ['/wp-codebox-wp-cli-bootstrap.php'] : []);
     assert.equal(profile.phpunit.environment, testCase.noBootstrap ? 'wordpress-integration' : 'standalone-php');
     assert.deepEqual(provenance.source_refs, [
       { slug: 'component', source: component, source_subpath: null },

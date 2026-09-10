@@ -45,6 +45,20 @@ if (args[0] === 'recipe' && args[1] === 'build') {
   fs.writeFileSync(args[args.indexOf('--output') + 1], '{"schema":"wp-codebox/workspace-recipe/v1"}');
   process.exit(0);
 }
+if (process.env.HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY === '1') {
+  process.stdout.write(JSON.stringify({
+    success: true,
+    executions: [{
+      command: 'wordpress.phpunit',
+      stdout: JSON.stringify({
+        schema: 'wp-codebox/phpunit-discovery/v1',
+        plugin_slug: 'sample-plugin',
+        files: ['/wordpress/wp-content/plugins/sample-plugin/tests/Unit/FirstTest.php'],
+      }),
+    }],
+  }));
+  process.exit(0);
+}
 const artifactRoot = args[args.indexOf('--artifacts') + 1];
 const runtime = path.join(artifactRoot, 'runtime-fixture');
 fs.mkdirSync(path.join(runtime, 'files', 'phpunit'), { recursive: true });
@@ -113,6 +127,7 @@ try {
     '/wordpress/wp-content/plugins/sample-plugin/tests/Unit/Deep/SecondTest.php',
   ]);
   assert.equal(options.bootstrapMode, 'managed');
+  assert.deepEqual(options.preloadFiles, ['/wp-codebox-wp-cli-bootstrap.php']);
   assert.deepEqual((await artifactResults(passed.artifacts)).summary, {
     total: 2,
     passed: 2,
@@ -169,6 +184,25 @@ try {
   const commandFailed = execute('command-failed', selected, 'command-failed');
   assert.notEqual(commandFailed.run.status, 0, 'a PHPUnit command failure must remain a failure');
   assert.equal((await artifactResults(commandFailed.artifacts)).status, 'failed');
+
+  const discoveryOptions = path.join(root, 'discovery-options.json');
+  const discovery = spawnSync('node', [path.join(extension, 'scripts/test/wp-codebox-phpunit-adapter.mjs')], {
+    env: {
+      ...process.env,
+      CAPTURED_OPTIONS: discoveryOptions,
+      HOMEBOY_COMPONENT_PATH: component,
+      COMPONENT_ID: 'sample-plugin',
+      HOMEBOY_WP_CODEBOX_BIN: cli,
+      HOMEBOY_SETTINGS_JSON: JSON.stringify({ phpunit_no_tests: 'fail', wp_codebox_phpunit_bootstrap_mode: 'managed' }),
+      HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY: '1',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(discovery.status, 0, discovery.stderr || discovery.stdout);
+  assert.match(discovery.stdout, /wp-codebox\/phpunit-discovery\/v1/);
+  const discoveryRecipeOptions = JSON.parse(await readFile(discoveryOptions, 'utf8'));
+  assert.deepEqual(discoveryRecipeOptions.preloadFiles || [], [], 'discovery must not preload a harness file that is not mounted');
+  assert.deepEqual(discoveryRecipeOptions.mounts || [], [], 'discovery must not mount the managed harness');
 
   const managedSource = path.join(root, 'managed-runtime', 'source');
   const managedCli = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');

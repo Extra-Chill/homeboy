@@ -86,6 +86,12 @@ runs PHPUnit in-process. No `bootstrap.php` or `phpunit.xml` in the component is
 required — and **shipping one is rejected** with a clear error. The extension
 owns bootstrap.
 
+Managed PHPUnit suites receive the extension's centrally provisioned WP-CLI API
+(`WP_CLI`, `WP_CLI::log`, and `WP_CLI\Utils\format_items`) from its Composer
+harness. The preload provides API classes and helpers without defining the
+`WP_CLI` constant or starting command dispatch, so suites retain normal
+WordPress PHPUnit runtime semantics.
+
 A component needs:
 
 - `tests/` directory with PHPUnit tests (default discovery: `*Test.php`

@@ -87,7 +87,11 @@ try {
     '/wordpress/wp-content/plugins/canonical-plugin',
     '/wordpress/wp-content/plugins/db-touching-dependency',
   ]);
-  assert.deepEqual(options[1].mounts, [{ source: path.join(extension, 'vendor'), target: '/wp-codebox-vendor', mode: 'readonly' }]);
+  assert.deepEqual(options[1].mounts, [
+    { source: path.join(extension, 'vendor'), target: '/wp-codebox-vendor', mode: 'readonly' },
+    { source: path.join(extension, 'scripts/test/wp-cli-phpunit-bootstrap.php'), target: '/wp-codebox-wp-cli-bootstrap.php', mode: 'readonly' },
+  ]);
+  assert.deepEqual(options[1].preloadFiles, ['/wp-codebox-wp-cli-bootstrap.php']);
   assert.equal(options[1].multisite, false, 'phpunit recipe defaults to single-site when nothing requests multisite');
   assert.equal(options[0].workloads[0].id, 'canonical-workload');
   assert.deepEqual(options[0].prepareSteps, [{ command: 'wordpress.wp-cli', args: ['command=option get home'] }]);
