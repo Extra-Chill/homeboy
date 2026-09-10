@@ -103,9 +103,8 @@ pub struct ManagedCargoTarget {
     /// A worktree-private store (see `acquire_managed_cargo_target_for_compatibility`)
     /// promotes artifacts it produced back to this base store on release, so
     /// the next worktree provisioned for the same repository identity seeds
-    /// warmer. The `SystemTime` is when this store was seeded from base:
-    /// only files touched since then are new output worth promoting.
-    promote_to: Option<(PathBuf, SystemTime)>,
+    /// warmer.
+    promote_to: Option<PathBuf>,
     _lease: Option<SharedCargoTargetLease>,
 }
 
@@ -150,8 +149,13 @@ impl Drop for ManagedCargoTarget {
         // Best-effort warmth hand-off: promoting is never a build
         // correctness requirement, only an optimization for the next run
         // that seeds from this repository identity's base store.
-        if let Some((base_dir, seeded_at)) = self.promote_to.take() {
-            copy_immutable_artifacts_since(&self.target_dir, &base_dir, Some(seeded_at));
+        if let Some(base_dir) = self.promote_to.take() {
+            // Readers take the same exclusive publication lock before seeding.
+            // This makes the complete cache projection visible as one operation,
+            // rather than exposing a concurrent seed to a partly copied store.
+            let _ = with_base_store_publication_lock(&base_dir, || {
+                sync_cargo_cache(&self.target_dir, &base_dir, true);
+            });
         }
     }
 }
@@ -333,24 +337,25 @@ fn acquire_managed_cargo_target_for_compatibility_in(
         std::process::id()
     );
     let lease = acquire_shared_cargo_target_in(&root, &run_owner, SystemTime::now())?;
-    let seeded_at = seed_worktree_cargo_target(&base_dir, lease.target_dir())?;
+    seed_worktree_cargo_target(&base_dir, lease.target_dir())?;
 
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "isolated",
         owner: owner.to_string(),
-        promote_to: Some((base_dir, seeded_at)),
+        promote_to: Some(base_dir),
         _lease: Some(lease),
     })
 }
 
 /// Seed a freshly created run-private Cargo target from the shared base store.
-fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<SystemTime> {
-    let seeded_at = SystemTime::now();
+fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<()> {
     if base_dir.exists() {
-        copy_immutable_artifacts_since(base_dir, private_dir, None);
+        with_base_store_publication_lock(base_dir, || {
+            sync_cargo_cache(base_dir, private_dir, false);
+        })?;
     }
-    Ok(seeded_at)
+    Ok(())
 }
 
 fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
@@ -366,23 +371,18 @@ fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
     name == LOCK_FILE || name == LEASE_FILE || name == OWNER_FILE || name == LAST_USED_FILE
 }
 
-/// Copy every immutable Cargo artifact under `from` into `to`, mirroring the
-/// relative directory structure. Cargo's locks, fingerprints, incremental
-/// state, and compiler probe are intentionally excluded: they are mutable
-/// coordination/state files, not reusable artifacts. A destination file that
-/// already exists is left in place (first writer wins), and per-entry errors
-/// are tolerated because cache transfer is only a warmth optimization.
-///
-/// `since`, when set, skips files last modified before that time: seeding
-/// copies an entire base store, but promotion only wants artifacts this run
-/// actually produced since it was seeded.
-fn copy_immutable_artifacts_since(from: &Path, to: &Path, since: Option<SystemTime>) {
+/// Synchronize a Cargo cache projection without transferring Cargo's live lock.
+/// Callers hold the base store's exclusive publication lock, so a seed sees a
+/// complete projection and a promotion cannot race another promotion. Files are
+/// copied to a sibling temporary inode and renamed into place, so a cache file
+/// is never observed half-written even if a future reader misses that lock.
+fn sync_cargo_cache(from: &Path, to: &Path, replace_existing: bool) {
     let Ok(entries) = fs::read_dir(from) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if is_lifecycle_sidecar(&name) || is_mutable_cargo_state(&name) {
+        if is_lifecycle_sidecar(&name) || is_cargo_coordination_state(&name) {
             continue;
         }
         let source = entry.path();
@@ -392,28 +392,61 @@ fn copy_immutable_artifacts_since(from: &Path, to: &Path, since: Option<SystemTi
         let dest = to.join(&name);
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             if fs::create_dir_all(&dest).is_ok() {
-                copy_immutable_artifacts_since(&source, &dest, since);
+                sync_cargo_cache(&source, &dest, replace_existing);
             }
             continue;
         }
-        if let Some(since) = since {
-            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-            if modified < since {
-                continue;
-            }
-        }
-        if dest.exists() {
+        if dest.exists() && !replace_existing {
             continue;
         }
-        let _ = fs::copy(&source, &dest);
+        let temporary = dest.with_extension(format!(
+            "homeboy-publish-{}",
+            ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        if fs::copy(&source, &temporary).is_ok() {
+            let _ = fs::rename(temporary, dest);
+        }
     }
 }
 
-fn is_mutable_cargo_state(name: &std::ffi::OsStr) -> bool {
-    matches!(
-        name.to_str(),
-        Some(".cargo-lock" | ".fingerprint" | "incremental" | ".rustc_info.json")
-    )
+fn is_cargo_coordination_state(name: &std::ffi::OsStr) -> bool {
+    // Fingerprints and incremental outputs are safe in a run-private target and
+    // are essential to Cargo's warm path. Only its live lock and probe result
+    // must not cross target boundaries.
+    matches!(name.to_str(), Some(".cargo-lock" | ".rustc_info.json"))
+}
+
+fn with_base_store_publication_lock<T>(
+    base_dir: &Path,
+    operation: impl FnOnce() -> T,
+) -> Result<T> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(base_dir.join(LOCK_FILE))
+        .map_err(|error| io_error(error, "open Cargo cache publication lock"))?;
+    let deadline = Instant::now() + CARGO_TARGET_LEASE_WAIT;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) => return Err(io_error(error, "lock Cargo cache publication")),
+        }
+        if Instant::now() >= deadline {
+            return Err(cargo_target_lease_wait_error(
+                base_dir,
+                "warm-cache-publication",
+                CARGO_TARGET_LEASE_WAIT,
+                "deadline_exhausted",
+            ));
+        }
+        std::thread::sleep(CARGO_TARGET_LEASE_POLL);
+    }
+    let result = operation();
+    FileExt::unlock(&lock).map_err(|error| io_error(error, "unlock Cargo cache publication"))?;
+    Ok(result)
 }
 
 /// Collect the target identity from repository inputs and the declared child
@@ -1778,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn warmed_cache_concurrent_real_builds_copy_artifacts_without_cargo_state() {
+    fn warmed_cache_concurrent_real_builds_publish_complete_cargo_state() {
         let root = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         fs::create_dir(workspace.path().join("src")).unwrap();
@@ -1808,6 +1841,10 @@ mod tests {
             .strip_prefix(&base)
             .expect("warm artifact lives in the shared base")
             .to_path_buf();
+        assert!(
+            base.join("debug/.fingerprint").is_dir(),
+            "promotion retains Cargo's real fingerprint warmth"
+        );
         for path in [
             base.join("debug/.cargo-lock"),
             base.join("debug/.fingerprint/state"),
@@ -1860,7 +1897,7 @@ mod tests {
         ] {
             assert!(
                 path.exists(),
-                "base fixture state remains local: {}",
+                "base fixture state is retained: {}",
                 path.display()
             );
         }
@@ -1915,15 +1952,16 @@ mod tests {
                 "warm artifacts must be copied, never hard-linked"
             );
         }
-        for state in [
-            "debug/.cargo-lock",
-            "debug/.fingerprint/state",
-            "debug/incremental/state",
-            ".rustc_info.json",
-        ] {
+        for state in ["debug/.cargo-lock", ".rustc_info.json"] {
             assert!(
                 !target.target_dir().join(state).exists(),
-                "Cargo mutable state must not be seeded: {state}"
+                "Cargo coordination state must not be seeded: {state}"
+            );
+        }
+        for state in ["debug/.fingerprint/state", "debug/incremental/state"] {
+            assert!(
+                target.target_dir().join(state).exists(),
+                "Cargo warmth state must be seeded: {state}"
             );
         }
     }

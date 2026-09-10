@@ -1209,10 +1209,13 @@ fn run_materialized_provider_command_once_contained(
         WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS,
         WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS,
     );
-    let (status, killed_for_liveness, timed_out) = loop {
+    let (status, killed_for_liveness, timed_out, cancelled) = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break (Some(status), false, false),
+            Ok(Some(status)) => break (Some(status), false, false, false),
             Ok(None) => {
+                if execution.cancellation.is_cancelled() {
+                    break (None, false, false, true);
+                }
                 let elapsed = started.elapsed();
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let mut progressed = false;
@@ -1255,14 +1258,14 @@ fn run_materialized_provider_command_once_contained(
                     }
                 }
                 if elapsed >= process_timeout {
-                    break (None, false, true);
+                    break (None, false, true, false);
                 }
                 if let Some(liveness_timeout) = liveness_timeout {
                     let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
                         last_progress_ms.load(Ordering::SeqCst),
                     ));
                     if progress_age >= liveness_timeout {
-                        break (None, true, false);
+                        break (None, true, false, false);
                     }
                     // Wake up at the earlier of process timeout and liveness deadline.
                     let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
@@ -1276,7 +1279,7 @@ fn run_materialized_provider_command_once_contained(
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(_) => break (None, false, false),
+            Err(_) => break (None, false, false, false),
         }
     };
 
@@ -1289,7 +1292,7 @@ fn run_materialized_provider_command_once_contained(
     // `status.is_none()` without a Homeboy-initiated kill means the wait loop
     // itself failed. The child is then still unreaped and still running, so it
     // needs the live termination path rather than a leader-exited reap.
-    let containment_cleanup = if killed_for_liveness || timed_out || status.is_none() {
+    let containment_cleanup = if killed_for_liveness || timed_out || cancelled || status.is_none() {
         child.terminate_live()
     } else {
         child.reap_after_exit()
@@ -1308,6 +1311,22 @@ fn run_materialized_provider_command_once_contained(
     let stderr_capture = stderr_capture.lock().expect("stderr capture");
     let stdout = stdout_capture.full_text();
     let stderr = stderr_capture.text();
+
+    if cancelled {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Cancelled,
+            AgentTaskFailureClassification::Provider,
+            "agent_task.provider_cancelled",
+            "provider execution cancelled".to_string(),
+            json!({
+                "provider": provider.id,
+                "command": command,
+                "cancellation_requested": true,
+                "cancellation_acknowledged": cancellation_acknowledged,
+            }),
+        );
+    }
 
     if killed_for_liveness {
         let (status, classification, message) = classify_stall_or_rate_limit(
