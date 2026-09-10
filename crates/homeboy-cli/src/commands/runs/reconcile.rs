@@ -114,6 +114,12 @@ pub(crate) fn reconcile_owned_stale_running_run(
     if run.status != RunStatus::Running.as_str() {
         return Ok(None);
     }
+    if store.expire_running_run_handoff(&run.id)?.is_some() {
+        return Ok(None);
+    }
+    if handoff_is_transferring(run) {
+        return Ok(None);
+    }
     Ok(reconcile_orphaned_running_runs_with_remote_status(
         store,
         vec![run.clone()],
@@ -123,6 +129,13 @@ pub(crate) fn reconcile_owned_stale_running_run(
     )?
     .into_iter()
     .next())
+}
+
+fn handoff_is_transferring(run: &RunRecord) -> bool {
+    run.metadata_json
+        .pointer("/homeboy_ownership_handoff/state")
+        .and_then(Value::as_str)
+        == Some("transferring")
 }
 
 fn reconcile_orphaned_running_runs<F>(

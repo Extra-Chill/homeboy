@@ -53,8 +53,52 @@ pub(super) mod raw_output;
 
 const DETACHED_REVIEW_RUN_ID_ENV: &str = "HOMEBOY_DETACHED_REVIEW_RUN_ID";
 const DETACHED_OWNERSHIP_TRANSFER_DEADLINE: Duration = Duration::from_secs(5);
-const COMPONENT_DISCOVERY_DEADLINE: Duration = Duration::from_secs(30);
-const DEPENDENCY_HYDRATION_DEADLINE: Duration = Duration::from_secs(30 * 60);
+const REVIEW_PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Clone, Copy)]
+struct ReviewPreflightDeadline {
+    expires_at: Instant,
+}
+
+impl ReviewPreflightDeadline {
+    fn start() -> Self {
+        Self {
+            expires_at: Instant::now() + REVIEW_PREFLIGHT_DEADLINE,
+        }
+    }
+
+    fn remaining(self, phase: &str) -> homeboy::core::Result<Duration> {
+        let remaining = self.expires_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(homeboy::core::Error::internal_unexpected(format!(
+                "review preflight/setup deadline exceeded during {phase}"
+            )));
+        }
+        Ok(remaining)
+    }
+
+    fn run<T, F>(self, phase: &str, operation: F) -> homeboy::core::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> homeboy::core::Result<T> + Send + 'static,
+    {
+        let remaining = self.remaining(phase)?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = sender.send(operation());
+        });
+        receiver
+            .recv_timeout(remaining)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => homeboy::core::Error::internal_unexpected(
+                    format!("review preflight/setup deadline exceeded during {phase}"),
+                ),
+                mpsc::RecvTimeoutError::Disconnected => homeboy::core::Error::internal_unexpected(
+                    format!("review {phase} worker stopped before returning a result"),
+                ),
+            })?
+    }
+}
 
 #[derive(Args)]
 pub struct ReviewArgs {
@@ -350,9 +394,10 @@ fn dispatch_review_plan_step(
 pub fn run(args: ReviewArgs) -> CmdResult<Value> {
     match args.command {
         Some(ReviewCommand::Audit(review_audit)) => {
+            let deadline = ReviewPreflightDeadline::start();
             let requested_source = review_audit.audit.release_readiness_source.clone();
-            let component = review_audit.audit.comp.load()?;
-            prepare_local_review_dependencies(&component, &None)?;
+            let component = load_component_with_deadline(&review_audit.audit.comp, deadline)?;
+            prepare_local_review_dependencies(&component, &None, deadline)?;
             let audit_args =
                 review_audit_args(review_audit.audit, &args.changed, &component.local_path)?;
             to_value_with_readiness_provenance(
@@ -364,10 +409,11 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
         Some(ReviewCommand::Lint(args)) => {
+            let deadline = ReviewPreflightDeadline::start();
             let requested_source = args.release_readiness_source.clone();
-            let component = args.comp.load()?;
+            let component = load_component_with_deadline(&args.comp, deadline)?;
             reject_manual_changelog_edit_for_lint(&component, &args)?;
-            prepare_local_review_dependencies(&component, &None)?;
+            prepare_local_review_dependencies(&component, &None, deadline)?;
             to_value_with_readiness_provenance(
                 lint::run(review_lint_args(args)),
                 &component,
@@ -376,12 +422,10 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
             )
         }
         Some(ReviewCommand::Test(args)) => {
-            if let Ok(run_id) = std::env::var(DETACHED_REVIEW_RUN_ID_ENV) {
-                return run_detached_test(args, &run_id);
-            }
+            let deadline = ReviewPreflightDeadline::start();
             let requested_source = args.release_readiness_source.clone();
-            let component = args.comp.load()?;
-            prepare_local_review_dependencies(&component, &None)?;
+            let component = load_component_with_deadline(&args.comp, deadline)?;
+            prepare_local_review_dependencies(&component, &None, deadline)?;
             to_value_with_readiness_provenance(
                 test::run(args),
                 &component,
@@ -392,48 +436,6 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
         None => to_value(run_umbrella(args)),
-    }
-}
-
-/// Complete a direct `review test` in the observation admitted by the launcher.
-/// The launcher has already returned its continuation command; this worker owns
-/// the test process and its durable evidence.
-fn run_detached_test(args: test::TestArgs, run_id: &str) -> CmdResult<Value> {
-    let observation = Some(observation::resume_after_ownership_transfer(
-        run_id,
-        DETACHED_OWNERSHIP_TRANSFER_DEADLINE,
-    )?);
-    observation::emit_early_lifecycle(&observation);
-    progress(&observation, "component_discovery", "component", "running");
-    let component = match load_component_with_deadline(&args.comp) {
-        Ok(component) => component,
-        Err(error) => {
-            observation::finish_error(observation, &error);
-            return Err(error);
-        }
-    };
-    progress(&observation, "dependency_setup", "dependencies", "running");
-    if let Err(error) = prepare_local_review_dependencies(&component, &observation) {
-        observation::finish_error(observation, &error);
-        return Err(error);
-    }
-    progress(&observation, "test_execution", "review.test", "running");
-    let _heartbeat = StageHeartbeat::start(Some(run_id), "test_execution", "review.test");
-    let result = test::run(args);
-    match result {
-        Ok((output, exit_code)) => {
-            let value = serde_json::to_value(&output).map_err(|error| {
-                homeboy::core::Error::internal_unexpected(format!(
-                    "failed to serialize detached review test output: {error}"
-                ))
-            })?;
-            observation::finish_direct_success(observation, "test", value.clone(), exit_code);
-            Ok((value, exit_code))
-        }
-        Err(error) => {
-            observation::finish_error(observation, &error);
-            Err(error)
-        }
     }
 }
 
@@ -536,11 +538,15 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         return attach_to_persisted_review(run_id);
     }
 
+    let deadline = ReviewPreflightDeadline::start();
     // Admit the durable review before resolving a component or probing scope.
     // A caller that disappears during either bounded preflight can therefore
     // still locate the exact run and its last persisted progress.
     let review_observation = Some(match std::env::var(DETACHED_REVIEW_RUN_ID_ENV) {
-        Ok(run_id) => observation::resume(&run_id)?,
+        Ok(run_id) => observation::resume_after_ownership_transfer(
+            &run_id,
+            DETACHED_OWNERSHIP_TRANSFER_DEADLINE,
+        )?,
         Err(_) => observation::start(observation::ReviewObservationStart {
             component_id: args.comp.component.as_deref(),
             component_label: args.comp.component.as_deref(),
@@ -561,7 +567,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component_args = args.effective_component_args();
-    let component = match load_component_with_deadline(&component_args) {
+    let component = match load_component_with_deadline(&component_args, deadline) {
         Ok(component) => component,
         Err(error) => {
             observation::finish_error(review_observation, &error);
@@ -577,7 +583,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         "changed-files",
         "running",
     );
-    let review_context = match preflight_review_scope(&args, &source_path) {
+    let review_context = match preflight_review_scope(&args.changed, &source_path, deadline) {
         Ok(context) => context,
         Err(error) => {
             observation::finish_error(review_observation, &error);
@@ -630,9 +636,10 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         "clean-checkout",
         "running",
     );
-    if let Err(error) =
-        homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&source_path))
-    {
+    let checkout_path = source_path.clone();
+    if let Err(error) = deadline.run("clean checkout validation", move || {
+        homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&checkout_path))
+    }) {
         observation::finish_error(review_observation, &error);
         return Err(error);
     }
@@ -642,7 +649,8 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         "dependencies",
         "running",
     );
-    if let Err(error) = prepare_local_review_dependencies(&component, &review_observation) {
+    if let Err(error) = prepare_local_review_dependencies(&component, &review_observation, deadline)
+    {
         observation::finish_error(review_observation, &error);
         return Err(error);
     }
@@ -825,10 +833,7 @@ pub(crate) fn detach_changed_only_summary(
     args: &ReviewArgs,
     normalized_args: &[String],
 ) -> homeboy::core::Result<Option<i32>> {
-    if !args.changed.changed_only
-        || !args.summary
-        || !matches!(args.command, Some(ReviewCommand::Test(_)))
-    {
+    if !args.changed.changed_only || !args.summary || args.command.is_some() {
         return Ok(None);
     }
     let observation = Some(observation::start(observation::ReviewObservationStart {
@@ -848,7 +853,7 @@ pub(crate) fn detach_changed_only_summary(
     observation
         .as_ref()
         .expect("observation is present")
-        .progress("handoff", "detached-worker", "accepted");
+        .progress("handoff", "detached-worker", "starting");
     let executable = std::env::current_exe().map_err(|error| {
         homeboy::core::Error::internal_io(
             error.to_string(),
@@ -884,6 +889,23 @@ pub(crate) fn detach_changed_only_summary(
         observation::finish_error(observation, &error);
         return Err(error);
     }
+    let launcher_observation = observation.as_ref().expect("observation is present");
+    let handoff_started = Instant::now();
+    while !launcher_observation.handoff_accepted(child.id())? {
+        if handoff_started.elapsed() >= DETACHED_OWNERSHIP_TRANSFER_DEADLINE {
+            let reason = format!(
+                "detached review worker {} did not acknowledge ownership within {:?}",
+                child.id(),
+                DETACHED_OWNERSHIP_TRANSFER_DEADLINE
+            );
+            launcher_observation.fail_handoff(child.id(), &reason);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(homeboy::core::Error::internal_unexpected(reason));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    launcher_observation.progress("handoff", "detached-worker", "accepted");
     println!(
         "{}",
         serde_json::json!({
@@ -899,9 +921,10 @@ pub(crate) fn detach_changed_only_summary(
 fn prepare_local_review_dependencies(
     component: &homeboy::core::component::Component,
     observation: &Option<observation::ReviewObservation>,
+    deadline: ReviewPreflightDeadline,
 ) -> homeboy::core::Result<()> {
     let policy = homeboy::core::deps::DependencyHydrationPolicy {
-        timeout: DEPENDENCY_HYDRATION_DEADLINE,
+        timeout: deadline.remaining("dependency hydration")?,
         ..Default::default()
     };
     let deadline_ms = policy.timeout.as_millis();
@@ -1008,26 +1031,10 @@ fn prepare_local_review_dependencies(
 
 fn load_component_with_deadline(
     args: &PositionalComponentArgs,
+    deadline: ReviewPreflightDeadline,
 ) -> homeboy::core::Result<homeboy::core::component::Component> {
     let args = args.clone();
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let _ = sender.send(args.load());
-    });
-    match receiver.recv_timeout(COMPONENT_DISCOVERY_DEADLINE) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            Err(homeboy::core::Error::internal_unexpected(format!(
-                "component discovery exceeded its {:?} deadline",
-                COMPONENT_DISCOVERY_DEADLINE
-            )))
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(homeboy::core::Error::internal_unexpected(
-                "component discovery worker stopped before returning a result".to_string(),
-            ))
-        }
-    }
+    deadline.run("component discovery", move || args.load())
 }
 
 fn progress(
@@ -1329,34 +1336,38 @@ fn attach_review_actionable(output: &mut ReviewCommandOutput) {
 }
 
 fn preflight_review_scope(
-    args: &ReviewArgs,
+    changed: &ChangedScopeArgs,
     source_path: &str,
+    deadline: ReviewPreflightDeadline,
 ) -> homeboy::core::Result<ReviewExecutionContext> {
-    let scope = if args.changed.changed_since().is_some() {
-        "changed-since"
-    } else if args.changed.changed_only {
-        "changed-only"
-    } else {
-        "full"
-    }
-    .to_string();
+    let changed = changed.clone();
+    let source_path = source_path.to_string();
+    deadline.run("changed-scope discovery", move || {
+        let scope = if changed.changed_since().is_some() {
+            "changed-since"
+        } else if changed.changed_only {
+            "changed-only"
+        } else {
+            "full"
+        }
+        .to_string();
 
-    // Probe once at the umbrella level so review can short-circuit before
-    // extension setup, include a stable changed-file count in its artifact,
-    // and pass the same resolved scope to each internal stage.
-    let precomputed_changed_files = match (args.changed.changed_since(), args.changed.changed_only)
-    {
-        _ if args.changed.lab.lab_changed_files_json.is_some() => args.changed.resolve()?,
-        (Some(git_ref), _) => Some(git::get_files_changed_since(source_path, git_ref)?),
-        (_, true) => Some(git::get_dirty_files(source_path)?),
-        _ => None,
-    };
-    let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
+        // Probe once at the umbrella level so review can short-circuit before
+        // extension setup, include a stable changed-file count in its artifact,
+        // and pass the same resolved scope to each internal stage.
+        let precomputed_changed_files = match (changed.changed_since(), changed.changed_only) {
+            _ if changed.lab.lab_changed_files_json.is_some() => changed.resolve()?,
+            (Some(git_ref), _) => Some(git::get_files_changed_since(&source_path, git_ref)?),
+            (_, true) => Some(git::get_dirty_files(&source_path)?),
+            _ => None,
+        };
+        let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
 
-    Ok(ReviewExecutionContext {
-        scope,
-        changed_file_count,
-        precomputed_changed_files,
+        Ok(ReviewExecutionContext {
+            scope,
+            changed_file_count,
+            precomputed_changed_files,
+        })
     })
 }
 

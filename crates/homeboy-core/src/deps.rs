@@ -3,7 +3,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 mod dependency_graph;
@@ -161,7 +161,8 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
-    hydrate_declared_dependencies_unlocked(path, workspace, package_root, policy)
+    let deadline = Instant::now() + policy.timeout;
+    hydrate_declared_dependencies_unlocked(path, workspace, package_root, policy, deadline)
 }
 
 fn hydrate_declared_dependencies_unlocked(
@@ -169,19 +170,50 @@ fn hydrate_declared_dependencies_unlocked(
     workspace: &str,
     package_root: &str,
     policy: &DependencyHydrationPolicy,
+    deadline: Instant,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
     let path_arg = path.display().to_string();
     let Ok(mut component) = component::resolve_effective(None, Some(&path_arg), None) else {
         return Ok(Vec::new());
     };
+    if hydration_deadline_expired(policy, deadline) {
+        return Ok(vec![deadline_hydration_outcome(workspace, package_root)]);
+    }
     component.local_path = path_arg;
-    let providers = provider::resolve_dependency_providers_optional(&component, path)?;
+    let component_for_discovery = component.clone();
+    let path_for_discovery = path.to_path_buf();
+    let Some(providers) = run_with_hydration_deadline(policy, deadline, move || {
+        provider::resolve_dependency_providers_optional(
+            &component_for_discovery,
+            &path_for_discovery,
+        )
+    })?
+    else {
+        return Ok(vec![deadline_hydration_outcome(workspace, package_root)]);
+    };
     let mut outcomes = Vec::new();
 
     for provider in providers {
-        let Some(plan) = provider.hydration_plan(&component, path)? else {
-            continue;
+        if hydration_deadline_expired(policy, deadline) {
+            outcomes.push(deadline_hydration_outcome(workspace, package_root));
+            break;
+        }
+        let component_for_plan = component.clone();
+        let path_for_plan = path.to_path_buf();
+        let plan = match run_with_hydration_deadline(policy, deadline, move || {
+            provider.hydration_plan(&component_for_plan, &path_for_plan)
+        })? {
+            Some(Some(plan)) => plan,
+            Some(None) => continue,
+            None => {
+                outcomes.push(deadline_hydration_outcome(workspace, package_root));
+                break;
+            }
         };
+        if hydration_deadline_expired(policy, deadline) {
+            outcomes.push(deadline_hydration_outcome(workspace, package_root));
+            break;
+        }
         let provider_id = crate::redaction::redact_string(&plan.provider_id);
         let install_command = crate::redaction::redact_argv(&plan.install.argv());
         let started = Instant::now();
@@ -200,6 +232,7 @@ fn hydrate_declared_dependencies_unlocked(
                 &provider_id,
                 "assessing_reusable_state",
                 policy,
+                deadline,
             );
             let reusable_command = crate::redaction::redact_argv(&reusable.command.argv());
             let reusable_reason = crate::redaction::redact_string(&reusable.reusable_reason);
@@ -267,7 +300,8 @@ fn hydrate_declared_dependencies_unlocked(
             elapsed_ms: started.elapsed().as_millis(),
             last_progress_ms_ago: None,
         });
-        let execution = run_hydration_command(&plan.install, &provider_id, "installing", policy);
+        let execution =
+            run_hydration_command(&plan.install, &provider_id, "installing", policy, deadline);
         if execution.termination != DependencyHydrationTermination::Completed {
             outcomes.push(hydration_outcome(
                 workspace,
@@ -351,11 +385,16 @@ fn run_hydration_command(
     provider_id: &str,
     phase: &str,
     policy: &DependencyHydrationPolicy,
+    deadline: Instant,
 ) -> HydrationCommandExecution {
-    if (policy.is_cancelled)() {
+    if hydration_deadline_expired(policy, deadline) {
         return HydrationCommandExecution {
             exit_code: None,
-            termination: DependencyHydrationTermination::Cancelled,
+            termination: if (policy.is_cancelled)() {
+                DependencyHydrationTermination::Cancelled
+            } else {
+                DependencyHydrationTermination::TimedOut
+            },
             stdout: String::new(),
             stderr: String::new(),
         };
@@ -389,10 +428,12 @@ fn run_hydration_command(
         homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_progress(
             &mut child,
             DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES,
-            policy.timeout.max(Duration::from_millis(1)),
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1)),
             Some(policy.no_progress_timeout.max(Duration::from_millis(1))),
             policy.heartbeat_interval.max(Duration::from_millis(1)),
-            move || cancellation(),
+            move || cancellation() || Instant::now() >= deadline,
             |heartbeat| {
                 progress(&hydration_progress(provider_id, phase, &heartbeat));
                 Ok(())
@@ -419,6 +460,55 @@ fn run_hydration_command(
         stdout: crate::redaction::redact_string(&String::from_utf8_lossy(&output.output.stdout)),
         stderr: crate::redaction::redact_string(&String::from_utf8_lossy(&output.output.stderr)),
     }
+}
+
+fn hydration_deadline_expired(policy: &DependencyHydrationPolicy, deadline: Instant) -> bool {
+    (policy.is_cancelled)() || Instant::now() >= deadline
+}
+
+/// Provider discovery and planning are provider-owned and may perform I/O. They
+/// share the command budget rather than each receiving a fresh timeout.
+fn run_with_hydration_deadline<T, F>(
+    policy: &DependencyHydrationPolicy,
+    deadline: Instant,
+    operation: F,
+) -> Result<Option<T>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if (policy.is_cancelled)() || remaining.is_zero() {
+        return Ok(None);
+    }
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(operation());
+    });
+    match receiver.recv_timeout(remaining) {
+        Ok(result) => result.map(Some),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::internal_unexpected(
+            "dependency hydration worker stopped before returning a result",
+        )),
+    }
+}
+
+fn deadline_hydration_outcome(workspace: &str, package_root: &str) -> DependencyHydrationOutcome {
+    hydration_outcome(
+        workspace,
+        package_root,
+        "dependency-discovery".to_string(),
+        Vec::new(),
+        String::new(),
+        "dependency hydration exceeded its total operation deadline".to_string(),
+        Duration::ZERO,
+        DependencyHydrationTermination::TimedOut,
+        DependencyHydrationStatus::Failed,
+        None,
+        String::new(),
+        String::new(),
+    )
 }
 
 fn hydration_progress(
@@ -1600,6 +1690,51 @@ mod tests {
                 DependencyHydrationTermination::Cancelled
             );
             assert!(started.elapsed() < Duration::from_secs(2));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hydration_timeout_is_one_budget_across_reusable_state_and_install() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{
+                    "provider":"fixture-provider",
+                    "commands":{
+                        "reusable":{
+                            "argv":["sh","-c","sleep 0.08; exit 1"],
+                            "reusable_reason":"fixture_state_matches",
+                            "stale_reason":"fixture_state_differs"
+                        },
+                        "install":{"argv":["sh","-c","sleep 0.08; printf ready > prepared.state"]}
+                    },
+                    "outputs":[{"path":"prepared.state","kind":"file"}]
+                }"#,
+            )
+            .expect("provider manifest");
+            let started = Instant::now();
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &DependencyHydrationPolicy {
+                    timeout: Duration::from_millis(120),
+                    no_progress_timeout: Duration::from_secs(1),
+                    heartbeat_interval: Duration::from_millis(10),
+                    is_cancelled: Arc::new(|| false),
+                    on_progress: Arc::new(|_| {}),
+                },
+            )
+            .expect("bounded hydration outcome");
+
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(
+                outcomes[0].termination,
+                DependencyHydrationTermination::TimedOut
+            );
+            assert!(started.elapsed() < Duration::from_millis(180));
         });
     }
 
