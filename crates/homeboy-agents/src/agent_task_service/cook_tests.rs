@@ -9388,6 +9388,42 @@ fn cook_persists_identity_before_fallible_workspace_canonicalization() {
 }
 
 #[test]
+fn replayed_materialized_attempt_terminalizes_when_canonicalization_fails() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let cook_id = "cook-replayed-canonicalization-admission";
+        let run_id = "cook-replayed-canonicalization-admission-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.workspace.source_worktree_path = Some(workspace.path().join("missing"));
+
+        // Simulate interruption after materialization but before the startup
+        // canonicalization phase. Replay must not leave this queued forever.
+        persist_initial_recipe(&options).expect("persist recipe before interruption");
+        let recipe_store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        let lifecycle_store = test_lifecycle_store();
+        recover_recipe_attempt_with_stores(&recipe_store, &lifecycle_store, run_id)
+            .expect("materialize interrupted attempt");
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("queued replay record")
+                .state,
+            AgentTaskRunState::Queued
+        );
+
+        let replay = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("replay returns durable canonicalization failure");
+        assert_eq!(replay.value.status, "pre_execution_failure");
+        let record = lifecycle_store
+            .read_record(run_id)
+            .expect("terminal replay record");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert!(record.metadata.get("pre_execution_failure").is_some());
+    });
+}
+
+#[test]
 fn local_startup_base_capture_is_durable_and_reported_before_interruption() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository");

@@ -5062,7 +5062,7 @@ fn run_cook_reported(
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let mut failure_options = options.clone();
-    let result = match run_cook_spine(
+    let mut result = match run_cook_spine(
         store,
         lifecycle_store,
         options,
@@ -5123,8 +5123,7 @@ fn run_cook_reported(
             if let Ok(mut record) =
                 lifecycle_store.read_record(&failure_options.identity.initial_run_id)
             {
-                if error.details["cook_materialized_by_invocation"] == true
-                    && store.data_root() == lifecycle_store.data_root()
+                if store.data_root() == lifecycle_store.data_root()
                     && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
                     && record.plan_id == failure_options.identity.initial_plan.plan_id
                 {
@@ -5164,6 +5163,10 @@ fn run_cook_reported(
             );
         }
     };
+    // Recompute every durable projection before terminal progress is observed.
+    // The spine can construct reports in legacy helpers, but its caller owns
+    // these roots and terminal observers must never receive ambient evidence.
+    super::cook_promotion::bind_report_to_stores(&mut result.value, store, lifecycle_store);
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
         let attempt = result
             .value

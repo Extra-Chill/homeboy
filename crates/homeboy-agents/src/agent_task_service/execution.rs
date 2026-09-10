@@ -2620,6 +2620,17 @@ pub fn retry_admission(run_id: &str) -> Result<()> {
     retry_admission_with_preflight(run_id, retry_plan_supported_by_generic_action)
 }
 
+/// Verify retry eligibility against the lifecycle installation that produced
+/// the report rather than the process's ambient home.
+pub(crate) fn retry_admission_in_root(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<()> {
+    let source = lifecycle_store.read_record(run_id)?;
+    retry_admission_in_store(lifecycle_store, &source, true)?;
+    Ok(())
+}
+
 /// Read-only Cook retry admission for control-plane projections. Unlike the
 /// executable admission path, this deliberately does not normalize placement
 /// metadata while rendering status.
@@ -2680,19 +2691,21 @@ fn retry_admission_in_store(
     source: &agent_task_lifecycle::AgentTaskRunRecord,
     require_latest_attempt: bool,
 ) -> Result<Option<CookRetryAttempt>> {
+    let recipe_store =
+        super::cook_recipe::CookRecipeStore::from_data_root(lifecycle_store.data_root());
     let has_cook_ownership = source
         .metadata
         .get("cook_id")
         .and_then(serde_json::Value::as_str)
-        .map(super::recipe_exists)
-        .transpose()?
+        .map(|cook_id| recipe_store.recipe_exists(cook_id))
         .unwrap_or(false);
     let retry = retryable_cook_attempt(lifecycle_store, source)?;
     if require_latest_attempt && has_cook_ownership {
         let cook_id = source.metadata["cook_id"]
             .as_str()
             .expect("recipe-backed Cook ownership has a cook id");
-        if super::load_recipe(cook_id)?
+        if recipe_store
+            .load_recipe(cook_id)?
             .attempts
             .last()
             .map(|attempt| attempt.run_id.as_str())

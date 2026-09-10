@@ -239,9 +239,10 @@ pub mod lifecycle {
         run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, submit_plan,
     };
     pub use super::super::agent_task_lifecycle::{
-        cancel, claim_cook_operation_in_store, claim_local_cook_retry_launch_in_store,
-        complete_cook_operation_in_store, consume_unmaterialized_cook_replay_claim,
-        cook_attempt_run_id, cook_index_exists_in_store, fail_cook_operation_in_store,
+        cancel, claim_cook_operation_in_store, claim_detached_cook_handoff_parent_in_store,
+        claim_local_cook_retry_launch_in_store, complete_cook_operation_in_store,
+        consume_unmaterialized_cook_replay_claim, cook_attempt_run_id, cook_index_exists_in_store,
+        fail_claimed_detached_cook_handoff_parent_in_store, fail_cook_operation_in_store,
         fail_detached_cook_handoff_parent_in_store, has_accepted_runner_handoff,
         is_unmaterialized_cook_admission, load_plan_in_store, materialize_recovered_patch_artifact,
         pin_current_controller_runtime, pinned_runtime_for_mutation,

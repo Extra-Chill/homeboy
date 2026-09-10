@@ -6121,11 +6121,15 @@ fn cook_failure_context_with_stores(
                 &chronological_latest_run_id,
                 recovery_legal,
                 blocking_claim.is_some(),
-                record
-                    .as_ref()
-                    .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
+                record.as_ref().is_some_and(|record| {
+                    lifecycle_store
+                        .map(|store| super::retry_admission_in_root(store, &record.run_id))
+                        .unwrap_or_else(|| super::retry_admission(&record.run_id))
+                        .is_ok()
+                }),
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 ambiguous_promotion_artifact_ids(
+                    lifecycle_store,
                     record_run_id,
                     promotion_diagnostic.as_ref(),
                     &recipe,
@@ -6284,6 +6288,7 @@ fn dirty_candidate_adoption_recovery_actions(
 /// promotion claim proves selection was the blocker, so a recovery command is
 /// executable rather than a replay of the known-invalid promotion.
 fn ambiguous_promotion_artifact_ids(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     run_id: &str,
     diagnostic: Option<&Value>,
     recipe: &super::AgentTaskCookRecipe,
@@ -6302,7 +6307,10 @@ fn ambiguous_promotion_artifact_ids(
     if !is_ambiguous_selection {
         return Vec::new();
     }
-    let Ok(aggregate) = agent_task_lifecycle::read_attempt_aggregate(run_id) else {
+    let aggregate = lifecycle_store
+        .map(|store| store.read_aggregate(run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(run_id));
+    let Ok(aggregate) = aggregate else {
         return Vec::new();
     };
     let Some(outcome) = aggregate.selected_outcome().or_else(|| {
@@ -6332,7 +6340,10 @@ fn ambiguous_promotion_artifact_ids(
     let Ok(recipe_options) = super::reconstruct_options(recipe) else {
         return Vec::new();
     };
-    let Ok((source, source_path)) = promotion_source(run_id) else {
+    let source = lifecycle_store
+        .map(|store| promotion_source_in_store(store, run_id))
+        .unwrap_or_else(|| promotion_source(run_id));
+    let Ok((source, source_path)) = source else {
         return Vec::new();
     };
     canonical_recoverable_patch_artifacts(
@@ -6346,7 +6357,11 @@ fn ambiguous_promotion_artifact_ids(
             task_base_sha: None,
             candidate_ref: None,
             to_worktree: recipe_options.workspace.to_worktree,
-            task_id: selected_candidate_task_id(run_id).ok().flatten(),
+            task_id: lifecycle_store
+                .map(|store| selected_candidate_task_id_in_store(store, run_id))
+                .unwrap_or_else(|| selected_candidate_task_id(run_id))
+                .ok()
+                .flatten(),
             artifact_id: None,
             dry_run: false,
             gates: crate::agent_task_gate::VerifyGateOptions::default(),

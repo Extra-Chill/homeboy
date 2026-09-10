@@ -84,16 +84,23 @@ const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT_ENV: &str =
 struct DetachedCookAdmission {
     store: agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_id: String,
+    launcher_id: String,
     pending: bool,
 }
 
 impl DetachedCookAdmission {
     fn establish(cook_id: &str) -> homeboy::core::Result<Self> {
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)?;
+        let launcher_id = uuid::Uuid::new_v4().to_string();
+        agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+            &store,
+            cook_id,
+            &launcher_id,
+        )?;
         Ok(Self {
             store,
             cook_id: cook_id.to_string(),
+            launcher_id,
             pending: true,
         })
     }
@@ -106,9 +113,10 @@ impl DetachedCookAdmission {
 impl Drop for DetachedCookAdmission {
     fn drop(&mut self) {
         if self.pending {
-            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+            let _ = agent_task_lifecycle::fail_claimed_detached_cook_handoff_parent_in_store(
                 &self.store,
                 &self.cook_id,
+                &self.launcher_id,
                 "detached Cook launcher stopped before daemon ownership was published",
             );
         }
@@ -2399,6 +2407,40 @@ mod tests {
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["admission_state"],
                 "failed"
+            );
+        });
+    }
+
+    #[test]
+    fn second_launcher_cannot_adopt_or_terminalize_pending_handoff_parent() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-exclusive-launcher";
+            let first = DetachedCookAdmission::establish(cook_id)
+                .expect("first launcher owns pending parent");
+            let second = DetachedCookAdmission::establish(cook_id);
+            assert!(second.is_err(), "second launcher must be fenced out");
+
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("first parent remains discoverable");
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert_eq!(parent.metadata["detached_cook_handoff"]["state"], "pending");
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["admission_state"],
+                "pre_supervisor"
+            );
+            assert!(parent.metadata["detached_cook_handoff"]["launcher_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()));
+
+            drop(first);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(cook_id)
+                    .expect("owner cleanup terminalizes parent")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
             );
         });
     }

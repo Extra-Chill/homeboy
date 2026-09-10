@@ -517,6 +517,42 @@ pub fn record_detached_cook_handoff_parent_in_store(
     )
 }
 
+/// Claim a detached Cook handoff parent for one launcher. Generic parent
+/// recording remains idempotent for recovery, but a launcher must never adopt
+/// another launcher's pending parent and gain authority to fail it on drop.
+pub fn claim_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let _ = record_detached_cook_handoff_parent_in_store(lifecycle_store, &cook_id)?;
+    let launcher_id = launcher_id.to_string();
+    let claimed = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if handoff["cook_id"] != cook_id
+            || record.state.is_terminal()
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff.get("launcher_id").is_some()
+        {
+            return false;
+        }
+        record.metadata["detached_cook_handoff"]["launcher_id"] = json!(launcher_id);
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    if let Some(record) = claimed {
+        return Ok(record);
+    }
+    Err(Error::validation_invalid_argument(
+        "cook_id",
+        "detached Cook handoff is already owned or has advanced",
+        Some(cook_id),
+        None,
+    ))
+}
+
 /// Create a complete detached parent and immutable admission binding in the
 /// first durable run-record write. Input bytes remain staged and this state is
 /// deliberately invisible to runner selection until publication is recovered.
@@ -1719,6 +1755,36 @@ pub fn fail_detached_cook_handoff_parent_in_store(
     })?;
     // A protected parent is a successful no-op: it is the authoritative result
     // of materialization or a prior terminal transition, not a missing parent.
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Terminalize a pending parent only when the launcher that created its claim
+/// exits before daemon ownership is published.
+pub fn fail_claimed_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if handoff["cook_id"] != cook_id
+            || handoff["launcher_id"] != launcher_id
+            || record.state.is_terminal()
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+        {
+            return false;
+        }
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+        metadata["detached_cook_handoff"]["admission_state"] = json!("failed");
+        metadata["detached_cook_handoff"]["reason"] = json!(reason);
+        set_run_state(record, AgentTaskRunState::Failed);
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
 
