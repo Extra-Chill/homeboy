@@ -1,15 +1,22 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use homeboy_core::process::pid_has_ownership_token;
+use homeboy_core::test_support::{HermeticDaemonGuard, HermeticTestContext, TestBinary};
 
 #[test]
 #[cfg(unix)]
 fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let repository = fixture.path().join("repository");
-    let invocation_dir = fixture.path().join("operator-cwd");
-    let components_dir = fixture.path().join(".config/homeboy/components");
-    let tools = fixture.path().join("tools");
+    let fixture = HermeticTestContext::new();
+    let _daemon = HermeticDaemonGuard::new(&fixture, TestBinary::HomeboyFixture);
+    let repository = fixture.root().join("repository");
+    let invocation_dir = fixture.root().join("operator-cwd");
+    let components_dir = fixture.root().join(".config/homeboy/components");
+    let tools = fixture.root().join("tools");
     std::fs::create_dir_all(repository.join("target/debug")).expect("target directory");
     std::fs::create_dir_all(&invocation_dir).expect("operator directory");
     std::fs::create_dir_all(&components_dir).expect("components directory");
@@ -47,7 +54,7 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
     .expect("component registration");
 
     let inventory = run_cleanup_with_path(
-        fixture.path(),
+        &fixture,
         &invocation_dir,
         &["--include", "repo-artifacts"],
         &path,
@@ -71,7 +78,7 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
     );
 
     let args: Vec<_> = next_command.split_whitespace().skip(2).collect();
-    let applied = run_cleanup_with_path(fixture.path(), &invocation_dir, &args, &path);
+    let applied = run_cleanup_with_path(&fixture, &invocation_dir, &args, &path);
     assert_eq!(applied["success"], true, "{applied:#}");
     let job_id = applied
         .pointer("/data/job_id")
@@ -95,20 +102,20 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
         "{applied:#}"
     );
 
-    let completed = wait_for_cleanup_job(fixture.path(), &invocation_dir, job_id, &path);
+    let completed = wait_for_cleanup_job(&fixture, &invocation_dir, job_id, &path);
     assert_eq!(completed["data"]["status"], "succeeded", "{completed:#}");
     let artifact_removed = !repository.join("target").exists();
-    let stopped = run_homeboy(fixture.path(), &invocation_dir, &["daemon", "stop"], &path);
+    let stopped = run_homeboy(&fixture, &invocation_dir, &["daemon", "stop"], &path);
     assert_eq!(stopped["success"], true, "{stopped:#}");
     assert!(artifact_removed);
 }
 
 #[test]
 fn aggregate_repo_artifact_next_action_excludes_unignored_work() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let repository = fixture.path().join("repository");
-    let invocation_dir = fixture.path().join("operator-cwd");
-    let components_dir = fixture.path().join(".config/homeboy/components");
+    let fixture = HermeticTestContext::new();
+    let repository = fixture.root().join("repository");
+    let invocation_dir = fixture.root().join("operator-cwd");
+    let components_dir = fixture.root().join(".config/homeboy/components");
     std::fs::create_dir_all(repository.join("target/debug")).expect("target directory");
     std::fs::create_dir_all(&invocation_dir).expect("operator directory");
     std::fs::create_dir_all(&components_dir).expect("components directory");
@@ -125,11 +132,7 @@ fn aggregate_repo_artifact_next_action_excludes_unignored_work() {
     )
     .expect("component registration");
 
-    let inventory = run_cleanup(
-        fixture.path(),
-        &invocation_dir,
-        &["--include", "repo-artifacts"],
-    );
+    let inventory = run_cleanup(&fixture, &invocation_dir, &["--include", "repo-artifacts"]);
     assert_eq!(inventory["success"], true, "{inventory:#}");
     assert!(
         inventory
@@ -152,11 +155,11 @@ fn aggregate_repo_artifact_next_action_excludes_unignored_work() {
 #[test]
 #[cfg(unix)]
 fn aggregate_runner_binary_cache_next_action_applies_owned_candidate() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let invocation_dir = fixture.path().join("operator-cwd");
+    let fixture = HermeticTestContext::new();
+    let invocation_dir = fixture.root().join("operator-cwd");
     let slot = invocation_dir.join("_homeboy_binaries/homeboy-old");
     let binary = slot.join("target/release/homeboy");
-    let tools = fixture.path().join("tools");
+    let tools = fixture.root().join("tools");
     std::fs::create_dir_all(&invocation_dir).expect("operator directory");
     std::fs::create_dir_all(binary.parent().expect("binary parent")).expect("slot directory");
     std::fs::create_dir_all(&tools).expect("tools directory");
@@ -178,7 +181,7 @@ fn aggregate_runner_binary_cache_next_action_applies_owned_candidate() {
     );
 
     let inventory = run_cleanup_with_path(
-        fixture.path(),
+        &fixture,
         &invocation_dir,
         &["--include", "runner-binary-caches"],
         &path,
@@ -192,7 +195,7 @@ fn aggregate_runner_binary_cache_next_action_applies_owned_candidate() {
     assert_eq!(next_command, "homeboy runner cache-prune local --apply");
 
     let args: Vec<_> = next_command.split_whitespace().skip(1).collect();
-    let applied = run_homeboy(fixture.path(), &invocation_dir, &args, &path);
+    let applied = run_homeboy(&fixture, &invocation_dir, &args, &path);
     assert_eq!(applied["success"], true, "{applied:#}");
     assert!(!slot.exists());
 }
@@ -200,9 +203,9 @@ fn aggregate_runner_binary_cache_next_action_applies_owned_candidate() {
 #[test]
 #[cfg(unix)]
 fn explicit_local_shared_cargo_apply_succeeds_without_a_daemon() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let invocation_dir = fixture.path().join("operator-cwd");
-    let cargo_root = fixture.path().join("cargo-targets");
+    let fixture = HermeticTestContext::new();
+    let invocation_dir = fixture.root().join("operator-cwd");
+    let cargo_root = fixture.root().join("cargo-targets");
     let store = cargo_root.join(format!("homeboy-{}", "a".repeat(64)));
     let leased_store = cargo_root.join(format!("homeboy-{}", "b".repeat(64)));
     std::fs::create_dir_all(&store).expect("cargo target store");
@@ -240,7 +243,7 @@ fn explicit_local_shared_cargo_apply_succeeds_without_a_daemon() {
             "--full",
         ])
         .current_dir(&invocation_dir)
-        .env("HOME", fixture.path())
+        .env("HOME", fixture.home())
         .env("HOMEBOY_CARGO_TARGET_ROOT", &cargo_root)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .output()
@@ -271,16 +274,17 @@ fn explicit_local_shared_cargo_apply_succeeds_without_a_daemon() {
 #[test]
 #[cfg(unix)]
 fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
-    let fixture = tempfile::tempdir().expect("fixture");
-    let invocation_dir = fixture.path().join("operator-cwd");
-    let cargo_root = fixture.path().join("cargo-targets");
+    let fixture = HermeticTestContext::new();
+    let _daemon = HermeticDaemonGuard::new(&fixture, TestBinary::HomeboyFixture);
+    let invocation_dir = fixture.root().join("operator-cwd");
+    let cargo_root = fixture.root().join("cargo-targets");
     let historical = cargo_root.join(format!("homeboy-{}", "a".repeat(64)));
     let current = cargo_root.join(format!("homeboy-{}", "b".repeat(64)));
     std::fs::create_dir_all(&invocation_dir).expect("operator directory");
     create_old_cargo_target(&historical);
 
     let first = run_cleanup_with_cargo_root(
-        fixture.path(),
+        &fixture,
         &invocation_dir,
         &["--include", "shared-cargo-targets", "--apply"],
         &cargo_root,
@@ -289,7 +293,7 @@ fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
     assert_eq!(first["data"]["submission"]["disposition"], "created");
     let first_job_id = first["data"]["job_id"].as_str().expect("first job ID");
     let first_completed = wait_for_cleanup_job(
-        fixture.path(),
+        &fixture,
         &invocation_dir,
         first_job_id,
         &std::env::var("PATH").unwrap_or_default(),
@@ -302,7 +306,7 @@ fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
 
     create_old_cargo_target(&current);
     let second = run_cleanup_with_cargo_root(
-        fixture.path(),
+        &fixture,
         &invocation_dir,
         &["--include", "shared-cargo-targets", "--apply"],
         &cargo_root,
@@ -312,7 +316,7 @@ fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
     let second_job_id = second["data"]["job_id"].as_str().expect("second job ID");
     assert_ne!(second_job_id, first_job_id, "{second:#}");
     let second_completed = wait_for_cleanup_job(
-        fixture.path(),
+        &fixture,
         &invocation_dir,
         second_job_id,
         &std::env::var("PATH").unwrap_or_default(),
@@ -324,12 +328,104 @@ fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
     assert!(!current.exists(), "current candidate must be removed");
 
     let stopped = run_homeboy(
-        fixture.path(),
+        &fixture,
         &invocation_dir,
         &["daemon", "stop"],
         &std::env::var("PATH").unwrap_or_default(),
     );
     assert_eq!(stopped["success"], true, "{stopped:#}");
+}
+
+#[test]
+#[cfg(unix)]
+fn hermetic_daemon_guard_reaps_supervisor_and_server_after_panic() {
+    let record = std::sync::Mutex::new(None);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let fixture = HermeticTestContext::new();
+        let _daemon = HermeticDaemonGuard::new(&fixture, TestBinary::HomeboyFixture);
+        let output = fixture
+            .command(TestBinary::HomeboyFixture)
+            .args(["daemon", "ensure-running"])
+            .output()
+            .expect("start isolated daemon");
+        assert!(
+            output.status.success(),
+            "daemon ensure-running failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state: Value = serde_json::from_slice(
+            &std::fs::read(fixture.daemon_dir().join("state.json")).expect("daemon state"),
+        )
+        .expect("daemon state JSON");
+        let token = state["startup_token"]
+            .as_str()
+            .expect("daemon startup token");
+        let pids = daemon_pids_for_token(token);
+        *record.lock().expect("daemon process record") = Some((token.to_string(), pids));
+        panic!("exercise daemon teardown during assertion unwinding");
+    }));
+    assert!(panic.is_err(), "fixture must panic after starting a daemon");
+
+    let (token, pids) = record
+        .into_inner()
+        .expect("daemon process record")
+        .expect("daemon processes were recorded");
+    assert!(
+        pids.len() >= 2,
+        "record both supervisor and server: {pids:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline
+        && pids.iter().any(|pid| {
+            pid_has_ownership_token(*pid, "HOMEBOY_DAEMON_STARTUP_TOKEN", &token)
+                .expect("inspect recorded daemon ownership")
+        })
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let survivors: Vec<_> = pids
+        .iter()
+        .copied()
+        .filter(|pid| {
+            pid_has_ownership_token(*pid, "HOMEBOY_DAEMON_STARTUP_TOKEN", &token)
+                .expect("inspect recorded daemon ownership")
+        })
+        .collect();
+    if !survivors.is_empty() {
+        // This only runs when the token still proves ownership immediately
+        // before the signal, so a recycled PID cannot target another process.
+        for pid in &survivors {
+            unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+    assert!(
+        survivors.is_empty(),
+        "daemon processes survived fixture teardown: {survivors:?}"
+    );
+}
+
+#[cfg(unix)]
+fn daemon_pids_for_token(token: &str) -> Vec<u32> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .expect("list daemon processes");
+    assert!(output.status.success(), "ps failed");
+    output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            let line = std::str::from_utf8(line).ok()?.trim();
+            let (pid, command) = line.split_once(char::is_whitespace)?;
+            (command.contains("daemon")
+                && command.contains("--startup-token")
+                && command.contains(token))
+            .then(|| pid.parse().ok())
+            .flatten()
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -353,23 +449,38 @@ fn create_old_cargo_target(path: &Path) {
     );
 }
 
-fn run_cleanup(home: &Path, cwd: &Path, args: &[&str]) -> Value {
-    run_cleanup_with_path(home, cwd, args, &std::env::var("PATH").unwrap_or_default())
+fn run_cleanup(context: &HermeticTestContext, cwd: &Path, args: &[&str]) -> Value {
+    run_cleanup_with_path(
+        context,
+        cwd,
+        args,
+        &std::env::var("PATH").unwrap_or_default(),
+    )
 }
 
-fn run_cleanup_with_path(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {
+fn run_cleanup_with_path(
+    context: &HermeticTestContext,
+    cwd: &Path,
+    args: &[&str],
+    path: &str,
+) -> Value {
     let mut command = vec!["cleanup"];
     command.extend_from_slice(args);
-    run_homeboy(home, cwd, &command, path)
+    run_homeboy(context, cwd, &command, path)
 }
 
-fn run_cleanup_with_cargo_root(home: &Path, cwd: &Path, args: &[&str], cargo_root: &Path) -> Value {
+fn run_cleanup_with_cargo_root(
+    context: &HermeticTestContext,
+    cwd: &Path,
+    args: &[&str],
+    cargo_root: &Path,
+) -> Value {
     let mut command = vec!["cleanup"];
     command.extend_from_slice(args);
-    let output = Command::new(homeboy_bin())
+    let output = context
+        .command(TestBinary::HomeboyFixture)
         .args(command)
         .current_dir(cwd)
-        .env("HOME", home)
         .env("HOMEBOY_CARGO_TARGET_ROOT", cargo_root)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env_remove("HOMEBOY_LAB_EXECUTION_RUNNER_ID")
@@ -385,11 +496,11 @@ fn run_cleanup_with_cargo_root(home: &Path, cwd: &Path, args: &[&str], cargo_roo
     })
 }
 
-fn run_homeboy(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {
-    let output = Command::new(homeboy_bin())
+fn run_homeboy(context: &HermeticTestContext, cwd: &Path, args: &[&str], path: &str) -> Value {
+    let output = context
+        .command(TestBinary::HomeboyFixture)
         .args(args)
         .current_dir(cwd)
-        .env("HOME", home)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env("PATH", path)
         // This fixture inventories its isolated local runner. A parent Lab
@@ -408,10 +519,15 @@ fn run_homeboy(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {
     })
 }
 
-fn wait_for_cleanup_job(home: &Path, cwd: &Path, job_id: &str, path: &str) -> Value {
+fn wait_for_cleanup_job(
+    context: &HermeticTestContext,
+    cwd: &Path,
+    job_id: &str,
+    path: &str,
+) -> Value {
     let mut latest = Value::Null;
     for _ in 0..100 {
-        latest = run_cleanup_with_path(home, cwd, &["status", job_id], path);
+        latest = run_cleanup_with_path(context, cwd, &["status", job_id], path);
         if latest
             .pointer("/data/status")
             .and_then(Value::as_str)
