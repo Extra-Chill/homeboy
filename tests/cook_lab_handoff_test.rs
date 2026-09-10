@@ -586,6 +586,93 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
     );
 }
 
+/// A launcher crash before the supervisor projection must retain a discoverable
+/// resumable parent without relying on a separate cancellation request (#14528).
+#[test]
+fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
+    let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("pre-projection-crash");
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        "pre-projection-crash",
+        &checkout,
+        "interrupted-launcher",
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
+    let cook_id = "crash-interrupted-pre-projection";
+    let pause_marker = context.root().join("controller-started");
+    let mut launcher = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    launcher
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "1000")
+        .env(
+            "HOMEBOY_TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH",
+            &pause_marker,
+        )
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--run-id",
+            cook_id,
+            "--repo",
+            "pre-projection-crash",
+            "--backend",
+            "fixture",
+            "--prompt",
+            "crash before child projection",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
+            "--to-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--verify",
+            "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ]);
+    let mut launcher = launcher.spawn().expect("start detached Cook launcher");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !pause_marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "launcher did not reach the controller-start/pre-projection boundary"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    launcher.kill().expect("crash paused launcher");
+    launcher.wait().expect("reap crashed launcher");
+
+    let mut status = context.command(TestBinary::HomeboyFixture);
+    status.args(["agent-task", "status", cook_id]);
+    let status = bounded_output(status);
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status.status.success(), "{status_stdout}");
+    let lifecycle: serde_json::Value =
+        serde_json::from_str(&status_stdout).expect("terminal lifecycle status JSON");
+    assert_eq!(lifecycle["data"]["state"], "queued", "{status_stdout}");
+    assert_eq!(
+        lifecycle["data"]["action_eligibility"]["actions"]
+            .as_array()
+            .and_then(|actions| actions.iter().find(|action| action["action"] == "resume"))
+            .and_then(|action| action["availability"].as_str()),
+        Some("available"),
+        "{status_stdout}"
+    );
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    assert!(
+        !lifecycle_store.cook_index_path(cook_id).exists(),
+        "a crashed pre-projection launcher must not admit an executable Cook"
+    );
+}
+
 /// Piped stdio is not permission to turn a default local wait into a durable
 /// handoff. This target fails during foreground resolution, which makes the
 /// assertion bounded while proving the launcher did not emit a detach envelope.
@@ -626,6 +713,26 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let context = HermeticTestContext::new();
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("local-cook-durability");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            checkout.to_str().expect("fixture checkout path"),
+        ],
+    );
+    std::fs::create_dir_all(checkout.join("docs")).expect("create fixture docs directory");
+    std::fs::write(checkout.join("docs/agent-task-smoke.md"), "before\n")
+        .expect("seed fixture patch input");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &["add", "docs/agent-task-smoke.md"],
+    );
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &["commit", "-m", "seed fixture patch input"],
+    );
     let component_id = "local-cook-durability";
     let (_task_handle, task_worktree) = native_task_worktree(
         &context,
@@ -643,10 +750,10 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let client_stderr = context.root().join("foreground-client.stderr");
     let mut client = context.controller_runtime_command(TestBinary::HomeboyFixture);
     client
-        // This test exercises automatic placement, not live host pressure.
-        .env("GITHUB_ACTIONS", "true")
         .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "5000")
         .args([
+            "--placement",
+            "local",
             "agent-task",
             "cook",
             "--run-id",
@@ -655,6 +762,8 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
             component_id,
             "--backend",
             "fixture",
+            "--model",
+            "fixture-model",
             "--prompt",
             "complete after the observing client exits",
             "--cwd",
@@ -778,7 +887,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
             .and_then(serde_json::Value::as_array)
             .is_some_and(|artifacts| {
                 artifacts.iter().any(|artifact| {
-                    artifact.get("id").and_then(serde_json::Value::as_str) == Some("changes.patch")
+                    artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patch")
                 })
             });
     assert!(
