@@ -177,6 +177,14 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
     }
+    if record.state.is_terminal()
+        && record.runner_id().is_some()
+        && record.runner_job_id().is_some()
+    {
+        return available(
+            "terminal runner evidence may be reprojected idempotently without reopening execution",
+        );
+    }
     match record.state {
         AgentTaskRunState::Queued => {
             if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {

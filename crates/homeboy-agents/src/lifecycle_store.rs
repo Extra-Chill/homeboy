@@ -1519,7 +1519,7 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         rig_id: None,
         metadata_json,
     };
-    let resource_projection = agent_task_resource_projection(&record)?;
+    let resource_projection = agent_task_resource_projection(lifecycle_store, &record)?;
     if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
         store.upsert_imported_run_with_mission_and_resource_projection(
             &projected,
@@ -1547,8 +1547,28 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
 /// observation store atomically persists it beside the run projection so action
 /// admission can never observe a lifecycle version from another write.
 fn agent_task_resource_projection(
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
 ) -> Result<ControlPlaneResourceProjection> {
+    let mut aliases = vec![record.run_id.clone()];
+    let cook_id = record.metadata.get("cook_id").and_then(Value::as_str);
+    if let Some(cook_id) = cook_id {
+        // A Cook alias is owned only by the index's latest attempt.  An index
+        // that exists but cannot be read is an authority failure, not a reason
+        // to target the concrete attempt as though the alias did not exist.
+        let index_path = lifecycle_store.cook_index_path(cook_id);
+        if index_path.try_exists().map_err(|error| {
+            Error::internal_io(
+                "inspect Cook index for resource projection",
+                Some(error.to_string()),
+            )
+        })? {
+            let index = lifecycle_store.read_cook_index(cook_id)?;
+            if index.latest_run_id == record.run_id {
+                aliases.push(cook_id.to_string());
+            }
+        }
+    }
     Ok(ControlPlaneResourceProjection {
         resource_type: "agent_task_run".to_string(),
         resource_id: record.run_id.clone(),
@@ -1561,9 +1581,7 @@ fn agent_task_resource_projection(
             .as_str()
             .unwrap_or("unknown")
             .to_string(),
-        // A Cook alias is reassigned by its index owner, not by every attempt
-        // write. Concurrent attempts must never contend for an implicit alias.
-        aliases: vec![record.run_id.clone()],
+        aliases,
         eligibility: serde_json::to_value(
             crate::agent_task_lifecycle::lifecycle_action_eligibility(record, None),
         )
@@ -1601,7 +1619,7 @@ pub(super) fn read_record_in_store(
         .control_plane_resource_projection("agent_task_run", &record.run_id)?
         .is_none()
     {
-        let projection = agent_task_resource_projection(&record)?;
+        let projection = agent_task_resource_projection(lifecycle_store, &record)?;
         if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
             store.upsert_imported_run_with_mission_and_resource_projection(
                 &run,
@@ -1729,6 +1747,10 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
         }
     }
     write_json(&path, &index)?;
+    // The index is now the authoritative alias owner. Re-project the current
+    // target in the same Cook lock so SQLite admission observes the reassignment.
+    let latest = store.read_record(&index.latest_run_id)?;
+    store.write_record(&latest)?;
     Ok(index)
 }
 

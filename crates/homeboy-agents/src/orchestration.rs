@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, lifecycle_action_eligibility, now_timestamp,
-    resolve_run_id_in_store, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
     CanonicalControlPlaneIdentities,
 };
 use crate::agent_task_schedule::AgentTaskPlan;
@@ -1603,6 +1603,14 @@ impl OrchestrationService<LifecycleStoreLookup> {
         let Some(effect) = effect else {
             return Ok(status);
         };
+        if effect.recovery_required {
+            status.state = ControlPlaneEffectExecutionState::Unknown;
+            status.message = Some(
+                "legacy action claim requires authoritative reconciliation before redispatch"
+                    .to_string(),
+            );
+            return Ok(status);
+        }
         match effect.state {
             homeboy_control_plane_contract::ControlPlaneEffectState::Pending
             | homeboy_control_plane_contract::ControlPlaneEffectState::Leased => {
@@ -1678,11 +1686,27 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 "this mutation requires an exact durable run id; Cook aliases are not accepted",
             ));
         }
-        let resolved = if exact_mutation {
-            requested_id.as_str().to_string()
-        } else {
-            resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
-                .map_err(map_lifecycle_error)?
+        let observation = self
+            .lookup
+            .store
+            .open_observation_initialized()
+            .map_err(map_lifecycle_error)?;
+        // Action admission resolves aliases from the transactional projection.
+        // Filesystem Cook indexes remain compatibility reads and cannot broaden
+        // a mutation target when they are absent or unreadable.
+        let projected = observation
+            .control_plane_resource_projection("agent_task_run", requested_id.as_str())
+            .map_err(map_lifecycle_error)?;
+        let resolved = match projected {
+            Some(projection)
+                if exact_mutation && projection.resource_id != requested_id.as_str() =>
+            {
+                return Err(ControlPlaneError::invalid_argument(
+                    "this mutation requires an exact durable run id; Cook aliases are not accepted",
+                ));
+            }
+            Some(projection) => projection.resource_id,
+            None => requested_id.as_str().to_string(),
         };
         let record = self
             .lookup
@@ -1692,11 +1716,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
         // Admission is fenced by the projection committed with the lifecycle
         // record. The filesystem record is now a compatibility read for the
         // domain effect, never the authority deciding whether it may start.
-        let observation = self
-            .lookup
-            .store
-            .open_observation_initialized()
-            .map_err(map_lifecycle_error)?;
         let accepted_at = now_timestamp();
         let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
             serde_json::to_vec(request)
@@ -1733,7 +1752,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
         let idempotency_digest =
             homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
         let admission = observation
-            .enqueue_control_plane_action_intent(&intent, &fence, &idempotency_digest)
+            .enqueue_control_plane_action_intent(
+                &intent,
+                &fence,
+                "agent_task_run",
+                &idempotency_digest,
+            )
             .map_err(map_lifecycle_error)?;
         let effect = match admission {
             homeboy_core::observation::store::ControlPlaneEffectAdmission::Enqueued(effect)
@@ -2176,7 +2200,23 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         crate::agent_task_service::terminal_transport_recovery_required(
                             requested_id.as_str(),
                         );
+                    let terminal_projection_recovery = record.state.is_terminal()
+                        && record.runner_id().is_some()
+                        && record.runner_job_id().is_some();
                     let resumed = (|| -> homeboy_core::Result<_> {
+                        if terminal_projection_recovery {
+                            crate::agent_task_service::reconcile_terminal_artifact_projection(
+                                &resolved,
+                            )?;
+                            let result = crate::agent_task_service::terminal_run_result(&resolved)?
+                                .ok_or_else(|| {
+                                    homeboy_core::Error::internal_unexpected(
+                                        "terminal transport recovery has no terminal result",
+                                    )
+                                })?;
+                            let current = self.lookup.store.read_record(&resolved)?;
+                            return Ok((result, current));
+                        }
                         if needs_transport_recovery {
                             crate::agent_task_service::recover_terminal_transport_proxy_evidence(
                                 requested_id.as_str(),
@@ -2290,6 +2330,15 @@ fn action_unavailability(
         action,
         ControlPlaneAction::Cancel | ControlPlaneAction::Reconcile
     ) {
+        return None;
+    }
+    if action == ControlPlaneAction::Resume
+        && record.state.is_terminal()
+        && record.runner_id().is_some()
+        && record.runner_job_id().is_some()
+    {
+        // This is an idempotent evidence/artifact reprojection, not execution
+        // resume. The Resume branch below performs only that recovery first.
         return None;
     }
     let report = lifecycle_action_eligibility(record, None);
@@ -5219,24 +5268,16 @@ impl ControlPlaneProvider for RegisteredProvider {
                             && eligibility.availability == ControlPlaneActionAvailability::Available
                     })
                 });
-                if !available {
-                    if let Some(acknowledgement) =
-                        homeboy_core::control_plane::replay_delegated_action(
-                            &observation,
-                            requested_id,
-                            request,
-                        )?
-                    {
-                        return Ok(acknowledgement);
-                    }
-                    return Err(ControlPlaneError::invalid_argument(format!(
-                        "control-plane action is unavailable for run {requested_id}"
-                    )));
-                }
                 return homeboy_core::control_plane::execute_delegated_action(
                     &observation,
                     &record,
                     request,
+                    "observation_run",
+                    record.finished_at.as_deref().unwrap_or(&record.started_at),
+                    available,
+                    (!available).then(|| {
+                        format!("control-plane action is unavailable for run {requested_id}")
+                    }),
                     || {
                         let current = observation
                             .get_run(requested_id.as_str())
@@ -5378,6 +5419,7 @@ mod tests {
             .enqueue_control_plane_action_intent(
                 &intent,
                 &fence,
+                "agent_task_run",
                 &homeboy_engine_primitives::content_hash::sha256_hex(
                     request.idempotency_key.as_bytes(),
                 ),

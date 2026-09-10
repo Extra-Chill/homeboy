@@ -8289,19 +8289,38 @@ pub(super) fn run_resume_with_executor(
             },
             executor,
         )?;
-    let exit_code = match homeboy::agents::agent_task_action_result::resume(&acknowledgement)? {
+    let resume_result = homeboy::agents::agent_task_action_result::resume(&acknowledgement)?;
+    let exit_code = match &resume_result {
         homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
             exit_code,
             ..
-        } => exit_code,
+        } => *exit_code,
         homeboy::agents::agent_task_action_result::ResumeActionResult::UnmaterializedCook {
             terminal,
             ..
-        } => i32::from(terminal) * 2,
+        } => i32::from(*terminal) * 2,
     };
     Ok((
-        serde_json::to_value(acknowledgement)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        // Historical terminal transport recovery has always returned the
+        // aggregate-shaped status cursor. Keep that compatibility projection
+        // while the mutation itself remains a durable action acknowledgement.
+        serde_json::to_value(match (&resume_result, acknowledgement.outcome) {
+            (
+                homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
+                    aggregate,
+                    ..
+                },
+                homeboy_control_plane_contract::ControlPlaneActionOutcome::AlreadySatisfied,
+            ) => aggregate,
+            _ => {
+                return Ok((
+                    serde_json::to_value(acknowledgement)
+                        .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                    exit_code,
+                ))
+            }
+        })
+        .map_err(|error| Error::internal_json(error.to_string(), None))?,
         exit_code,
     ))
 }

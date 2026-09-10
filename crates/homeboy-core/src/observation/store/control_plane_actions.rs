@@ -40,6 +40,9 @@ pub struct ControlPlaneEffectStatus {
     pub lease_owner: Option<String>,
     pub lease_expires_at: Option<String>,
     pub terminal: Option<ControlPlaneEffectTerminal>,
+    /// A pre-outbox claim crossed an unknown external-effect window. It is
+    /// deliberately non-leaseable until its domain reconciles it.
+    pub recovery_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +138,7 @@ impl ObservationStore {
         &self,
         intent: &ControlPlaneActionIntent,
         fence: &ControlPlaneActionFence,
+        resource_type: &str,
         idempotency_digest: &str,
     ) -> Result<ControlPlaneEffectAdmission> {
         self.connection
@@ -163,10 +167,8 @@ impl ObservationStore {
                     None,
                 ));
             }
-            let projection = self.control_plane_resource_projection(
-                "agent_task_run",
-                intent.resource.run.as_str(),
-            )?;
+            let projection = self
+                .control_plane_resource_projection(resource_type, intent.resource.run.as_str())?;
             let Some(projection) = projection else {
                 return Err(Error::validation_invalid_argument(
                     "run_id",
@@ -401,6 +403,7 @@ impl ObservationStore {
                         .map_err(|e| Error::internal_json(e.to_string(), None))
                 })
                 .transpose()?,
+            recovery_required: state == "recovery_required",
         }))
     }
     pub fn existing_control_plane_action(
@@ -752,7 +755,12 @@ mod tests {
         };
         assert!(matches!(
             store
-                .enqueue_control_plane_action_intent(&intent, &fence, &"a".repeat(64))
+                .enqueue_control_plane_action_intent(
+                    &intent,
+                    &fence,
+                    "agent_task_run",
+                    &"a".repeat(64)
+                )
                 .unwrap(),
             ControlPlaneEffectAdmission::Enqueued(_)
         ));
@@ -760,7 +768,12 @@ mod tests {
         let store = ObservationStore::open_initialized_at(&path).unwrap();
         assert!(matches!(
             store
-                .enqueue_control_plane_action_intent(&intent, &fence, &"a".repeat(64))
+                .enqueue_control_plane_action_intent(
+                    &intent,
+                    &fence,
+                    "agent_task_run",
+                    &"a".repeat(64)
+                )
                 .unwrap(),
             ControlPlaneEffectAdmission::Duplicate(_)
         ));
@@ -870,7 +883,12 @@ mod tests {
                 let store = ObservationStore::open_initialized_at(path).unwrap();
                 barrier.wait();
                 store
-                    .enqueue_control_plane_action_intent(&intent, &fence, &"d".repeat(64))
+                    .enqueue_control_plane_action_intent(
+                        &intent,
+                        &fence,
+                        "agent_task_run",
+                        &"d".repeat(64),
+                    )
                     .unwrap()
             }));
         }

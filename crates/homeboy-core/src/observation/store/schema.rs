@@ -513,6 +513,14 @@ fn apply_migration(connection: &Connection, migration: &Migration) -> Result<()>
 }
 
 fn evolve_control_plane_action_claims(connection: &Connection) -> Result<()> {
+    use homeboy_control_plane_contract::{
+        ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionFence,
+        ControlPlaneActionIntent, ControlPlaneActionPayload, ControlPlaneActionRequest,
+        ControlPlaneActionResource, ControlPlaneEffectAudit, ControlPlaneEffectTerminal,
+        ControlPlaneRef, EffectId, RunId, CONTROL_PLANE_ACTION_FENCE_SCHEMA,
+        CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_EFFECT_AUDIT_SCHEMA, CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA,
+    };
     for (column, definition) in [
         ("intent_json", "TEXT"),
         ("fence_json", "TEXT"),
@@ -532,9 +540,97 @@ fn evolve_control_plane_action_claims(connection: &Connection) -> Result<()> {
                 .map_err(sqlite_error("evolve control-plane action claims"))?;
         }
     }
+    let mut statement = connection.prepare(
+        "SELECT c.run_id, c.idempotency_digest, c.request_digest, c.state, c.accepted_at, c.acknowledgement_json, r.started_at, COALESCE(r.finished_at, r.started_at) FROM control_plane_action_claims c JOIN runs r ON r.id = c.run_id WHERE c.intent_json IS NULL OR c.effect_id IS NULL OR c.fence_json IS NULL OR c.outbox_state IS NULL"
+    ).map_err(sqlite_error("read legacy control-plane action claims"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(sqlite_error("map legacy control-plane action claims"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(sqlite_error("collect legacy control-plane action claims"))?;
+    drop(statement);
+    for (
+        run_id,
+        idempotency_digest,
+        request_digest,
+        state,
+        accepted_at,
+        acknowledgement,
+        started_at,
+        updated_at,
+    ) in rows
+    {
+        let run = RunId::new(&run_id)
+            .map_err(|error| crate::Error::internal_unexpected(error.to_string()))?;
+        let effect_id = EffectId(format!(
+            "legacy:{}",
+            homeboy_engine_primitives::content_hash::sha256_hex(
+                format!("{run_id}\0{idempotency_digest}").as_bytes()
+            )
+        ));
+        let acknowledgement = acknowledgement
+            .as_deref()
+            .map(serde_json::from_str::<ControlPlaneActionAcknowledgement>)
+            .transpose()
+            .map_err(|error| crate::Error::internal_json(error.to_string(), None))?;
+        let request = acknowledgement
+            .as_ref()
+            .map(|ack| ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: effect_id.clone(),
+                action: ack.action,
+                idempotency_key: ack.idempotency_key.clone(),
+                actor: ack.actor.clone(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            })
+            .unwrap_or(ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: effect_id.clone(),
+                action: ControlPlaneAction::Reconcile,
+                idempotency_key: format!("legacy-{idempotency_digest}"),
+                actor: "migration-22".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: false,
+            });
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: effect_id.clone(),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(run.clone()),
+                run: run.clone(),
+                original_alias: None,
+            },
+            request,
+            request_digest,
+            accepted_at: accepted_at.clone(),
+        };
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: updated_at,
+            eligible: state == "completed",
+            reason: (state != "completed").then(|| {
+                "legacy claim requires authoritative reconciliation before redispatch".to_string()
+            }),
+        };
+        let terminal = acknowledgement.as_ref().map(|acknowledgement| ControlPlaneEffectTerminal { schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(), completed_at: acknowledgement.completed_at.clone(), acknowledgement: acknowledgement.clone(), audit: ControlPlaneEffectAudit { schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(), observed_at: started_at, evidence: serde_json::json!({ "migration": 22, "legacy_completed_acknowledgement": true }) } });
+        connection.execute("UPDATE control_plane_action_claims SET intent_json = ?3, fence_json = ?4, effect_id = ?5, outbox_state = ?6, terminal_json = ?7 WHERE run_id = ?1 AND idempotency_digest = ?2", rusqlite::params![run_id, idempotency_digest, serde_json::to_string(&intent).map_err(|error| crate::Error::internal_json(error.to_string(), None))?, serde_json::to_string(&fence).map_err(|error| crate::Error::internal_json(error.to_string(), None))?, effect_id.0, if terminal.is_some() { "terminal" } else { "recovery_required" }, terminal.map(|value| serde_json::to_string(&value)).transpose().map_err(|error| crate::Error::internal_json(error.to_string(), None))?]).map_err(sqlite_error("backfill legacy control-plane action effect"))?;
+    }
     connection.execute_batch(
-        "UPDATE control_plane_action_claims SET outbox_state = CASE state WHEN 'completed' THEN 'terminal' ELSE 'pending' END WHERE outbox_state IS NULL;
-         CREATE UNIQUE INDEX IF NOT EXISTS idx_control_plane_action_claims_effect_id ON control_plane_action_claims(effect_id) WHERE effect_id IS NOT NULL;
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_control_plane_action_claims_effect_id ON control_plane_action_claims(effect_id) WHERE effect_id IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_control_plane_action_claims_outbox ON control_plane_action_claims(outbox_state, lease_expires_at, accepted_at);"
     ).map_err(sqlite_error("finalize control-plane action outbox evolution"))
 }
@@ -1317,8 +1413,19 @@ mod tests {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "pending"
+            "recovery_required"
         );
+        let (intent, effect_id, fence, terminal): (String, String, String, Option<String>) = connection
+            .query_row(
+                "SELECT intent_json, effect_id, fence_json, terminal_json FROM control_plane_action_claims",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert!(intent.contains("migration-22"));
+        assert!(effect_id.starts_with("legacy:"));
+        assert!(fence.contains("authoritative reconciliation"));
+        assert!(terminal.is_none());
         assert_eq!(
             connection
                 .query_row(
