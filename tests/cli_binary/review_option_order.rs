@@ -141,6 +141,32 @@ fn review_actions_accept_their_shared_post_action_options_in_help() {
 }
 
 #[test]
+fn startup_help_applies_the_same_review_option_projection() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let sentinel = home.path().join("runtime-initialized");
+
+    let output = Command::new(homeboy_bin())
+        .args(["review", "--changed-only", "test", "fixture", "--help"])
+        .env_clear()
+        .env("HOME", home.path())
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .env("HOMEBOY_TEST_RUNTIME_INITIALIZATION_SENTINEL", &sentinel)
+        .output()
+        .expect("run invalid review test help");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--changed-only is not supported by this review action"),
+        "{stderr}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "startup help must not initialize the runtime"
+    );
+}
+
+#[test]
 fn review_rejects_conflicting_parent_and_action_values_before_execution() {
     let home = tempfile::tempdir().expect("temporary home");
 
@@ -195,6 +221,10 @@ fn review_rejects_conflicting_parent_and_action_values_before_execution() {
             "{combined}"
         );
         assert!(combined.contains("conflicting"), "{combined}");
+        assert!(
+            !combined.contains("missing component") && !combined.contains("No files changed"),
+            "conflicting scopes must fail before review execution: {combined}"
+        );
     }
 }
 
