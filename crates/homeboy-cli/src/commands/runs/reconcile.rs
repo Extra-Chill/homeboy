@@ -187,13 +187,11 @@ where
         else {
             continue;
         };
-        reconciled.push(reconcile_orphaned_running_run(
-            store,
-            run,
-            reason,
-            remote_job_status,
-            dry_run,
-        )?);
+        if let Some(summary) =
+            reconcile_orphaned_running_run(store, run, reason, remote_job_status, dry_run)?
+        {
+            reconciled.push(summary);
+        }
     }
     Ok(reconciled)
 }
@@ -212,7 +210,7 @@ fn reconcile_orphaned_running_run(
     reason: &str,
     remote_job_status: Option<String>,
     dry_run: bool,
-) -> homeboy::core::Result<ReconciledRunSummary> {
+) -> homeboy::core::Result<Option<ReconciledRunSummary>> {
     let owner_pid = run_owner_pid(run);
     if !dry_run {
         // Candidate selection is entirely local. Refresh only a selected row,
@@ -245,33 +243,33 @@ fn reconcile_orphaned_running_run(
                 .as_deref()
                 .expect("terminal status is present"),
         );
-        let refreshed = store
-            .finish_running_run_if_metadata(&run.id, status, metadata, &run.metadata_json)?
-            .or_else(|| store.get_run(&run.id).ok().flatten());
+        let Some(refreshed) =
+            store.finish_running_run_if_metadata(&run.id, status, metadata, &run.metadata_json)?
+        else {
+            return Ok(None);
+        };
         (
-            refreshed
-                .as_ref()
-                .and_then(|run| RunStatus::from_label(&run.status))
-                .unwrap_or(status),
-            refreshed.and_then(|run| run.finished_at),
+            RunStatus::from_label(&refreshed.status).unwrap_or(status),
+            refreshed.finished_at,
         )
     } else {
         let metadata =
             with_reconcile_metadata(run, owner_pid, reason, &reconcile_run_dir_metadata(run));
-        (
-            RunStatus::Stale,
-            store
-                .finish_running_run_if_metadata(
-                    &run.id,
-                    RunStatus::Stale,
-                    metadata,
-                    &run.metadata_json,
-                )?
-                .and_then(|run| run.finished_at),
-        )
+        (RunStatus::Stale, {
+            let Some(refreshed) = store.finish_running_run_if_metadata(
+                &run.id,
+                RunStatus::Stale,
+                metadata,
+                &run.metadata_json,
+            )?
+            else {
+                return Ok(None);
+            };
+            refreshed.finished_at
+        })
     };
 
-    Ok(ReconciledRunSummary {
+    Ok(Some(ReconciledRunSummary {
         id: run.id.clone(),
         kind: run.kind.clone(),
         previous_status: run.status.clone(),
@@ -282,7 +280,7 @@ fn reconcile_orphaned_running_run(
         reason: reason.to_string(),
         artifact_count,
         remote_job_status,
-    })
+    }))
 }
 
 fn reconciliation_reason<F>(
@@ -1035,6 +1033,44 @@ mod tests {
             assert!(reconciled[0].finished_at.is_none());
             assert_eq!(unchanged.status, "running");
             assert!(unchanged.finished_at.is_none());
+        });
+    }
+
+    #[test]
+    fn fleet_reconcile_does_not_report_a_cas_lost_row_as_reconciled() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                ))
+                .expect("run");
+
+            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+                |selected| {
+                    store
+                        .update_run_metadata(
+                            &selected.id,
+                            serde_json::json!({ "concurrent_progress": true }),
+                        )
+                        .expect("deterministically replace selected metadata");
+                    Ok(None)
+                },
+            )
+            .expect("fleet reconcile");
+
+            assert!(reconciled.is_empty());
+            let current = store.get_run(&run.id).expect("read").expect("run");
+            assert_eq!(current.status, RunStatus::Running.as_str());
+            assert_eq!(current.metadata_json["concurrent_progress"], true);
         });
     }
 

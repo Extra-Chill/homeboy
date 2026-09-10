@@ -99,8 +99,19 @@ pub struct RunsDossierCommandHint {
 }
 
 pub(crate) fn runs_dossier(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_readonly()?;
-    let (run, artifacts) = runs_service::load_run_with_artifacts(&store, run_id)?;
+    let store = ObservationStore::open_initialized()?;
+    runs_dossier_in_store(&store, run_id)
+}
+
+pub(crate) fn runs_dossier_in_store(
+    store: &ObservationStore,
+    run_id: &str,
+) -> CmdResult<RunsOutput> {
+    let run = runs_service::require_run(store, run_id)?;
+    runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(store, &run);
+    let run = runs_service::require_run(store, run_id)?;
+    reconcile::reconcile_owned_stale_running_run(store, &run)?;
+    let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
     let artifact_index = evidence_report::evidence_artifact_index(&artifacts);
     let failure = evidence_report::evidence_failure_summary(&run);
     let stale_reason = reconcile::running_status_note(&run);

@@ -510,12 +510,20 @@ where
     std::thread::spawn(move || {
         let _ = sender.send(operation());
     });
-    match receiver.recv_timeout(remaining) {
-        Ok(result) => result.map(Some),
-        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::internal_unexpected(
-            "dependency hydration worker stopped before returning a result",
-        )),
+    loop {
+        if (policy.is_cancelled)() || Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(10))) {
+            Ok(result) => return result.map(Some),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::internal_unexpected(
+                    "dependency hydration worker stopped before returning a result",
+                ));
+            }
+        }
     }
 }
 
@@ -1728,6 +1736,76 @@ mod tests {
             );
             assert!(started.elapsed() < Duration::from_secs(2));
         });
+    }
+
+    #[test]
+    fn cancellation_stops_provider_discovery_without_waiting_for_its_deadline() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
+        let release_for_worker = Arc::clone(&release);
+        let started = Instant::now();
+        let canceller = std::thread::spawn({
+            let cancelled = Arc::clone(&cancelled);
+            move || {
+                std::thread::sleep(Duration::from_millis(25));
+                cancelled.store(true, Ordering::SeqCst);
+            }
+        });
+        let result = run_with_hydration_deadline(
+            &policy,
+            Instant::now() + Duration::from_secs(2),
+            move || {
+                let (lock, wake) = &*release_for_worker;
+                let mut released = lock.lock().expect("lock release");
+                while !*released {
+                    released = wake.wait(released).expect("wait release");
+                }
+                Ok(())
+            },
+        )
+        .expect("discovery cancellation result");
+        canceller.join().expect("canceller");
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let (lock, wake) = &*release;
+        *lock.lock().expect("lock release") = true;
+        wake.notify_one();
+    }
+
+    #[test]
+    fn cancellation_stops_provider_planning_without_waiting_for_its_deadline() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
+        let release_for_worker = Arc::clone(&release);
+        let started = Instant::now();
+        let canceller = std::thread::spawn({
+            let cancelled = Arc::clone(&cancelled);
+            move || {
+                std::thread::sleep(Duration::from_millis(25));
+                cancelled.store(true, Ordering::SeqCst);
+            }
+        });
+        let result = run_with_hydration_deadline(
+            &policy,
+            Instant::now() + Duration::from_secs(2),
+            move || {
+                let (lock, wake) = &*release_for_worker;
+                let mut released = lock.lock().expect("lock release");
+                while !*released {
+                    released = wake.wait(released).expect("wait release");
+                }
+                Ok(())
+            },
+        )
+        .expect("planning cancellation result");
+        canceller.join().expect("canceller");
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let (lock, wake) = &*release;
+        *lock.lock().expect("lock release") = true;
+        wake.notify_one();
     }
 
     #[cfg(unix)]
