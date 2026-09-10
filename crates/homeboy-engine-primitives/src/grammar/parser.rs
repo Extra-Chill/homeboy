@@ -141,25 +141,13 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
                 regular_string_quote = None;
             }
             Region::StringLiteral
-        } else if in_block_comment {
-            // Check if block comment ends on this line
-            if let Some(pos) = trimmed.find(block_comment_end.as_str()) {
-                // Comment ends partway through this line
-                in_block_comment = false;
-                let after = &trimmed[pos + block_comment_end.len()..].trim();
-                if after.is_empty() {
-                    Region::BlockComment
-                } else {
-                    // Mixed line — treat as code (conservative)
-                    Region::Code
-                }
-            } else {
-                Region::BlockComment
-            }
-        } else if is_line_comment(trimmed, &grammar.comments) {
-            Region::LineComment
         } else {
-            // Check for block comment start
+            // Outside any string: block comments take precedence over
+            // line/doc comment prefixes. A `/**` doc-block opener must not be
+            // consumed as a line comment — that leaves the block's interior
+            // classified as code, where prose apostrophes ("doesn't", "file's")
+            // open phantom multi-line strings that swallow the real namespace
+            // and method declarations that follow (#14527).
             for (open, close) in &grammar.comments.block {
                 if trimmed.starts_with(open.as_str())
                     && (!trimmed.contains(close.as_str()) || trimmed.ends_with(open.as_str()))
@@ -169,7 +157,22 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
                 }
             }
             if in_block_comment {
-                Region::BlockComment
+                // Check if block comment ends on this line
+                if let Some(pos) = trimmed.find(block_comment_end.as_str()) {
+                    // Comment ends partway through this line
+                    in_block_comment = false;
+                    let after = &trimmed[pos + block_comment_end.len()..].trim();
+                    if after.is_empty() {
+                        Region::BlockComment
+                    } else {
+                        // Mixed line — treat as code (conservative)
+                        Region::Code
+                    }
+                } else {
+                    Region::BlockComment
+                }
+            } else if is_line_comment(trimmed, &grammar.comments) {
+                Region::LineComment
             } else {
                 // Scan only the code portion: a trailing `// the post's title`
                 // must not open a single-quoted string that swallows every
