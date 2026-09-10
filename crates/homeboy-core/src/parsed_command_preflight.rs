@@ -747,6 +747,25 @@ mod tests {
     }
 
     #[test]
+    fn resolver_admits_automatic_and_explicit_runners_from_fresh_bounded_evidence() {
+        let policy = explicit_runner_policy("connected_ready", vec!["lab-b".into()], true);
+
+        assert!(resolve_parsed_command_preflight(
+            vec!["fixture".into()],
+            explicit_runner_input(),
+            policy.clone(),
+        )
+        .is_ok());
+
+        let mut automatic = explicit_runner_input();
+        automatic.placement = PlacementIntent::Auto;
+        automatic.runner = RunnerIntent::Default;
+        assert!(
+            resolve_parsed_command_preflight(vec!["fixture".into()], automatic, policy).is_ok()
+        );
+    }
+
+    #[test]
     fn resolver_rejects_an_explicit_runner_without_ready_inventory_evidence() {
         let input = explicit_runner_input();
         let policy = explicit_runner_policy("stale", Vec::new(), false);

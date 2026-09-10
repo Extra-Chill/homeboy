@@ -1352,7 +1352,7 @@ impl CliRuntime {
                 cli.runner
                     .as_deref()
                     .map(crate::runner::lab_runner_readiness_for_admission)
-                    .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+                    .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
                     .ok()
             } else {
                 None
@@ -2744,7 +2744,7 @@ fn preflight_composed_lab_route(
         options
             .runner
             .map(crate::runner::lab_runner_readiness_for_admission)
-            .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+            .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
             .ok()
     } else {
         None
@@ -2870,7 +2870,7 @@ fn resolve_composed_capability_preflight(
         })
         .or_else(|| {
             (options.placement != crate::cli_surface::Placement::Local)
-                .then(|| crate::runner::lab_runner_readiness().ok())
+                .then(|| crate::runner::refresh_lab_runner_readiness_for_admission().ok())
                 .flatten()
                 .map(|readiness| resource_policy::lab_readiness_snapshot(&readiness))
         });
@@ -2957,7 +2957,7 @@ fn preflight_hot_command_with_input(
                 cli.runner
                     .as_deref()
                     .map(crate::runner::lab_runner_readiness_for_admission)
-                    .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+                    .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
                     .ok()
             } else {
                 None
