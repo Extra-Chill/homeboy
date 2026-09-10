@@ -1364,6 +1364,9 @@ pub struct AgentTaskCookReport {
     /// recipe was materialized. It may contain a bounded causal provider-command
     /// projection; expanded evidence remains available through `diagnose`.
     pub failure_context: Option<AgentTaskCookFailureContext>,
+    /// Store roots that produced this report. Kept out of the wire document so
+    /// derived completion evidence remains bound to the execution installation.
+    pub(crate) report_stores: Option<(CookRecipeStore, AgentTaskLifecycleStore)>,
 }
 
 /// The end-to-end publication state of a Cook candidate.
@@ -1533,7 +1536,10 @@ impl AgentTaskCookReport {
             self.status.as_str(),
             "green_no_finalize" | "intentional_no_change"
         );
-        cook_completion(
+        cook_completion_with_stores(
+            self.report_stores
+                .as_ref()
+                .map(|(recipe, lifecycle)| (recipe, lifecycle)),
             self.selected_candidate.as_ref(),
             finalization_requested,
             self.finalization.as_ref(),
@@ -1563,9 +1569,29 @@ pub fn cook_completion(
     finalization: Option<&Value>,
     finalization_run_id: Option<&str>,
 ) -> Option<AgentTaskCookCompletion> {
+    cook_completion_with_stores(
+        None,
+        selected_candidate,
+        finalization_requested,
+        finalization,
+        finalization_run_id,
+    )
+}
+
+fn cook_completion_with_stores(
+    stores: Option<(&CookRecipeStore, &AgentTaskLifecycleStore)>,
+    selected_candidate: Option<&Value>,
+    finalization_requested: bool,
+    finalization: Option<&Value>,
+    finalization_run_id: Option<&str>,
+) -> Option<AgentTaskCookCompletion> {
     let candidate_produced = canonical_candidate_produced(selected_candidate);
-    let canonical_finalization =
-        canonical_candidate_finalization(selected_candidate, finalization, finalization_run_id);
+    let canonical_finalization = canonical_candidate_finalization_with_stores(
+        stores,
+        selected_candidate,
+        finalization,
+        finalization_run_id,
+    );
     // A report can carry a receipt before the Cook index is available. Once a
     // canonical selection exists, however, only that selected attempt owns the
     // completion receipt; a newer non-substantive attempt cannot replace it.
@@ -1577,7 +1603,7 @@ pub fn cook_completion(
     });
     let pr_finalized = finalization.is_some_and(cook_finalization_is_pr_receipt);
     let recovery_run_id = (!pr_finalized && finalization_requested)
-        .then(|| canonical_finalization_recovery_run_id(selected_candidate))
+        .then(|| canonical_finalization_recovery_run_id_with_stores(stores, selected_candidate))
         .flatten();
     let state = if pr_finalized {
         "pr_finalized"
@@ -1627,6 +1653,13 @@ fn canonical_candidate_produced(selected_candidate: Option<&Value>) -> bool {
 /// Recovery needs the exact selected immutable artifact, a finalizable promotion,
 /// required-gate evidence accepted by the Cook recipe, and reviewer metadata.
 fn canonical_finalization_recovery_run_id(selected_candidate: Option<&Value>) -> Option<String> {
+    canonical_finalization_recovery_run_id_with_stores(None, selected_candidate)
+}
+
+fn canonical_finalization_recovery_run_id_with_stores(
+    stores: Option<(&CookRecipeStore, &AgentTaskLifecycleStore)>,
+    selected_candidate: Option<&Value>,
+) -> Option<String> {
     if !canonical_candidate_produced(selected_candidate) {
         return None;
     }
@@ -1634,17 +1667,28 @@ fn canonical_finalization_recovery_run_id(selected_candidate: Option<&Value>) ->
     let run_id = candidate["run_id"].as_str()?;
     let task_id = candidate["selected_task_id"].as_str()?;
     let cook_id = candidate["cook_id"].as_str()?;
-    let recipe = super::cook_recipe::load_recipe(cook_id).ok()?;
+    let recipe = stores
+        .map(|(store, _)| store.load_recipe(cook_id))
+        .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id))
+        .ok()?;
     let options = super::cook_recipe::reconstruct_adoption_options(&recipe).ok()?;
-    let promotion = super::cook_promotion::persisted_promotion_for_attempt(run_id)
+    let promotion = stores
+        .map(|(_, lifecycle)| {
+            super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle, run_id)
+        })
+        .unwrap_or_else(|| super::cook_promotion::persisted_promotion_for_attempt(run_id))
         .ok()
         .flatten()?;
-    let recovery_run_id = super::cook_promotion::canonical_cook_recovery_run_id(cook_id)?;
+    let recovery_run_id =
+        super::cook_promotion::canonical_cook_recovery_run_id_with_stores(stores, cook_id)?;
     if !canonical_finalization_eligible(
         &promotion,
         options.gates.accept_inherited_failures,
         review_form_from_aggregate(
-            &agent_task_lifecycle::read_attempt_aggregate(&recovery_run_id).ok()?,
+            &stores
+                .map(|(_, lifecycle)| lifecycle.read_aggregate(&recovery_run_id))
+                .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(&recovery_run_id))
+                .ok()?,
         )
         .ok()
         .flatten()
@@ -1683,6 +1727,20 @@ pub(crate) fn canonical_candidate_finalization(
     inspected_finalization: Option<&Value>,
     inspected_run_id: Option<&str>,
 ) -> Option<Value> {
+    canonical_candidate_finalization_with_stores(
+        None,
+        selected_candidate,
+        inspected_finalization,
+        inspected_run_id,
+    )
+}
+
+pub(crate) fn canonical_candidate_finalization_with_stores(
+    stores: Option<(&CookRecipeStore, &AgentTaskLifecycleStore)>,
+    selected_candidate: Option<&Value>,
+    inspected_finalization: Option<&Value>,
+    inspected_run_id: Option<&str>,
+) -> Option<Value> {
     if !canonical_candidate_produced(selected_candidate) {
         return None;
     }
@@ -1694,18 +1752,27 @@ pub(crate) fn canonical_candidate_finalization(
             return Some(finalization.clone());
         }
     }
-    let record = agent_task_lifecycle::exact_record(run_id).ok()?;
+    let record = stores
+        .map(|(_, lifecycle)| lifecycle.read_record(run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::exact_record(run_id))
+        .ok()?;
     if record.metadata["cook_id"].as_str() == Some(cook_id) {
         if let Some(finalization) = record.metadata.get("cook_finalization") {
             return Some(finalization.clone());
         }
     }
-    let recipe = super::cook_recipe::load_recipe(cook_id).ok()?;
+    let recipe = stores
+        .map(|(store, _)| store.load_recipe(cook_id))
+        .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id))
+        .ok()?;
     for attempt in recipe.attempts.iter().rev() {
         if attempt.run_id == run_id {
             continue;
         }
-        let Ok(record) = agent_task_lifecycle::exact_record(&attempt.run_id) else {
+        let record = stores
+            .map(|(_, lifecycle)| lifecycle.read_record(&attempt.run_id))
+            .unwrap_or_else(|| agent_task_lifecycle::exact_record(&attempt.run_id));
+        let Ok(record) = record else {
             continue;
         };
         if record.metadata["cook_id"].as_str() != Some(cook_id)
@@ -1713,10 +1780,18 @@ pub(crate) fn canonical_candidate_finalization(
         {
             continue;
         }
-        let Some(promotion) =
-            super::cook_promotion::persisted_promotion_for_attempt(&attempt.run_id)
-                .ok()
-                .flatten()
+        let Some(promotion) = stores
+            .map(|(_, lifecycle)| {
+                super::cook_promotion::persisted_promotion_for_attempt_in_store(
+                    lifecycle,
+                    &attempt.run_id,
+                )
+            })
+            .unwrap_or_else(|| {
+                super::cook_promotion::persisted_promotion_for_attempt(&attempt.run_id)
+            })
+            .ok()
+            .flatten()
         else {
             continue;
         };
@@ -1739,6 +1814,16 @@ pub(crate) fn canonical_candidate_finalization(
 /// that publish or recover must use this instead of ranking attempt history.
 pub(crate) fn canonical_cook_candidate(cook_id: &str) -> Option<Value> {
     agent_task_lifecycle::select_cook_candidate(cook_id)
+        .ok()
+        .and_then(|selection| serde_json::to_value(selection).ok())
+}
+
+pub(crate) fn canonical_cook_candidate_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Option<Value> {
+    lifecycle_store
+        .select_cook_candidate(cook_id)
         .ok()
         .and_then(|selection| serde_json::to_value(selection).ok())
 }
@@ -2210,6 +2295,7 @@ mod run_lifecycle_projection_tests {
             primary_failure: None,
             moving_base_recovery: None,
             failure_context: None,
+            report_stores: None,
         }
     }
 
@@ -4897,7 +4983,7 @@ fn run_cook_with_runtime(
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let notification_options = options.clone();
-    let result = run_cook_reported(
+    let mut result = run_cook_reported(
         store,
         lifecycle_store,
         options,
@@ -4906,7 +4992,8 @@ fn run_cook_with_runtime(
         Some(durable_observer),
         mode,
     );
-    if let Ok(result) = &result {
+    if let Ok(result) = &mut result {
+        super::cook_promotion::bind_report_to_stores(&mut result.value, store, lifecycle_store);
         if result.value.disposition.is_terminal() {
             crate::agent_task_notify::cook_terminal(
                 &result.value,

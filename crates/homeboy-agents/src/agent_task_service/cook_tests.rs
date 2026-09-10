@@ -10,20 +10,21 @@ use super::super::cook_adoption::{
 use super::super::cook_baseline::git_output;
 use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
-    canonical_cook_patch_artifact_id_in_store, canonical_cook_recovery_run_id,
-    cook_candidate_base_sha, cook_finalization_options, cook_finalization_options_with_stores,
-    cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
-    finalize_cook_pr_with_backend_with_stores, finalize_or_load_cook_pr_with_backend,
-    finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
-    moving_base_recovery_for_run, moving_base_recovery_for_run_with_stores,
-    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
-    preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    replacement_gate_execution_started, selected_candidate_task_id_in_store,
-    verify_replacement_gates, CookReportInput, MovingBaseCookRecovery,
+    bind_report_to_stores, canonical_cook_patch_artifact_id_in_store,
+    canonical_cook_recovery_run_id, cook_candidate_base_sha, cook_finalization_options,
+    cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
+    finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
+    finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
+    mark_replacement_gate_execution_started, moving_base_recovery_for_run,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
+    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
+    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
+    persisted_promotion_for_attempt_in_store, preflight_cook_promotion_in_store,
+    prepare_manual_finalization_identity, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, replacement_gate_execution_started,
+    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -38,6 +39,7 @@ use crate::agent_task_finalization::{
     AgentTaskPrRef, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
     RealAgentTaskPrFinalizationBackend,
 };
+use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
 use crate::agent_task_scheduler::{
     AgentTaskAggregateStatus, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
@@ -854,6 +856,7 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
                 legal_actions: Vec::new(),
                 next_actions: Vec::new(),
             }),
+            report_stores: None,
         },
         exit_code: 1,
     };
@@ -973,6 +976,7 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
                 next_actions: Vec::new(),
                 legal_actions: Vec::new(),
             }),
+            report_stores: None,
         },
         exit_code: 1,
     };
@@ -1119,6 +1123,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
                 legal_actions: Vec::new(),
                 next_actions: Vec::new(),
             }),
+            report_stores: None,
         },
         exit_code: 1,
     };
@@ -20484,6 +20489,76 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
             "history_run_ids should still include the full cross-invocation history"
         );
         assert!(!report.value.history_run_ids.contains(&fresh_run_id));
+    });
+}
+
+#[test]
+fn runtime_report_binding_uses_only_its_injected_installation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let injected_context = homeboy_core::test_support::HermeticTestContext::new();
+        let ambient_context = homeboy_core::test_support::HermeticTestContext::new();
+        let injected_lifecycle = AgentTaskLifecycleStore::new(injected_context.path_roots());
+        let ambient_lifecycle = AgentTaskLifecycleStore::new(ambient_context.path_roots());
+        let injected_recipe = CookRecipeStore::from_data_root(injected_lifecycle.data_root());
+        let ambient_recipe = CookRecipeStore::from_data_root(ambient_lifecycle.data_root());
+        let cook_id = "cook-rooted-report";
+        let injected_run = "cook-rooted-report-injected";
+        let ambient_run = "cook-rooted-report-ambient";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+
+        for (recipe, lifecycle, run_id) in [
+            (&injected_recipe, &injected_lifecycle, injected_run),
+            (&ambient_recipe, &ambient_lifecycle, ambient_run),
+        ] {
+            recipe
+                .persist_initial_recipe(&options)
+                .expect("persist recipe");
+            agent_task_lifecycle::submit_plan_in_store(
+                lifecycle,
+                &options.identity.initial_plan,
+                Some(run_id),
+            )
+            .expect("persist run");
+            lifecycle
+                .record_cook_attempt(cook_id, 1, run_id)
+                .expect("persist index");
+            agent_task_lifecycle::record_cook_controller_failure_in_store(
+                lifecycle,
+                run_id,
+                &serde_json::json!({ "code": run_id }),
+            )
+            .expect("persist failure");
+        }
+
+        let mut report = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: None,
+        })
+        .value;
+        bind_report_to_stores(&mut report, &injected_recipe, &injected_lifecycle);
+        let serialized = serde_json::to_value(&report).expect("serialize rooted report");
+
+        assert_eq!(
+            serialized["history_run_ids"],
+            serde_json::json!([injected_run])
+        );
+        assert_eq!(serialized["latest_run_id"], injected_run);
+        let context = &serialized["failure_context"];
+        assert_eq!(context["latest_run_id"], injected_run);
+        assert_eq!(context["diagnostic"]["code"], injected_run);
+        for action in context["legal_actions"]
+            .as_array()
+            .expect("recovery actions")
+        {
+            assert!(action["command"].as_str().unwrap().contains(injected_run));
+            assert!(!action["command"].as_str().unwrap().contains(ambient_run));
+        }
     });
 }
 
