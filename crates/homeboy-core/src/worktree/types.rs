@@ -458,6 +458,10 @@ pub struct WorktreeInventoryOutput {
     pub cross_tab_scope: &'static str,
     pub cross_tab: WorktreeInventoryCrossTab,
     pub records: Vec<WorktreeInventoryRecord>,
+    /// Malformed manifests encountered within this physical page. Their names
+    /// remain valid keyset boundaries, so a corrupt record cannot stall a walk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<WorktreeListDiagnostic>,
     pub adopted: WorktreeAdoptedInventoryPage,
 }
 

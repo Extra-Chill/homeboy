@@ -1074,21 +1074,62 @@ pub(super) fn inventory_with_store_and_authority(
             .apply_deadline
             .unwrap_or_else(|| std::time::Instant::now() + APPLY_TIMEOUT)
     });
-    let worktrees = list_with_store(store_dir)?.worktrees;
-    let total = worktrees.len();
-    let mut worktrees = worktrees.into_iter().filter(|record| {
-        options
-            .cursor
-            .as_ref()
-            .is_none_or(|cursor| record.id.as_str() > cursor.as_str())
+    // Count and sort manifest names without deserializing the registry. A page
+    // must bound parsing too, not merely trim an already materialized result.
+    let mut manifest_paths = if store_dir.exists() {
+        fs::read_dir(store_dir)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(store_dir.display().to_string()))
+            })?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    manifest_paths.sort();
+    let total = manifest_paths.len();
+    let start = options.cursor.as_ref().map_or(0, |cursor| {
+        let cursor = paths::sanitize_path_segment(cursor);
+        manifest_paths.partition_point(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|id| id <= cursor.as_str())
+        })
     });
-    let records_page: Vec<_> = worktrees.by_ref().take(limit).collect();
-    let mut next_cursor = worktrees.next().map(|_| {
-        records_page
+    // Probe one extra physical manifest. The boundary is the filename, not a
+    // decoded record ID, so deletion or corruption of returned rows is safe.
+    let page_paths = manifest_paths
+        .into_iter()
+        .skip(start)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let has_more = page_paths.len() > limit;
+    let page_paths = page_paths.into_iter().take(limit).collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    let records_page = page_paths
+        .iter()
+        .filter_map(|path| match read_record_path(path) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                diagnostics.push(WorktreeListDiagnostic::from_error(
+                    error,
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string),
+                    Some(path.display().to_string()),
+                ));
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut next_cursor = has_more.then(|| {
+        page_paths
             .last()
-            .expect("a page with a following record is non-empty")
-            .id
-            .clone()
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str())
+            .expect("JSON manifest names are valid cursor boundaries")
+            .to_string()
     });
     let mut truncated = next_cursor.is_some();
     let mut records = Vec::new();
@@ -1313,6 +1354,7 @@ pub(super) fn inventory_with_store_and_authority(
         cross_tab_scope: "task_worktree_page",
         cross_tab,
         records,
+        diagnostics,
         adopted: WorktreeAdoptedInventoryPage {
             cursor: options.adopted_cursor,
             next_cursor: adopted_next_cursor,

@@ -4,7 +4,9 @@
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use crate::agent_task_scheduler::AgentTaskState;
+use base64::Engine;
 use homeboy_core::api_jobs::{JobStatus, JobStore};
+use homeboy_core::observation::RunCursor;
 use std::collections::{BTreeMap, BTreeSet};
 // `agent-task active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
@@ -49,6 +51,44 @@ pub struct AgentTaskDiscoveryOptions {
     pub state: Option<String>,
     pub placement: Option<String>,
     pub parent_id: Option<String>,
+}
+
+/// Bounded durable discovery page. This is deliberately separate from
+/// [`AgentTaskDiscoveryOptions`] so existing callers retain their source and
+/// wire compatibility while new callers cannot accidentally use an offset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentTaskDiscoveryPageOptions {
+    /// Maximum physical rows to parse. Filtering is applied only to this page;
+    /// callers resume the opaque keyset cursor to continue sparse searches.
+    pub limit: usize,
+    /// Opaque continuation returned by the previous page.
+    pub cursor: Option<String>,
+    pub repo: Option<String>,
+    pub workspace: Option<String>,
+    pub task_url: Option<String>,
+    pub submitted_after: Option<String>,
+    pub state: Option<String>,
+    pub placement: Option<String>,
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskDiscoveryPage {
+    pub schema: &'static str,
+    pub filter: &'static str,
+    /// Count is for this physical page after filters, not a claim about the
+    /// remainder of a sparse filtered history.
+    pub count: usize,
+    /// A bounded page cannot truthfully compute a filtered global total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+    pub physical_limit: usize,
+    pub physical_count: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub runs: Vec<AgentTaskDiscoveryRun>,
+    pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -263,6 +303,104 @@ pub fn discover_runs_with_options(
 ) -> Result<AgentTaskDiscoveryReport> {
     let (records, record_health) = agent_task_lifecycle::read_records_with_health()?;
     discovery_report(filter, options, records, record_health)
+}
+
+/// Read one immutable-keyset physical page. The cursor encodes the observation
+/// store's `(started_at, id)` ordering key, so it remains valid if the returned
+/// boundary row is deleted before the caller resumes.
+pub fn discover_runs_page(
+    filter: AgentTaskDiscoveryFilter,
+    options: AgentTaskDiscoveryPageOptions,
+) -> Result<AgentTaskDiscoveryPage> {
+    let limit = options.limit.clamp(1, 100);
+    let after = options
+        .cursor
+        .as_deref()
+        .map(decode_page_cursor)
+        .transpose()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let (mut records, truncated, next) = store.read_record_page(after, limit)?;
+    let physical_count = records.len();
+    records.retain(|record| !is_fixture_runner_record(record));
+    let submitted_after = options
+        .submitted_after
+        .as_deref()
+        .map(parse_submitted_after)
+        .transpose()?;
+    let legacy = AgentTaskDiscoveryOptions {
+        repo: options.repo,
+        workspace: options.workspace,
+        task_url: options.task_url,
+        submitted_after: options.submitted_after,
+        state: options.state,
+        placement: options.placement,
+        parent_id: options.parent_id,
+        ..Default::default()
+    };
+    if filter == AgentTaskDiscoveryFilter::Active {
+        records.retain(|record| {
+            matches!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+                    | agent_task_lifecycle::AgentTaskRunState::Running
+            )
+        });
+    }
+    records.retain(|record| matches_discovery_options(record, &legacy, submitted_after.as_ref()));
+    if filter == AgentTaskDiscoveryFilter::Latest {
+        records.truncate(1);
+    }
+    let now = chrono::Utc::now();
+    let runs = records
+        .into_iter()
+        .map(|record| discovery_run(record, filter == AgentTaskDiscoveryFilter::Active, now))
+        .collect::<Vec<_>>();
+    Ok(AgentTaskDiscoveryPage {
+        schema: "homeboy/agent-task-discovery-page/v1",
+        filter: match filter {
+            AgentTaskDiscoveryFilter::All => "all",
+            AgentTaskDiscoveryFilter::Active => "active",
+            AgentTaskDiscoveryFilter::Latest => "latest",
+        },
+        count: runs.len(),
+        total: None,
+        physical_limit: limit,
+        physical_count,
+        truncated,
+        next_cursor: next.map(encode_page_cursor),
+        record_health: AgentTaskRecordHealthSummary {
+            schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
+            healthy: runs.len(),
+            ..Default::default()
+        },
+        runs,
+    })
+}
+
+fn encode_page_cursor(cursor: RunCursor) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&cursor).expect("run cursor serializes"))
+}
+
+fn decode_page_cursor(value: &str) -> Result<RunCursor> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "cursor",
+                "must be an opaque agent-task page continuation",
+                Some(value.to_string()),
+                None,
+            )
+        })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        Error::validation_invalid_argument(
+            "cursor",
+            "must be an opaque agent-task page continuation",
+            Some(value.to_string()),
+            None,
+        )
+    })
 }
 
 /// [`discover_runs_with_options`] against an explicitly injected lifecycle
@@ -1146,5 +1284,19 @@ mod tests {
         assert_eq!(report.total, 1);
         assert_eq!(report.count, 1);
         assert_eq!(report.runs[0].run_id, "retry-attempt");
+    }
+
+    #[test]
+    fn page_cursor_is_opaque_keyset_and_rejects_the_cursor_field() {
+        let cursor = RunCursor {
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            id: "run-42".to_string(),
+        };
+        let encoded = encode_page_cursor(cursor.clone());
+        assert_ne!(encoded, cursor.id);
+        assert_eq!(decode_page_cursor(&encoded).unwrap(), cursor);
+
+        let error = decode_page_cursor("not-a-page-cursor").unwrap_err();
+        assert_eq!(error.details["field"], "cursor");
     }
 }
