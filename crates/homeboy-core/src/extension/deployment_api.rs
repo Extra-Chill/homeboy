@@ -1,9 +1,16 @@
 //! Typed Extension API discovery and invocation for deployment providers.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use homeboy_control_plane_contract::{
+    ControlPlaneAction, ControlPlaneActionFence, ControlPlaneActionIntent,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneActionResource,
+    ControlPlaneEffectAudit, ControlPlaneEffectTerminal, ControlPlaneRef, RunId,
+    CONTROL_PLANE_ACTION_FENCE_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_EFFECT_AUDIT_SCHEMA,
+    CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA,
+};
 use homeboy_extension_contract::api::v1::{
     ExtensionApiCatalogEntryStatus, ExtensionApiCatalogRequest,
     ExtensionApiDeploymentProviderDescriptor, ExtensionApiDeploymentProviderDiagnostic,
@@ -47,16 +54,6 @@ pub struct DeploymentProviderApi {
 pub struct DeploymentProviderInvocationContext<'a> {
     pub component_path: &'a Path,
     pub input_path: &'a Path,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct DeploymentProviderEffectLedger {
-    request: ExtensionApiDeploymentProviderSubmitRequest,
-    state: ExtensionApiDeploymentProviderEffectState,
-    #[serde(default)]
-    result: Option<ExtensionApiDeploymentProviderResult>,
-    #[serde(default)]
-    message: Option<String>,
 }
 
 impl DeploymentProviderApi {
@@ -210,12 +207,9 @@ impl DeploymentProviderApi {
         if let Some(failure) = self.failure.clone() {
             return submit_failure(request, failure);
         }
-        let (_lock, ledger_path) = match effect_ledger_lock(&request.effect_id.0) {
-            Ok(lock) => lock,
-            Err(error) => return submit_failure(request, internal_failure(error.to_string())),
-        };
-        match read_effect_ledger(&ledger_path) {
-            Ok(Some(ledger)) if ledger.request != *request => {
+        let effect = match admit_provider_effect(request) {
+            Ok(effect) => effect,
+            Err(error) if error.message.contains("different action intent") => {
                 return submit_diagnostic(
                     request,
                     diagnostic(
@@ -225,10 +219,38 @@ impl DeploymentProviderApi {
                     ),
                 )
             }
-            Ok(Some(ledger)) => return submit_from_ledger(request, ledger),
-            Ok(None) => {}
             Err(error) => return submit_failure(request, internal_failure(error.to_string())),
+        };
+        if effect.recovery_required {
+            return provider_effect_response(
+                request,
+                ExtensionApiDeploymentProviderEffectState::Unknown,
+                None,
+            );
         }
+        if let Some(terminal) = effect.terminal {
+            return provider_terminal_response(request, &terminal);
+        }
+        let now = chrono::Utc::now();
+        let lease =
+            match crate::observation::ObservationStore::open_initialized().and_then(|store| {
+                store.lease_control_plane_effect_by_id(
+                    &request.effect_id,
+                    &format!("deployment-provider:{}", std::process::id()),
+                    &now.to_rfc3339(),
+                    &(now + chrono::Duration::seconds(30)).to_rfc3339(),
+                )
+            }) {
+                Ok(Some(lease)) => lease,
+                Ok(None) => {
+                    return provider_effect_response(
+                        request,
+                        ExtensionApiDeploymentProviderEffectState::Running,
+                        None,
+                    )
+                }
+                Err(error) => return submit_failure(request, internal_failure(error.to_string())),
+            };
         let candidate = match self.select(&request.extension_id, &request.provider_id) {
             Ok(candidate) => candidate,
             Err(diagnostic) => return submit_diagnostic(request, diagnostic),
@@ -301,16 +323,6 @@ impl DeploymentProviderApi {
                 ),
             );
         };
-        let mut ledger = DeploymentProviderEffectLedger {
-            request: request.clone(),
-            state: ExtensionApiDeploymentProviderEffectState::Running,
-            result: None,
-            message: None,
-        };
-        if let Err(error) = write_effect_ledger(&ledger_path, &ledger) {
-            return submit_failure(request, internal_failure(error.to_string()));
-        }
-
         let command = if request.dry_run {
             provider
                 .dry_run_command
@@ -354,7 +366,7 @@ impl DeploymentProviderApi {
         let evidence =
             provider_evidence(&execution.output.stdout, &execution.output.stderr, provider);
 
-        ledger.result = Some(ExtensionApiDeploymentProviderResult {
+        let result = ExtensionApiDeploymentProviderResult {
             exit_code: execution.exit_code,
             evidence,
             error: (execution.exit_code != 0).then(|| {
@@ -364,16 +376,19 @@ impl DeploymentProviderApi {
                     format!("{}{}", execution.output.stdout, execution.output.stderr)
                 }
             }),
-        });
-        ledger.state = if execution.exit_code == 0 {
-            ExtensionApiDeploymentProviderEffectState::Succeeded
-        } else {
-            ExtensionApiDeploymentProviderEffectState::Failed
         };
-        if let Err(error) = write_effect_ledger(&ledger_path, &ledger) {
+        if let Err(error) = terminalize_provider_effect(request, &lease, result.clone()) {
             return submit_failure(request, internal_failure(error.to_string()));
         }
-        submit_from_ledger(request, ledger)
+        provider_effect_response(
+            request,
+            if result.exit_code == 0 {
+                ExtensionApiDeploymentProviderEffectState::Succeeded
+            } else {
+                ExtensionApiDeploymentProviderEffectState::Failed
+            },
+            Some(result),
+        )
     }
 
     pub fn status_api(
@@ -387,31 +402,7 @@ impl DeploymentProviderApi {
         ) {
             return status_failure(request, failure);
         }
-        let path = match effect_ledger_path(&request.effect_id.0) {
-            Ok(path) => path,
-            Err(error) => return status_failure(request, internal_failure(error.to_string())),
-        };
-        match read_effect_ledger(&path) {
-            Ok(Some(ledger)) => ExtensionApiDeploymentProviderStatusResponse {
-                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(),
-                api_version: EXTENSION_API_V1,
-                effect_id: request.effect_id.clone(),
-                state: ledger.state,
-                result: ledger.result,
-                message: ledger.message,
-                failure: None,
-            },
-            Ok(None) => ExtensionApiDeploymentProviderStatusResponse {
-                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(),
-                api_version: EXTENSION_API_V1,
-                effect_id: request.effect_id.clone(),
-                state: ExtensionApiDeploymentProviderEffectState::NotStarted,
-                result: None,
-                message: None,
-                failure: None,
-            },
-            Err(error) => status_failure(request, internal_failure(error.to_string())),
-        }
+        provider_effect_status(request)
     }
 
     fn select(
@@ -605,19 +596,212 @@ fn submit_diagnostic(
     }
 }
 
-fn submit_from_ledger(
+fn provider_effect_response(
     request: &ExtensionApiDeploymentProviderSubmitRequest,
-    ledger: DeploymentProviderEffectLedger,
+    state: ExtensionApiDeploymentProviderEffectState,
+    result: Option<ExtensionApiDeploymentProviderResult>,
 ) -> ExtensionApiDeploymentProviderSubmitResponse {
     ExtensionApiDeploymentProviderSubmitResponse {
         schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA.to_string(),
         api_version: EXTENSION_API_V1,
         effect_id: request.effect_id.clone(),
-        state: ledger.state,
-        result: ledger.result,
+        state,
+        result,
         diagnostic: None,
         failure: None,
     }
+}
+
+fn provider_effect_status(
+    request: &ExtensionApiDeploymentProviderStatusRequest,
+) -> ExtensionApiDeploymentProviderStatusResponse {
+    let store = match crate::observation::ObservationStore::open_initialized() {
+        Ok(store) => store,
+        Err(error) => return status_failure(request, internal_failure(error.to_string())),
+    };
+    if let Err(error) = store.expire_control_plane_effect_leases(&chrono::Utc::now().to_rfc3339()) {
+        return status_failure(request, internal_failure(error.to_string()));
+    }
+    match store.control_plane_effect_status(&request.effect_id) {
+        Ok(None) => ExtensionApiDeploymentProviderStatusResponse { schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(), api_version: EXTENSION_API_V1, effect_id: request.effect_id.clone(), state: ExtensionApiDeploymentProviderEffectState::NotStarted, result: None, message: None, failure: None },
+        Ok(Some(effect)) if effect.recovery_required => ExtensionApiDeploymentProviderStatusResponse { schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(), api_version: EXTENSION_API_V1, effect_id: request.effect_id.clone(), state: ExtensionApiDeploymentProviderEffectState::Unknown, result: None, message: Some("provider execution lease expired; authoritative provider reconciliation is required".to_string()), failure: None },
+        Ok(Some(effect)) => match effect.terminal {
+            Some(terminal) => provider_terminal_status(request, &terminal),
+            None => ExtensionApiDeploymentProviderStatusResponse { schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(), api_version: EXTENSION_API_V1, effect_id: request.effect_id.clone(), state: ExtensionApiDeploymentProviderEffectState::Running, result: None, message: None, failure: None },
+        },
+        Err(error) => status_failure(request, internal_failure(error.to_string())),
+    }
+}
+
+fn provider_terminal_status(
+    request: &ExtensionApiDeploymentProviderStatusRequest,
+    terminal: &ControlPlaneEffectTerminal,
+) -> ExtensionApiDeploymentProviderStatusResponse {
+    let result = serde_json::from_value(terminal.acknowledgement.result.data.clone()).ok();
+    ExtensionApiDeploymentProviderStatusResponse {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        effect_id: request.effect_id.clone(),
+        state: if terminal.acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        {
+            ExtensionApiDeploymentProviderEffectState::Succeeded
+        } else {
+            ExtensionApiDeploymentProviderEffectState::Failed
+        },
+        result,
+        message: terminal.acknowledgement.message.clone(),
+        failure: None,
+    }
+}
+
+fn provider_terminal_response(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
+    terminal: &ControlPlaneEffectTerminal,
+) -> ExtensionApiDeploymentProviderSubmitResponse {
+    provider_effect_response(
+        request,
+        if terminal.acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        {
+            ExtensionApiDeploymentProviderEffectState::Succeeded
+        } else {
+            ExtensionApiDeploymentProviderEffectState::Failed
+        },
+        serde_json::from_value(terminal.acknowledgement.result.data.clone()).ok(),
+    )
+}
+
+fn admit_provider_effect(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
+) -> crate::error::Result<crate::observation::store::ControlPlaneEffectStatus> {
+    let store = crate::observation::ObservationStore::open_initialized()?;
+    let resource_id = format!(
+        "deployment-provider-{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(request.effect_id.0.as_bytes())
+    );
+    let run = RunId::new(resource_id.clone()).map_err(|error| {
+        crate::Error::validation_invalid_argument("effect_id", error.to_string(), None, None)
+    })?;
+    let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        &serde_json::to_vec(request)
+            .map_err(|error| crate::Error::internal_json(error.to_string(), None))?,
+    );
+    let projection = crate::observation::ControlPlaneResourceProjection {
+        resource_type: "deployment_provider_effect".to_string(),
+        resource_id: resource_id.clone(),
+        version: request_digest.clone(),
+        state: "admitted".to_string(),
+        aliases: vec![resource_id.clone()],
+        eligibility: serde_json::json!({"provider": request.provider_id}),
+        provenance: serde_json::json!({"source": "deployment_provider", "request": request}),
+    };
+    // The action-outbox foreign key binds every effect to an observation run.
+    // Provider effects use this SQLite-owned adapter row, not another ledger.
+    store.upsert_imported_run_with_resource_projection(
+        &crate::observation::RunRecord {
+            id: resource_id.clone(),
+            kind: "deployment-provider-effect".to_string(),
+            component_id: Some(request.component_id.clone()),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: Some("deployment provider".to_string()),
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({ "request": request }),
+        },
+        &projection,
+        true,
+    )?;
+    let action_request = ControlPlaneActionRequest {
+        schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+        effect_id: request.effect_id.clone(),
+        action: ControlPlaneAction::Resume,
+        idempotency_key: request.effect_id.0.clone(),
+        actor: "deployment-provider".to_string(),
+        expected_updated_at: None,
+        parameters: ControlPlaneActionPayload::empty(),
+        confirmed: false,
+    };
+    let intent = ControlPlaneActionIntent {
+        schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+        effect_id: request.effect_id.clone(),
+        resource: ControlPlaneActionResource {
+            resource: ControlPlaneRef::Run(run.clone()),
+            run,
+            original_alias: None,
+        },
+        request: action_request,
+        request_digest: request_digest.clone(),
+        accepted_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let fence = ControlPlaneActionFence {
+        schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+        resource_updated_at: request_digest.clone(),
+        eligible: true,
+        reason: None,
+    };
+    match store.enqueue_control_plane_action_intent(
+        &intent,
+        &fence,
+        "deployment_provider_effect",
+        &request_digest,
+    )? {
+        crate::observation::store::ControlPlaneEffectAdmission::Enqueued(effect)
+        | crate::observation::store::ControlPlaneEffectAdmission::Duplicate(effect) => Ok(effect),
+    }
+}
+
+fn terminalize_provider_effect(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
+    lease: &crate::observation::store::ControlPlaneEffectStatus,
+    result: ExtensionApiDeploymentProviderResult,
+) -> crate::error::Result<()> {
+    let store = crate::observation::ObservationStore::open_initialized()?;
+    let completed_at = chrono::Utc::now().to_rfc3339();
+    let run = lease.intent.resource.run.clone();
+    let acknowledgement = homeboy_control_plane_contract::ControlPlaneActionAcknowledgement {
+        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+            .to_string(),
+        acknowledgement: format!("{}:provider-effect", request.effect_id.0),
+        run: run.clone(),
+        action: ControlPlaneAction::Resume,
+        idempotency_key: request.effect_id.0.clone(),
+        actor: "deployment-provider".to_string(),
+        accepted_at: lease.intent.accepted_at.clone(),
+        completed_at: completed_at.clone(),
+        outcome: if result.exit_code == 0 {
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        } else {
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+        },
+        resource: homeboy_control_plane_contract::ControlPlaneRun::new(run),
+        result: ControlPlaneActionPayload {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA
+                .to_string(),
+            data: serde_json::to_value(&result)
+                .map_err(|error| crate::Error::internal_json(error.to_string(), None))?,
+        },
+        message: result.error.clone(),
+    };
+    store.terminalize_control_plane_effect(
+        &request.effect_id,
+        lease.lease_fence,
+        &ControlPlaneEffectTerminal {
+            schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(),
+            completed_at: completed_at.clone(),
+            acknowledgement,
+            audit: ControlPlaneEffectAudit {
+                schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(),
+                observed_at: completed_at,
+                evidence: serde_json::json!({"provider_result": result}),
+            },
+        },
+    )?;
+    Ok(())
 }
 
 fn status_failure(
@@ -640,54 +824,6 @@ fn internal_failure(message: String) -> ExtensionApiOperationFailure {
         code: homeboy_extension_contract::api::v1::ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
         message,
     }
-}
-
-fn effect_ledger_path(effect_id: &str) -> crate::error::Result<PathBuf> {
-    Ok(crate::paths::PathRoots::from_environment()?
-        .data()
-        .join("deployment-provider-effects")
-        .join(format!(
-            "{}.json",
-            homeboy_engine_primitives::content_hash::sha256_hex(effect_id.as_bytes())
-        )))
-}
-
-fn effect_ledger_lock(effect_id: &str) -> crate::error::Result<(File, PathBuf)> {
-    let path = effect_ledger_path(effect_id)?;
-    fs::create_dir_all(path.parent().expect("effect ledger parent"))?;
-    let lock_path = path.with_extension("lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
-    crate::config::lock_exclusive_bounded(&lock, &lock_path, "lock deployment provider effect")?;
-    Ok((lock, path))
-}
-
-fn read_effect_ledger(path: &Path) -> crate::error::Result<Option<DeploymentProviderEffectLedger>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    serde_json::from_slice(&fs::read(path)?)
-        .map(Some)
-        .map_err(|error| {
-            crate::Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })
-}
-
-fn write_effect_ledger(
-    path: &Path,
-    ledger: &DeploymentProviderEffectLedger,
-) -> crate::error::Result<()> {
-    let temporary = path.with_extension("tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(ledger)
-            .map_err(|error| crate::Error::internal_json(error.to_string(), None))?,
-    )?;
-    fs::rename(temporary, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -984,17 +1120,21 @@ mod tests {
                         },
                     )
                 });
-                assert_eq!(
-                    first.join().expect("first submit").state,
+                let first = first.join().expect("first submit").state;
+                let second = second.join().expect("second submit").state;
+                assert!(matches!(
+                    first,
                     ExtensionApiDeploymentProviderEffectState::Succeeded
-                );
-                assert_eq!(
-                    second.join().expect("second submit").state,
+                        | ExtensionApiDeploymentProviderEffectState::Running
+                ));
+                assert!(matches!(
+                    second,
                     ExtensionApiDeploymentProviderEffectState::Succeeded
-                );
+                        | ExtensionApiDeploymentProviderEffectState::Running
+                ));
             });
             assert_eq!(
-                fs::read_to_string(&counter)
+                std::fs::read_to_string(&counter)
                     .expect("external calls")
                     .lines()
                     .count(),
@@ -1029,9 +1169,6 @@ mod tests {
             );
 
             let unknown = homeboy_control_plane_contract::EffectId("test:unknown".to_string());
-            let path = effect_ledger_path(&unknown.0).expect("ledger path");
-            fs::create_dir_all(path.parent().expect("ledger parent")).expect("ledger directory");
-            fs::write(&path, b"not JSON").expect("corrupt ledger");
             assert_eq!(
                 api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
                     schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
@@ -1039,7 +1176,7 @@ mod tests {
                     effect_id: unknown
                 })
                 .state,
-                ExtensionApiDeploymentProviderEffectState::Unknown
+                ExtensionApiDeploymentProviderEffectState::NotStarted
             );
 
             write_extension(

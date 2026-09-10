@@ -308,8 +308,9 @@ impl ObservationStore {
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error("begin control-plane effect lease"))?;
         let result = (|| {
+            self.expire_leased_effects_to_recovery_required(now)?;
             let effect: Option<String> = self.connection.query_row(
-                "SELECT effect_id FROM control_plane_action_claims WHERE outbox_state = 'pending' OR (outbox_state = 'leased' AND lease_expires_at <= ?1) ORDER BY accepted_at, effect_id LIMIT 1", [now], |row| row.get(0),
+                "SELECT effect_id FROM control_plane_action_claims WHERE outbox_state = 'pending' ORDER BY accepted_at, effect_id LIMIT 1", [], |row| row.get(0),
             ).optional().map_err(sqlite_error("select leaseable control-plane effect"))?;
             let Some(effect) = effect else {
                 return Ok(None);
@@ -348,9 +349,10 @@ impl ObservationStore {
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error("begin targeted control-plane effect lease"))?;
         let result = (|| {
+            self.expire_leased_effects_to_recovery_required(now)?;
             let changed = self.connection.execute(
-                "UPDATE control_plane_action_claims SET outbox_state = 'leased', lease_owner = ?2, lease_fence = lease_fence + 1, lease_expires_at = ?3 WHERE effect_id = ?1 AND (outbox_state = 'pending' OR (outbox_state = 'leased' AND lease_expires_at <= ?4))",
-                params![effect_id.0, owner, expires_at, now],
+                "UPDATE control_plane_action_claims SET outbox_state = 'leased', lease_owner = ?2, lease_fence = lease_fence + 1, lease_expires_at = ?3 WHERE effect_id = ?1 AND outbox_state = 'pending'",
+                params![effect_id.0, owner, expires_at],
             ).map_err(sqlite_error("lease targeted control-plane effect"))?;
             if changed == 0 {
                 return Ok(None);
@@ -424,6 +426,34 @@ impl ObservationStore {
         self.effect_status(effect_id)
     }
 
+    /// An expired lease crossed an external-effect crash window. It is not safe
+    /// to hand it to another worker: a domain reconciler must provide provider
+    /// evidence before it can become terminal.
+    pub fn expire_control_plane_effect_leases(&self, now: &str) -> Result<()> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin expired control-plane effect recovery"))?;
+        let result = self.expire_leased_effects_to_recovery_required(now);
+        match result {
+            Ok(()) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error("commit expired control-plane effect recovery")),
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn expire_leased_effects_to_recovery_required(&self, now: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE control_plane_action_claims SET outbox_state = 'recovery_required', lease_owner = NULL, lease_expires_at = NULL WHERE outbox_state = 'leased' AND lease_expires_at <= ?1",
+            [now],
+        ).map_err(sqlite_error("mark expired control-plane effect recovery required"))?;
+        Ok(())
+    }
+
     fn effect_status_by_idempotency(
         &self,
         run: &str,
@@ -450,6 +480,7 @@ impl ObservationStore {
                 "pending" => ControlPlaneEffectState::Pending,
                 "leased" => ControlPlaneEffectState::Leased,
                 "terminal" => ControlPlaneEffectState::Terminal,
+                "recovery_required" => ControlPlaneEffectState::Leased,
                 _ => {
                     return Err(Error::internal_unexpected(
                         "invalid control-plane effect state",

@@ -229,7 +229,55 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn open_observation_initialized(&self) -> Result<ObservationStore> {
-        ObservationStore::open_initialized_for_lifecycle_in_roots(&self.roots)
+        let store = ObservationStore::open_initialized_for_lifecycle_in_roots(&self.roots)?;
+        self.import_historical_cook_indexes(&store)?;
+        Ok(store)
+    }
+
+    /// One-way compatibility migration for the former Cook-index authority.
+    /// Index files are imported before this lifecycle store serves actions or
+    /// mutable reads; conflicting aliases fail closed instead of selecting a
+    /// filesystem winner. Subsequent reads use only the SQLite projection.
+    fn import_historical_cook_indexes(&self, observation: &ObservationStore) -> Result<()> {
+        let root = self.data_root().join("agent-task-cooks");
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(root.display().to_string()),
+                ))
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                Error::internal_io(error.to_string(), Some(root.display().to_string()))
+            })?;
+            let path = entry.path().join("index.json");
+            if !path.exists() {
+                continue;
+            }
+            let index: AgentTaskCookIndex = read_json(&path)?;
+            if observation
+                .control_plane_resource_projection("agent_task_run", &index.cook_id)?
+                .is_some()
+            {
+                continue;
+            }
+            let run = observation.get_run(&index.latest_run_id)?.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_index",
+                    "Cook index latest attempt has no canonical lifecycle record",
+                    Some(index.latest_run_id.clone()),
+                    None,
+                )
+            })?;
+            let record = record_from_run(&run)?;
+            let projection = agent_task_resource_projection(self, &record, Some(&index))?;
+            observation.upsert_control_plane_resource_projection(&projection)?;
+        }
+        Ok(())
     }
 
     /// Read the observation store through this store's own roots.
@@ -718,19 +766,35 @@ impl AgentTaskLifecycleStore {
         cook_id: &str,
         mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
     ) -> Result<Option<AgentTaskCookIndex>> {
-        let path = self.cook_index_path(cook_id);
-        if !path.exists() {
+        let Some(mut index) = projected_cook_index_in_store(self, &sanitize_run_id(cook_id))?
+        else {
             return Ok(None);
-        }
-        let mut index = read_json(&path)?;
+        };
         if mutate(&mut index) {
-            write_json(&path, &index)?;
+            self.write_cook_index_attempt_locked(
+                &index.cook_id,
+                index
+                    .attempts
+                    .last()
+                    .map(|entry| entry.attempt)
+                    .unwrap_or_default(),
+                &index.latest_run_id,
+                index
+                    .attempts
+                    .last()
+                    .map(|entry| entry.recorded_at.clone())
+                    .unwrap_or_default(),
+                index.latest_substantive_candidate.clone(),
+            )?;
         }
         Ok(Some(index))
     }
 
     pub fn cook_index_exists(&self, cook_id: &str) -> bool {
-        self.cook_index_path(cook_id).exists()
+        projected_cook_index_in_store(self, &sanitize_run_id(cook_id))
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Persist the latest bounded, secret-safe terminal notification outcome
@@ -1560,28 +1624,15 @@ fn agent_task_resource_projection(
     cook_index: Option<&AgentTaskCookIndex>,
 ) -> Result<ControlPlaneResourceProjection> {
     let mut aliases = vec![record.run_id.clone()];
-    let cook_id = record.metadata.get("cook_id").and_then(Value::as_str);
+    let cook_id = record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .or_else(|| cook_index.map(|index| index.cook_id.as_str()));
     if let Some(cook_id) = cook_id {
-        // A Cook alias is owned only by the index's latest attempt.  An index
-        // that exists but cannot be read is an authority failure, not a reason
-        // to target the concrete attempt as though the alias did not exist.
-        let index_path = lifecycle_store.cook_index_path(cook_id);
-        if cook_index.is_some()
-            || index_path.try_exists().map_err(|error| {
-                Error::internal_io(
-                    "inspect Cook index for resource projection",
-                    Some(error.to_string()),
-                )
-            })?
-        {
-            let stored_index;
-            let index = match cook_index {
-                Some(index) => index,
-                None => {
-                    stored_index = lifecycle_store.read_cook_index(cook_id)?;
-                    &stored_index
-                }
-            };
+        // Alias ownership is the SQLite projection committed with the lifecycle
+        // record. A historical index is considered only by startup migration.
+        if let Some(index) = cook_index {
             if index.latest_run_id == record.run_id {
                 aliases.push(cook_id.to_string());
             }
@@ -1607,9 +1658,9 @@ fn agent_task_resource_projection(
         provenance: json!({
             "source": "agent_task_lifecycle",
             "record_schema": record.schema,
-            "persisted_data_window": "filesystem-derived-read-compatibility/v1",
-            // The complete index is a SQLite-first source for replaying the
-            // compatibility file after a crash or write failure.
+            "persisted_data_window": "sqlite-canonical-cook-index/v1",
+            // The complete index rematerializes the compatibility file after a
+            // crash or write failure; it is never read as lifecycle authority.
             "cook_index": cook_index,
         }),
     })
@@ -1633,9 +1684,8 @@ pub(super) fn read_record_in_store(
         )
     })?;
     let record = record_from_run(&run)?;
-    // Existing installations predate the resource table. Import exactly once
-    // from the persisted lifecycle projection; alias conflicts intentionally
-    // fail rather than selecting a non-deterministic action target.
+    // Existing lifecycle rows predate the resource table. Their exact run
+    // projection is imported once; Cook aliases were imported at store startup.
     if store
         .control_plane_resource_projection("agent_task_run", &record.run_id)?
         .is_none()
@@ -1731,8 +1781,6 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
     let path = store.cook_index_path(&cook_id);
     let mut index = if let Some(index) = projected_cook_index_in_store(store, &cook_id)? {
         index
-    } else if path.exists() {
-        read_json(&path)?
     } else {
         AgentTaskCookIndex {
             schema: super::records::schemas::COOK_INDEX.to_string(),
@@ -1817,13 +1865,17 @@ pub(super) fn read_cook_index_in_store(
         let _ = write_cook_index_projection(&store.cook_index_path(&cook_id), &index);
         return Ok(index);
     }
-    read_json(&store.cook_index_path(&cook_id))
+    Err(Error::validation_invalid_argument(
+        "cook_id",
+        "canonical Cook alias projection not found; initialize or repair the lifecycle store before reading it",
+        Some(cook_id),
+        None,
+    ))
 }
 
 pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
     let store = default_store()?;
-    Ok(projected_cook_index_in_store(&store, cook_id)?.is_some()
-        || store.cook_index_path(cook_id).exists())
+    Ok(projected_cook_index_in_store(&store, cook_id)?.is_some())
 }
 
 fn projected_cook_index_in_store(
