@@ -1045,6 +1045,7 @@ pub fn consume_unmaterialized_cook_replay_claim(
     let cook_id = sanitize_run_id(cook_id);
     let token = token.to_string();
     let owner = current_replay_worker_owner()?;
+    let now = chrono::Utc::now();
     let consumed = store.mutate_record(&cook_id, |record| {
         if record.state.is_terminal() {
             return false;
@@ -1053,15 +1054,19 @@ pub fn consume_unmaterialized_cook_replay_claim(
         if admission["lease"]["state"] != "claimed"
             || admission["lease"]["fence"].as_u64() != Some(fence)
             || admission["lease"]["token"].as_str() != Some(token.as_str())
+            || admission["lease"]["expires_at"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_none_or(|expires_at| expires_at.with_timezone(&chrono::Utc) <= now)
         {
             return false;
         }
         admission["state"] = json!("replaying");
         admission["lease"]["state"] = json!("consumed");
-        admission["lease"]["consumed_at"] = json!(chrono::Utc::now().to_rfc3339());
+        admission["lease"]["consumed_at"] = json!(now.to_rfc3339());
         admission["lease"]["owner"] = owner.clone();
         admission["lease"]["expires_at"] =
-            json!((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339());
+            json!((now + chrono::Duration::minutes(10)).to_rfc3339());
         record.updated_at = Some(now_timestamp());
         true
     })?;
@@ -1080,6 +1085,7 @@ pub fn renew_unmaterialized_cook_replay_claim(
     let cook_id = sanitize_run_id(cook_id);
     let token = token.to_string();
     let owner = current_replay_worker_owner()?;
+    let now = chrono::Utc::now();
     let renewed = store.mutate_record(&cook_id, |record| {
         if record.state.is_terminal() {
             return false;
@@ -1090,6 +1096,10 @@ pub fn renew_unmaterialized_cook_replay_claim(
             || admission["lease"]["fence"].as_u64() != Some(fence)
             || admission["lease"]["token"].as_str() != Some(token.as_str())
             || admission["lease"]["owner"] != owner
+            || admission["lease"]["expires_at"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_none_or(|expires_at| expires_at.with_timezone(&chrono::Utc) <= now)
         {
             return false;
         }
@@ -1099,7 +1109,7 @@ pub fn renew_unmaterialized_cook_replay_claim(
             .as_object_mut()
             .expect("replay lease object")
             .remove("expires_at");
-        admission["lease"]["materialization_fence_at"] = json!(chrono::Utc::now().to_rfc3339());
+        admission["lease"]["materialization_fence_at"] = json!(now.to_rfc3339());
         record.updated_at = Some(now_timestamp());
         true
     })?;
@@ -1359,6 +1369,53 @@ pub fn record_detached_cook_handoff_child_in_store(
         true
     })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Atomically transfer a claimed handoff parent to its submitted supervisor.
+///
+/// A launcher has a live child after spawn but before the child can materialize
+/// its first attempt. Persisting the child identity and daemon job together
+/// makes cancellation in that interval able to signal the exact process, while
+/// the launcher id prevents a stale launcher from publishing another owner's
+/// child or supervisor.
+pub fn record_claimed_detached_cook_handoff_supervision_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    pid: u32,
+    start_identity: homeboy_core::process::ProcessStartIdentity,
+    job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let launcher_id = launcher_id.to_string();
+    let job_id = job_id.to_string();
+    let updated = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if record.state.is_terminal()
+            || handoff["cook_id"] != cook_id
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff["launcher_id"] != launcher_id
+        {
+            return false;
+        }
+        let handoff = &mut record.ensure_metadata_object()["detached_cook_handoff"];
+        handoff["child_pid"] = json!(pid);
+        handoff["child_start_identity"] = json!(start_identity);
+        handoff["supervisor_job_id"] = json!(job_id);
+        handoff["admission_state"] = json!("supervising");
+        handoff["reattach_command"] = json!(format!("homeboy agent-task status {cook_id}"));
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    updated.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_id",
+            "detached Cook handoff is not owned by this launcher or has advanced",
+            Some(cook_id),
+            None,
+        )
+    })
 }
 
 /// Persist the supervising daemon job inside an explicitly rooted store.

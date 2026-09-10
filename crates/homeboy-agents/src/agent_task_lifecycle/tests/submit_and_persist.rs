@@ -743,6 +743,152 @@ fn replay_claim_consumption_validates_token_and_generation_exactly_once() {
 }
 
 #[test]
+fn replay_claim_consumption_rejects_an_expired_lease_without_extending_it() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-replay-expired-consume";
+        record_unmaterialized_cook_admission_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(9);
+            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
+                "state": "claimed",
+                "fence": 9,
+                "token": "expired-token",
+                "expires_at": "2000-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("seed expired claim");
+
+        assert!(
+            !consume_unmaterialized_cook_replay_claim(cook_id, 9, "expired-token")
+                .expect("expired claim is rejected")
+        );
+        let record = exact_record(cook_id).expect("read unchanged expired claim");
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "queued"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+            "claimed"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["expires_at"],
+            "2000-01-01T00:00:00+00:00"
+        );
+    });
+}
+
+#[test]
+fn replay_claim_renewal_rejects_an_expired_lease_without_materializing_it() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-replay-expired-renew";
+        record_unmaterialized_cook_admission_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(10);
+            record.metadata["unmaterialized_cook_admission"]["state"] = json!("replaying");
+            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
+                "state": "consumed",
+                "fence": 10,
+                "token": "expired-token",
+                "owner": {
+                    "pid": std::process::id(),
+                    "process_start_identity": homeboy_core::process::process_start_identity(
+                        std::process::id(),
+                    )
+                    .expect("inspect test process")
+                    .expect("test process identity"),
+                },
+                "expires_at": "2000-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("seed expired consumed claim");
+
+        assert!(
+            !renew_unmaterialized_cook_replay_claim(cook_id, 10, "expired-token")
+                .expect("expired claim cannot be renewed")
+        );
+        let record = exact_record(cook_id).expect("read unchanged expired lease");
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "replaying"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+            "consumed"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["expires_at"],
+            "2000-01-01T00:00:00+00:00"
+        );
+    });
+}
+
+#[test]
+fn only_the_claiming_launcher_can_publish_detached_child_supervision() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-launcher-supervision-fence";
+    record_detached_cook_handoff_parent_in_store(&store, cook_id).expect("persist handoff parent");
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "active-launcher")
+        .expect("claim handoff parent");
+    let identity = homeboy_core::process::ProcessStartIdentity::Linux {
+        starttime_ticks: 42,
+    };
+
+    assert!(record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "stale-launcher",
+        4242,
+        identity.clone(),
+        "supervisor-stale",
+    )
+    .is_err());
+    let pending = store.read_record(cook_id).expect("read fenced parent");
+    assert_eq!(
+        pending.metadata["detached_cook_handoff"]["admission_state"],
+        "pre_supervisor"
+    );
+    assert!(pending.metadata["detached_cook_handoff"]["child_pid"].is_null());
+
+    let supervised = record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        identity,
+        "supervisor-active",
+    )
+    .expect("owner publishes complete supervision handoff");
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["child_pid"],
+        4242
+    );
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["supervisor_job_id"],
+        "supervisor-active"
+    );
+}
+
+#[test]
 fn scoped_resume_rearms_backoff_but_preserves_terminal_and_materializing_owners() {
     with_isolated_home(|_| {
         for cook_id in ["resume-blocked", "resume-materializing", "resume-terminal"] {

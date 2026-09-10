@@ -810,6 +810,24 @@ pub(super) fn intercept_local_detached_cook(
             }
         };
     if let Err(error) =
+        agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
+            &admission.store,
+            &cook_id,
+            &admission.launcher_id,
+            pid,
+            start_identity.clone(),
+            controller_job.job_id(),
+        )
+    {
+        compensate_supervisor_projection_failure(
+            &controller_client,
+            controller_job.job_id(),
+            &mut child,
+            &cook_id,
+        );
+        return Err(error);
+    }
+    if let Err(error) =
         publish_local_cook_launch_token_with_supervisor(&launch_token, controller_job.job_id())
     {
         compensate_supervisor_projection_failure(
@@ -2606,6 +2624,57 @@ mod tests {
                 ),
                 "cancelled child must be dead"
             );
+        });
+    }
+
+    #[test]
+    fn cancellation_during_pre_materialization_signals_the_supervised_child() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-cancel-during-pre-materialization";
+            let mut admission =
+                DetachedCookAdmission::establish(cook_id).expect("claim handoff parent");
+            let mut child = Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn pre-materialization child");
+            let identity =
+                detached_child_start_identity(child.id()).expect("capture child identity");
+            agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
+                &admission.store,
+                cook_id,
+                &admission.launcher_id,
+                child.id(),
+                identity,
+                "supervisor-pre-materialization",
+            )
+            .expect("persist child and supervisor before guard release");
+
+            let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
+                .expect("cancel pending supervised handoff");
+            assert_eq!(
+                cancelled.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                cancelled.metadata["detached_cook_handoff"]["supervisor_job_id"],
+                "supervisor-pre-materialization"
+            );
+            assert!(
+                cancelled
+                    .metadata
+                    .get("detached_cook_handoff_cancellation")
+                    .is_some(),
+                "cancellation must use the durable child identity"
+            );
+            let _ = child.wait();
+            assert!(
+                matches!(
+                    homeboy::core::process::process_identity_state(child.id(), None),
+                    homeboy::core::process::ProcessIdentityState::Dead
+                ),
+                "cancelled child must be dead"
+            );
+            admission.release();
         });
     }
 
