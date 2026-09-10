@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.5] - 2026-09-10
+
+### Changed
+- reap fixture daemons during teardown
+
+### Fixed
+- report partial external storage inventory
+
 ## [0.371.4] - 2026-09-10
 
 ### Changed
