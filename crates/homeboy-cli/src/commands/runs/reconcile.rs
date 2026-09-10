@@ -169,6 +169,14 @@ where
 {
     let mut reconciled = Vec::new();
     for run in &running {
+        // Match focused watch reconciliation: a pending detached handoff owns
+        // the row until it is accepted or its durable deadline settles it.
+        if !dry_run && store.expire_running_run_handoff(&run.id)?.is_some() {
+            continue;
+        }
+        if handoff_is_transferring(run) {
+            continue;
+        }
         // An unavailable or malformed runner answer cannot prove terminality.
         // Leave the row running rather than falling back to daemon-PID or age
         // heuristics that could contradict live remote work.
@@ -821,6 +829,50 @@ mod tests {
             assert_eq!(reconciled[0].reason, "runner_backed_run_exceeded_exemption");
             assert_eq!(updated.status, "stale");
             assert!(updated.finished_at.is_some());
+        });
+    }
+
+    #[test]
+    fn fleet_reconcile_settles_expired_handoffs_before_stale_owner_classification() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }))
+                        .build(),
+                    "expired-fleet-handoff".to_string(),
+                )
+                .expect("running review");
+            store
+                .begin_running_run_handoff(
+                    &run.id,
+                    u32::MAX,
+                    chrono::Utc::now() - chrono::Duration::seconds(1),
+                )
+                .expect("begin expired handoff");
+
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+            )
+            .expect("fleet reconcile");
+            let settled = store.get_run(&run.id).expect("read").expect("run");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(settled.status, RunStatus::Error.as_str());
+            assert_eq!(
+                settled.metadata_json["homeboy_ownership_handoff"]["state"],
+                "failed"
+            );
+            assert_eq!(
+                settled.metadata_json["homeboy_reconciled"],
+                Value::Null,
+                "handoff expiry must not be overwritten as a generic stale run"
+            );
         });
     }
 

@@ -1053,6 +1053,112 @@ pub fn wait_with_bounded_output_supervised_with_progress(
     )
 }
 
+/// Like [`wait_with_bounded_output_supervised_with_progress`], but all command
+/// supervision and cleanup must complete by `deadline`.
+pub fn wait_with_bounded_output_supervised_with_progress_until(
+    child: &mut Child,
+    byte_limit: usize,
+    deadline: std::time::Instant,
+    no_progress_timeout: Option<Duration>,
+    heartbeat_interval: Duration,
+    mut is_cancelled: impl FnMut() -> bool,
+    mut on_heartbeat: impl FnMut(SupervisedCommandHeartbeat) -> io::Result<()>,
+) -> io::Result<SupervisedCommandOutput> {
+    // Reserve a small part of the caller's deadline for signal delivery, reaping,
+    // and capture joins. The operation cannot spend its entire budget on work and
+    // then extend it again during cleanup.
+    const CLEANUP_RESERVE: Duration = Duration::from_millis(50);
+    let supervision_deadline = deadline.checked_sub(CLEANUP_RESERVE).unwrap_or(deadline);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let live_output = Arc::new(Mutex::new(LiveOutputTail::new(byte_limit)));
+    let stdout_handle = stdout.map({
+        let live_output = Arc::clone(&live_output);
+        move |stream| {
+            thread::spawn(move || {
+                capture_tail_with_live_snapshot(stream, byte_limit, true, live_output, None)
+            })
+        }
+    });
+    let stderr_handle = stderr.map({
+        let live_output = Arc::clone(&live_output);
+        move |stream| {
+            thread::spawn(move || {
+                capture_tail_with_live_snapshot(stream, byte_limit, false, live_output, None)
+            })
+        }
+    });
+    let started = std::time::Instant::now();
+    let mut last_heartbeat = started.checked_sub(heartbeat_interval).unwrap_or(started);
+    let (status, termination) = loop {
+        if let Some(status) = child.try_wait()? {
+            terminate_remaining_process_group(child.id())?;
+            break (status, SupervisedCommandTermination::Completed);
+        }
+        if is_cancelled() {
+            break (
+                terminate_process_tree_and_reap_until(child, deadline)?,
+                SupervisedCommandTermination::Cancelled,
+            );
+        }
+        if std::time::Instant::now() >= supervision_deadline {
+            break (
+                terminate_process_tree_and_reap_until(child, deadline)?,
+                SupervisedCommandTermination::TimedOut,
+            );
+        }
+        if no_progress_timeout.is_some_and(|limit| {
+            live_output
+                .lock()
+                .map(|live| {
+                    live.last_progress
+                        .as_ref()
+                        .map(|(_, progress_at)| progress_at.elapsed())
+                        .unwrap_or_else(|| started.elapsed())
+                        >= limit
+                })
+                .unwrap_or(false)
+        }) {
+            break (
+                terminate_process_tree_and_reap_until(child, deadline)?,
+                SupervisedCommandTermination::NoProgress,
+            );
+        }
+        if last_heartbeat.elapsed() >= heartbeat_interval {
+            let heartbeat = live_output
+                .lock()
+                .map(|tail| tail.heartbeat(started.elapsed()))
+                .unwrap_or_default();
+            if let Err(error) = on_heartbeat(heartbeat) {
+                return match terminate_process_tree_and_reap_until(child, deadline) {
+                    Ok(_) => Err(error),
+                    Err(cleanup_error) => Err(io::Error::other(format!(
+                        "{error}; failed to terminate and reap supervised child after heartbeat failure: {cleanup_error}"
+                    ))),
+                };
+            }
+            last_heartbeat = std::time::Instant::now();
+        }
+        thread::sleep(
+            Duration::from_millis(10)
+                .min(supervision_deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    };
+    let (stdout, stderr) = join_capture_pair(stdout_handle, stderr_handle, deadline)?;
+    Ok(SupervisedCommandOutput {
+        output: BoundedCommandOutput {
+            status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+            capture: CommandCaptureMetadata {
+                stdout: stdout.metadata,
+                stderr: stderr.metadata,
+            },
+        },
+        termination,
+    })
+}
+
 /// Supervise a command with optional structured progress and an immediate
 /// bounded-output stream tee.
 #[allow(clippy::too_many_arguments)]
@@ -1930,6 +2036,17 @@ mod supervisor_zombie_guard_tests {
 /// On platforms without process groups, `Child::kill` still provides portable
 /// termination and reaping of the spawned process.
 pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
+    terminate_process_tree_and_reap_until(
+        child,
+        std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE,
+    )
+}
+
+/// Terminate and reap an isolated process tree without extending `deadline`.
+pub fn terminate_process_tree_and_reap_until(
+    child: &mut Child,
+    deadline: std::time::Instant,
+) -> io::Result<ExitStatus> {
     #[cfg(unix)]
     {
         enable_child_subreaper()?;
@@ -1941,21 +2058,23 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
         signal_process_group(root_pid, libc::SIGTERM)?;
         signal_pids(&descendants, libc::SIGTERM);
         let mut status = child.try_wait()?;
-        if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_TERM_GRACE, &mut status)? {
+        let term_grace = PROCESS_TREE_TERM_GRACE
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
+        if !wait_for_process_group_exit(child, root_pid, term_grace, &mut status)? {
             signal_process_group(root_pid, libc::SIGKILL)?;
             signal_pids(&descendants, libc::SIGKILL);
-            if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_KILL_GRACE, &mut status)?
-            {
-                if status.is_none() {
-                    let _ = child.wait()?;
-                }
+            let kill_grace = PROCESS_TREE_KILL_GRACE
+                .min(deadline.saturating_duration_since(std::time::Instant::now()));
+            if !wait_for_process_group_exit(child, root_pid, kill_grace, &mut status)? {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!("process group {root_pid} remained alive after SIGKILL"),
                 ));
             }
         }
-        status.map(Ok).unwrap_or_else(|| child.wait())
+        status
+            .map(Ok)
+            .unwrap_or_else(|| reap_child_until(child, deadline))
     }
 
     #[cfg(not(unix))]
@@ -1965,10 +2084,7 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
                 return Err(error);
             }
         }
-        reap_child_until(
-            child,
-            std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE,
-        )
+        reap_child_until(child, deadline)
     }
 }
 

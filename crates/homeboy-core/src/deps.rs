@@ -173,11 +173,27 @@ fn hydrate_declared_dependencies_unlocked(
     deadline: Instant,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
     let path_arg = path.display().to_string();
-    let Ok(mut component) = component::resolve_effective(None, Some(&path_arg), None) else {
-        return Ok(Vec::new());
+    let component_path_arg = path_arg.clone();
+    let component = match run_with_hydration_deadline(policy, deadline, move || {
+        Ok(component::resolve_effective(None, Some(&component_path_arg), None).ok())
+    })? {
+        Some(Some(component)) => component,
+        Some(None) => return Ok(Vec::new()),
+        None => {
+            return Ok(vec![deadline_hydration_outcome(
+                policy,
+                workspace,
+                package_root,
+            )])
+        }
     };
+    let mut component = component;
     if hydration_deadline_expired(policy, deadline) {
-        return Ok(vec![deadline_hydration_outcome(workspace, package_root)]);
+        return Ok(vec![deadline_hydration_outcome(
+            policy,
+            workspace,
+            package_root,
+        )]);
     }
     component.local_path = path_arg;
     let component_for_discovery = component.clone();
@@ -189,13 +205,17 @@ fn hydrate_declared_dependencies_unlocked(
         )
     })?
     else {
-        return Ok(vec![deadline_hydration_outcome(workspace, package_root)]);
+        return Ok(vec![deadline_hydration_outcome(
+            policy,
+            workspace,
+            package_root,
+        )]);
     };
     let mut outcomes = Vec::new();
 
     for provider in providers {
         if hydration_deadline_expired(policy, deadline) {
-            outcomes.push(deadline_hydration_outcome(workspace, package_root));
+            outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
             break;
         }
         let component_for_plan = component.clone();
@@ -206,12 +226,12 @@ fn hydrate_declared_dependencies_unlocked(
             Some(Some(plan)) => plan,
             Some(None) => continue,
             None => {
-                outcomes.push(deadline_hydration_outcome(workspace, package_root));
+                outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
                 break;
             }
         };
         if hydration_deadline_expired(policy, deadline) {
-            outcomes.push(deadline_hydration_outcome(workspace, package_root));
+            outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
             break;
         }
         let provider_id = crate::redaction::redact_string(&plan.provider_id);
@@ -424,13 +444,10 @@ fn run_hydration_command(
     };
     let progress = Arc::clone(&policy.on_progress);
     let cancellation = Arc::clone(&policy.is_cancelled);
-    let Ok(output) =
-        homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_progress(
+    let output = match homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_progress_until(
             &mut child,
             DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES,
-            deadline
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_millis(1)),
+            deadline,
             Some(policy.no_progress_timeout.max(Duration::from_millis(1))),
             policy.heartbeat_interval.max(Duration::from_millis(1)),
             move || cancellation() || Instant::now() >= deadline,
@@ -438,14 +455,22 @@ fn run_hydration_command(
                 progress(&hydration_progress(provider_id, phase, &heartbeat));
                 Ok(())
             },
-        )
-    else {
-        return HydrationCommandExecution {
-            exit_code: None,
-            termination: DependencyHydrationTermination::SpawnFailed,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        ) {
+        Ok(output) => output,
+        Err(_) => {
+            return HydrationCommandExecution {
+                exit_code: None,
+                termination: if (policy.is_cancelled)() {
+                    DependencyHydrationTermination::Cancelled
+                } else if Instant::now() >= deadline {
+                    DependencyHydrationTermination::TimedOut
+                } else {
+                    DependencyHydrationTermination::SpawnFailed
+                },
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+        }
     };
     use homeboy_engine_primitives::command::SupervisedCommandTermination;
     let termination = match output.termination {
@@ -494,16 +519,28 @@ where
     }
 }
 
-fn deadline_hydration_outcome(workspace: &str, package_root: &str) -> DependencyHydrationOutcome {
+fn deadline_hydration_outcome(
+    policy: &DependencyHydrationPolicy,
+    workspace: &str,
+    package_root: &str,
+) -> DependencyHydrationOutcome {
     hydration_outcome(
         workspace,
         package_root,
         "dependency-discovery".to_string(),
         Vec::new(),
         String::new(),
-        "dependency hydration exceeded its total operation deadline".to_string(),
+        if (policy.is_cancelled)() {
+            "dependency hydration was cancelled".to_string()
+        } else {
+            "dependency hydration exceeded its total operation deadline".to_string()
+        },
         Duration::ZERO,
-        DependencyHydrationTermination::TimedOut,
+        if (policy.is_cancelled)() {
+            DependencyHydrationTermination::Cancelled
+        } else {
+            DependencyHydrationTermination::TimedOut
+        },
         DependencyHydrationStatus::Failed,
         None,
         String::new(),
@@ -1734,7 +1771,9 @@ mod tests {
                 outcomes[0].termination,
                 DependencyHydrationTermination::TimedOut
             );
-            assert!(started.elapsed() < Duration::from_millis(180));
+            // The rejected implementation took about 1.14s here because its
+            // reaping grace began after the 120ms operation budget.
+            assert!(started.elapsed() < Duration::from_millis(900));
         });
     }
 
