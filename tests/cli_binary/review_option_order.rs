@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-fn review_test_accepts_shared_options_after_the_action_in_help_and_runtime_paths() {
+fn review_test_help_and_execution_accept_the_same_options() {
     let home = tempfile::tempdir().expect("temporary home");
     let sentinel = home.path().join("runtime-initialized");
 
@@ -10,7 +10,7 @@ fn review_test_accepts_shared_options_after_the_action_in_help_and_runtime_paths
         .args([
             "review",
             "test",
-            "--changed-only",
+            "--changed-since=-base",
             "--placement=local",
             "--summary",
             "--help",
@@ -32,6 +32,16 @@ fn review_test_accepts_shared_options_after_the_action_in_help_and_runtime_paths
         "{}",
         String::from_utf8_lossy(&help.stdout)
     );
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("--changed-since"),
+        "{}",
+        String::from_utf8_lossy(&help.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&help.stdout).contains("--changed-only"),
+        "review test must not advertise an unsupported option: {}",
+        String::from_utf8_lossy(&help.stdout)
+    );
     assert!(!sentinel.exists(), "help must not initialize the runtime");
 
     let runtime = Command::new(homeboy_bin())
@@ -40,7 +50,8 @@ fn review_test_accepts_shared_options_after_the_action_in_help_and_runtime_paths
             "review",
             "test",
             "missing-component",
-            "--changed-only",
+            "--changed-since=-base",
+            "--summary",
         ])
         .env_clear()
         .env("HOME", home.path())
@@ -58,9 +69,28 @@ fn review_test_accepts_shared_options_after_the_action_in_help_and_runtime_paths
         String::from_utf8_lossy(&runtime.stderr)
     );
     assert!(
-        !combined.contains("unexpected argument '--changed-only'")
-            && !combined.contains("unrecognized subcommand '--changed-only'"),
-        "review test flags must parse before component resolution: {combined}"
+        !combined.contains("unexpected argument '--changed-since'")
+            && !combined.contains("unrecognized subcommand '--changed-since'"),
+        "review test options advertised in help must parse before component resolution: {combined}"
+    );
+
+    let unsupported = Command::new(homeboy_bin())
+        .args(["review", "test", "missing-component", "--changed-only"])
+        .env_clear()
+        .env("HOME", home.path())
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run unsupported review test option");
+
+    assert!(!unsupported.status.success());
+    let unsupported_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&unsupported.stdout),
+        String::from_utf8_lossy(&unsupported.stderr)
+    );
+    assert!(
+        unsupported_output.contains("unexpected argument '--changed-only'"),
+        "review test must reject options absent from its help: {unsupported_output}"
     );
 }
 
@@ -107,6 +137,64 @@ fn review_actions_accept_their_shared_post_action_options_in_help() {
             "review {action}: {}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+}
+
+#[test]
+fn review_rejects_conflicting_parent_and_action_values_before_execution() {
+    let home = tempfile::tempdir().expect("temporary home");
+
+    for args in [
+        [
+            "review",
+            "--path",
+            "parent-path",
+            "audit",
+            "fixture",
+            "--path",
+            "child-path",
+        ]
+        .as_slice(),
+        [
+            "review",
+            "--changed-since",
+            "parent-base",
+            "test",
+            "fixture",
+            "--changed-since",
+            "child-base",
+        ]
+        .as_slice(),
+        [
+            "review",
+            "--audit-profile",
+            "full",
+            "audit",
+            "fixture",
+            "--audit-profile",
+            "pr",
+        ]
+        .as_slice(),
+    ] {
+        let output = Command::new(homeboy_bin())
+            .args(args)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+            .output()
+            .expect("run conflicting review command");
+
+        assert_eq!(output.status.code(), Some(2));
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined.contains("validation.invalid_argument"),
+            "{combined}"
+        );
+        assert!(combined.contains("conflicting"), "{combined}");
     }
 }
 

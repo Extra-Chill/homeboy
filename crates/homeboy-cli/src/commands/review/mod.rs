@@ -53,7 +53,7 @@ pub struct ReviewArgs {
 
     /// Attach to an already-persisted review run instead of starting another
     /// audit/lint/test execution.
-    #[arg(long, global = true, value_name = "RUN_ID")]
+    #[arg(long, value_name = "RUN_ID")]
     pub run_id: Option<String>,
 
     #[command(flatten)]
@@ -77,14 +77,13 @@ pub struct ReviewArgs {
     pub summary: bool,
 
     /// Run an extension-declared CI profile as an additional review gate.
-    #[arg(long, global = true, value_name = "ID")]
+    #[arg(long, value_name = "ID")]
     pub ci_profile: Option<String>,
 
     /// Audit detector profile for the audit stage. Defaults to `pr` for
     /// changed-file review and `full` for full review.
     #[arg(
         long,
-        global = true,
         value_name = "PROFILE",
         value_parser = ["full", "pr", "architecture"]
     )]
@@ -95,7 +94,6 @@ pub struct ReviewArgs {
     /// `homeboy git pr comment --body-file`.
     #[arg(
         long,
-        global = true,
         value_name = "FORMAT",
         value_parser = ["pr-comment"]
     )]
@@ -105,7 +103,6 @@ pub struct ReviewArgs {
     /// Repeatable as `--banner key=value`.
     #[arg(
         long,
-        global = true,
         value_name = "KEY=VALUE",
         value_parser = parse_key_val
     )]
@@ -160,13 +157,26 @@ impl ReviewCommand {
 pub struct ReviewAuditArgs {
     #[command(flatten)]
     pub audit: audit::AuditArgs,
+
+    /// Operate only on files modified in the working tree. Review translates
+    /// this to audit's precomputed HEAD-based changed-file scope.
+    #[arg(long, conflicts_with = "changed_since")]
+    pub changed_only: bool,
+
+    /// Audit detector profile for this review action.
+    #[arg(
+        long,
+        value_name = "PROFILE",
+        value_parser = ["full", "pr", "architecture"]
+    )]
+    pub audit_profile: Option<String>,
 }
 
 const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
 
 impl ReviewArgs {
-    /// Project review-level options into the selected action before routing or
-    /// execution. This keeps parent-first and action-first forms identical.
+    /// Project parent-first and action-first options into one action-aware
+    /// state before preflight, routing, and execution consume this command.
     pub(crate) fn project_effective_child_args(&mut self) -> homeboy::core::Result<()> {
         let Some(command) = self.command.take() else {
             return Ok(());
@@ -182,19 +192,53 @@ impl ReviewArgs {
         }
 
         self.command = Some(match command {
-            ReviewCommand::Audit(args) => {
-                let child = apply_review_args_to_audit(self, args.audit);
+            ReviewCommand::Audit(mut args) => {
+                let changed_only = merge_flag(self.changed.changed_only, args.changed_only);
+                merge_changed_since(&mut self.changed, &mut args.audit.changed)?;
+                merge_component_args(&mut self.comp, &mut args.audit.comp)?;
+                merge_extension_ids(
+                    &mut self.extension_override,
+                    &mut args.audit.extension_override,
+                );
+                merge_baseline_args(&mut self.baseline_args, &mut args.audit.baseline_args);
+                self.summary = merge_flag(self.summary, args.audit.json_summary);
+                args.audit.json_summary = self.summary;
+                let action_profile = merge_option(
+                    "--audit-profile",
+                    args.audit_profile.take(),
+                    args.audit.profile.take(),
+                )?;
+                let profile =
+                    merge_option("--audit-profile", self.audit_profile.take(), action_profile)?;
+                self.audit_profile = profile.clone();
+                args.audit.profile = profile;
+                self.changed.changed_only = changed_only;
+                args.changed_only = changed_only;
                 // A changed-only review audit becomes a HEAD-based audit after
                 // its source checkout is resolved, so its Lab contract must be
                 // local before routing reaches that resolution.
-                ReviewCommand::Audit(ReviewAuditArgs { audit: child })
+                ReviewCommand::Audit(args)
             }
-            ReviewCommand::Lint(args) => ReviewCommand::Lint(apply_review_args_to_lint(self, args)),
-            ReviewCommand::Test(args) => {
+            ReviewCommand::Lint(mut args) => {
+                merge_changed_scope(&mut self.changed, &mut args.changed)?;
+                merge_component_args(&mut self.comp, &mut args.comp)?;
+                merge_extension_ids(&mut self.extension_override, &mut args.extension_override);
+                merge_baseline_args(&mut self.baseline_args, &mut args.baseline_args);
+                self.summary = merge_flag(self.summary, args.summary);
+                args.summary = self.summary;
+                ReviewCommand::Lint(args)
+            }
+            ReviewCommand::Test(mut args) => {
                 if self.changed.changed_only {
                     return Err(unsupported_nested_option("--changed-only"));
                 }
-                ReviewCommand::Test(apply_review_args_to_test(self, args))
+                merge_changed_since(&mut self.changed, &mut args.changed.since)?;
+                merge_component_args(&mut self.comp, &mut args.comp)?;
+                merge_extension_ids(&mut self.extension_override, &mut args.extension_override);
+                merge_baseline_args(&mut self.baseline_args, &mut args.baseline_args);
+                self.summary = merge_flag(self.summary, args.json_summary);
+                args.json_summary = self.summary;
+                ReviewCommand::Test(args)
             }
             ReviewCommand::Build(mut args) => {
                 if self.changed.changed_only
@@ -209,15 +253,16 @@ impl ReviewArgs {
                         "--changed-only, --summary, baseline options, --extension, or --audit-profile",
                     ));
                 }
-                if args.target_id.is_none() {
-                    args.target_id = self.comp.component.clone();
-                }
-                if args.scope.path.is_none() {
-                    args.scope.path = self.comp.path.clone();
-                }
-                if args.changed.changed_since.is_none() {
-                    args.changed.changed_since = self.changed.changed_since().map(str::to_string);
-                }
+                args.target_id = merge_option(
+                    "component",
+                    self.comp.component.take(),
+                    args.target_id.take(),
+                )?;
+                self.comp.component = args.target_id.clone();
+                let path = merge_option("--path", self.comp.path.take(), args.scope.path.take())?;
+                self.comp.path = path.clone();
+                args.scope.path = path;
+                merge_changed_since(&mut self.changed, &mut args.changed)?;
                 ReviewCommand::Build(args)
             }
             ReviewCommand::AuditBaseline(args) => ReviewCommand::AuditBaseline(args),
@@ -491,64 +536,83 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
     }
 }
 
-fn apply_review_args_to_audit(
-    shared: &ReviewArgs,
-    mut child: audit::AuditArgs,
-) -> audit::AuditArgs {
-    apply_review_component_and_extensions(shared, &mut child.comp, &mut child.extension_override);
-    if let Some(changed_since) = shared.changed.changed_since() {
-        child.changed.changed_since = Some(changed_since.to_string());
-    }
-    child.json_summary |= shared.summary;
-    apply_review_baseline_args(shared, &mut child.baseline_args);
-    if let Some(profile) = &shared.audit_profile {
-        child.profile = profile.clone();
-    }
-    child
-}
-
-fn apply_review_args_to_lint(shared: &ReviewArgs, mut child: lint::LintArgs) -> lint::LintArgs {
-    apply_review_component_and_extensions(shared, &mut child.comp, &mut child.extension_override);
-    if shared.changed.is_scoped() {
-        child.changed = shared.changed.clone();
-    }
-    child.summary |= shared.summary;
-    apply_review_baseline_args(shared, &mut child.baseline_args);
-    child
-}
-
-fn apply_review_args_to_test(shared: &ReviewArgs, mut child: test::TestArgs) -> test::TestArgs {
-    apply_review_component_and_extensions(shared, &mut child.comp, &mut child.extension_override);
-    if shared.changed.changed_since().is_some() {
-        child.changed = shared.changed.lab.clone();
-    }
-    child.json_summary |= shared.summary;
-    apply_review_baseline_args(shared, &mut child.baseline_args);
-    child
-}
-
-fn apply_review_component_and_extensions(
-    shared: &ReviewArgs,
-    component: &mut PositionalComponentArgs,
-    extensions: &mut ExtensionOverrideArgs,
-) {
-    if shared.comp.component.is_some() {
-        component.component = shared.comp.component.clone();
-    }
-    if shared.comp.path.is_some() {
-        component.path = shared.comp.path.clone();
-    }
-    if !shared.extension_override.extensions.is_empty() {
-        let mut merged = shared.extension_override.extensions.clone();
-        merged.append(&mut extensions.extensions);
-        extensions.extensions = merged;
+fn merge_option(
+    option: &str,
+    parent: Option<String>,
+    child: Option<String>,
+) -> homeboy::core::Result<Option<String>> {
+    match (parent, child) {
+        (Some(parent), Some(child)) if parent != child => {
+            Err(homeboy::core::Error::validation_invalid_argument(
+                "review option",
+                format!("conflicting {option} values before and after the review action"),
+                None,
+                None,
+            ))
+        }
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
     }
 }
 
-fn apply_review_baseline_args(shared: &ReviewArgs, baseline: &mut BaselineArgs) {
-    baseline.baseline |= shared.baseline_args.baseline;
-    baseline.ignore_baseline |= shared.baseline_args.ignore_baseline;
-    baseline.ratchet |= shared.baseline_args.ratchet;
+fn merge_component_args(
+    parent: &mut PositionalComponentArgs,
+    child: &mut PositionalComponentArgs,
+) -> homeboy::core::Result<()> {
+    let component = merge_option("component", parent.component.take(), child.component.take())?;
+    let path = merge_option("--path", parent.path.take(), child.path.take())?;
+    parent.component = component.clone();
+    parent.path = path.clone();
+    child.component = component;
+    child.path = path;
+    Ok(())
+}
+
+fn merge_changed_since(
+    parent: &mut ChangedScopeArgs,
+    child: &mut ChangedSinceArgs,
+) -> homeboy::core::Result<()> {
+    let changed_since = merge_option(
+        "--changed-since",
+        parent.lab.since.changed_since.take(),
+        child.changed_since.take(),
+    )?;
+    parent.lab.since.changed_since = changed_since.clone();
+    child.changed_since = changed_since;
+    Ok(())
+}
+
+fn merge_changed_scope(
+    parent: &mut ChangedScopeArgs,
+    child: &mut ChangedScopeArgs,
+) -> homeboy::core::Result<()> {
+    merge_changed_since(parent, &mut child.lab.since)?;
+    let changed_only = merge_flag(parent.changed_only, child.changed_only);
+    parent.changed_only = changed_only;
+    child.changed_only = changed_only;
+    Ok(())
+}
+
+fn merge_extension_ids(parent: &mut ExtensionOverrideArgs, child: &mut ExtensionOverrideArgs) {
+    let mut effective = parent.extensions.clone();
+    for extension in &child.extensions {
+        if !effective.contains(extension) {
+            effective.push(extension.clone());
+        }
+    }
+    parent.extensions = effective.clone();
+    child.extensions = effective;
+}
+
+fn merge_baseline_args(parent: &mut BaselineArgs, child: &mut BaselineArgs) {
+    parent.baseline = merge_flag(parent.baseline, child.baseline);
+    parent.ignore_baseline = merge_flag(parent.ignore_baseline, child.ignore_baseline);
+    parent.ratchet = merge_flag(parent.ratchet, child.ratchet);
+    *child = parent.clone();
+}
+
+fn merge_flag(parent: bool, child: bool) -> bool {
+    parent || child
 }
 
 /// Translate review's working-tree scope to audit's existing HEAD-based scoped
@@ -564,7 +628,9 @@ fn review_audit_args(
         audit_args.changed.precomputed_changed_files = Some(git::get_dirty_files(source_path)?);
         // `AuditArgs::profile` defaults to full for direct audit. A working-tree
         // review instead uses the bounded profile promised by review's scope.
-        audit_args.profile = "pr".to_string();
+        if audit_args.profile.is_none() {
+            audit_args.profile = Some("pr".to_string());
+        }
     }
     Ok(audit_args)
 }
@@ -1283,7 +1349,7 @@ fn build_audit_args(
         conventions: false,
         only: Vec::new(),
         exclude: Vec::new(),
-        profile: selected_audit_profile(args, review_context),
+        profile: Some(selected_audit_profile(args, review_context)),
         baseline_args: args.baseline_args.clone(),
         changed: ChangedSinceArgs {
             // Audit has no separate --changed-only flag. Reusing HEAD with the
@@ -1525,7 +1591,7 @@ mod tests {
             );
             assert_eq!(args.audit.changed.changed_since.as_deref(), Some("main"));
             assert!(args.audit.json_summary && args.audit.baseline_args.baseline);
-            assert_eq!(args.audit.profile, "architecture");
+            assert_eq!(args.audit.profile.as_deref(), Some("architecture"));
         }
 
         let lint_before = projected_review(&[
@@ -1605,7 +1671,6 @@ mod tests {
     #[test]
     fn review_action_projection_rejects_options_not_shared_by_the_action() {
         for argv in [
-            ["homeboy", "review", "test", "fixture", "--changed-only"].as_slice(),
             ["homeboy", "review", "--summary", "build", "fixture"].as_slice(),
             [
                 "homeboy",
@@ -1625,6 +1690,96 @@ mod tests {
                 .project_effective_child_args()
                 .expect_err("unsupported child option must fail before routing");
             assert!(error.message.contains("not supported"), "{error}");
+        }
+
+        assert!(
+            Cli::try_parse_from(["homeboy", "review", "test", "fixture", "--changed-only"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn review_action_projection_normalizes_equal_duplicates_and_rejects_conflicts() {
+        let review = projected_review(&[
+            "homeboy",
+            "review",
+            "--path",
+            "-fixture-path",
+            "--changed-since",
+            "-base",
+            "--extension",
+            "fixture-extension",
+            "--audit-profile",
+            "pr",
+            "audit",
+            "fixture",
+            "--path",
+            "-fixture-path",
+            "--changed-since",
+            "-base",
+            "--extension",
+            "fixture-extension",
+            "--audit-profile",
+            "pr",
+        ]);
+        let Some(ReviewCommand::Audit(args)) = review.command else {
+            panic!("expected audit action");
+        };
+        assert_eq!(review.comp.path.as_deref(), Some("-fixture-path"));
+        assert_eq!(args.audit.changed.changed_since(), Some("-base"));
+        assert_eq!(args.audit.profile.as_deref(), Some("pr"));
+        assert_eq!(
+            args.audit.extension_override.extensions,
+            ["fixture-extension"]
+        );
+
+        for argv in [
+            [
+                "homeboy",
+                "review",
+                "--path",
+                "parent-path",
+                "audit",
+                "fixture",
+                "--path",
+                "child-path",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "review",
+                "--changed-since",
+                "parent-base",
+                "test",
+                "fixture",
+                "--changed-since",
+                "child-base",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "review",
+                "--audit-profile",
+                "full",
+                "audit",
+                "fixture",
+                "--audit-profile",
+                "pr",
+            ]
+            .as_slice(),
+        ] {
+            let mut cli = Cli::try_parse_from(argv).expect("conflicting command should parse");
+            let Commands::Review(review) = &mut cli.command else {
+                panic!("expected review command");
+            };
+            let error = review
+                .project_effective_child_args()
+                .expect_err("conflicting cross-position options must fail");
+            assert_eq!(
+                error.code,
+                homeboy::core::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(error.message.contains("conflicting"), "{error}");
         }
     }
 
@@ -1972,7 +2127,7 @@ mod tests {
 
         let audit_args = build_audit_args(&args, &review_context);
 
-        assert_eq!(audit_args.profile, "pr");
+        assert_eq!(audit_args.profile.as_deref(), Some("pr"));
         assert_eq!(audit_args.changed.changed_since.as_deref(), Some("HEAD"));
         assert_eq!(
             audit_args.changed.precomputed_changed_files.as_deref(),
@@ -2022,7 +2177,10 @@ mod tests {
             precomputed_changed_files: None,
         };
 
-        assert_eq!(build_audit_args(&args, &review_context).profile, "pr");
+        assert_eq!(
+            build_audit_args(&args, &review_context).profile.as_deref(),
+            Some("pr")
+        );
     }
 
     #[test]
@@ -2034,7 +2192,10 @@ mod tests {
             precomputed_changed_files: None,
         };
 
-        assert_eq!(build_audit_args(&args, &review_context).profile, "full");
+        assert_eq!(
+            build_audit_args(&args, &review_context).profile.as_deref(),
+            Some("full")
+        );
     }
 
     #[test]
@@ -2147,8 +2308,8 @@ mod tests {
         };
 
         assert_eq!(
-            build_audit_args(&args, &review_context).profile,
-            "architecture"
+            build_audit_args(&args, &review_context).profile.as_deref(),
+            Some("architecture")
         );
     }
 

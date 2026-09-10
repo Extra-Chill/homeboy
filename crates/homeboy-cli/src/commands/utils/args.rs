@@ -362,7 +362,7 @@ pub struct PositionalComponentArgs {
     pub component: Option<String>,
 
     /// Override the component checkout path for this invocation
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub path: Option<String>,
 }
 
@@ -1132,7 +1132,7 @@ pub struct BaselineArgs {
 #[derive(Args, Debug, Clone, Default)]
 pub struct ChangedSinceArgs {
     /// Only operate on files changed since this git ref (branch, tag, or SHA).
-    #[arg(long, value_name = "REF")]
+    #[arg(long, value_name = "REF", allow_hyphen_values = true)]
     pub changed_since: Option<String>,
 
     /// Caller-injected changeset. Not a CLI surface — `review` and the Lab
@@ -1208,7 +1208,7 @@ pub struct ChangedScopeArgs {
 
     /// Operate only on files modified in the working tree
     /// (staged, unstaged, untracked). File-scoped, not hunk-scoped.
-    #[arg(long, global = true, conflicts_with = "changed_since")]
+    #[arg(long, conflicts_with = "changed_since")]
     pub changed_only: bool,
 }
 
