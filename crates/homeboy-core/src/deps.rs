@@ -1,4 +1,5 @@
 use crate::component::{self, Component};
+use crate::cooperative_control::CooperativeControl;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -202,10 +203,11 @@ fn hydrate_declared_dependencies_unlocked(
     component.local_path = path_arg;
     let component_for_discovery = component.clone();
     let path_for_discovery = path.to_path_buf();
-    let Some(providers) = run_with_hydration_deadline(policy, deadline, move |_| {
-        provider::resolve_dependency_providers_optional(
+    let Some(providers) = run_with_hydration_deadline(policy, deadline, move |control| {
+        provider::resolve_dependency_providers_optional_with_control(
             &component_for_discovery,
             &path_for_discovery,
+            control,
         )
     })?
     else {
@@ -224,8 +226,8 @@ fn hydrate_declared_dependencies_unlocked(
         }
         let component_for_plan = component.clone();
         let path_for_plan = path.to_path_buf();
-        let plan = match run_with_hydration_deadline(policy, deadline, move |_| {
-            provider.hydration_plan(&component_for_plan, &path_for_plan)
+        let plan = match run_with_hydration_deadline(policy, deadline, move |control| {
+            provider.hydration_plan(&component_for_plan, &path_for_plan, control)
         })? {
             Some(Some(plan)) => plan,
             Some(None) => continue,
@@ -504,17 +506,6 @@ fn hydration_deadline_expired(policy: &DependencyHydrationPolicy, deadline: Inst
 /// Providers must use the supplied control point around potentially blocking
 /// work. Keeping the operation on the caller thread prevents provider work from
 /// continuing after hydration returns.
-struct DependencyHydrationControl<'a> {
-    policy: &'a DependencyHydrationPolicy,
-    deadline: Instant,
-}
-
-impl DependencyHydrationControl<'_> {
-    fn is_cancelled(&self) -> bool {
-        hydration_deadline_expired(self.policy, self.deadline)
-    }
-}
-
 /// Provider discovery and planning share the command budget rather than each
 /// receiving a fresh timeout.
 fn run_with_hydration_deadline<T, F>(
@@ -523,9 +514,9 @@ fn run_with_hydration_deadline<T, F>(
     operation: F,
 ) -> Result<Option<T>>
 where
-    F: FnOnce(&DependencyHydrationControl<'_>) -> Result<T>,
+    F: FnOnce(&CooperativeControl) -> Result<T>,
 {
-    let control = DependencyHydrationControl { policy, deadline };
+    let control = CooperativeControl::new(deadline, Arc::clone(&policy.is_cancelled));
     if control.is_cancelled() {
         return Ok(None);
     }
@@ -819,7 +810,10 @@ fn resolve_dependency_workspace(
     let mut candidate = path.to_path_buf();
 
     loop {
-        let providers = provider::resolve_dependency_providers_optional(component, &candidate)?;
+        let control = CooperativeControl::unbounded();
+        let providers = provider::resolve_dependency_providers_optional_with_control(
+            component, &candidate, &control,
+        )?;
         if !providers.is_empty() {
             return Ok((candidate, providers));
         }
@@ -916,23 +910,28 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
     let workspace = dependency_install_workspace_root(path)?;
     let (component, resolved_path) =
         resolve_component_path(None, Some(&path.display().to_string()))?;
-    let providers =
-        match provider::resolve_dependency_providers_optional(&component, &resolved_path) {
-            Ok(providers) => providers,
-            Err(error) => {
-                if !crate::extension::resolve::has_linked_extension_for_capability(
-                    &component,
-                    homeboy_extension_contract::ExtensionCapability::Deps,
-                )? {
-                    Vec::new()
-                } else {
-                    return Err(error);
-                }
+    let control = CooperativeControl::unbounded();
+    let providers = match provider::resolve_dependency_providers_optional_with_control(
+        &component,
+        &resolved_path,
+        &control,
+    ) {
+        Ok(providers) => providers,
+        Err(error) => {
+            if !crate::extension::resolve::has_linked_extension_for_capability(
+                &component,
+                homeboy_extension_contract::ExtensionCapability::Deps,
+            )? {
+                Vec::new()
+            } else {
+                return Err(error);
             }
-        };
+        }
+    };
     let mut steps = Vec::new();
     for provider in providers {
-        if let Some(plan) = provider.hydration_plan(&component, &resolved_path)? {
+        let control = CooperativeControl::unbounded();
+        if let Some(plan) = provider.hydration_plan(&component, &resolved_path, &control)? {
             steps.push(DependencyInstallPlanStep {
                 provider_id: plan.provider_id,
                 invocation: dependency_install_invocation(plan.install.argv())?,
@@ -1762,6 +1761,8 @@ mod tests {
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
         let release_for_operation = Arc::clone(&release);
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_operation = Arc::clone(&completed);
         let started = Instant::now();
         let canceller = std::thread::spawn({
             let cancelled = Arc::clone(&cancelled);
@@ -1782,6 +1783,7 @@ mod tests {
                         .expect("wait release");
                     released = next;
                     if control.is_cancelled() {
+                        completed_for_operation.store(true, Ordering::SeqCst);
                         return Ok(());
                     }
                 }
@@ -1791,6 +1793,7 @@ mod tests {
         .expect("discovery cancellation result");
         canceller.join().expect("canceller");
         assert!(result.is_none());
+        assert!(completed.load(Ordering::SeqCst));
         assert!(started.elapsed() < Duration::from_millis(500));
         let (lock, wake) = &*release;
         *lock.lock().expect("lock release") = true;
@@ -1803,6 +1806,8 @@ mod tests {
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
         let release_for_operation = Arc::clone(&release);
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_operation = Arc::clone(&completed);
         let started = Instant::now();
         let canceller = std::thread::spawn({
             let cancelled = Arc::clone(&cancelled);
@@ -1823,6 +1828,7 @@ mod tests {
                         .expect("wait release");
                     released = next;
                     if control.is_cancelled() {
+                        completed_for_operation.store(true, Ordering::SeqCst);
                         return Ok(());
                     }
                 }
@@ -1832,6 +1838,7 @@ mod tests {
         .expect("planning cancellation result");
         canceller.join().expect("canceller");
         assert!(result.is_none());
+        assert!(completed.load(Ordering::SeqCst));
         assert!(started.elapsed() < Duration::from_millis(500));
         let (lock, wake) = &*release;
         *lock.lock().expect("lock release") = true;

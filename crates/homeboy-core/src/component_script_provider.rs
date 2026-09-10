@@ -14,6 +14,7 @@ use std::path::Path;
 use homeboy_extension_contract::{ExtensionCapability, ExtensionPhaseTiming};
 
 use crate::component::Component;
+use crate::cooperative_control::CooperativeControl;
 use crate::engine::resource::ExtensionChildResourceSummary;
 use crate::{Error, Result};
 
@@ -44,6 +45,7 @@ pub trait ComponentScriptRunner: Send + Sync {
         passthrough: bool,
         extra_env: &[(String, String)],
         script_args: &[String],
+        control: &CooperativeControl,
     ) -> Result<ComponentScriptOutput>;
 
     /// Run a pre-resolved extension execution context against a component.
@@ -54,6 +56,7 @@ pub trait ComponentScriptRunner: Send + Sync {
         component: &Component,
         path_override: Option<String>,
         script_args: &[String],
+        control: &CooperativeControl,
     ) -> Result<ComponentScriptOutput>;
 }
 
@@ -75,8 +78,21 @@ pub fn run_with_context(
     path_override: Option<String>,
     script_args: &[String],
 ) -> Result<ComponentScriptOutput> {
+    let control = CooperativeControl::unbounded();
+    run_with_context_controlled(context, component, path_override, script_args, &control)
+}
+
+pub fn run_with_context_controlled(
+    context: &crate::extension::resolve::ExtensionExecutionContext,
+    component: &Component,
+    path_override: Option<String>,
+    script_args: &[String],
+    control: &CooperativeControl,
+) -> Result<ComponentScriptOutput> {
     with_provider(|runner| match runner {
-        Some(runner) => runner.run_with_context(context, component, path_override, script_args),
+        Some(runner) => {
+            runner.run_with_context(context, component, path_override, script_args, control)
+        }
         None => Err(Error::internal_io(
             "no component-script runner registered; the extension subsystem is not available",
             None,
@@ -93,6 +109,27 @@ pub fn run_component_scripts_with_env(
     extra_env: &[(String, String)],
     script_args: &[String],
 ) -> Result<ComponentScriptOutput> {
+    let control = CooperativeControl::unbounded();
+    run_component_scripts_with_env_controlled(
+        component,
+        capability,
+        source_path,
+        passthrough,
+        extra_env,
+        script_args,
+        &control,
+    )
+}
+
+pub fn run_component_scripts_with_env_controlled(
+    component: &Component,
+    capability: ExtensionCapability,
+    source_path: &Path,
+    passthrough: bool,
+    extra_env: &[(String, String)],
+    script_args: &[String],
+    control: &CooperativeControl,
+) -> Result<ComponentScriptOutput> {
     with_provider(|runner| match runner {
         Some(runner) => runner.run_component_scripts_with_env(
             component,
@@ -101,6 +138,7 @@ pub fn run_component_scripts_with_env(
             passthrough,
             extra_env,
             script_args,
+            control,
         ),
         None => Err(Error::internal_io(
             "no component-script runner registered; the extension subsystem is not available",

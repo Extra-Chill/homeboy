@@ -79,24 +79,12 @@ impl ReviewPreflightDeadline {
 
     fn run<T, F>(self, phase: &str, operation: F) -> homeboy::core::Result<T>
     where
-        T: Send + 'static,
-        F: FnOnce() -> homeboy::core::Result<T> + Send + 'static,
+        F: FnOnce() -> homeboy::core::Result<T>,
     {
-        let remaining = self.remaining(phase)?;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let _ = sender.send(operation());
-        });
-        receiver
-            .recv_timeout(remaining)
-            .map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => homeboy::core::Error::internal_unexpected(
-                    format!("review preflight/setup deadline exceeded during {phase}"),
-                ),
-                mpsc::RecvTimeoutError::Disconnected => homeboy::core::Error::internal_unexpected(
-                    format!("review {phase} worker stopped before returning a result"),
-                ),
-            })?
+        self.remaining(phase)?;
+        let result = operation()?;
+        self.remaining(phase)?;
+        Ok(result)
     }
 }
 
