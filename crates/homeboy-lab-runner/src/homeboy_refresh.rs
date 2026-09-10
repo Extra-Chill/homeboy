@@ -2330,9 +2330,13 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
                         )),
                     )?;
                     if exit != 0 {
-                        return Ok((
-                            dev_sync_failure_output(options, plan, None, Vec::new()),
-                            exit,
+                        let detail = [output.stderr.trim(), output.stdout.trim()]
+                            .into_iter()
+                            .find(|output| !output.is_empty())
+                            .unwrap_or("runner source snapshot build returned no output");
+                        return Err(Error::internal_io(
+                            format!("runner source snapshot build failed: {detail}"),
+                            Some("runner dev-sync source snapshot build".into()),
                         ));
                     }
                     let (remote_binary, binary_sha256) =
