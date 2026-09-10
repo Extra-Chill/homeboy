@@ -9319,6 +9319,48 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
 }
 
 #[test]
+fn cook_persists_identity_before_fallible_workspace_canonicalization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let cook_id = "cook-canonicalization-admission";
+        let run_id = "cook-canonicalization-admission-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.workspace.source_worktree_path = Some(workspace.path().join("missing"));
+
+        let first = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("canonicalization failure has a durable Cook report");
+        assert_eq!(first.value.status, "pre_execution_failure");
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(cook_id)
+                .expect("Cook alias resolves after canonicalization failure")
+                .run_id,
+            run_id
+        );
+        let record = agent_task_lifecycle::reconcile_status(run_id)
+            .expect("canonicalization failure persists its attempt");
+        assert_eq!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+        assert_eq!(
+            record.metadata["cook_progress"]["phase"],
+            serde_json::json!("workspace_provider_canonicalization")
+        );
+
+        let replay = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("replay returns the same durable Cook failure");
+        assert_eq!(replay.value.status, first.value.status);
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(cook_id)
+                .expect("replay preserves Cook alias")
+                .run_id,
+            run_id
+        );
+    });
+}
+
+#[test]
 fn local_startup_base_capture_is_durable_and_reported_before_interruption() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository");

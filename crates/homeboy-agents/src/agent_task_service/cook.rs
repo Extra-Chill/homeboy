@@ -5254,7 +5254,6 @@ fn run_cook_spine(
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    canonicalize_cook_provider_workspace(&mut options)?;
     // The local detached launcher persists this fence before spawn. Recheck it
     // at each durable/external boundary so a dead launcher cannot revive work.
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.identity.cook_id)?;
@@ -5312,18 +5311,6 @@ fn run_cook_spine(
         } else {
             false
         };
-    if !persisted_finalization
-        && !moving_base_continuation
-        && !verification_pending_continuation
-        && !authenticated_historical_review_continuation
-        && !cook_workspace_lookup_pending(&options.identity.initial_plan)
-        && options.provider_transport.attempt_dispatcher.is_none()
-        && options.workspace.source_worktree_path.is_none()
-        && options.provider_transport.provider_command.is_none()
-        && options.provider_transport.provider_invocation.is_none()
-    {
-        preflight_initial_cook_workspace_provider(&options)?;
-    }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
     let adopted_model = if persisted_finalization {
@@ -5401,7 +5388,6 @@ fn run_cook_spine(
     } else {
         options
     };
-    canonicalize_cook_provider_workspace(&mut options)?;
     // Candidate adoption records the concrete external model on the lifecycle
     // attempt. Reuse it only when the persisted promotion authenticates the
     // same candidate/model pair, including after a detached continuation.
@@ -5453,6 +5439,47 @@ fn run_cook_spine(
         options.retry_policy.max_attempts,
         &options.ai_disclosure.ai_tool,
     );
+    // Canonicalization and native-worktree discovery can block on provider
+    // runtime state. The recipe and lifecycle attempt above must therefore own
+    // their result before either check begins.
+    let startup_cook_id = options.identity.cook_id.clone();
+    let startup_run_id = options.identity.initial_run_id.clone();
+    run_cook_startup_phase(
+        lifecycle_store,
+        durable_observer,
+        &startup_cook_id,
+        &startup_run_id,
+        "workspace_provider_canonicalization",
+        || canonicalize_cook_provider_workspace(&mut options),
+    )
+    .map_err(|mut error| {
+        error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+        error
+    })?;
+    if !existing_recipe
+        && !persisted_finalization
+        && !moving_base_continuation
+        && !verification_pending_continuation
+        && !authenticated_historical_review_continuation
+        && !cook_workspace_lookup_pending(&options.identity.initial_plan)
+        && options.provider_transport.attempt_dispatcher.is_none()
+        && options.workspace.source_worktree_path.is_none()
+        && options.provider_transport.provider_command.is_none()
+        && options.provider_transport.provider_invocation.is_none()
+    {
+        run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &options.identity.cook_id,
+            &options.identity.initial_run_id,
+            "workspace_provider_preflight",
+            || preflight_initial_cook_workspace_provider(&options),
+        )
+        .map_err(|mut error| {
+            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+            error
+        })?;
+    }
     // Reject a known-invalid managed workspace before base capture reaches its
     // remote. Detached first handoffs have no local source path and remain
     // eligible for runner-owned materialization below.
