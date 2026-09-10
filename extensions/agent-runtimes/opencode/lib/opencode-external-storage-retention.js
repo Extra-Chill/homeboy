@@ -75,50 +75,61 @@ function retentionConfig(env, options) {
 	const tempRoots = absolutePaths([...(value.temp_roots || []), paths.tmp].filter(Boolean));
 	const dataRoots = absolutePaths([...(value.data_roots || []), paths.data, dbPath && path.dirname(dbPath)].filter(Boolean));
 	if (tempRoots.length + dataRoots.length > MAX_ROOTS) throw new Error('Retention configuration exceeds the root ceiling.');
+	if (hasOverlappingRoots(tempRoots) || hasOverlappingRoots(dataRoots)) throw new Error('Retention roots in the same storage class must not overlap.');
 	if (tempRoots.some((root) => dataRoots.some((data) => overlaps(root, data)))) throw new Error('Retention roots must not overlap.');
 	return { command, temp_roots: tempRoots, data_roots: dataRoots, db_path: dbPath, marker_key: markerKey(env) };
 }
 
 function inventoryFor(config, options) {
 	const roots = [...config.temp_roots.map((value, index) => ({ id: `temp-${index}`, path: value })), ...config.data_roots.map((value, index) => ({ id: `data-${index}`, path: value }))];
-	const sessions = discoverSessions(config, [], roots, options);
-	const markerItems = config.marker_key ? discoverMarkers(config, roots, options, new Set(sessions.map((entry) => entry.id.slice('session:'.length)))) : [];
+	const markerDiscovery = config.marker_key ? discoverMarkers(config, roots, options, new Set()) : { items: [], incomplete: [] };
+	const sessionDiscovery = discoverSessions(config, roots, options, new Set(markerDiscovery.items.map((entry) => entry._session_id).filter(Boolean)));
+	for (const marker of markerDiscovery.items) marker.referenced = Boolean(marker._session_id && sessionDiscovery.ids.has(marker._session_id));
 	const protectedItems = discoverProtected(config, roots);
-	const items = [...markerItems, ...sessions, ...protectedItems].slice(0, MAX_ITEMS);
+	// Scratch is discovered before session rows so a busy session store cannot
+	// starve signed terminal scratch from the bounded inventory.
+	const items = [...markerDiscovery.items, ...sessionDiscovery.items, ...protectedItems].slice(0, MAX_ITEMS);
 	const known = new Set(items.map((item) => item._path).filter(Boolean));
-	const unknownBytes = roots.reduce((total, root) => total + unknownBytesBelow(root.path, known), 0);
+	const unknown = roots.map((root) => unknownBytesBelow(root.path, known));
+	const unknownBytes = unknown.reduce((total, value) => total + value.bytes, 0);
+	const measuredItems = items.map((entry) => ({ entry, measurement: walkBytes(entry._path) }));
+	const incomplete = [...markerDiscovery.incomplete, ...unknown.flatMap((value, index) => value.reasons.map((reason) => ({ root_id: roots[index].id, reason, observed_entries: value.entries, observed_bytes: value.bytes })) ), ...measuredItems.flatMap(({ entry, measurement }) => measurement.reasons.map((reason) => ({ root_id: entry.root_id, reason: `item_${reason}`, observed_entries: measurement.entries, observed_bytes: measurement.bytes })) )];
 	const generation = digest(JSON.stringify({ roots: roots.map((root) => [root.id, fingerprint(root.path)]), items: items.map((item) => [item.id, item.state]) }));
 	return {
 		schema: SCHEMA, provider_id: PROVIDER_ID, generation, roots,
-		items: items.map(({ _path, _workspace, state, ...item }) => ({ ...item, reclaim_token: digest(`${generation}:${item.id}:${state}`) })), unknown_bytes: unknownBytes,
+		items: items.map(({ _path, _workspace, _session_id, state, ...item }) => ({ ...item, reclaim_token: digest(`${generation}:${item.id}:${state}`) })), unknown_bytes: unknownBytes,
+		...(incomplete.length ? { completeness: { complete: false, incomplete_roots: incomplete } } : {}),
 	};
 }
 
 function discoverMarkers(config, roots, options, sessions) {
-	const items = [];
+	const items = []; const incomplete = [];
 	for (const root of config.temp_roots) {
-		for (const candidate of [root, ...safeEntries(root).filter((entry) => entry.isDirectory()).slice(0, MAX_ITEMS).map((entry) => path.join(root, entry.name))]) {
+		const discovery = boundedDirectories(root);
+		for (const candidate of discovery.directories) {
 			const marker = readMarker(candidate, options.env || process.env);
 			if (!marker || !sameRealDirectory(candidate, root)) continue;
 			const active = marker.active === true || processAlive(marker.owner_pid);
-			const discovered = item(marker.id, rootId(candidate, roots), 'scratch', candidate, true, active, Boolean(marker.session_id && sessions.has(marker.session_id)), ageDays(marker.terminal_at, options.now), `marker:${marker.signature}`);
+			const discovered = item(marker.id, rootId(candidate, roots), 'scratch', candidate, true, active, Boolean(marker.session_id && sessions.has(marker.session_id)), ageDays(marker.terminal_at, options.now), `marker:${marker.signature}:${sizeOf(candidate)}`);
 			discovered._workspace = marker.workspace;
+			discovered._session_id = marker.session_id;
 			items.push(discovered);
 		}
+		for (const reason of discovery.reasons) incomplete.push({ root_id: rootId(root, roots), reason: `scratch_discovery_${reason}`, observed_entries: discovery.entries, observed_bytes: 0 });
 	}
-	return items;
+	return { items, incomplete };
 }
 
-function discoverSessions(config, markerItems, roots, options) {
-	if (!config.db_path || !safeRegularFile(config.db_path)) return [];
+function discoverSessions(config, roots, options, markerSessions = markerSessionIds(config, options.env || process.env)) {
+	if (!config.db_path || !safeRegularFile(config.db_path)) return { items: [], ids: new Set() };
 	const sessions = openCodeJson(config.command, ['session', 'list', '--format', 'json'], options.env || process.env);
-	if (!Array.isArray(sessions)) return [item(`session-store:${digest(config.db_path).slice(0, 16)}`, rootId(config.db_path, roots), 'session_store', config.db_path, false, true, true, 0, `db:${fingerprint(config.db_path)}`)];
+	if (!Array.isArray(sessions)) return { items: [item(`session-store:${digest(config.db_path).slice(0, 16)}`, rootId(config.db_path, roots), 'session_store', config.db_path, false, true, true, 0, `db:${fingerprint(config.db_path)}`)], ids: new Set() };
 	const storeId = `session-store:${digest(config.db_path).slice(0, 16)}`;
-	const markerSessions = markerSessionIds(config, options.env || process.env);
-	const sessionItems = sessions.filter((session) => validId(session.id)).slice(0, MAX_ITEMS - 1).map((session) => item(`session:${session.id}`, rootId(config.db_path, roots), 'durable_artifact', config.db_path, true, processAlive(session.owner_pid), session.pinned === true || markerSessions.has(session.id), ageDays(session.updated || session.created, options.now), `session:${session.id}:${fingerprint(config.db_path)}`, 0));
-	return [item(storeId, rootId(config.db_path, roots), 'session_store', config.db_path, false, false, true, 0, `db:${fingerprint(config.db_path)}`), ...sessionItems];
+	const validSessions = sessions.filter((session) => validId(session.id));
+	const sessionItems = validSessions.slice(0, MAX_ITEMS - 1).map((session) => item(`session:${session.id}`, rootId(config.db_path, roots), 'durable_artifact', config.db_path, true, processAlive(session.owner_pid), session.pinned === true || markerSessions.has(session.id), ageDays(session.updated || session.created, options.now), `session:${session.id}:${fingerprint(config.db_path)}`, 0));
+	return { items: [item(storeId, rootId(config.db_path, roots), 'session_store', config.db_path, false, false, true, 0, `db:${fingerprint(config.db_path)}`), ...sessionItems], ids: new Set(validSessions.map((session) => session.id)) };
 }
-function markerSessionIds(config, env) { const ids = new Set(); for (const root of config.temp_roots) for (const candidate of [root, ...safeEntries(root).filter((entry) => entry.isDirectory()).slice(0, MAX_ITEMS).map((entry) => path.join(root, entry.name))]) { const marker = readMarker(candidate, env); if (marker?.session_id) ids.add(marker.session_id); } return ids; }
+function markerSessionIds(config, env) { const ids = new Set(); for (const root of config.temp_roots) for (const candidate of boundedDirectories(root).directories) { const marker = readMarker(candidate, env); if (marker?.session_id) ids.add(marker.session_id); } return ids; }
 
 function discoverProtected(config, roots) {
 	const items = [];
@@ -155,7 +166,7 @@ function reclaimScratch(id, config, options) {
 
 function findMarkedScratch(id, config, env) {
 	for (const root of config.temp_roots) {
-		for (const candidate of [root, ...safeEntries(root).filter((entry) => entry.isDirectory()).slice(0, MAX_ITEMS).map((entry) => path.join(root, entry.name))]) {
+		for (const candidate of boundedDirectories(root).directories) {
 			if (sameRealDirectory(candidate, root) && readMarker(candidate, env)?.id === id) return candidate;
 		}
 	}
@@ -209,15 +220,23 @@ function secureEqual(left, right) { return left.length === right.length && crypt
 function reclaimable(value) { return value.class === 'scratch' && value.ownership_known && value.reconstructable && !value.active && !value.referenced; }
 function processAlive(pid) { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } }
 function safeEntries(directory, limit = MAX_WALK_ENTRIES) { try { const handle = fs.opendirSync(directory, { bufferSize: Math.min(limit, 128) }); const entries = []; for (let entry = handle.readSync(); entry && entries.length < limit; entry = handle.readSync()) entries.push(entry); handle.closeSync(); return entries; } catch { return []; } }
-function sizeOf(candidate) {
-	const stack = [[candidate, 0]]; let bytes = 0; let entries = 0;
-	while (stack.length && entries < MAX_WALK_ENTRIES && bytes < MAX_WALK_BYTES) {
+function sizeOf(candidate) { return walkBytes(candidate).bytes; }
+function walkBytes(root, known = new Set()) {
+	const stack = [[root, 0]]; let bytes = 0; let entries = 0; const reasons = new Set();
+	while (stack.length) {
+		if (entries >= MAX_WALK_ENTRIES) { reasons.add('entry_limit'); break; }
+		if (bytes >= MAX_WALK_BYTES) { reasons.add('byte_limit'); break; }
 		const [current, depth] = stack.pop(); entries += 1;
-		try { const stat = fs.lstatSync(current); if (stat.isSymbolicLink()) continue; if (stat.isDirectory()) { if (depth < MAX_WALK_DEPTH) for (const entry of safeEntries(current).slice(0, MAX_WALK_ENTRIES - entries)) stack.push([path.join(current, entry.name), depth + 1]); } else bytes += stat.size; } catch { /* Unknown paths remain non-reclaimable. */ }
+		try { const stat = fs.lstatSync(current); if (stat.isSymbolicLink() || known.has(current)) continue; if (stat.isDirectory()) { if (depth >= MAX_WALK_DEPTH) { reasons.add('depth_limit'); continue; } for (const entry of safeEntries(current, MAX_WALK_ENTRIES - entries)) stack.push([path.join(current, entry.name), depth + 1]); } else bytes += stat.size; } catch { reasons.add('read_error'); }
 	}
-	return bytes;
+	return { bytes, entries, reasons: [...reasons] };
 }
-function unknownBytesBelow(root, known) { const stack = [[root, 0]]; let bytes = 0; let entries = 0; while (stack.length && entries < MAX_WALK_ENTRIES && bytes < MAX_WALK_BYTES) { const [current, depth] = stack.pop(); entries += 1; if (known.has(current)) continue; const hasKnownDescendant = [...known].some((candidate) => inside(candidate, current)); if (!hasKnownDescendant) { bytes += sizeOf(current); continue; } if (depth < MAX_WALK_DEPTH) for (const entry of safeEntries(current, MAX_WALK_ENTRIES - entries)) stack.push([path.join(current, entry.name), depth + 1]); } return bytes; }
+function unknownBytesBelow(root, known) { return walkBytes(root, known); }
+function boundedDirectories(root) {
+	const stack = [[root, 0]]; const directories = []; let entries = 0; const reasons = new Set();
+	while (stack.length) { if (entries >= MAX_WALK_ENTRIES) { reasons.add('entry_limit'); break; } const [current, depth] = stack.pop(); entries += 1; try { const stat = fs.lstatSync(current); if (stat.isSymbolicLink() || !stat.isDirectory()) continue; directories.push(current); if (depth >= MAX_WALK_DEPTH) { reasons.add('depth_limit'); continue; } for (const entry of safeEntries(current, MAX_WALK_ENTRIES - entries)) if (entry.isDirectory()) stack.push([path.join(current, entry.name), depth + 1]); } catch { reasons.add('read_error'); } }
+	return { directories, entries, reasons: [...reasons] };
+}
 function rootId(candidate, roots) { return roots.find((root) => inside(candidate, root.path))?.id || 'unmanaged'; }
 function sameRealDirectory(candidate, root) { try { return inside(fs.realpathSync(candidate), fs.realpathSync(root)) && !fs.lstatSync(candidate).isSymbolicLink(); } catch { return false; } }
 function safeRegularFile(candidate) { try { return safeAbsolutePath(candidate) && fs.lstatSync(candidate).isFile() && !fs.lstatSync(candidate).isSymbolicLink(); } catch { return false; } }
@@ -226,6 +245,7 @@ function safeAbsolutePath(value) { return typeof value === 'string' && path.isAb
 function absolutePaths(values) { return [...new Set(values.map(safeAbsolutePath).filter(Boolean))]; }
 function inside(candidate, root) { if (!candidate || !root) return false; const relative = path.relative(root, candidate); return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)); }
 function overlaps(one, two) { return inside(one, two) || inside(two, one); }
+function hasOverlappingRoots(roots) { return roots.some((root, index) => roots.slice(index + 1).some((other) => overlaps(root, other))); }
 function fingerprint(candidate) { try { const stat = fs.lstatSync(candidate); return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`; } catch { return 'missing'; } }
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value); }
