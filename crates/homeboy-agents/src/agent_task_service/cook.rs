@@ -5447,7 +5447,10 @@ fn run_cook_spine(
         };
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
-    let adopted_model = if persisted_finalization {
+    let adopted_model = if persisted_finalization
+        || moving_base_continuation
+        || verification_pending_continuation
+    {
         None
     } else {
         lifecycle_store
@@ -6964,8 +6967,11 @@ fn run_cook_spine(
         budget_used.provider_rotations = budget_used
             .provider_rotations
             .saturating_add(remediation_category_usage.provider_rotations);
-        let adopted_continuation =
-            adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?;
+        let adopted_continuation = if rooted_promotion_continuation {
+            None
+        } else {
+            adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?
+        };
         let review_form_continuation = mode.allows_historical_terminal()
             && review_form_attempt_is_ready_for_cook_continuation_in_store(
                 lifecycle_store,

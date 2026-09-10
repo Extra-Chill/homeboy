@@ -5743,19 +5743,18 @@ pub(crate) fn bind_report_to_stores(
         &report.cook_id,
         &report.invocation_run_ids,
     );
-    report.failure_context = (report.status != "review_ready"
-        && report.status != "draft_published"
-        && report.status != "green_no_finalize")
-        .then(|| {
-            cook_failure_context_with_stores(
-                Some(recipe_store),
-                Some(lifecycle_store),
-                &report.cook_id,
-                report.latest_run_id.as_deref(),
-                &report.status,
-            )
-        })
-        .flatten();
+    report.failure_context = (!homeboy_core::cook_status::CookStatus::from_status(&report.status)
+        .is_success_exit())
+    .then(|| {
+        cook_failure_context_with_stores(
+            Some(recipe_store),
+            Some(lifecycle_store),
+            &report.cook_id,
+            report.latest_run_id.as_deref(),
+            &report.status,
+        )
+    })
+    .flatten();
     report.report_stores = Some((recipe_store.clone(), lifecycle_store.clone()));
 }
 

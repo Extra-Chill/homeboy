@@ -9183,6 +9183,11 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                     run_id.to_string()
                 ),
                 (
+                    "workspace_provider_canonicalization".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
                     "workspace_base_capture".to_string(),
                     cook_id.to_string(),
                     run_id.to_string()
