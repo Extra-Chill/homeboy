@@ -2,10 +2,11 @@
 
 use crate::install::local_package_source_root_for_dependencies;
 use crate::{
-    declared_id, default_materialize_source_root, discover_rigs, install, list, list_ids, load,
-    load_local_source, materialize_rig_resource, materialize_rig_spec,
-    materialize_rig_spec_with_default_source_root, read_source_metadata_in_root,
-    read_stack_source_metadata_in_root, run_check, run_lint, MATERIALIZED_RIG_RESOURCE_SCHEMA,
+    declared_id, default_materialize_source_root, discover_rigs, install,
+    install_with_local_source_copy, list, list_ids, load, load_local_source,
+    materialize_rig_resource, materialize_rig_spec, materialize_rig_spec_with_default_source_root,
+    read_source_metadata_in_root, read_stack_source_metadata_in_root, run_check, run_lint,
+    MATERIALIZED_RIG_RESOURCE_SCHEMA,
 };
 use homeboy_core::test_support::HomeGuard;
 use homeboy_core::ErrorCode;
@@ -99,6 +100,34 @@ mod discovery {
             read_source_metadata_in_root(&test_config_root(), "alpha").expect("metadata");
         assert!(metadata.linked);
         assert_eq!(metadata.rig_path, source.to_string_lossy());
+    }
+
+    #[test]
+    fn copied_local_install_survives_source_workspace_cleanup() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+
+        let result = install_with_local_source_copy(
+            &test_config_root(),
+            package.path().to_str().expect("package path"),
+            None,
+            false,
+            true,
+        )
+        .expect("copy install");
+        let durable_source = result.source_root;
+        assert!(!result.linked);
+        assert!(durable_source.exists());
+
+        package.close().expect("remove ephemeral source workspace");
+        let loaded = load(&test_config_root(), "alpha").expect("load copied rig after cleanup");
+        assert_eq!(loaded.id, "alpha");
+
+        let metadata =
+            read_source_metadata_in_root(&test_config_root(), "alpha").expect("metadata");
+        assert!(!metadata.linked);
+        assert!(std::path::Path::new(&metadata.package_path).exists());
     }
 }
 
