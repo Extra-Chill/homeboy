@@ -3859,7 +3859,19 @@ pub(crate) fn canonical_cook_recovery_run_id_with_stores(
             let Ok(record) = record else {
                 continue;
             };
-            if review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record).ok()?
+            let review_form_ready = stores
+                .map(|(_, lifecycle)| {
+                    super::cook::review_form_attempt_is_ready_for_cook_continuation_in_store(
+                        lifecycle,
+                        &attempt.plan,
+                        &record,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record)
+                })
+                .ok()?;
+            if review_form_ready
                 && stores
                     .map(|(_, lifecycle)| {
                         persisted_promotion_for_attempt_in_store(lifecycle, &attempt.run_id)
@@ -5704,6 +5716,7 @@ pub(crate) fn bind_report_to_stores(
     report: &mut AgentTaskCookReport,
     recipe_store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    failure_context_required: bool,
 ) {
     report.history_run_ids = lifecycle_store
         .read_cook_index(&report.cook_id)
@@ -5743,18 +5756,17 @@ pub(crate) fn bind_report_to_stores(
         &report.cook_id,
         &report.invocation_run_ids,
     );
-    report.failure_context = (!homeboy_core::cook_status::CookStatus::from_status(&report.status)
-        .is_success_exit())
-    .then(|| {
-        cook_failure_context_with_stores(
-            Some(recipe_store),
-            Some(lifecycle_store),
-            &report.cook_id,
-            report.latest_run_id.as_deref(),
-            &report.status,
-        )
-    })
-    .flatten();
+    report.failure_context = failure_context_required
+        .then(|| {
+            cook_failure_context_with_stores(
+                Some(recipe_store),
+                Some(lifecycle_store),
+                &report.cook_id,
+                report.latest_run_id.as_deref(),
+                &report.status,
+            )
+        })
+        .flatten();
     report.report_stores = Some((recipe_store.clone(), lifecycle_store.clone()));
 }
 

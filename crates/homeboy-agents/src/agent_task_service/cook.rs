@@ -1776,7 +1776,18 @@ pub(crate) fn canonical_candidate_finalization_with_stores(
             continue;
         };
         if record.metadata["cook_id"].as_str() != Some(cook_id)
-            || !review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record).ok()?
+            || !stores
+                .map(|(_, lifecycle)| {
+                    review_form_attempt_is_ready_for_cook_continuation_in_store(
+                        lifecycle,
+                        &attempt.plan,
+                        &record,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record)
+                })
+                .ok()?
         {
             continue;
         }
@@ -4155,7 +4166,7 @@ pub(crate) fn review_form_attempt_is_ready_for_cook_continuation(
     review_form_attempt_is_ready_for_cook_continuation_in_store(&lifecycle_store, plan, record)
 }
 
-fn review_form_attempt_is_ready_for_cook_continuation_in_store(
+pub(super) fn review_form_attempt_is_ready_for_cook_continuation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -4993,7 +5004,12 @@ fn run_cook_with_runtime(
         mode,
     );
     if let Ok(result) = &mut result {
-        super::cook_promotion::bind_report_to_stores(&mut result.value, store, lifecycle_store);
+        super::cook_promotion::bind_report_to_stores(
+            &mut result.value,
+            store,
+            lifecycle_store,
+            result.exit_code != 0,
+        );
         if result.value.disposition.is_terminal() {
             crate::agent_task_notify::cook_terminal(
                 &result.value,
@@ -5166,7 +5182,12 @@ fn run_cook_reported(
     // Recompute every durable projection before terminal progress is observed.
     // The spine can construct reports in legacy helpers, but its caller owns
     // these roots and terminal observers must never receive ambient evidence.
-    super::cook_promotion::bind_report_to_stores(&mut result.value, store, lifecycle_store);
+    super::cook_promotion::bind_report_to_stores(
+        &mut result.value,
+        store,
+        lifecycle_store,
+        result.exit_code != 0,
+    );
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
         let attempt = result
             .value

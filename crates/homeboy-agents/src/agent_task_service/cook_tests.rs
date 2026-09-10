@@ -20582,7 +20582,7 @@ fn runtime_report_binding_uses_only_its_injected_installation() {
             invocation_latest_run_id: None,
         })
         .value;
-        bind_report_to_stores(&mut report, &injected_recipe, &injected_lifecycle);
+        bind_report_to_stores(&mut report, &injected_recipe, &injected_lifecycle, true);
         let serialized = serde_json::to_value(&report).expect("serialize rooted report");
 
         assert_eq!(
@@ -20600,6 +20600,25 @@ fn runtime_report_binding_uses_only_its_injected_installation() {
             assert!(action["command"].as_str().unwrap().contains(injected_run));
             assert!(!action["command"].as_str().unwrap().contains(ambient_run));
         }
+
+        let mut successful = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "intentional_no_change_finalized_existing_candidate",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 0,
+            invocation_latest_run_id: None,
+        })
+        .value;
+        bind_report_to_stores(
+            &mut successful,
+            &injected_recipe,
+            &injected_lifecycle,
+            false,
+        );
+        assert!(successful.failure_context.is_none());
     });
 }
 
