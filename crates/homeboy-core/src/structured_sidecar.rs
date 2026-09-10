@@ -171,10 +171,6 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
 ];
 
-pub fn registry() -> &'static [StructuredSidecarSchema] {
-    REGISTRY
-}
-
 pub fn schema(key: &str) -> Option<&'static StructuredSidecarSchema> {
     REGISTRY.iter().find(|entry| entry.key == key)
 }
@@ -412,7 +408,7 @@ mod tests {
 
     #[test]
     fn registry_contains_current_core_sidecars() {
-        let keys: Vec<&str> = registry().iter().map(|entry| entry.key).collect();
+        let keys: Vec<&str> = REGISTRY.iter().map(|entry| entry.key).collect();
 
         for key in [
             "lint.findings",
@@ -454,7 +450,7 @@ mod tests {
 
     #[test]
     fn registry_keys_are_unique() {
-        let mut keys: Vec<&str> = registry().iter().map(|entry| entry.key).collect();
+        let mut keys: Vec<&str> = REGISTRY.iter().map(|entry| entry.key).collect();
         let total = keys.len();
         keys.sort_unstable();
         keys.dedup();
@@ -463,7 +459,7 @@ mod tests {
 
     #[test]
     fn empty_payload_matches_declared_shape() {
-        for entry in registry() {
+        for entry in REGISTRY {
             let empty = entry.empty_payload();
             match entry.shape {
                 StructuredSidecarShape::Array => assert!(empty.is_array(), "{}", entry.key),
