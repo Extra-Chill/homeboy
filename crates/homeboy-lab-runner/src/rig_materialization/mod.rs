@@ -237,7 +237,7 @@ pub(super) fn sync_lab_offload_rigs(
     let mut synced_rigs = Vec::new();
     for rig_id in &rig_ids {
         let (source, source_kind, package_source, workload_hashes, source_snapshot) =
-            if primary_rig_ids.contains(rig_id) {
+            if should_use_primary_rig_source(&primary_rig_ids, rig_id) {
                 (
                     primary.remote_path.to_string(),
                     LabOffloadRigSyncSource::PrimarySnapshot,
@@ -657,6 +657,13 @@ fn primary_source_rig_ids(primary_local_path: &str) -> Result<HashSet<String>> {
         .into_iter()
         .map(|discovered| discovered.id)
         .collect())
+}
+
+fn should_use_primary_rig_source(primary_rig_ids: &HashSet<String>, rig_id: &str) -> bool {
+    // A command may discover its rig from the installed config file, whose
+    // parent is only one directory inside the authoritative package. Prefer
+    // installed metadata when it exists so package siblings are snapshotted.
+    primary_rig_ids.contains(rig_id) && homeboy_rig::read_source_metadata(rig_id).is_none()
 }
 
 fn is_bench_or_fuzz_rig_component_command(args: &[String]) -> bool {
@@ -2965,6 +2972,41 @@ mod tests {
                 primary_source_rig_ids(&checkout.display().to_string()).expect("primary rigs");
 
             assert!(rig_ids.contains("studio-web-product-matrix"));
+        });
+    }
+
+    #[test]
+    fn installed_rig_metadata_beats_a_nested_primary_rig_directory() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let rig_id = "stripe";
+            let rig_dir = home.path().join("package/rigs/stripe");
+            std::fs::create_dir_all(&rig_dir).expect("rig directory");
+            std::fs::write(rig_dir.join("rig.json"), r#"{"id":"stripe"}"#).expect("rig spec");
+            std::fs::create_dir_all(homeboy_core::paths::rig_sources_in_root(&test_config_root()))
+                .expect("rig sources");
+            homeboy_rig::install::write_source_metadata(
+                &homeboy_core::paths::homeboy().expect("config root"),
+                rig_id,
+                &homeboy_rig::install::RigSourceMetadata {
+                    source: home.path().join("package").display().to_string(),
+                    source_root: Some(home.path().join("package").display().to_string()),
+                    package_path: home.path().join("package").display().to_string(),
+                    rig_path: rig_dir.join("rig.json").display().to_string(),
+                    discovery_path: Some(home.path().join("package").display().to_string()),
+                    source_revision: None,
+                    source_ref: None,
+                    source_dirty: false,
+                    source_content_hash: None,
+                    linked: true,
+                    materialized: false,
+                },
+            )
+            .expect("source metadata");
+
+            let primary_ids =
+                primary_source_rig_ids(&rig_dir.display().to_string()).expect("primary rig ids");
+
+            assert!(!should_use_primary_rig_source(&primary_ids, rig_id));
         });
     }
 
