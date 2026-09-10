@@ -1568,8 +1568,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
         self.execute_action_with_delegates(
             requested_id,
             request,
-            |parameters| default_retry(requested_id.as_str(), parameters),
-            || default_resume(requested_id.as_str()),
+            |run_id, parameters| default_retry(run_id, parameters),
+            |run_id| default_resume(run_id),
             default_promote,
         )
     }
@@ -1584,10 +1584,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError>
     where
         F: FnOnce(
+            &str,
             &ControlPlaneRetryParameters,
         )
             -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
-        R: FnOnce() -> homeboy_core::Result<
+        R: FnOnce(
+            &str,
+        ) -> homeboy_core::Result<
             crate::agent_task_service::AgentTaskRunResult<
                 crate::agent_task_schedule::AgentTaskAggregate,
             >,
@@ -1749,6 +1752,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         ControlPlaneActionPayload::empty(),
                         Some("run changed since the supplied precondition".to_string()),
                     )
+                } else if let Some(reason) = action_unavailability(&record, request.action) {
+                    (
+                        ControlPlaneActionOutcome::Failed,
+                        project_record(&record, None)?,
+                        ControlPlaneActionPayload::empty(),
+                        Some(reason),
+                    )
                 } else {
                     match request.action {
                         ControlPlaneAction::Cancel if record.state.is_terminal() => (
@@ -1888,7 +1898,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 )?;
                             parameters.new_run_id =
                                 Some(retry_action_run_id(&record, request, &parameters));
-                            match retry(&parameters) {
+                            match retry(&resolved, &parameters) {
                                 Ok(retry) => {
                                     let outcome = if retry.created {
                                         ControlPlaneActionOutcome::Succeeded
@@ -2095,7 +2105,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                         requested_id.as_str(),
                                     )?;
                                 }
-                                let result = resume()?;
+                                let result = resume(&resolved)?;
                                 if needs_transport_recovery {
                                     crate::agent_task_service::reconcile_terminal_artifact_projection(
                                         requested_id.as_str(),
@@ -2180,6 +2190,30 @@ fn retry_action_run_id(
         );
         format!("retry-{identity}")
     })
+}
+
+/// The read projection is advisory, but an unavailable action must still be
+/// rejected by the mutation service. This check is deliberately after the
+/// idempotency claim: a failed request gets one durable terminal receipt rather
+/// than an orphaned in-progress claim or a second caller-specific result.
+fn action_unavailability(
+    record: &AgentTaskRunRecord,
+    action: ControlPlaneAction,
+) -> Option<String> {
+    // These actions have explicit idempotent terminal dispositions below.
+    if matches!(
+        action,
+        ControlPlaneAction::Cancel | ControlPlaneAction::Reconcile
+    ) {
+        return None;
+    }
+    let report = lifecycle_action_eligibility(record, None);
+    let eligibility = report
+        .actions
+        .into_iter()
+        .find(|entry| entry.action == action)?;
+    (eligibility.availability == ControlPlaneActionAvailability::Unavailable)
+        .then_some(eligibility.reason)
 }
 
 fn recover_interrupted_action_acknowledgement(
@@ -3400,8 +3434,8 @@ pub fn execute_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| default_retry(run_id, parameters),
-        || default_resume(run_id),
+        |resolved, parameters| default_retry(resolved, parameters),
+        |resolved| default_resume(resolved),
         default_promote,
     )
 }
@@ -3417,16 +3451,16 @@ where
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| {
+        |resolved, parameters| {
             crate::agent_task_service::retry_with_preflight(
-                run_id,
+                resolved,
                 parameters.new_run_id.as_deref(),
                 false,
                 parameters.force,
                 &preflight,
             )
         },
-        || default_resume(run_id),
+        |resolved| default_resume(resolved),
         default_promote,
     )
 }
@@ -3439,8 +3473,8 @@ pub fn execute_resume_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| default_retry(run_id, parameters),
-        || crate::agent_task_service::resume(run_id.to_string(), executor),
+        |resolved, parameters| default_retry(resolved, parameters),
+        |resolved| crate::agent_task_service::resume(resolved.to_string(), executor),
         default_promote,
     )
 }
@@ -3453,8 +3487,8 @@ pub fn execute_promotion_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| default_retry(run_id, parameters),
-        || default_resume(run_id),
+        |resolved, parameters| default_retry(resolved, parameters),
+        |resolved| default_resume(resolved),
         |promotion| {
             crate::agent_task_service::execute_promotion_with_progress(promotion.clone(), progress)
         },
@@ -3470,9 +3504,12 @@ fn execute_action_from_current_environment_with_delegates<F, R, P>(
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
 where
     F: FnOnce(
+        &str,
         &ControlPlaneRetryParameters,
     ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
-    R: FnOnce() -> homeboy_core::Result<
+    R: FnOnce(
+        &str,
+    ) -> homeboy_core::Result<
         crate::agent_task_service::AgentTaskRunResult<
             crate::agent_task_schedule::AgentTaskAggregate,
         >,
@@ -6779,8 +6816,8 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
+                    |_, _| panic!("retry delegate must not run"),
+                    |_| panic!("resume delegate must not run"),
                     |_| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted cancel");
@@ -6857,8 +6894,8 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || {
+                    |_, _| panic!("retry delegate must not run"),
+                    |_| {
                         effect_count.set(effect_count.get() + 1);
                         panic!("resume delegate must not run")
                     },
@@ -6935,8 +6972,8 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
+                    |_, _| panic!("retry delegate must not run"),
+                    |_| panic!("resume delegate must not run"),
                     |_| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted retry");
@@ -7015,8 +7052,8 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
+                    |_, _| panic!("retry delegate must not run"),
+                    |_| panic!("resume delegate must not run"),
                     |_| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted promotion");
@@ -7151,8 +7188,8 @@ mod tests {
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    move || {
+                    |_, _| panic!("retry delegate must not run"),
+                    move |_| {
                         executions.set(executions.get() + 1);
                         Ok(crate::agent_task_service::AgentTaskRunResult {
                             value: aggregate,
@@ -7207,8 +7244,8 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &malformed,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
+                    |_, _| panic!("retry delegate must not run"),
+                    |_| panic!("resume delegate must not run"),
                     |_| panic!("promote delegate must not run"),
                 )
                 .expect_err("malformed parameters");
@@ -7219,8 +7256,8 @@ mod tests {
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
+                    |_, _| panic!("retry delegate must not run"),
+                    |_| panic!("resume delegate must not run"),
                     move |_| {
                         executions.set(executions.get() + 1);
                         Err(homeboy_core::Error::internal_unexpected(
@@ -7281,8 +7318,8 @@ mod tests {
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
+                    |_, _| panic!("retry delegate must not run"),
+                    |_| panic!("resume delegate must not run"),
                     move |_| {
                         executions.set(executions.get() + 1);
                         Ok(report)
