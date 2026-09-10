@@ -338,6 +338,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         0
     };
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
+    if let Ok(record) = agent_task_lifecycle::exact_record(&target.run_id) {
+        attach_lab_snapshot_failure_projection(&mut value, &record);
+    }
     if value["action_eligibility"]["actions"]
         .as_array()
         .is_some_and(|actions| {
@@ -1476,6 +1479,74 @@ fn lab_transport_repair_action_for_receipt(
     .with_kind(CommandNextActionKind::Repair)
 }
 
+/// Snapshot construction happens before a provider or runner owns work. The
+/// recovery marker is compatibility-tolerant because persisted failures from
+/// before lifecycle projection carried the producer's stale command string.
+fn lab_snapshot_recovery_projection(
+    record: &AgentTaskRunRecord,
+    retry: &RetryReplayAction,
+) -> Option<Value> {
+    let recovery = record
+        .metadata
+        .pointer("/pre_execution_failure/details/recovery")?;
+    let snapshot_construction = record
+        .metadata
+        .pointer("/pre_execution_failure/details/classification")?
+        .as_str()
+        == Some("snapshot_construction");
+    let lifecycle_marker = matches!(
+        (
+            recovery.get("owner").and_then(Value::as_str),
+            recovery.get("action").and_then(Value::as_str),
+        ),
+        (
+            Some("durable_lifecycle"),
+            Some("project_lifecycle_recovery")
+        ) | (
+            Some("homeboy_snapshot_staging"),
+            Some("rebuild_snapshot_staging_and_replay_cook")
+        )
+    );
+    if !snapshot_construction || !lifecycle_marker {
+        return None;
+    }
+    let remediation = recovery
+        .get("remediation")
+        .and_then(Value::as_str)
+        .unwrap_or("Correct the controller-side snapshot inputs before retrying or starting replacement lifecycle work.");
+    let reason = retry
+        .reason
+        .as_deref()
+        .or_else(|| recovery.get("reason").and_then(Value::as_str));
+    let owner = if let Some(cook_id) = record.metadata["cook_id"].as_str() {
+        json!({
+            "lifecycle": "cook",
+            "cook_id": cook_id,
+            "attempt_run_id": record.run_id,
+        })
+    } else {
+        json!({
+            "lifecycle": "agent_task",
+            "run_id": record.run_id,
+        })
+    };
+    Some(json!({
+        "owner": owner,
+        "readiness": retry.readiness,
+        "reason": reason,
+        "admission": retry.admission,
+        "action": retry.action.as_ref().and_then(|action| action.action.clone()),
+        "remediation": remediation,
+    }))
+}
+
+fn attach_lab_snapshot_failure_projection(value: &mut Value, record: &AgentTaskRunRecord) {
+    let retry = retry_replay_action(record);
+    if let Some(projection) = lab_snapshot_recovery_projection(record, &retry) {
+        value["lab_snapshot_failure"] = projection;
+    }
+}
+
 const DISCOVERY_NEXT_ACTION_LIMIT: usize = 8;
 
 fn attach_agent_task_discovery_actionable(
@@ -1876,6 +1947,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         }
     }
     let retry = retry_replay_action(&record);
+    let lab_snapshot_failure = lab_snapshot_recovery_projection(&record, &retry);
     let next_commands = diagnose_next_commands(
         &record,
         retry.action.as_ref(),
@@ -1899,6 +1971,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "runner_diagnostic_probe": runner_diagnostic_probe,
         "continuation_admission": record.metadata.get("cook_continuation_admission"),
         "retry_replay": retry.projection(),
+        "lab_snapshot_failure": lab_snapshot_failure,
         "next_commands": next_commands,
     });
     if let Some(projection) = lab_transport_failure_projection(&record, run_id) {
@@ -4886,6 +4959,10 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 }),
             });
         }
+        // Historical snapshot records include the producer's obsolete generic
+        // retry command. Durable recovery projection owns that command now, so
+        // retain the failure facts but never relay the stale hint as diagnosis.
+        let details = diagnostic_pre_execution_details(details);
         return Some(CollectedDiagnostic {
             task_id: "controller".to_string(),
             class: failure
@@ -4923,6 +5000,18 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             })
         }),
     })
+}
+
+fn diagnostic_pre_execution_details(details: &Value) -> Value {
+    let mut details = details.clone();
+    let is_snapshot_failure =
+        details.get("classification").and_then(Value::as_str) == Some("snapshot_construction");
+    if is_snapshot_failure {
+        if let Some(recovery) = details.get_mut("recovery").and_then(Value::as_object_mut) {
+            recovery.remove("command");
+        }
+    }
+    details
 }
 
 fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {
