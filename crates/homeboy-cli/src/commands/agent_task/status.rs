@@ -1260,28 +1260,60 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
 pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
     let run_id = args.run_id;
     if args.apply {
-        let acknowledgement =
-            homeboy::agents::orchestration::execute_action_from_current_environment(
-                &run_id,
-                &homeboy_control_plane_contract::ControlPlaneActionRequest {
-                    schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
-                        .to_string(),
-                    action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
-                    idempotency_key: args
-                        .idempotency_key
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    actor: "homeboy-cli".to_string(),
-                    expected_updated_at: None,
-                    parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
-                    confirmed: true,
-                },
-            )?;
-        let exit = i32::from(matches!(
-            acknowledgement.outcome,
-            homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-        ));
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let resolved_run_ids =
+            agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, &run_id)?;
+        let scope_key = args
+            .idempotency_key
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let mut acknowledgements = Vec::with_capacity(resolved_run_ids.len());
+        let scoped = resolved_run_ids.len() > 1;
+        for resolved_run_id in resolved_run_ids {
+            // A group is only a selection mechanism. Every durable record gets
+            // its own action identity, receipt, and event stream.
+            let idempotency_key = if scoped {
+                uuid::Uuid::new_v5(
+                    &uuid::Uuid::NAMESPACE_OID,
+                    format!("{scope_key}:reconcile:{resolved_run_id}").as_bytes(),
+                )
+                .to_string()
+            } else {
+                scope_key.clone()
+            };
+            acknowledgements.push(
+                homeboy::agents::orchestration::execute_action_from_current_environment(
+                    &resolved_run_id,
+                    &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                            .to_string(),
+                        action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
+                        idempotency_key,
+                        actor: "homeboy-cli".to_string(),
+                        expected_updated_at: None,
+                        parameters:
+                            homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+                        confirmed: true,
+                    },
+                )?,
+            );
+        }
+        let exit = i32::from(acknowledgements.iter().any(|acknowledgement| {
+            acknowledgement.outcome
+                == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+        }));
+        if acknowledgements.len() == 1 {
+            return Ok((
+                serde_json::to_value(acknowledgements.remove(0)).unwrap_or(Value::Null),
+                exit,
+            ));
+        }
         return Ok((
-            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+            json!({
+                "schema": "homeboy/control-plane-reconcile-scope-result/v1",
+                "requested_run_id": run_id,
+                "acknowledgements": acknowledgements,
+            }),
             exit,
         ));
     }
@@ -3586,7 +3618,7 @@ pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
                     .to_string(),
                 data: json!({ "reason": args.reason }),
             },
-            confirmed: true,
+            confirmed: args.confirm,
         },
     )?;
     let exit = i32::from(
@@ -3611,7 +3643,7 @@ pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
-            confirmed: true,
+            confirmed: args.confirm,
         },
     )?;
     let exit = i32::from(

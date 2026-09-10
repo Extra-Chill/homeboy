@@ -274,6 +274,40 @@ impl AgentTaskLifecycleStore {
         write_plan_in_store(self, run_id, plan)
     }
 
+    /// Bind a preflighted controller plan only while this consumer atomically
+    /// claims the exact queued record. A losing consumer must not overwrite the
+    /// winner's route or quarantine its now-running record.
+    pub(crate) fn bind_controller_plan_and_claim_queued_run(
+        &self,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+    ) -> Result<Option<AgentTaskRunRecord>> {
+        self.with_config_lock(|| {
+            let mut record = self.read_record(run_id)?;
+            if record.state != super::AgentTaskRunState::Queued
+                || record.metadata.get("queue_quarantine").is_some()
+            {
+                return Ok(None);
+            }
+            let mut plan = plan.clone();
+            migrate_execution_budget(&mut plan)?;
+            validate_managed_services(&plan)?;
+            write_private_json(&self.controller_plan_path(run_id), &plan)?;
+
+            record.updated_at = Some(super::now_timestamp());
+            super::set_run_state(&mut record, super::AgentTaskRunState::Running);
+            super::update_lifecycle_heartbeat(&mut record);
+            for task in &mut record.tasks {
+                if task.state == crate::agent_tasks::AgentTaskState::Queued {
+                    task.state = crate::agent_tasks::AgentTaskState::Running;
+                }
+            }
+            record.record_runner_metadata(false);
+            self.write_record_locked_without_terminal_projection(&record)
+                .map(Some)
+        })
+    }
+
     pub fn record_pre_execution_failure(
         &self,
         run_id: &str,

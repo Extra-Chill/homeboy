@@ -2311,6 +2311,62 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
 }
 
 #[test]
+fn control_plane_action_rejects_idempotency_key_intent_mismatch() {
+    with_isolated_home(|_| {
+        let run_id = "action-intent-mismatch";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("queued run");
+        let mut request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
+            idempotency_key: "same-key".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({ "reason": "first hold" }),
+            },
+            confirmed: true,
+        };
+        crate::orchestration::execute_action_from_current_environment(run_id, &request)
+            .expect("first action");
+        request.parameters.data = serde_json::json!({ "reason": "different hold" });
+        let error = crate::orchestration::execute_action_from_current_environment(run_id, &request)
+            .expect_err("key cannot be reused for another intent");
+        assert!(error.message.contains("different action intent"));
+    });
+}
+
+#[test]
+fn exact_quarantine_action_rejects_a_cook_alias_without_mutating_its_attempt() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-quarantine-alias";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(&attempt_id)).expect("queued attempt");
+        index_cook_attempt(cook_id, &attempt_id);
+        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
+            idempotency_key: "alias-rejected".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({ "reason": "hold" }),
+            },
+            confirmed: true,
+        };
+        let error =
+            crate::orchestration::execute_action_from_current_environment(cook_id, &request)
+                .expect_err("Cook aliases are not exact quarantine targets");
+        assert!(error.message.contains("Cook aliases are not accepted"));
+        let attempt = agent_task_lifecycle::exact_record(&attempt_id).expect("unchanged attempt");
+        assert!(attempt.metadata.get("queue_quarantine").is_none());
+    });
+}
+
+#[test]
 fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
     with_isolated_home(|home| {
         let run_id = "queued-in-explicit-store";

@@ -3944,10 +3944,17 @@ pub(crate) fn dispatch_cook_follow_up(
             // claim is written onto exists.
             let operation_key = retry_dispatch_operation_key(&next_run_id);
             ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
-            match lifecycle_store.claim_cook_operation(
+            let dispatch_intent = serde_json::json!({
+                "schema": "homeboy/cook-dispatch-intent/v1",
+                "run_id": next_run_id,
+                "operation_key": operation_key,
+            });
+            match agent_task_lifecycle::claim_operation_with_intent_in_store(
+                lifecycle_store,
                 &next_run_id,
                 &operation_key,
                 RETRY_DISPATCH_CLAIM_LEASE,
+                &dispatch_intent,
             )? {
                 agent_task_lifecycle::ClaimOutcome::Acquired => {
                     dispatcher.dispatch_attempt(
@@ -3955,18 +3962,56 @@ pub(crate) fn dispatch_cook_follow_up(
                         &next_run_id,
                         Some(baseline.capability()),
                     )?;
+                    // The accepting daemon writes this receipt atomically with
+                    // its handoff ownership. A dispatcher return alone is not
+                    // acceptance evidence and cannot complete this operation.
+                    let receipt = agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+                        lifecycle_store,
+                        &next_run_id,
+                        &operation_key,
+                    )?
+                    .ok_or_else(|| {
+                        Error::internal_unexpected(
+                            "retry dispatcher returned without a durable receiver acceptance receipt",
+                        )
+                    })?;
                     lifecycle_store.complete_cook_operation(
                         &next_run_id,
                         &operation_key,
-                        serde_json::json!({ "dispatched_run_id": next_run_id }),
+                        serde_json::json!({
+                            "dispatched_run_id": next_run_id,
+                            "dispatch_receipt": receipt,
+                        }),
                     )?;
+                }
+                agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+                    // A receiver receipt survives a controller crash after the
+                    // handoff succeeded and before this controller completed
+                    // its claim. Complete from that acceptance evidence rather
+                    // than issuing a second dispatch.
+                    if let Some(receipt) =
+                        agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+                            lifecycle_store,
+                            &next_run_id,
+                            &operation_key,
+                        )?
+                    {
+                        lifecycle_store.complete_cook_operation(
+                            &next_run_id,
+                            &operation_key,
+                            serde_json::json!({
+                                "dispatched_run_id": next_run_id,
+                                "dispatch_receipt": receipt,
+                                "recovered": true,
+                            }),
+                        )?;
+                    }
                 }
                 // The retry was already durably dispatched (completed) or is
                 // owned by a concurrent pass (lease held). Either way, do not
                 // send a second handoff; the persisted plan and run state carry
                 // the existing dispatch forward.
-                agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
-                | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
+                agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {}
             }
         } else {
             ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;

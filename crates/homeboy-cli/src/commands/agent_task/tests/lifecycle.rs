@@ -4651,6 +4651,53 @@ fn reconcile_apply_returns_the_replayable_control_plane_acknowledgement() {
     });
 }
 
+#[test]
+fn reconcile_apply_accounts_for_each_record_in_a_cook_scope() {
+    with_temp_home(|| {
+        let cook_id = "run-cli-reconcile-scope";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("Cook parent");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(&attempt_id)).expect("Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            &attempt_id,
+        )
+        .expect("Cook index");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] = json!(&attempt_id);
+        })
+        .expect("bind accepted child");
+
+        let (value, exit_code) = reconcile_run(ReconcileArgs {
+            run_id: cook_id.to_string(),
+            dry_run: false,
+            apply: true,
+            idempotency_key: Some("cli-reconcile-scope-1".to_string()),
+        })
+        .expect("scoped reconcile action");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["requested_run_id"], cook_id);
+        assert_eq!(value["acknowledgements"].as_array().map(Vec::len), Some(2));
+        for run_id in [cook_id, attempt_id.as_str()] {
+            let record = agent_task_lifecycle::exact_record(run_id).expect("action record");
+            assert_eq!(
+                record.metadata["cook_operation_claims"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1),
+                "{run_id} receives its own action claim"
+            );
+        }
+    });
+}
+
 /// A provider that reserved a terminal result keeps the run joinable, so
 /// cancellation is deliberately not applied. That must be reported as the
 /// deferral it is — never as a completed cancellation — and it must not spend

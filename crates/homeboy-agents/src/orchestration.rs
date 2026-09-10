@@ -1598,8 +1598,31 @@ impl OrchestrationService<LifecycleStoreLookup> {
             -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
     {
         validate_action_request(request)?;
-        let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
-            .map_err(map_lifecycle_error)?;
+        let exact_mutation = matches!(
+            request.action,
+            ControlPlaneAction::Quarantine
+                | ControlPlaneAction::Rearm
+                | ControlPlaneAction::Reconcile
+        );
+        if matches!(
+            request.action,
+            ControlPlaneAction::Quarantine | ControlPlaneAction::Rearm
+        ) && self
+            .lookup
+            .store
+            .read_cook_index(requested_id.as_str())
+            .is_ok()
+        {
+            return Err(ControlPlaneError::invalid_argument(
+                "this mutation requires an exact durable run id; Cook aliases are not accepted",
+            ));
+        }
+        let resolved = if exact_mutation {
+            requested_id.as_str().to_string()
+        } else {
+            resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
+                .map_err(map_lifecycle_error)?
+        };
         let record = self
             .lookup
             .store
@@ -1750,7 +1773,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             })?;
                             match crate::agent_task_lifecycle::cancel_run_in_store(
                                 &self.lookup.store,
-                                requested_id.as_str(),
+                                &resolved,
                                 parameters.reason.as_deref(),
                             ) {
                                 Ok(cancelled) => {
@@ -1773,7 +1796,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         ControlPlaneAction::Reconcile => {
                             match crate::agent_task_service::reconcile_run_in_store(
                                 &self.lookup.store,
-                                requested_id.as_str(),
+                                &resolved,
                                 false,
                             ) {
                                 Ok(report) => {
