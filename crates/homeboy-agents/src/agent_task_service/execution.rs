@@ -2990,6 +2990,10 @@ fn prepare_component_worktree_workspace(
             None,
         )
     })?;
+    // Worktree materialization replaces the declarative branch with an
+    // execution path. Preserve the submitted logical scope for lifecycle
+    // discovery before that replacement.
+    request.metadata["logical_workspace_branch"] = Value::String(branch.clone());
     let cleanup_policy = cleanup_policy_for_workspace(request.workspace.cleanup.as_deref());
     let task_url = request.workspace.task_url.clone().or_else(|| {
         request

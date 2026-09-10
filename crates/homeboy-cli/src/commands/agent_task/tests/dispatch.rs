@@ -2654,6 +2654,54 @@ fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
     );
 }
 
+#[test]
+fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
+    with_isolated_home(|_| {
+        persist_discovery_record(
+            "branch-scoped-stale",
+            "fix/scoped-stale",
+            AgentTaskRunState::Queued,
+        );
+        agent_task_lifecycle::rewrite_record_for_test("branch-scoped-stale", |record| {
+            record.metadata["runner_pid"] = json!(i32::MAX as u32);
+        })
+        .expect("make selected record stale");
+        persist_discovery_record(
+            "other-branch-stale",
+            "fix/other-stale",
+            AgentTaskRunState::Queued,
+        );
+        agent_task_lifecycle::rewrite_record_for_test("other-branch-stale", |record| {
+            record.metadata["runner_pid"] = json!(i32::MAX as u32);
+        })
+        .expect("make other record stale");
+
+        let active = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "active".to_string(),
+            "--branch".to_string(),
+            "fix/scoped-stale".to_string(),
+            "--full".to_string(),
+        ]);
+
+        assert_eq!(active["liveness_summary"]["reconcilable"], 1);
+        assert_eq!(active["runs"][0]["run_id"], "branch-scoped-stale");
+        let commands = active["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("actionable next actions")
+            .iter()
+            .filter_map(|action| action["command"].as_str())
+            .collect::<Vec<_>>();
+        assert!(commands.iter().any(|command| {
+            *command == "homeboy --placement local agent-task reconcile branch-scoped-stale --dry-run"
+        }));
+        assert!(!commands
+            .iter()
+            .any(|command| command.contains("agent-task active --reconcile")));
+    });
+}
+
 fn run_discovery_page(args: Vec<String>) -> Value {
     let cli = Cli::try_parse_from(args).expect("discovery command parses");
     let Commands::AgentTask(agent_task) = cli.command else {

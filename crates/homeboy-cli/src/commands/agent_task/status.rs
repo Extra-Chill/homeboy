@@ -1205,7 +1205,7 @@ pub(super) fn list_runs(
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value, None);
+    attach_agent_task_discovery_actionable(&mut value, None, false);
     Ok((value, 0))
 }
 
@@ -1214,6 +1214,7 @@ pub(super) fn list_runs_page(
     args: ListArgs,
 ) -> CmdResult<Value> {
     let command = list_continuation_prefix(&args);
+    let branch_scoped = args.branch.is_some();
     let limit = args.limit.unwrap_or(20);
     let report = agent_task_service_direct::discover_runs_page(
         filter,
@@ -1231,7 +1232,7 @@ pub(super) fn list_runs_page(
         },
     )?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value, Some(&command));
+    attach_agent_task_discovery_actionable(&mut value, Some(&command), branch_scoped);
     Ok((value, 0))
 }
 
@@ -1240,7 +1241,7 @@ pub(super) fn list_filtered_latest_runs(
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_filtered_latest_run(options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value, None);
+    attach_agent_task_discovery_actionable(&mut value, None, false);
     Ok((value, 0))
 }
 
@@ -1255,6 +1256,7 @@ pub(super) fn list_filtered_latest_runs(
 pub(super) fn list_active(
     options: agent_task_service_direct::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
+    let branch_scoped = options.branch.is_some();
     let report = agent_task_service_direct::discover_runs_with_options(
         agent_task_service::AgentTaskDiscoveryFilter::Active,
         options,
@@ -1269,12 +1271,17 @@ pub(super) fn list_active(
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
-    attach_agent_task_discovery_actionable(&mut value, Some("homeboy agent-task active"));
+    attach_agent_task_discovery_actionable(
+        &mut value,
+        Some("homeboy agent-task active"),
+        branch_scoped,
+    );
     Ok((value, 0))
 }
 
 pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
     let command = active_continuation_prefix(&args);
+    let branch_scoped = args.branch.is_some();
     let limit = args.limit.unwrap_or(20);
     let report = agent_task_service_direct::discover_runs_page(
         agent_task_service::AgentTaskDiscoveryFilter::Active,
@@ -1293,7 +1300,7 @@ pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
-    attach_agent_task_discovery_actionable(&mut value, Some(&command));
+    attach_agent_task_discovery_actionable(&mut value, Some(&command), branch_scoped);
     Ok((value, 0))
 }
 
@@ -1471,7 +1478,11 @@ fn lab_transport_repair_action_for_receipt(
 
 const DISCOVERY_NEXT_ACTION_LIMIT: usize = 8;
 
-fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Option<&str>) {
+fn attach_agent_task_discovery_actionable(
+    value: &mut Value,
+    active_command: Option<&str>,
+    branch_scoped: bool,
+) {
     let runs = value
         .get("runs")
         .and_then(Value::as_array)
@@ -1479,18 +1490,19 @@ fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Opt
         .unwrap_or_default();
     let mut metadata = CommandActionableMetadata::default();
 
-    if value
-        .get("liveness_summary")
-        .and_then(Value::as_object)
-        .is_some_and(|summary| {
-            ["stale", "suspect", "unreconciled"].iter().any(|bucket| {
-                summary
-                    .get(*bucket)
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default()
-                    > 0
+    if !branch_scoped
+        && value
+            .get("liveness_summary")
+            .and_then(Value::as_object)
+            .is_some_and(|summary| {
+                ["stale", "suspect", "unreconciled"].iter().any(|bucket| {
+                    summary
+                        .get(*bucket)
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default()
+                        > 0
+                })
             })
-        })
     {
         metadata.next_actions.push(
             CommandNextAction::new(
