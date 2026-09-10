@@ -11,6 +11,7 @@ OUTPUT_DIR="${TMPDIR}/output"
 SUMMARY_FILE="${TMPDIR}/summary.md"
 ENV_FILE="${TMPDIR}/github-env"
 ARGS_FILE="${TMPDIR}/homeboy-args"
+CALLS_FILE="${TMPDIR}/homeboy-calls"
 mkdir -p "${BIN_DIR}" "${OUTPUT_DIR}"
 mkdir -p "${TMPDIR}/observations"
 
@@ -32,6 +33,11 @@ if [ "$1" != "runs" ] || [ "$2" != "report" ] || [ "$3" != "failure-digest" ]; t
   printf 'unsupported Homeboy command: %s\n' "$*" >&2
   exit 2
 fi
+printf '%s\n' "$*" >> "${HOMEBOY_STUB_CALLS_FILE}"
+if [ "$4" = "--help" ]; then
+  printf 'Render failure digest\n'
+  exit 0
+fi
 printf '%s\n' "$@" > "${HOMEBOY_STUB_ARGS_FILE}"
 cat <<'MARKDOWN'
 ## Failure Digest
@@ -44,6 +50,7 @@ chmod +x "${BIN_DIR}/homeboy"
 
 export PATH="${BIN_DIR}:${PATH}"
 export HOMEBOY_STUB_ARGS_FILE="${ARGS_FILE}"
+export HOMEBOY_STUB_CALLS_FILE="${CALLS_FILE}"
 export HOMEBOY_OUTPUT_DIR="${OUTPUT_DIR}"
 export RESULTS='{"review lint":"fail","review test":"fail"}'
 export GITHUB_SERVER_URL="https://github.com"
@@ -100,6 +107,7 @@ grep -Fx -- "--tooling-json" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "${TOOLING_JSON}" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--commands" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "review lint,review test,review audit" "${ARGS_FILE}" >/dev/null
+grep -F "runs report failure-digest --help" "${CALLS_FILE}" >/dev/null
 
 jq -e \
   '.homeboy_cli_version == "homeboy 1.2.3" and
@@ -153,6 +161,10 @@ fi
 
 cat > "${BIN_DIR}/homeboy" <<'STUB'
 #!/usr/bin/env bash
+if [ "$4" = "--help" ]; then
+  printf 'Render failure digest\n'
+  exit 0
+fi
 printf 'renderer failed before producing markdown\n' >&2
 exit 1
 STUB
@@ -162,10 +174,35 @@ export RESULTS='{"review lint":"fail","review test":"timeout"}'
 bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
 
 grep -F "## Failure digest unavailable" "${DIGEST_FILE}" >/dev/null
-grep -F '`homeboy review lint`: **fail** (result: `review-lint.json`)' "${DIGEST_FILE}" >/dev/null
-grep -F '`homeboy review test`: **timeout** (result: `review-test.json`)' "${DIGEST_FILE}" >/dev/null
+grep -F '`homeboy review lint`: **fail** - no summary recorded (result: `review-lint.json`)' "${DIGEST_FILE}" >/dev/null
+grep -F '`homeboy review test`: **timeout** - no summary recorded (result: `review-test.json`)' "${DIGEST_FILE}" >/dev/null
 grep -F "renderer failed before producing markdown" "${DIGEST_FILE}" >/dev/null
+grep -F -- "- Status: **failed**" "${DIGEST_FILE}" >/dev/null
 grep -F "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" "${ENV_FILE}" >/dev/null
+
+cat > "${BIN_DIR}/homeboy" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${HOMEBOY_STUB_CALLS_FILE}"
+printf "error: unrecognized subcommand 'report'\n" >&2
+exit 2
+STUB
+chmod +x "${BIN_DIR}/homeboy"
+export RESULTS='{"review lint":"fail"}'
+export HOMEBOY_CI_RESULTS_ARTIFACT="homeboy-ci-results-lint"
+printf '%s\n' '{"summary":"26 lint finding(s) detected"}' > "${OUTPUT_DIR}/review-lint.json"
+: > "${CALLS_FILE}"
+
+bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
+
+grep -F "unsupported by selected Homeboy binary" "${DIGEST_FILE}" >/dev/null
+grep -F "homeboy-ci-results-lint" "${DIGEST_FILE}" >/dev/null
+grep -F "unrecognized subcommand 'report'" "${DIGEST_FILE}" >/dev/null
+grep -F '`homeboy review lint`: **fail** - 26 lint finding(s) detected (result: `review-lint.json`)' "${DIGEST_FILE}" >/dev/null
+grep -Fx "runs report failure-digest --help" "${CALLS_FILE}" >/dev/null
+if grep -Fq -- "--output-dir" "${CALLS_FILE}"; then
+  echo "unsupported renderer was invoked after its capability probe failed" >&2
+  exit 1
+fi
 
 cat > "${OUTPUT_DIR}/setup.json" <<'JSON'
 {"schema":"homeboy/action-setup-result/v1","phase":"dependency_build_setup","status":"failed","owner":"Homeboy extension setup","step":"install Homeboy extension","exit_code":1,"replay_command":"bash install-extension.sh","diagnostic":"source SHA mismatch"}

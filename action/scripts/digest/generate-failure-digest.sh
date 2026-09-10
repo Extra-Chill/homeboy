@@ -161,11 +161,13 @@ append_timeout_triage_to_digest() {
 write_fallback_digest() {
   local digest_file="$1"
   local renderer_stderr_file="$2"
-  local failed_commands="" diagnostics command status
+  local renderer_status="$3"
+  local failed_commands="" diagnostics command status summary
 
   while IFS=$'\t' read -r command status; do
     [ -n "${command}" ] || continue
-    failed_commands+="- \`homeboy ${command}\`: **${status}** (result: \`$(command_result_filename "${command}")\`)"$'\n'
+    summary="$(jq -r '(.summary // .diagnostics.message // .data.failure.summary // "no summary recorded") | strings' "${OUTPUT_DIR}/$(command_result_filename "${command}")" 2>/dev/null || printf 'no summary recorded')"
+    failed_commands+="- \`homeboy ${command}\`: **${status}** - ${summary} (result: \`$(command_result_filename "${command}")\`)"$'\n'
   done < <(jq -r '
     to_entries[]
     | select(.value == "fail" or .value == "timeout")
@@ -175,21 +177,21 @@ write_fallback_digest() {
 
   {
     printf '## Failure digest unavailable\n\n'
-    printf 'The Homeboy failure-digest renderer returned no output. Per-command result JSON and logs remain in the CI results artifact; this fallback and renderer stderr are in the matching `-failure-digest` artifact.\n\n'
+    printf 'The Homeboy failure-digest renderer could not produce a digest for the selected Homeboy binary. The original gate failure remains authoritative; per-command result JSON and logs are in the CI results artifact `%s`. This fallback and renderer stderr are in the matching `-failure-digest` artifact.\n\n' "${HOMEBOY_CI_RESULTS_ARTIFACT:-homeboy-ci-results}"
     printf '### Failed commands\n'
     if [ -n "${failed_commands}" ]; then
       printf '%s\n' "${failed_commands}"
     else
       printf '%s\n' '- The final result envelope did not identify a failed command.'
     fi
-    printf '\n### Renderer diagnostic\n\n```text\n%s\n```\n' "${diagnostics:-No renderer stderr was captured.}"
+    printf '\n### Renderer diagnostic\n\n- Status: **%s**\n\n```text\n%s\n```\n' "${renderer_status}" "${diagnostics:-No renderer stderr was captured.}"
   } > "${digest_file}"
 
   while IFS= read -r command; do
     [ -n "${command}" ] || continue
     printf '::error::homeboy %s failed, but its failure digest was unavailable; inspect the CI results and -failure-digest artifacts.\n' "${command}"
   done < <(jq -r 'to_entries[] | select(.value == "fail" or .value == "timeout") | .key' <<< "${RESULTS_JSON}" 2>/dev/null || true)
-  printf '::error::Failure digest renderer returned no file; inspect the CI results and -failure-digest artifacts for failed command names and renderer stderr.\n'
+  printf '::error::Failure digest renderer could not produce a digest; inspect the CI results and -failure-digest artifacts for original command failures and renderer diagnostics.\n'
 }
 
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
@@ -226,6 +228,8 @@ ARGS=(
   --commands "${COMMANDS_CSV}"
 )
 
+rm -f "${DIGEST_FILE}" "${RENDERER_STDERR_FILE}"
+
 if has_setup_failure; then
   : > "${RENDERER_STDERR_FILE}"
   {
@@ -233,14 +237,18 @@ if has_setup_failure; then
     printf 'Action setup did not complete. The requested quality commands were not run.\n'
   } > "${DIGEST_FILE}"
 else
-  if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2> "${RENDERER_STDERR_FILE}"; then
-    rm -f "${DIGEST_FILE}"
+  renderer_status="unsupported by selected Homeboy binary"
+  if homeboy runs report failure-digest --help > /dev/null 2> "${RENDERER_STDERR_FILE}"; then
+    renderer_status="failed"
+    if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2>> "${RENDERER_STDERR_FILE}"; then
+      rm -f "${DIGEST_FILE}"
+    fi
   fi
 fi
 
 if [ ! -s "${DIGEST_FILE}" ]; then
   rm -f "${DIGEST_FILE}"
-  write_fallback_digest "${DIGEST_FILE}" "${RENDERER_STDERR_FILE}"
+  write_fallback_digest "${DIGEST_FILE}" "${RENDERER_STDERR_FILE}" "${renderer_status:-failed}"
 fi
 
 append_local_reproduction_commands "${DIGEST_FILE}"
