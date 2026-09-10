@@ -141,6 +141,17 @@ impl ObservationStore {
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error("begin control-plane action intent admission"))?;
         let result = (|| {
+            if let Some(existing) = self.effect_status(&intent.effect_id)? {
+                if existing.intent.request_digest != intent.request_digest {
+                    return Err(Error::validation_invalid_argument(
+                        "effect_id",
+                        "control-plane effect id was already used for different input",
+                        None,
+                        None,
+                    ));
+                }
+                return Ok(ControlPlaneEffectAdmission::Duplicate(existing));
+            }
             if !fence.eligible {
                 return Err(Error::validation_invalid_argument(
                     "action",
