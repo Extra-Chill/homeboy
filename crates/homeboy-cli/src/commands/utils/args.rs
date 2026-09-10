@@ -104,13 +104,7 @@ pub(crate) fn filter_passthrough_args(command: PassthroughCommand, args: &[Strin
 /// the sentinel into the argv Homeboy forwards verbatim.
 pub(crate) fn mark_explicit_passthrough(args: Vec<String>) -> Vec<String> {
     let explicit_passthrough = matches!(args.get(1).map(String::as_str), Some("bench"))
-        || matches!(
-            (
-                args.get(1).map(String::as_str),
-                args.get(2).map(String::as_str)
-            ),
-            (Some("review"), Some("test"))
-        );
+        || review_action_index(&args).is_some_and(|index| args[index] == "test");
     if !explicit_passthrough {
         return args;
     }
@@ -252,7 +246,7 @@ fn arg_takes_value(arg: &Arg) -> bool {
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
     mark_explicit_passthrough(normalize_legacy_allow_local_fallback(
-        normalize_review_audit_baseline(args),
+        normalize_review_shared_option_order(normalize_review_audit_baseline(args)),
     ))
 }
 
@@ -279,6 +273,317 @@ fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
         args.splice(position + 1..position + 3, ["audit-baseline".to_string()]);
     }
     args
+}
+
+/// Review owns its shared scope and presentation options, while its actions own
+/// their specialized options. Move shared options written after an action back
+/// to review so either natural ordering has one typed representation.
+fn normalize_review_shared_option_order(args: Vec<String>) -> Vec<String> {
+    let Some(action_index) = review_action_index(&args) else {
+        return args;
+    };
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let mut shared = Vec::new();
+    let mut action_args = Vec::new();
+    let mut index = action_index + 1;
+
+    while index < separator {
+        if let Some(width) = review_shared_option_width(&args, index) {
+            shared.extend_from_slice(&args[index..index + width]);
+            index += width;
+        } else {
+            action_args.push(args[index].clone());
+            index += 1;
+        }
+    }
+
+    if shared.is_empty() {
+        return args;
+    }
+
+    let mut normalized = args[..action_index].to_vec();
+    normalized.extend(shared);
+    normalized.push(args[action_index].clone());
+    normalized.extend(action_args);
+    normalized.extend_from_slice(&args[separator..]);
+    normalized
+}
+
+fn review_action_index(args: &[String]) -> Option<usize> {
+    if args.get(1).map(String::as_str) != Some("review") {
+        return None;
+    }
+
+    let mut index = 2;
+    while index < args.len() && args[index] != "--" {
+        if matches!(
+            args[index].as_str(),
+            "audit" | "audit-baseline" | "lint" | "test" | "build" | "ci"
+        ) {
+            return Some(index);
+        }
+        index += review_shared_option_width(args, index).unwrap_or(1);
+    }
+    None
+}
+
+fn review_shared_option_width(args: &[String], index: usize) -> Option<usize> {
+    let option = args.get(index)?;
+    let takes_value = [
+        "--run-id",
+        "--path",
+        "--extension",
+        "--changed-since",
+        "--lab-changed-files-json",
+        "--ci-profile",
+        "--audit-profile",
+        "--report",
+        "--banner",
+    ];
+    let flags = [
+        "--changed-only",
+        "--summary",
+        "--baseline",
+        "--ignore-baseline",
+        "--ratchet",
+    ];
+
+    if flags.contains(&option.as_str()) {
+        return Some(1);
+    }
+    takes_value.iter().find_map(|flag| {
+        (option == flag)
+            .then_some(2)
+            .or_else(|| option.starts_with(&format!("{flag}=")).then_some(1))
+    })
+}
+
+#[cfg(test)]
+mod review_option_order_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn argv(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn review_actions_accept_shared_options_before_or_after_the_action() {
+        for (action, target) in [
+            ("audit", vec!["fixture"]),
+            ("lint", vec!["fixture"]),
+            ("test", vec!["fixture"]),
+            ("build", vec!["fixture"]),
+            ("ci", vec!["list"]),
+        ] {
+            let mut before = vec![
+                "homeboy",
+                "--placement=local",
+                "review",
+                "--run-id=run-123",
+                "--path=fixture-path",
+                "--extension=first",
+                "--extension=second",
+                "--changed-since=main",
+                "--lab-changed-files-json=[]",
+                "--summary",
+                "--ci-profile=pr",
+                "--audit-profile=architecture",
+                "--report=pr-comment",
+                "--banner=source=generated",
+                "--banner=scope=changed",
+                "--baseline",
+                "--ignore-baseline",
+                "--ratchet",
+                action,
+            ];
+            before.extend(target.iter().copied());
+            let mut after = vec!["homeboy", "review", action];
+            after.extend(target.iter().copied());
+            after.extend([
+                "--run-id",
+                "run-123",
+                "--path",
+                "fixture-path",
+                "--extension",
+                "first",
+                "--extension",
+                "second",
+                "--changed-since",
+                "main",
+                "--lab-changed-files-json",
+                "[]",
+                "--summary",
+                "--ci-profile",
+                "pr",
+                "--audit-profile",
+                "architecture",
+                "--report",
+                "pr-comment",
+                "--banner",
+                "source=generated",
+                "--banner",
+                "scope=changed",
+                "--baseline",
+                "--ignore-baseline",
+                "--ratchet",
+                "--placement",
+                "local",
+            ]);
+
+            for command in [before, after] {
+                let normalized = normalize(argv(&command));
+                Cli::try_parse_from(&normalized).unwrap_or_else(|error| {
+                    panic!(
+                        "review {action} shared options failed to parse: {normalized:?}\n{error}"
+                    )
+                });
+                assert_eq!(normalize(normalized.clone()), normalized);
+            }
+        }
+    }
+
+    #[test]
+    fn review_actions_accept_changed_only_before_or_after_the_action() {
+        for (action, target) in [
+            ("audit", vec!["fixture"]),
+            ("lint", vec!["fixture"]),
+            ("test", vec!["fixture"]),
+            ("build", vec!["fixture"]),
+            ("ci", vec!["list"]),
+        ] {
+            let mut before = vec!["homeboy", "review", "--changed-only", action];
+            before.extend(target.iter().copied());
+            let mut after = vec!["homeboy", "review", action];
+            after.extend(target.iter().copied());
+            after.push("--changed-only");
+            for command in [before, after] {
+                Cli::try_parse_from(normalize(argv(&command))).unwrap_or_else(|error| {
+                    panic!("review {action} changed-only failed to parse: {error}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn review_action_shared_options_preserve_equals_and_space_value_forms() {
+        for (command, expected) in [
+            (
+                argv(&[
+                    "homeboy",
+                    "review",
+                    "test",
+                    "fixture",
+                    "--changed-since=origin/main",
+                    "--extension=rust",
+                    "--banner=source=generated",
+                ]),
+                argv(&[
+                    "homeboy",
+                    "review",
+                    "--changed-since=origin/main",
+                    "--extension=rust",
+                    "--banner=source=generated",
+                    "test",
+                    "fixture",
+                ]),
+            ),
+            (
+                argv(&[
+                    "homeboy",
+                    "review",
+                    "test",
+                    "fixture",
+                    "--changed-since",
+                    "origin/main",
+                    "--extension",
+                    "rust",
+                    "--banner",
+                    "source=generated",
+                ]),
+                argv(&[
+                    "homeboy",
+                    "review",
+                    "--changed-since",
+                    "origin/main",
+                    "--extension",
+                    "rust",
+                    "--banner",
+                    "source=generated",
+                    "test",
+                    "fixture",
+                ]),
+            ),
+        ] {
+            let normalized = normalize(command);
+            assert_eq!(normalized, expected);
+            Cli::try_parse_from(normalized).expect("canonical replay command parses");
+        }
+    }
+
+    #[test]
+    fn review_action_scope_conflicts_are_reported_as_the_exact_conflict() {
+        for (action, target) in [
+            ("audit", vec!["fixture"]),
+            ("lint", vec!["fixture"]),
+            ("test", vec!["fixture"]),
+            ("build", vec!["fixture"]),
+            ("ci", vec!["list"]),
+        ] {
+            for scope in [
+                vec!["--changed-since", "main", "--changed-only"],
+                vec!["--changed-only", "--changed-since=main"],
+            ] {
+                let mut command = vec!["homeboy", "review", action];
+                command.extend(target.iter().copied());
+                command.extend(scope);
+                let error = match Cli::try_parse_from(normalize(argv(&command))) {
+                    Ok(_) => panic!("conflicting review scopes must fail"),
+                    Err(error) => error,
+                };
+                let message = error.to_string();
+                assert!(message.contains("--changed-only"), "{message}");
+                assert!(message.contains("--changed-since"), "{message}");
+                assert!(message.contains("cannot be used with"), "{message}");
+                assert!(
+                    !message.contains("tip: a similar argument exists"),
+                    "conflicts must explain the requested flags, not suggest another one: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_test_passthrough_is_not_reordered() {
+        let command = argv(&[
+            "homeboy",
+            "review",
+            "test",
+            "fixture",
+            "--summary",
+            "--",
+            "--changed-since",
+            "main",
+        ]);
+
+        assert_eq!(
+            normalize(command),
+            argv(&[
+                "homeboy",
+                "review",
+                "--summary",
+                "test",
+                "fixture",
+                "--",
+                EXPLICIT_PASSTHROUGH_SENTINEL,
+                "--changed-since",
+                "main",
+            ])
+        );
+    }
 }
 
 // ============================================================================

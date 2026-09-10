@@ -337,14 +337,14 @@ fn dispatch_review_plan_step(
     }
 }
 
-pub fn run(args: ReviewArgs) -> CmdResult<Value> {
-    match args.command {
+pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
+    match args.command.take() {
         Some(ReviewCommand::Audit(review_audit)) => {
-            let requested_source = review_audit.audit.release_readiness_source.clone();
-            let component = review_audit.audit.comp.load()?;
+            let audit_args = apply_review_args_to_audit(&args, review_audit.audit);
+            let requested_source = audit_args.release_readiness_source.clone();
+            let component = audit_args.comp.load()?;
             prepare_local_review_dependencies(&component)?;
-            let audit_args =
-                review_audit_args(review_audit.audit, &args.changed, &component.local_path)?;
+            let audit_args = review_audit_args(audit_args, &args.changed, &component.local_path)?;
             to_value_with_readiness_provenance(
                 audit::run(audit_args),
                 &component,
@@ -353,33 +353,100 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
             )
         }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
-        Some(ReviewCommand::Lint(args)) => {
-            let requested_source = args.release_readiness_source.clone();
-            let component = args.comp.load()?;
-            reject_manual_changelog_edit_for_lint(&component, &args)?;
+        Some(ReviewCommand::Lint(child_args)) => {
+            let lint_args = apply_review_args_to_lint(&args, child_args);
+            let requested_source = lint_args.release_readiness_source.clone();
+            let component = lint_args.comp.load()?;
+            reject_manual_changelog_edit_for_lint(&component, &lint_args)?;
             prepare_local_review_dependencies(&component)?;
             to_value_with_readiness_provenance(
-                lint::run(review_lint_args(args)),
+                lint::run(review_lint_args(lint_args)),
                 &component,
                 requested_source.as_deref(),
                 "lint",
             )
         }
-        Some(ReviewCommand::Test(args)) => {
-            let requested_source = args.release_readiness_source.clone();
-            let component = args.comp.load()?;
+        Some(ReviewCommand::Test(child_args)) => {
+            let test_args = apply_review_args_to_test(&args, child_args);
+            let requested_source = test_args.release_readiness_source.clone();
+            let component = test_args.comp.load()?;
             prepare_local_review_dependencies(&component)?;
             to_value_with_readiness_provenance(
-                test::run(args),
+                test::run(test_args),
                 &component,
                 requested_source.as_deref(),
                 "test",
             )
         }
-        Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
+        Some(ReviewCommand::Build(mut build_args)) => {
+            if args.changed.changed_since().is_some() {
+                build_args.changed = args.changed.lab.since.clone();
+            }
+            to_value(build::run(build_args))
+        }
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
         None => to_value(run_umbrella(args)),
     }
+}
+
+fn apply_review_args_to_audit(
+    shared: &ReviewArgs,
+    mut child: audit::AuditArgs,
+) -> audit::AuditArgs {
+    apply_review_component_and_extensions(shared, &mut child.comp, &mut child.extension_override);
+    if let Some(changed_since) = shared.changed.changed_since() {
+        child.changed.changed_since = Some(changed_since.to_string());
+    }
+    child.json_summary |= shared.summary;
+    apply_review_baseline_args(shared, &mut child.baseline_args);
+    if let Some(profile) = &shared.audit_profile {
+        child.profile = profile.clone();
+    }
+    child
+}
+
+fn apply_review_args_to_lint(shared: &ReviewArgs, mut child: lint::LintArgs) -> lint::LintArgs {
+    apply_review_component_and_extensions(shared, &mut child.comp, &mut child.extension_override);
+    if shared.changed.is_scoped() {
+        child.changed = shared.changed.clone();
+    }
+    child.summary |= shared.summary;
+    apply_review_baseline_args(shared, &mut child.baseline_args);
+    child
+}
+
+fn apply_review_args_to_test(shared: &ReviewArgs, mut child: test::TestArgs) -> test::TestArgs {
+    apply_review_component_and_extensions(shared, &mut child.comp, &mut child.extension_override);
+    if shared.changed.changed_since().is_some() {
+        child.changed = shared.changed.lab.clone();
+    }
+    child.json_summary |= shared.summary;
+    apply_review_baseline_args(shared, &mut child.baseline_args);
+    child
+}
+
+fn apply_review_component_and_extensions(
+    shared: &ReviewArgs,
+    component: &mut PositionalComponentArgs,
+    extensions: &mut ExtensionOverrideArgs,
+) {
+    if shared.comp.component.is_some() {
+        component.component = shared.comp.component.clone();
+    }
+    if shared.comp.path.is_some() {
+        component.path = shared.comp.path.clone();
+    }
+    if !shared.extension_override.extensions.is_empty() {
+        let mut merged = shared.extension_override.extensions.clone();
+        merged.append(&mut extensions.extensions);
+        extensions.extensions = merged;
+    }
+}
+
+fn apply_review_baseline_args(shared: &ReviewArgs, baseline: &mut BaselineArgs) {
+    baseline.baseline |= shared.baseline_args.baseline;
+    baseline.ignore_baseline |= shared.baseline_args.ignore_baseline;
+    baseline.ratchet |= shared.baseline_args.ratchet;
 }
 
 /// Translate review's working-tree scope to audit's existing HEAD-based scoped
