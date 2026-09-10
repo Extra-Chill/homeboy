@@ -30,8 +30,13 @@ use homeboy_review::review::{
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use super::parse_key_val;
 use super::utils::args::{
@@ -45,6 +50,8 @@ use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOpti
 
 mod observation;
 pub(super) mod raw_output;
+
+const DETACHED_REVIEW_RUN_ID_ENV: &str = "HOMEBOY_DETACHED_REVIEW_RUN_ID";
 
 #[derive(Args)]
 pub struct ReviewArgs {
@@ -342,7 +349,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Audit(review_audit)) => {
             let requested_source = review_audit.audit.release_readiness_source.clone();
             let component = review_audit.audit.comp.load()?;
-            prepare_local_review_dependencies(&component)?;
+            prepare_local_review_dependencies(&component, &None)?;
             let audit_args =
                 review_audit_args(review_audit.audit, &args.changed, &component.local_path)?;
             to_value_with_readiness_provenance(
@@ -357,7 +364,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
             let requested_source = args.release_readiness_source.clone();
             let component = args.comp.load()?;
             reject_manual_changelog_edit_for_lint(&component, &args)?;
-            prepare_local_review_dependencies(&component)?;
+            prepare_local_review_dependencies(&component, &None)?;
             to_value_with_readiness_provenance(
                 lint::run(review_lint_args(args)),
                 &component,
@@ -366,9 +373,12 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
             )
         }
         Some(ReviewCommand::Test(args)) => {
+            if let Ok(run_id) = std::env::var(DETACHED_REVIEW_RUN_ID_ENV) {
+                return run_detached_test(args, &run_id);
+            }
             let requested_source = args.release_readiness_source.clone();
             let component = args.comp.load()?;
-            prepare_local_review_dependencies(&component)?;
+            prepare_local_review_dependencies(&component, &None)?;
             to_value_with_readiness_provenance(
                 test::run(args),
                 &component,
@@ -379,6 +389,45 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
         None => to_value(run_umbrella(args)),
+    }
+}
+
+/// Complete a direct `review test` in the observation admitted by the launcher.
+/// The launcher has already returned its continuation command; this worker owns
+/// the test process and its durable evidence.
+fn run_detached_test(args: test::TestArgs, run_id: &str) -> CmdResult<Value> {
+    let observation = Some(observation::resume(run_id)?);
+    observation::emit_early_lifecycle(&observation);
+    progress(&observation, "component_discovery", "component", "running");
+    let component = match args.comp.load() {
+        Ok(component) => component,
+        Err(error) => {
+            observation::finish_error(observation, &error);
+            return Err(error);
+        }
+    };
+    progress(&observation, "dependency_setup", "dependencies", "running");
+    if let Err(error) = prepare_local_review_dependencies(&component, &observation) {
+        observation::finish_error(observation, &error);
+        return Err(error);
+    }
+    progress(&observation, "test_execution", "review.test", "running");
+    let _heartbeat = StageHeartbeat::start(Some(run_id), "test_execution", "review.test");
+    let result = test::run(args);
+    match result {
+        Ok((output, exit_code)) => {
+            let value = serde_json::to_value(&output).map_err(|error| {
+                homeboy::core::Error::internal_unexpected(format!(
+                    "failed to serialize detached review test output: {error}"
+                ))
+            })?;
+            observation::finish_direct_success(observation, "test", value.clone(), exit_code);
+            Ok((value, exit_code))
+        }
+        Err(error) => {
+            observation::finish_error(observation, &error);
+            Err(error)
+        }
     }
 }
 
@@ -481,14 +530,54 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         return attach_to_persisted_review(run_id);
     }
 
+    // Admit the durable review before resolving a component or probing scope.
+    // A caller that disappears during either bounded preflight can therefore
+    // still locate the exact run and its last persisted progress.
+    let review_observation = Some(match std::env::var(DETACHED_REVIEW_RUN_ID_ENV) {
+        Ok(run_id) => observation::resume(&run_id)?,
+        Err(_) => observation::start(observation::ReviewObservationStart {
+            component_id: args.comp.component.as_deref(),
+            component_label: args.comp.component.as_deref(),
+            source_path: None,
+            args: &args,
+            scope: "pending-discovery",
+            changed_file_count: None,
+        })?,
+    });
+    observation::emit_early_lifecycle(&review_observation);
+    progress(
+        &review_observation,
+        "component_discovery",
+        "component",
+        "running",
+    );
+
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component_args = args.effective_component_args();
-    let component = component_args.load()?;
+    let component = match component_args.load() {
+        Ok(component) => component,
+        Err(error) => {
+            observation::finish_error(review_observation, &error);
+            return Err(error);
+        }
+    };
     let component_label = component.id.clone();
     let source_path = component.local_path.clone();
 
-    let review_context = preflight_review_scope(&args, &source_path)?;
+    progress(
+        &review_observation,
+        "scope_discovery",
+        "changed-files",
+        "running",
+    );
+    let review_context = match preflight_review_scope(&args, &source_path) {
+        Ok(context) => context,
+        Err(error) => {
+            observation::finish_error(review_observation, &error);
+            return Err(error);
+        }
+    };
     let scope = review_context.scope.clone();
     let changed_file_count = review_context.changed_file_count;
 
@@ -503,14 +592,6 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         let message = format!("No files changed {} — skipping review", scope_label);
         println!("{}", message);
 
-        let review_observation = Some(observation::start(observation::ReviewObservationStart {
-            component_id: &component.id,
-            component_label: &component_label,
-            source_path: Path::new(&source_path),
-            args: &args,
-            scope: &scope,
-            changed_file_count: Some(0),
-        })?);
         let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
 
         let mut output = ReviewService::skipped_output(
@@ -537,18 +618,25 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
 
     // The test phase restores its checkout, so establish the whole plan is
     // eligible before dependency hydration or any detector can begin.
-    homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&source_path))?;
-
-    let review_observation = Some(observation::start(observation::ReviewObservationStart {
-        component_id: &component.id,
-        component_label: &component_label,
-        source_path: Path::new(&source_path),
-        args: &args,
-        scope: &scope,
-        changed_file_count,
-    })?);
-    observation::emit_early_lifecycle(&review_observation);
-    if let Err(error) = prepare_local_review_dependencies(&component) {
+    progress(
+        &review_observation,
+        "test_checkout_preflight",
+        "clean-checkout",
+        "running",
+    );
+    if let Err(error) =
+        homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&source_path))
+    {
+        observation::finish_error(review_observation, &error);
+        return Err(error);
+    }
+    progress(
+        &review_observation,
+        "dependency_setup",
+        "dependencies",
+        "running",
+    );
+    if let Err(error) = prepare_local_review_dependencies(&component, &review_observation) {
         observation::finish_error(review_observation, &error);
         return Err(error);
     }
@@ -588,6 +676,9 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
             ));
         }
         // homeboy-audit: allow-thin-command-adapter
+        progress(&review_observation, "test_execution", &step.kind, "running");
+        let _heartbeat =
+            StageHeartbeat::start(review_run_id.as_deref(), "test_execution", &step.kind);
         dispatch_review_plan_step(step, &args, &component_label, &review_context)
         // homeboy-audit: allow-thin-command-adapter
     }) {
@@ -721,8 +812,66 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     Ok((output, overall_exit))
 }
 
+/// Start changed-only summary review in an independent session. This narrow
+/// form is intentionally asynchronous: its durable run is admitted before any
+/// component, dependency, or changed-scope discovery can block.
+pub(crate) fn detach_changed_only_summary(
+    args: &ReviewArgs,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<i32>> {
+    if !args.changed.changed_only
+        || !args.summary
+        || !matches!(args.command, Some(ReviewCommand::Test(_)))
+    {
+        return Ok(None);
+    }
+    let observation = observation::start(observation::ReviewObservationStart {
+        component_id: args.comp.component.as_deref(),
+        component_label: args.comp.component.as_deref(),
+        source_path: None,
+        args,
+        scope: "pending-discovery",
+        changed_file_count: None,
+    })?;
+    let run_id = observation.run_id().to_string();
+    observation::emit_early_lifecycle(&Some(observation));
+    let observation = observation::resume(&run_id)?;
+    observation.progress("handoff", "detached-worker", "accepted");
+    let executable = std::env::current_exe().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("resolve detached review executable".to_string()),
+        )
+    })?;
+    let mut command = Command::new(executable);
+    command
+        .args(normalized_args.iter().skip(1))
+        .env(DETACHED_REVIEW_RUN_ID_ENV, &run_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    homeboy::core::process::detach_from_caller_session(&mut command);
+    command.spawn().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("spawn detached review worker".to_string()),
+        )
+    })?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": "homeboy/review-local-handoff/v1",
+            "run_id": run_id,
+            "status": "running",
+            "watch_command": format!("homeboy runs watch {run_id}"),
+        })
+    );
+    Ok(Some(0))
+}
+
 fn prepare_local_review_dependencies(
     component: &homeboy::core::component::Component,
+    observation: &Option<observation::ReviewObservation>,
 ) -> homeboy::core::Result<()> {
     let policy = homeboy::core::deps::DependencyHydrationPolicy::default();
     let deadline_ms = policy.timeout.as_millis();
@@ -737,9 +886,13 @@ fn prepare_local_review_dependencies(
         last_progress_ms_ago: None,
         deadline_ms,
     });
+    progress(observation, "dependency_setup", "dependencies", "running");
 
     let component_id = component.id.clone();
-    let progress = Arc::new(
+    let run_id = observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
+    let dependency_progress = Arc::new(
         move |progress: &homeboy::core::deps::DependencyHydrationProgress| {
             emit_local_review_setup_progress(LocalReviewSetupProgress {
                 phase: &progress.phase,
@@ -751,10 +904,18 @@ fn prepare_local_review_dependencies(
                 last_progress_ms_ago: progress.last_progress_ms_ago,
                 deadline_ms,
             });
+            if let Some(run_id) = run_id.as_deref() {
+                update_progress(
+                    run_id,
+                    &progress.phase,
+                    progress.current.as_deref().unwrap_or(&progress.provider_id),
+                    "heartbeat",
+                );
+            }
         },
     );
     let policy = homeboy::core::deps::DependencyHydrationPolicy {
-        on_progress: progress,
+        on_progress: dependency_progress,
         ..policy
     };
     let outcomes = homeboy::core::deps::hydrate_declared_dependencies(
@@ -778,6 +939,12 @@ fn prepare_local_review_dependencies(
             last_progress_ms_ago: None,
             deadline_ms,
         });
+        progress(
+            observation,
+            "dependency_setup",
+            &failed.provider_id,
+            "failed",
+        );
         return Err(homeboy::core::Error::dependency_step_failed(
             "dependency.setup",
             &component.id,
@@ -805,7 +972,85 @@ fn prepare_local_review_dependencies(
         last_progress_ms_ago: None,
         deadline_ms,
     });
+    progress(observation, "dependency_setup", "dependencies", "completed");
     Ok(())
+}
+
+fn progress(
+    observation: &Option<observation::ReviewObservation>,
+    phase: &str,
+    current: &str,
+    status: &str,
+) {
+    if let Some(observation) = observation {
+        observation.progress(phase, current, status);
+    }
+}
+
+fn update_progress(run_id: &str, phase: &str, current: &str, status: &str) {
+    let Ok(store) = ObservationStore::open_initialized() else {
+        return;
+    };
+    let Ok(Some(run)) = store.get_run(run_id) else {
+        return;
+    };
+    let metadata = homeboy::core::observation::merge_metadata(
+        run.metadata_json,
+        serde_json::json!({
+            "observation_status": "running",
+            "progress": {
+                "phase": phase,
+                "current": current,
+                "status": status,
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+            },
+        }),
+    );
+    let _ = store.update_running_run_metadata(run_id, metadata);
+}
+
+/// Keep the durable run fresh while an extension-owned command is silent. The
+/// metadata update is the canonical heartbeat; stderr is never its only sink.
+struct StageHeartbeat {
+    stop: Arc<AtomicBool>,
+    wake: mpsc::Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl StageHeartbeat {
+    fn start(run_id: Option<&str>, phase: &str, current: &str) -> Option<Self> {
+        let run_id = run_id?.to_string();
+        let phase = phase.to_string();
+        let current = current.to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (wake, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                if receiver.recv_timeout(Duration::from_secs(5)).is_ok() {
+                    break;
+                }
+                if !worker_stop.load(Ordering::Relaxed) {
+                    update_progress(&run_id, &phase, &current, "heartbeat");
+                }
+            }
+        });
+        Some(Self {
+            stop,
+            wake,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for StageHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.wake.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 struct LocalReviewSetupProgress<'a> {

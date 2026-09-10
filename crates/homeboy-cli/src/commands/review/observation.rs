@@ -22,6 +22,41 @@ impl ReviewObservation {
     pub(super) fn run_id(&self) -> &str {
         self.0.run_id()
     }
+
+    pub(super) fn progress(&self, phase: &str, current: &str, status: &str) {
+        let Ok(Some(run)) = self.0.store().get_run(self.run_id()) else {
+            return;
+        };
+        let metadata = merge_metadata(
+            run.metadata_json,
+            serde_json::json!({
+                "observation_status": "running",
+                "progress": {
+                    "phase": phase,
+                    "current": current,
+                    "status": status,
+                    "updated_at": chrono::Utc::now().to_rfc3339(),
+                },
+            }),
+        );
+        let _ = self
+            .0
+            .store()
+            .update_running_run_metadata(self.run_id(), metadata);
+        // The stream mirrors the persisted update so compact output remains
+        // observable without making stderr the source of truth.
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "schema": "homeboy/review-lifecycle/v1",
+                "event": "progress",
+                "run_id": self.run_id(),
+                "phase": phase,
+                "current": current,
+                "status": status,
+            })
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -36,9 +71,9 @@ struct EarlyReviewLifecycle<'a> {
 }
 
 pub(super) struct ReviewObservationStart<'a> {
-    pub component_id: &'a str,
-    pub component_label: &'a str,
-    pub source_path: &'a Path,
+    pub component_id: Option<&'a str>,
+    pub component_label: Option<&'a str>,
+    pub source_path: Option<&'a Path>,
     pub args: &'a ReviewArgs,
     pub scope: &'a str,
     pub changed_file_count: Option<usize>,
@@ -46,22 +81,33 @@ pub(super) struct ReviewObservationStart<'a> {
 
 pub(super) fn start(start: ReviewObservationStart<'_>) -> homeboy::core::Result<ReviewObservation> {
     let metadata = review_observation_initial_metadata(
-        start.component_label,
+        start.component_label.unwrap_or("pending-discovery"),
         start.args,
         start.scope,
         start.changed_file_count,
     );
-    ActiveObservation::start(
-        NewRunRecord::builder("review")
-            .component_id(start.component_id)
-            .command(review_observation_command(start.component_id, start.args))
-            .cwd_path(start.source_path)
-            .current_homeboy_version()
-            .git_sha(short_head_revision_at(start.source_path))
-            .metadata(metadata.clone())
-            .build(),
-    )
-    .map(ReviewObservation)
+    let record = NewRunRecord::builder("review")
+        .optional_cwd_path(start.source_path)
+        .command(review_observation_command(
+            start.component_id.unwrap_or("pending-discovery"),
+            start.args,
+        ))
+        .current_homeboy_version()
+        .git_sha(start.source_path.and_then(short_head_revision_at))
+        .metadata(metadata.clone())
+        .build();
+    let record = match start.component_id {
+        Some(component_id) => NewRunRecord {
+            component_id: Some(component_id.to_string()),
+            ..record
+        },
+        None => record,
+    };
+    ActiveObservation::start(record).map(ReviewObservation)
+}
+
+pub(super) fn resume(run_id: &str) -> homeboy::core::Result<ReviewObservation> {
+    ActiveObservation::resume(run_id).map(ReviewObservation)
 }
 
 /// Emit a JSONL lifecycle event after persistence. The final stdout envelope is unchanged.
@@ -129,6 +175,40 @@ pub(super) fn finish_error(observation: Option<ReviewObservation>, error: &homeb
         }),
     );
     finish_if_running(&observation.0, RunStatus::Error, Some(metadata));
+}
+
+/// Persist direct child output on the umbrella review run. Direct `review test`
+/// has no `ReviewCommandOutput`, but its evidence must remain discoverable from
+/// the run that the detached launcher announced.
+pub(super) fn finish_direct_success(
+    observation: Option<ReviewObservation>,
+    stage: &str,
+    output: serde_json::Value,
+    exit_code: i32,
+) {
+    let Some(observation) = observation else {
+        return;
+    };
+    let status = if exit_code == 0 {
+        RunStatus::Pass
+    } else {
+        RunStatus::Fail
+    };
+    let metadata = merge_metadata(
+        observation.0.initial_metadata().clone(),
+        serde_json::json!({
+            "observation_status": status.as_str(),
+            "exit_code": exit_code,
+            "stages": [{
+                "name": stage,
+                "status": status.as_str(),
+                "ran": true,
+                "exit_code": exit_code,
+                "output": output,
+            }],
+        }),
+    );
+    finish_if_running(&observation.0, status, Some(metadata));
 }
 
 fn finish_if_running(
@@ -297,9 +377,9 @@ mod tests {
         homeboy::test_support::with_isolated_home(|_| {
             let args = review_args();
             let observation = start(ReviewObservationStart {
-                component_id: "homeboy",
-                component_label: "homeboy",
-                source_path: Path::new("/tmp/homeboy"),
+                component_id: Some("homeboy"),
+                component_label: Some("homeboy"),
+                source_path: Some(Path::new("/tmp/homeboy")),
                 args: &args,
                 scope: "changed-since",
                 changed_file_count: Some(3),
@@ -315,6 +395,15 @@ mod tests {
                 .expect("run");
             assert_eq!(run.kind, "review");
             assert_eq!(run.status, "running");
+
+            observation.progress("dependency_setup", "fixture-provider", "heartbeat");
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read")
+                .expect("run");
+            assert_eq!(run.metadata_json["progress"]["phase"], "dependency_setup");
+            assert_eq!(run.metadata_json["progress"]["current"], "fixture-provider");
 
             let lifecycle = serde_json::to_value(EarlyReviewLifecycle {
                 schema: "homeboy/review-lifecycle/v1",

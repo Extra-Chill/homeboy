@@ -29,6 +29,32 @@ impl ActiveObservation {
         Self::start(record).ok()
     }
 
+    /// Reopen a durable running observation in a detached worker.
+    pub fn resume(run_id: &str) -> crate::Result<Self> {
+        let store = ObservationStore::open_initialized()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            crate::Error::validation_invalid_argument(
+                "run_id",
+                "run record not found",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        if run.status != RunStatus::Running.as_str() {
+            return Err(crate::Error::validation_invalid_argument(
+                "run_id",
+                "only a running observation can be resumed",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        Ok(Self {
+            initial_metadata: run.metadata_json.clone(),
+            store,
+            run,
+        })
+    }
+
     pub fn store(&self) -> &ObservationStore {
         &self.store
     }
