@@ -1,4 +1,45 @@
 use super::*;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+
+const WORKTREE_LIST_CURSOR_SCHEMA: &str = "homeboy/worktree-list-cursor/v1";
+
+/// The filename is the immutable ordering key for a list page. Keep it inside
+/// a versioned envelope so the wire cursor is opaque and independently
+/// evolvable from task-worktree record IDs.
+#[derive(Debug, Serialize, Deserialize)]
+struct WorktreeListCursor {
+    schema: String,
+    manifest_name: String,
+}
+
+fn encode_worktree_list_cursor(manifest_name: String) -> String {
+    let cursor = WorktreeListCursor {
+        schema: WORKTREE_LIST_CURSOR_SCHEMA.to_string(),
+        manifest_name,
+    };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&cursor).expect("worktree list cursor serializes"))
+}
+
+pub(super) fn decode_worktree_list_cursor(value: &str) -> Result<String> {
+    let invalid = || {
+        Error::validation_invalid_argument(
+            "cursor",
+            "must be an opaque worktree-list continuation with schema homeboy/worktree-list-cursor/v1",
+            Some(value.to_string()),
+            None,
+        )
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| invalid())?;
+    let cursor: WorktreeListCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if cursor.schema != WORKTREE_LIST_CURSOR_SCHEMA || cursor.manifest_name.is_empty() {
+        return Err(invalid());
+    }
+    Ok(cursor.manifest_name)
+}
 
 pub(super) fn adopt_with_store(
     options: WorktreeAdoptOptions,
@@ -1028,6 +1069,7 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
             worktrees,
             cursor: None,
             next_cursor: None,
+            next_command: None,
             limit: usize::MAX,
             truncated: false,
             diagnostics,
@@ -1058,6 +1100,7 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
         worktrees,
         cursor: None,
         next_cursor: None,
+        next_command: None,
         limit: usize::MAX,
         truncated: false,
         diagnostics,
@@ -1069,9 +1112,13 @@ pub(super) fn list_page_with_store(
     options: WorktreeListOptions,
 ) -> Result<WorktreeListOutput> {
     let limit = options.limit.clamp(1, 500);
-    // The cursor is only compared to discovered manifest names; it never forms
-    // a filesystem path, so preserve its exact opaque boundary.
-    let cursor = options.cursor.as_deref();
+    // Decoded input is compared only to names discovered from the directory;
+    // it never forms a filesystem path.
+    let boundary = options
+        .cursor
+        .as_deref()
+        .map(decode_worktree_list_cursor)
+        .transpose()?;
     let mut entries = if store_dir.exists() {
         fs::read_dir(store_dir)
             .map_err(|error| {
@@ -1084,13 +1131,13 @@ pub(super) fn list_page_with_store(
         Vec::new()
     };
     entries.sort_by_key(|entry| entry.file_name());
-    let start = cursor.as_ref().map_or(0, |cursor| {
+    let start = boundary.as_ref().map_or(0, |boundary| {
         entries.partition_point(|entry| {
             entry
                 .file_name()
                 .to_string_lossy()
                 .trim_end_matches(".json")
-                <= *cursor
+                <= boundary.as_str()
         })
     });
     let entries = entries
@@ -1100,15 +1147,20 @@ pub(super) fn list_page_with_store(
         .collect::<Vec<_>>();
     let truncated = entries.len() > limit;
     let entries = entries.into_iter().take(limit).collect::<Vec<_>>();
-    let next_cursor = truncated.then(|| {
-        entries
-            .last()
-            .expect("a truncated page has a boundary entry")
-            .file_name()
-            .to_string_lossy()
-            .trim_end_matches(".json")
-            .to_string()
-    });
+    let next_cursor = truncated
+        .then(|| {
+            entries
+                .last()
+                .expect("a truncated page has a boundary entry")
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                .to_string()
+        })
+        .map(encode_worktree_list_cursor);
+    let next_command = next_cursor
+        .as_ref()
+        .map(|cursor| format!("homeboy worktree list --limit {limit} --cursor {cursor}"));
     let mut worktrees = Vec::new();
     let mut diagnostics = Vec::new();
     for entry in entries {
@@ -1128,6 +1180,7 @@ pub(super) fn list_page_with_store(
         worktrees,
         cursor: options.cursor,
         next_cursor,
+        next_command,
         limit,
         truncated,
         diagnostics,

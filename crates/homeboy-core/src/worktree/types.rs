@@ -404,11 +404,13 @@ pub struct WorktreeAdoptOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeListOutput {
     pub worktrees: Vec<TaskWorktreeRecord>,
-    /// The page starts strictly after this manifest identity.
+    /// Opaque continuation supplied for this page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
     pub limit: usize,
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

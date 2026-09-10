@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_support::write_component_registration;
+use base64::Engine;
 
 /// A caller reading a "missing handle" error needs the handle creation would
 /// actually produce, so the slug rule has to be reachable outside this module.
@@ -2260,7 +2261,7 @@ fn list_retains_valid_records_and_diagnoses_malformed_manifests() {
 }
 
 #[test]
-fn list_page_walks_manifest_keysets_without_parsing_the_remainder() {
+fn list_page_walks_opaque_manifest_keysets_without_parsing_the_remainder() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
     let store = dir.path().join("store");
@@ -2295,14 +2296,28 @@ fn list_page_walks_manifest_keysets_without_parsing_the_remainder() {
         ["fixture@a", "fixture@b"]
     );
     assert!(first.diagnostics.is_empty());
-    assert_eq!(first.next_cursor.as_deref(), Some("fixture@b"));
+    let cursor = first.next_cursor.clone().expect("opaque continuation");
+    assert_ne!(cursor, "fixture@b");
+    assert!(!cursor.contains("fixture@b"));
+    assert_eq!(
+        super::store_ops::decode_worktree_list_cursor(&cursor).unwrap(),
+        "fixture@b"
+    );
+    assert_eq!(
+        first.next_command.as_deref(),
+        Some(format!("homeboy worktree list --limit 2 --cursor {cursor}").as_str())
+    );
     assert!(first.truncated);
+
+    // The filename keyset boundary still advances when the returned record is
+    // deleted between requests.
+    fs::remove_file(store.join("fixture@b.json")).unwrap();
 
     let second = list_page_with_store(
         &store,
         WorktreeListOptions {
             limit: 2,
-            cursor: first.next_cursor,
+            cursor: Some(cursor),
         },
     )
     .unwrap();
@@ -2317,6 +2332,27 @@ fn list_page_walks_manifest_keysets_without_parsing_the_remainder() {
     assert_eq!(second.diagnostics.len(), 1);
     assert!(second.next_cursor.is_none());
     assert!(!second.truncated);
+}
+
+#[test]
+fn list_page_rejects_malformed_and_version_mismatched_cursors() {
+    for cursor in [
+        "not-a-worktree-list-cursor".to_string(),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "schema": "homeboy/worktree-list-cursor/v0",
+                "manifest_name": "fixture@a"
+            })
+            .to_string(),
+        ),
+    ] {
+        let error = super::store_ops::decode_worktree_list_cursor(&cursor).unwrap_err();
+        assert_eq!(
+            error.code,
+            crate::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(error.details["field"], "cursor");
+    }
 }
 
 #[test]

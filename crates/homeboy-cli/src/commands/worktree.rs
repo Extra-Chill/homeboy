@@ -131,8 +131,8 @@ enum WorktreeCommand {
         /// Maximum manifests to inspect
         #[arg(long, default_value_t = 100)]
         limit: usize,
-        /// Start after this task-worktree record ID
-        #[arg(long)]
+        /// Opaque continuation returned by the preceding page
+        #[arg(long, value_name = "CURSOR")]
         cursor: Option<String>,
     },
     /// Report bounded local task-worktree inventory and reconcile only leased terminal snapshots
@@ -835,6 +835,7 @@ mod tests {
             worktrees: Vec::new(),
             cursor: None,
             next_cursor: None,
+            next_command: None,
             limit: 100,
             truncated: false,
             diagnostics: Vec::new(),
