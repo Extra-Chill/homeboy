@@ -372,6 +372,14 @@ const MIGRATIONS: &[Migration] = &[
             ON control_plane_action_claims(run_id, state);
         "#,
     },
+    Migration {
+        // Schema 21's claim is the action ledger. Evolve it in place into the
+        // transactional intent/outbox; existing completed acknowledgements
+        // remain authoritative and running claims become recoverable pending
+        // effects after restart.
+        version: 22,
+        sql: "",
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.
@@ -471,7 +479,37 @@ fn apply_migration(connection: &Connection, migration: &Migration) -> Result<()>
     if migration.version == 20 {
         backfill_control_plane_missions(connection)?;
     }
+    if migration.version == 22 {
+        evolve_control_plane_action_claims(connection)?;
+    }
     Ok(())
+}
+
+fn evolve_control_plane_action_claims(connection: &Connection) -> Result<()> {
+    for (column, definition) in [
+        ("intent_json", "TEXT"),
+        ("fence_json", "TEXT"),
+        ("effect_id", "TEXT"),
+        ("outbox_state", "TEXT"),
+        ("lease_owner", "TEXT"),
+        ("lease_fence", "INTEGER NOT NULL DEFAULT 0"),
+        ("lease_expires_at", "TEXT"),
+        ("terminal_json", "TEXT"),
+        ("audit_json", "TEXT"),
+    ] {
+        if !column_exists(connection, "control_plane_action_claims", column)? {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE control_plane_action_claims ADD COLUMN {column} {definition};"
+                ))
+                .map_err(sqlite_error("evolve control-plane action claims"))?;
+        }
+    }
+    connection.execute_batch(
+        "UPDATE control_plane_action_claims SET outbox_state = CASE state WHEN 'completed' THEN 'terminal' ELSE 'pending' END WHERE outbox_state IS NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_control_plane_action_claims_effect_id ON control_plane_action_claims(effect_id) WHERE effect_id IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_control_plane_action_claims_outbox ON control_plane_action_claims(outbox_state, lease_expires_at, accepted_at);"
+    ).map_err(sqlite_error("finalize control-plane action outbox evolution"))
 }
 
 fn backfill_control_plane_missions(connection: &Connection) -> Result<()> {
@@ -1234,6 +1272,35 @@ mod tests {
                 )
                 .unwrap(),
             "2026-01-01T00:01:00Z"
+        );
+    }
+
+    #[test]
+    fn migration_22_evolves_schema_21_claims_idempotently() {
+        let connection = schema_through_migration(21);
+        connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run', 'test', 'now', 'running')", []).unwrap();
+        connection.execute("INSERT INTO control_plane_action_claims(run_id, idempotency_digest, request_digest, state, owner_pid, accepted_at) VALUES ('run', ?1, ?2, 'running', 1, 'now')", rusqlite::params!["a".repeat(64), "b".repeat(64)]).unwrap();
+        apply_migrations(&connection).unwrap();
+        apply_migrations(&connection).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT outbox_state FROM control_plane_action_claims",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "pending"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 22",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
         );
     }
 

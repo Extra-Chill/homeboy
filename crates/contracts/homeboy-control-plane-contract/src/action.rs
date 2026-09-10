@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ControlPlaneAction, ControlPlaneRun, RunId};
+use crate::{ControlPlaneAction, ControlPlaneRef, ControlPlaneRun, RunId};
 
 pub const CONTROL_PLANE_ACTION_REQUEST_SCHEMA: &str = "homeboy/control-plane-action-request/v1";
 pub const CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA: &str =
@@ -28,6 +28,91 @@ pub const CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA: &str =
 pub const CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-promote-parameters/v1";
 pub const CONTROL_PLANE_PROMOTE_RESULT_SCHEMA: &str = "homeboy/control-plane-promote-result/v1";
+pub const CONTROL_PLANE_ACTION_INTENT_SCHEMA: &str = "homeboy/control-plane-action-intent/v1";
+pub const CONTROL_PLANE_ACTION_FENCE_SCHEMA: &str = "homeboy/control-plane-action-fence/v1";
+pub const CONTROL_PLANE_EFFECT_LEASE_SCHEMA: &str = "homeboy/control-plane-effect-lease/v1";
+pub const CONTROL_PLANE_EFFECT_AUDIT_SCHEMA: &str = "homeboy/control-plane-effect-audit/v1";
+pub const CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA: &str = "homeboy/control-plane-effect-terminal/v1";
+
+/// Stable, caller-derived identity for one external effect. The same intent
+/// must retain this value across restart and reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct EffectId(pub String);
+
+/// Canonical durable resource plus the original external alias, when one was
+/// supplied. Aliases are evidence, never a second authority for the resource.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionResource {
+    pub resource: ControlPlaneRef,
+    pub run: RunId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_alias: Option<String>,
+}
+
+/// Immutable request persisted before any external action is attempted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionIntent {
+    pub schema: String,
+    pub effect_id: EffectId,
+    pub resource: ControlPlaneActionResource,
+    pub request: ControlPlaneActionRequest,
+    pub request_digest: String,
+    pub accepted_at: String,
+}
+
+/// Eligibility snapshot evaluated in the transaction that admits an intent.
+/// A worker must treat a later resource change as a reconciliation boundary,
+/// not silently execute against a different resource version.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionFence {
+    pub schema: String,
+    pub resource_updated_at: String,
+    pub eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneEffectState {
+    Pending,
+    Leased,
+    Terminal,
+}
+
+/// Fenced, expiring ownership of an outbox effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectLease {
+    pub schema: String,
+    pub effect_id: EffectId,
+    pub owner: String,
+    pub fence: u64,
+    pub expires_at: String,
+}
+
+/// Immutable evidence collected by the effect executor before terminalization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectAudit {
+    pub schema: String,
+    pub observed_at: String,
+    pub evidence: Value,
+}
+
+/// Terminal record written atomically with the acknowledgement and audit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectTerminal {
+    pub schema: String,
+    pub completed_at: String,
+    pub acknowledgement: ControlPlaneActionAcknowledgement,
+    pub audit: ControlPlaneEffectAudit,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
