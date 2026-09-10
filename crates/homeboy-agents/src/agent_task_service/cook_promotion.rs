@@ -2049,22 +2049,10 @@ fn promotion_checkpoint_matches(promotion: &AgentTaskPromotionReport, checkpoint
         && checkpoint.pointer("/provenance/candidate") == promotion.provenance.get("candidate")
 }
 
-pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
-    agent_task_lifecycle::reconcile_status(run_id)
-        .map(|record| run_record_needs_execution(&record))
-        .unwrap_or(true)
-}
-
 pub(crate) fn attempt_needs_execution_with_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> bool {
-    if lifecycle_store
-        .matches_current_environment()
-        .unwrap_or(false)
-    {
-        return attempt_needs_execution(run_id);
-    }
     lifecycle_store
         .read_record(run_id)
         .map(|record| run_record_needs_execution(&record))
@@ -2083,30 +2071,10 @@ fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord)
     )
 }
 
-pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
-    agent_task_lifecycle::reconcile_status(run_id)
-        .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
-        && agent_task_lifecycle::read_aggregate(run_id).is_ok_and(|aggregate| {
-            !aggregate.outcomes.is_empty()
-                && aggregate.outcomes.iter().all(|outcome| {
-                    outcome
-                        .diagnostics
-                        .iter()
-                        .any(|diagnostic| diagnostic.class == "agent_task.provider_missing")
-                })
-        })
-}
-
 pub(crate) fn retryable_provider_discovery_failure_with_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> bool {
-    if lifecycle_store
-        .matches_current_environment()
-        .unwrap_or(false)
-    {
-        return retryable_provider_discovery_failure(run_id);
-    }
     lifecycle_store
         .read_record(run_id)
         .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)

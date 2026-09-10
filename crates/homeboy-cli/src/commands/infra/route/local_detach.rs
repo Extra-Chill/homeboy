@@ -78,6 +78,43 @@ const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SPAWN_ENV: &str =
 const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT_ENV: &str =
     "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT";
 
+/// A parent is persisted before session setup or stdin capture. Until a daemon
+/// owns the child, an interrupted launcher must terminalize that parent instead
+/// of leaving an unactionable pending handoff behind.
+struct DetachedCookAdmission {
+    store: agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: String,
+    pending: bool,
+}
+
+impl DetachedCookAdmission {
+    fn establish(cook_id: &str) -> homeboy::core::Result<Self> {
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)?;
+        Ok(Self {
+            store,
+            cook_id: cook_id.to_string(),
+            pending: true,
+        })
+    }
+
+    fn release(&mut self) {
+        self.pending = false;
+    }
+}
+
+impl Drop for DetachedCookAdmission {
+    fn drop(&mut self) {
+        if self.pending {
+            let _ = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                &self.store,
+                &self.cook_id,
+                "detached Cook launcher stopped before daemon ownership was published",
+            );
+        }
+    }
+}
+
 /// Serve the one local retry route that has an existing Cook owner. Generic
 /// retries, Lab retries, runner-side commands, and a retry that only reserves
 /// a successor retain their established routes.
@@ -695,6 +732,9 @@ pub(super) fn intercept_local_detached_cook(
     let cook_id = requested_cook_id
         .clone()
         .unwrap_or_else(|| format!("cook-detached-{}", uuid::Uuid::new_v4()));
+    // Establish the user-requested handle before any filesystem setup, prompt
+    // read, daemon connection, or output path can delay this launcher.
+    let mut admission = DetachedCookAdmission::establish(&cook_id)?;
     let mut child_args = detached_cook_child_args(
         normalized_args,
         &cook_id,
@@ -772,6 +812,9 @@ pub(super) fn intercept_local_detached_cook(
         );
         return Err(error);
     }
+    // The daemon now owns the child. Later client-side observation failures must
+    // not rewrite the authoritative handoff parent.
+    admission.release();
     if cli.detach_after_handoff {
         let handoff = await_durable_linked_handoff(
             &cook_id,
@@ -1022,11 +1065,33 @@ fn materialize_stdin_prompt(
     args: &mut [String],
     session_root: &Path,
 ) -> homeboy::core::Result<Option<PathBuf>> {
-    materialize_prompt_from(args, session_root, &mut std::io::stdin().lock())
+    let Some(index) = stdin_prompt_index(args) else {
+        return Ok(None);
+    };
+    let prompt =
+        homeboy::agents::agent_task_prompts::read_prompt_input_bounded("-", handoff_timeout())?;
+    if prompt.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "prompt",
+            "agent-task cook --prompt - received empty stdin",
+            None,
+            None,
+        ));
+    }
+    let path = session_root.join("prompt.txt");
+    std::fs::write(&path, prompt)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    args[index] = if args[index] == "-" {
+        format!("@{}", path.display())
+    } else {
+        format!("--prompt=@{}", path.display())
+    };
+    Ok(Some(path))
 }
 
 /// The reader is a parameter so the capture can be exercised without a test
 /// reaching for the harness's own stdin, which may never reach EOF.
+#[cfg(test)]
 fn materialize_prompt_from(
     args: &mut [String],
     session_root: &Path,
@@ -2315,6 +2380,27 @@ mod tests {
             .expect("finalize handoff");
 
         assert_eq!(std::fs::read_to_string(path).expect("read output"), stdout);
+    }
+
+    #[test]
+    fn interrupted_pre_supervisor_admission_is_terminal_and_discoverable() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-interrupted-before-stdin";
+            let admission = DetachedCookAdmission::establish(cook_id)
+                .expect("persist parent before any launcher input work");
+            drop(admission);
+
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("interrupted parent remains addressable");
+            assert_eq!(
+                parent.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["admission_state"],
+                "failed"
+            );
+        });
     }
 
     #[test]

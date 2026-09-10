@@ -5516,15 +5516,21 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         options.workspace.source_worktree_path = Some(target.clone());
         options.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
             serde_json::json!({ "kind": "explicit_cwd" });
+        let lifecycle_store = test_lifecycle_store();
         validate_cook_workspace(&options).expect("clean explicit CWD has a valid identity");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("clean explicit CWD is admitted before its first provider attempt");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("clean explicit CWD is admitted before its first provider attempt");
 
         std::fs::write(target.join("candidate.txt"), "provider change\n")
             .expect("write candidate change");
         validate_cook_workspace(&options)
             .expect("retry identity validation retains provider candidate changes");
         let error = admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
             &options,
             &options.identity.initial_run_id,
         )
@@ -5543,8 +5549,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
             &options.identity.initial_run_id,
         )
         .expect("index zero-execution attempt");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect_err("a retry after a zero-execution lifecycle failure must reject user drift");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect_err("a retry after a zero-execution lifecycle failure must reject user drift");
 
         std::fs::remove_file(target.join("candidate.txt")).expect("remove pre-provider drift");
         let evidence = target.join(".homeboy/evidence/input/context.txt");
@@ -5554,8 +5564,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         options.identity.initial_plan.tasks[0].executor.config = serde_json::json!({
             "evidence_inputs": [{ "path": evidence }]
         });
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("the durable projected evidence path is not user drift");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("the durable projected evidence path is not user drift");
 
         agent_task_lifecycle::record_metadata_value_in_store(
             &test_lifecycle_store(),
@@ -5566,8 +5580,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         .expect("record provider execution boundary");
         std::fs::write(target.join("candidate.txt"), "provider change\n")
             .expect("write provider candidate");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("candidate changes remain admissible after a durable provider execution");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("candidate changes remain admissible after a durable provider execution");
 
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
             record.metadata["provider_executions_consumed"] = serde_json::Value::Null;
@@ -5576,8 +5594,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
             }]);
         })
         .expect("persist a historical provider execution ledger without its counter");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("historical provider ledger keeps candidate changes admissible");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("historical provider ledger keeps candidate changes admissible");
     });
 }
 
@@ -7695,7 +7717,7 @@ fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
             .expect("mark active Cook");
         }
 
-        super::record_active_cook_worktree_warning(&options)
+        super::record_active_cook_worktree_warning(&test_lifecycle_store(), &options)
             .expect("active worktree warning must not block Cook");
 
         let current = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
@@ -13281,7 +13303,10 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
         let failed_recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
         assert_eq!(failed_recipe.attempts.len(), 2);
         let failed_run_id = failed_recipe.attempts[1].run_id.clone();
-        assert!(retryable_provider_discovery_failure(&failed_run_id));
+        assert!(retryable_provider_discovery_failure_with_store(
+            &test_lifecycle_store(),
+            &failed_run_id,
+        ));
         let continuation_plan = agent_task_lifecycle::load_plan(&failed_run_id)
             .expect("provider replay persists its baseline-bound continuation plan");
         let baseline_root = continuation_plan.tasks[0]

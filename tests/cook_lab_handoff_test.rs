@@ -426,9 +426,16 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         supervisor_job_id.to_string(),
         "the executable run and controller job are linked before acceptance"
     );
-    assert!(
-        lifecycle_store.read_record(cook_id).is_err(),
-        "local detach must not persist a zero-task handoff parent"
+    let handoff_parent = lifecycle_store
+        .read_record(cook_id)
+        .expect("the requested Cook identity remains discoverable after handoff");
+    assert_eq!(
+        handoff_parent.metadata["detached_cook_handoff"]["state"],
+        "redirected"
+    );
+    assert_eq!(
+        handoff_parent.metadata["detached_cook_handoff"]["attempt_run_id"],
+        attempt_id
     );
     let job_store = JobStore::open_without_reconciliation(context.daemon_dir().join("jobs.json"))
         .expect("open controller job store");
