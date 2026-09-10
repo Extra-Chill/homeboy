@@ -4617,6 +4617,42 @@ mod tests {
     }
 
     #[test]
+    fn provider_effect_reconcile_http_matches_the_canonical_service_response() {
+        crate::test_support::with_isolated_home(|_| {
+            let request = homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest {
+                schema: homeboy_extension_contract::api::v1::EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_REQUEST_SCHEMA.to_string(),
+                api_version: homeboy_extension_contract::api::v1::EXTENSION_API_V1,
+                effect_id: homeboy_control_plane_contract::EffectId("missing-effect".to_string()),
+                request_digest: "digest".to_string(),
+                recovery_fence: 1,
+                result: homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderResult {
+                    exit_code: 0,
+                    evidence: json!({"provider":"verified"}),
+                    error: None,
+                },
+                authoritative_evidence: json!({"provider_job":"verified-42"}),
+            };
+            let direct = crate::control_plane::reconcile_deployment_provider_effect(&request);
+            let response = route_with_body(
+                "POST",
+                "/v1/control-plane/provider-effects/reconcile",
+                Some(serde_json::to_value(&request).expect("request JSON")),
+                &JobStore::default(),
+            );
+
+            assert_eq!(response.status_code, 200);
+            assert_eq!(
+                response.body["endpoint"],
+                "control_plane.provider_effects.reconcile"
+            );
+            assert_eq!(
+                response.body["body"],
+                serde_json::to_value(direct).expect("response JSON")
+            );
+        });
+    }
+
+    #[test]
     fn control_plane_reference_registration_paths_are_write_scoped() {
         for path in [
             "/v1/control-plane/runs/run-1/artifacts",

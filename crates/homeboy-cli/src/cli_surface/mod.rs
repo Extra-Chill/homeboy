@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db,
-    deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project, refactor,
-    release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack,
-    status, topology, trace, tunnel, upgrade, worktree,
+    activity, agent_task, api, bench, cleanup, component, config, contract, control_plane, daemon,
+    db, deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project,
+    refactor, release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh,
+    stack, status, topology, trace, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -207,6 +207,9 @@ pub enum Commands {
     Config(config::ConfigArgs),
     /// Inspect, export, validate, and normalize Homeboy contract metadata
     Contract(contract::ContractArgs),
+    /// Reconcile authoritative control-plane provider effects
+    #[command(name = "control-plane")]
+    ControlPlane(control_plane::ControlPlaneArgs),
     /// Run the local-only HTTP API daemon
     Daemon(daemon::DaemonArgs),
     /// Execute CLI-compatible extensions
