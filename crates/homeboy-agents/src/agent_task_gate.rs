@@ -2390,12 +2390,14 @@ impl SelectedGateEnvironment {
     }
 
     fn finish_cargo_target(&mut self, elapsed: Duration) -> Result<()> {
-        let (Some(target), Some(evidence)) = (&self._cargo_target, &mut self.report.cargo_target)
+        let (Some(target), Some(evidence)) =
+            (&mut self._cargo_target, &mut self.report.cargo_target)
         else {
             return Ok(());
         };
         evidence.bytes_after = target.size_bytes().ok();
         evidence.elapsed_ms = Some(elapsed.as_millis());
+        target.publish()?;
         Ok(())
     }
 }

@@ -17,6 +17,8 @@ const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
+const CACHE_CURRENT: &str = ".homeboy-cache-current";
+const CACHE_STAGING_PREFIX: &str = ".homeboy-cache-staging-";
 const LEGACY_LIFECYCLE_INFERRED: &str = "legacy lifecycle metadata inferred";
 const CARGO_TARGET_LEASE_WAIT: Duration = Duration::from_secs(30);
 const CARGO_TARGET_LEASE_POLL: Duration = Duration::from_millis(25);
@@ -142,6 +144,18 @@ impl ManagedCargoTarget {
     pub fn size_bytes(&self) -> Result<u64> {
         path_size(&self.target_dir)
     }
+
+    /// Publish this completed run's cache projection. Build callers invoke this
+    /// explicitly so publication failures remain visible to the owning workflow.
+    pub fn publish(&mut self) -> Result<()> {
+        let Some(base_dir) = self.promote_to.take() else {
+            return Ok(());
+        };
+        let publication_owner = format!("warm-cache-publication:{}", self.owner);
+        with_base_store_publication_lock(&base_dir, &publication_owner, || {
+            publish_cargo_cache(&self.target_dir, &base_dir)
+        })
+    }
 }
 
 impl Drop for ManagedCargoTarget {
@@ -155,7 +169,7 @@ impl Drop for ManagedCargoTarget {
             // rather than exposing a concurrent seed to a partly copied store.
             let publication_owner = format!("warm-cache-publication:{}", self.owner);
             let _ = with_base_store_publication_lock(&base_dir, &publication_owner, || {
-                sync_cargo_cache(&self.target_dir, &base_dir, true);
+                publish_cargo_cache(&self.target_dir, &base_dir)
             });
         }
     }
@@ -356,7 +370,7 @@ fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<()>
             .map(|owner| format!("warm-cache-seed:{owner}"))
             .unwrap_or_else(|| "warm-cache-seed:unknown".to_string());
         with_base_store_publication_lock(base_dir, &seed_owner, || {
-            sync_cargo_cache(base_dir, private_dir, false);
+            copy_cargo_cache(&cache_projection(base_dir), private_dir, false)
         })?;
     }
     Ok(())
@@ -372,7 +386,14 @@ fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
 /// Homeboy's own store-lifecycle sidecars. These describe the store, not
 /// Cargo's output, and must never be seeded or promoted between stores.
 fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
-    name == LOCK_FILE || name == LEASE_FILE || name == OWNER_FILE || name == LAST_USED_FILE
+    name == LOCK_FILE
+        || name == LEASE_FILE
+        || name == OWNER_FILE
+        || name == LAST_USED_FILE
+        || name == CACHE_CURRENT
+        || name
+            .to_str()
+            .is_some_and(|name| name.starts_with(CACHE_STAGING_PREFIX))
 }
 
 /// Synchronize a Cargo cache projection without transferring Cargo's live lock.
@@ -380,24 +401,75 @@ fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
 /// complete projection and a promotion cannot race another promotion. Files are
 /// copied to a sibling temporary inode and renamed into place, so a cache file
 /// is never observed half-written even if a future reader misses that lock.
-fn sync_cargo_cache(from: &Path, to: &Path, replace_existing: bool) {
-    let Ok(entries) = fs::read_dir(from) else {
-        return;
-    };
-    for entry in entries.flatten() {
+fn cache_projection(base_dir: &Path) -> PathBuf {
+    let current = base_dir.join(CACHE_CURRENT);
+    if current.exists() {
+        current
+    } else {
+        base_dir.to_path_buf()
+    }
+}
+
+/// Materialize a complete cache projection before it becomes reachable by a
+/// reader. The base directory remains a lifecycle/lock container; its current
+/// cache is a separately published directory.
+fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
+    let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging = base_dir.join(format!(
+        "{CACHE_STAGING_PREFIX}{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir(&staging)
+        .map_err(|error| io_error(error, "create Cargo cache publication staging"))?;
+    let current = cache_projection(base_dir);
+    let result = (|| {
+        if current != base_dir {
+            copy_cargo_cache(&current, &staging, true)?;
+        } else {
+            copy_cargo_cache(base_dir, &staging, true)?;
+        }
+        copy_cargo_cache(from, &staging, true)?;
+        let published = base_dir.join(CACHE_CURRENT);
+        let previous = base_dir.join(format!("{CACHE_STAGING_PREFIX}previous-{sequence}"));
+        if published.exists() {
+            fs::rename(&published, &previous)
+                .map_err(|error| io_error(error, "stage previous Cargo cache publication"))?;
+        }
+        if let Err(error) = fs::rename(&staging, &published) {
+            if previous.exists() {
+                let _ = fs::rename(&previous, &published);
+            }
+            return Err(io_error(error, "publish complete Cargo cache projection"));
+        }
+        if previous.exists() {
+            fs::remove_dir_all(&previous)
+                .map_err(|error| io_error(error, "remove superseded Cargo cache projection"))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() && staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn copy_cargo_cache(from: &Path, to: &Path, replace_existing: bool) -> Result<()> {
+    for entry in
+        fs::read_dir(from).map_err(|error| io_error(error, "read Cargo cache projection"))?
+    {
+        let entry = entry.map_err(|error| io_error(error, "read Cargo cache entry"))?;
         let name = entry.file_name();
         if is_lifecycle_sidecar(&name) || is_cargo_coordination_state(&name) {
             continue;
         }
         let source = entry.path();
-        let Ok(metadata) = fs::symlink_metadata(&source) else {
-            continue;
-        };
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| io_error(error, "stat Cargo cache entry"))?;
         let dest = to.join(&name);
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            if fs::create_dir_all(&dest).is_ok() {
-                sync_cargo_cache(&source, &dest, replace_existing);
-            }
+            fs::create_dir_all(&dest)
+                .map_err(|error| io_error(error, "create Cargo cache directory"))?;
+            copy_cargo_cache(&source, &dest, replace_existing)?;
             continue;
         }
         if dest.exists() && !replace_existing {
@@ -407,10 +479,12 @@ fn sync_cargo_cache(from: &Path, to: &Path, replace_existing: bool) {
             "homeboy-publish-{}",
             ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        if fs::copy(&source, &temporary).is_ok() {
-            let _ = fs::rename(temporary, dest);
-        }
+        fs::copy(&source, &temporary)
+            .map_err(|error| io_error(error, "copy Cargo cache artifact"))?;
+        fs::rename(&temporary, &dest)
+            .map_err(|error| io_error(error, "install Cargo cache artifact"))?;
     }
+    Ok(())
 }
 
 fn is_cargo_coordination_state(name: &std::ffi::OsStr) -> bool {
@@ -423,7 +497,7 @@ fn is_cargo_coordination_state(name: &std::ffi::OsStr) -> bool {
 fn with_base_store_publication_lock<T>(
     base_dir: &Path,
     owner: &str,
-    operation: impl FnOnce() -> T,
+    operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     with_base_store_publication_lock_until(
         base_dir,
@@ -437,7 +511,7 @@ fn with_base_store_publication_lock_until<T>(
     base_dir: &Path,
     owner: &str,
     deadline: Instant,
-    operation: impl FnOnce() -> T,
+    operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let lock = OpenOptions::new()
         .create(true)
@@ -470,7 +544,7 @@ fn with_base_store_publication_lock_until<T>(
     FileExt::unlock(&lock).map_err(|error| io_error(error, "unlock Cargo cache publication"))?;
     let _ = fs::remove_file(base_dir.join(LEASE_FILE));
     let _ = write_last_used(base_dir, SystemTime::now());
-    Ok(result)
+    result
 }
 
 fn cargo_target_publication_wait_error(
@@ -1923,8 +1997,9 @@ mod tests {
             root.path(),
             &format!("runner-refresh:runner-a:{}", compatibility.identity()),
         );
-        assert!(base.join("runner-a-artifact").exists());
-        assert!(base.join("runner-b-artifact").exists());
+        let projection = cache_projection(&base);
+        assert!(projection.join("runner-a-artifact").exists());
+        assert!(projection.join("runner-b-artifact").exists());
     }
 
     #[test]
@@ -1952,21 +2027,22 @@ mod tests {
         drop(warm);
 
         let base = shared_store_dir(root.path(), &format!("gate:{}", compatibility.identity()));
-        let immutable = first_regular_file(&base.join("debug/deps"))
+        let projection = cache_projection(&base);
+        let immutable = first_regular_file(&projection.join("debug/deps"))
             .expect("warm build should promote a reusable Cargo artifact");
         let immutable_relative = immutable
-            .strip_prefix(&base)
+            .strip_prefix(&projection)
             .expect("warm artifact lives in the shared base")
             .to_path_buf();
         assert!(
-            base.join("debug/.fingerprint").is_dir(),
+            projection.join("debug/.fingerprint").is_dir(),
             "promotion retains Cargo's real fingerprint warmth"
         );
         for path in [
-            base.join("debug/.cargo-lock"),
-            base.join("debug/.fingerprint/state"),
-            base.join("debug/incremental/state"),
-            base.join(".rustc_info.json"),
+            projection.join("debug/.cargo-lock"),
+            projection.join("debug/.fingerprint/state"),
+            projection.join("debug/incremental/state"),
+            projection.join(".rustc_info.json"),
         ] {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, b"mutable").unwrap();
@@ -2007,14 +2083,22 @@ mod tests {
         assert!(targets.0.join("debug").is_dir());
         assert!(targets.1.join("debug").is_dir());
         for path in [
-            base.join("debug/.cargo-lock"),
-            base.join("debug/.fingerprint/state"),
-            base.join("debug/incremental/state"),
-            base.join(".rustc_info.json"),
+            projection.join("debug/.cargo-lock"),
+            projection.join(".rustc_info.json"),
+        ] {
+            assert!(
+                !path.exists(),
+                "mutable Cargo coordination state is never republished: {}",
+                path.display()
+            );
+        }
+        for path in [
+            projection.join("debug/.fingerprint/state"),
+            projection.join("debug/incremental/state"),
         ] {
             assert!(
                 path.exists(),
-                "base fixture state is retained: {}",
+                "Cargo warmth state is retained: {}",
                 path.display()
             );
         }
@@ -2148,7 +2232,7 @@ mod tests {
             &base,
             "warm-cache-seed:runner-refresh:99",
             Instant::now() + Duration::from_millis(10),
-            || (),
+            || Ok(()),
         )
         .unwrap_err();
 

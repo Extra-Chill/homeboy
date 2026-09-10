@@ -3110,7 +3110,7 @@ fn build_local_homeboy_binary(
             None,
         ));
     }
-    let target = homeboy_core::cleanup::acquire_managed_cargo_target(
+    let mut target = homeboy_core::cleanup::acquire_managed_cargo_target(
         &format!("runner-refresh:{}", source_path.display()),
         &source_path,
         None,
@@ -3131,6 +3131,7 @@ fn build_local_homeboy_binary(
             None,
         ));
     }
+    target.publish()?;
     Ok((target.target_dir().join("release/homeboy"), Some(target)))
 }
 
@@ -3300,7 +3301,7 @@ fn build_runner_source_snapshot(
 
 fn source_snapshot_build_script(snapshot: &PreparedRunnerSourceSnapshot) -> String {
     format!(
-        "set -eu\narchive={archive}\nexpected={expected}\nslot={slot}\ntrap 'rm -f -- \"$archive\"' EXIT\nhash() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\n[ \"$(hash \"$archive\")\" = \"$expected\" ] || {{ echo source_snapshot_hash_mismatch >&2; exit 1; }}\nif [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then binary_sha=$(hash \"$slot/homeboy\"); else rm -rf -- \"$slot\"; mkdir -p \"$slot/source\"; tar -xf \"$archive\" -C \"$slot/source\"; [ -f \"$slot/source/Cargo.toml\" ] || {{ echo source_snapshot_missing_manifest >&2; exit 1; }}; cargo build --release --bin homeboy --manifest-path \"$slot/source/Cargo.toml\" --target-dir \"$slot/target\"; install -m 0755 \"$slot/target/release/homeboy\" \"$slot/homeboy.tmp\"; mv -f \"$slot/homeboy.tmp\" \"$slot/homeboy\"; printf '%s' \"$expected\" > \"$slot/.source-sha256\"; binary_sha=$(hash \"$slot/homeboy\"); fi\n[ \"$(dd if=\"$slot/homeboy\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = 7f454c46 ] || {{ echo runner_native_build_not_elf >&2; exit 1; }}\nprintf 'HOMEBOY_DEV_SOURCE_SHA256=%s\\nHOMEBOY_DEV_BINARY_SHA256=%s\\nHOMEBOY_DEV_BINARY_PATH=%s\\n' \"$expected\" \"$binary_sha\" \"$slot/homeboy\"\n",
+        "set -eu\narchive={archive}\nexpected={expected}\nslot={slot}\ntrap 'rm -f -- \"$archive\"' EXIT\nhash() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\n[ \"$(hash \"$archive\")\" = \"$expected\" ] || {{ echo source_snapshot_hash_mismatch >&2; exit 1; }}\nif [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then binary_sha=$(hash \"$slot/homeboy\"); else attempt=\"$slot.attempt.$$.${{RANDOM:-0}}\"; next=\"$slot.next.$$.${{RANDOM:-0}}\"; trap 'rm -f -- \"$archive\" \"$next\"; rm -rf -- \"$attempt\"' EXIT; mkdir -p \"$attempt/source\"; tar -xf \"$archive\" -C \"$attempt/source\"; [ -f \"$attempt/source/Cargo.toml\" ] || {{ echo source_snapshot_missing_manifest >&2; exit 1; }}; cargo build --release --bin homeboy --manifest-path \"$attempt/source/Cargo.toml\" --target-dir \"$attempt/target\"; install -m 0755 \"$attempt/target/release/homeboy\" \"$attempt/homeboy\"; printf '%s' \"$expected\" > \"$attempt/.source-sha256\"; if [ -e \"$slot\" ] && [ ! -L \"$slot\" ]; then if [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then rm -rf -- \"$attempt\"; else echo source_snapshot_slot_invalid >&2; exit 1; fi; else ln -s \"$attempt\" \"$next\"; mv -f \"$next\" \"$slot\"; fi; binary_sha=$(hash \"$slot/homeboy\"); fi\n[ \"$(dd if=\"$slot/homeboy\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = 7f454c46 ] || {{ echo runner_native_build_not_elf >&2; exit 1; }}\nprintf 'HOMEBOY_DEV_SOURCE_SHA256=%s\\nHOMEBOY_DEV_BINARY_SHA256=%s\\nHOMEBOY_DEV_BINARY_PATH=%s\\n' \"$expected\" \"$binary_sha\" \"$slot/homeboy\"\n",
         archive = quote_path(&snapshot.remote_archive),
         expected = quote_path(&snapshot.sha256),
         slot = quote_path(&snapshot.build_slot),
