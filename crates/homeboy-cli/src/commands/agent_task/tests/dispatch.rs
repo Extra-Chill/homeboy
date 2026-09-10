@@ -2616,7 +2616,7 @@ fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
         "--limit",
         "20",
         "--cursor",
-        "20",
+        "opaque-page-cursor",
     ])
     .expect("active continuation parses");
     let Commands::AgentTask(agent_task) = cli.command else {
@@ -2626,7 +2626,7 @@ fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
         panic!("expected active command");
     };
     assert_eq!(args.limit, Some(20));
-    assert_eq!(args.cursor, Some(20));
+    assert_eq!(args.cursor.as_deref(), Some("opaque-page-cursor"));
     assert!(!args.reconcile);
 
     assert!(Cli::try_parse_from(["homeboy", "agent-task", "active", "--limit", "0"]).is_err());
@@ -2652,6 +2652,202 @@ fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
     assert!(
         Cli::try_parse_from(["homeboy", "agent-task", "active", "--reconcile", "--full",]).is_err()
     );
+}
+
+fn run_discovery_page(args: Vec<String>) -> Value {
+    let cli = Cli::try_parse_from(args).expect("discovery command parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let (output, exit_code) = super::super::run(agent_task).expect("discovery command succeeds");
+    assert_eq!(exit_code, 0);
+    output
+}
+
+#[test]
+fn list_and_active_default_to_the_compact_page_limit() {
+    with_isolated_home(|_| {
+        let list = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+        ]);
+        assert_eq!(list["limit"], 20);
+
+        let active = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "active".to_string(),
+        ]);
+        assert_eq!(active["limit"], 20);
+    });
+}
+
+fn persist_discovery_record(run_id: &str, branch: &str, state: AgentTaskRunState) {
+    agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist discovery run");
+    agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+        record.submitted_at = "2026-09-10T00:00:00Z".to_string();
+        record.updated_at = Some("2026-09-10T00:00:00Z".to_string());
+        record.state = state;
+        record.metadata["branch"] = json!(branch);
+    })
+    .expect("set discovery fixture keyset and branch");
+}
+
+#[test]
+fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
+    with_isolated_home(|_| {
+        for run_id in ["tie-a", "tie-b", "tie-c", "tie-d"] {
+            persist_discovery_record(run_id, "fix/ties", AgentTaskRunState::Queued);
+        }
+
+        let first = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--branch".to_string(),
+            "fix/ties".to_string(),
+            "--limit".to_string(),
+            "2".to_string(),
+        ]);
+        assert_eq!(first["limit"], 2);
+        assert_eq!(first["physical_count"], 2);
+        assert_eq!(
+            first["runs"]
+                .as_array()
+                .expect("first page runs")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["tie-d", "tie-c"]
+        );
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("tied page continuation")
+            .to_string();
+
+        // This tied insertion sorts before the emitted keyset boundary, so it
+        // belongs to a later fresh walk rather than displacing an in-progress one.
+        persist_discovery_record("tie-z", "fix/ties", AgentTaskRunState::Queued);
+        let lifecycle =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+        let connection = rusqlite::Connection::open(lifecycle.observation_db_path())
+            .expect("open lifecycle database");
+        connection
+            .execute(
+                "DELETE FROM control_plane_mission_runs WHERE run_id = ?1",
+                ["tie-c"],
+            )
+            .expect("delete any mission link for boundary");
+        connection
+            .execute("DELETE FROM runs WHERE id = ?1", ["tie-c"])
+            .expect("delete emitted boundary");
+
+        let second = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--branch".to_string(),
+            "fix/ties".to_string(),
+            "--limit".to_string(),
+            "2".to_string(),
+            "--cursor".to_string(),
+            cursor,
+        ]);
+        assert_eq!(
+            second["runs"]
+                .as_array()
+                .expect("second page runs")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["tie-b", "tie-a"]
+        );
+        assert_eq!(second["next_cursor"], Value::Null);
+        assert!(!second["truncated"].as_bool().expect("truncated flag"));
+    });
+}
+
+#[test]
+fn list_sparse_scope_requires_the_matching_opaque_continuation() {
+    with_isolated_home(|_| {
+        persist_discovery_record("sparse-a", "fix/sparse", AgentTaskRunState::Running);
+        persist_discovery_record("sparse-z", "fix/sparse", AgentTaskRunState::Queued);
+
+        let first = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/sparse".to_string(),
+            "--limit".to_string(),
+            "1".to_string(),
+        ]);
+        assert_eq!(first["count"], 0);
+        assert_eq!(first["physical_count"], 1);
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("sparse continuation")
+            .to_string();
+        let next_action = first["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("continuation action")
+            .iter()
+            .find_map(|action| action["command"].as_str())
+            .expect("next command");
+        assert!(next_action.contains("--state running --branch fix/sparse --limit 1 --cursor"));
+
+        let second = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/sparse".to_string(),
+            "--limit".to_string(),
+            "1".to_string(),
+            "--cursor".to_string(),
+            cursor.clone(),
+        ]);
+        assert_eq!(second["count"], 1);
+        assert_eq!(second["runs"][0]["run_id"], "sparse-a");
+
+        let changed_scope = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "list",
+            "--state",
+            "queued",
+            "--branch",
+            "fix/sparse",
+            "--cursor",
+            &cursor,
+        ])
+        .expect("scope-changing command parses");
+        let Commands::AgentTask(agent_task) = changed_scope.command else {
+            panic!("expected agent-task command");
+        };
+        let error = super::super::run(agent_task).expect_err("scope mismatch is rejected");
+        assert_eq!(error.details["field"], "cursor");
+
+        let malformed = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "list",
+            "--cursor",
+            "not-an-agent-task-cursor",
+        ])
+        .expect("malformed cursor reaches command validation");
+        let Commands::AgentTask(agent_task) = malformed.command else {
+            panic!("expected agent-task command");
+        };
+        let error = super::super::run(agent_task).expect_err("malformed cursor is rejected");
+        assert_eq!(error.details["field"], "cursor");
+    });
 }
 
 #[test]

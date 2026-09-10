@@ -1213,7 +1213,8 @@ pub(super) fn list_runs_page(
     filter: agent_task_service::AgentTaskDiscoveryFilter,
     args: ListArgs,
 ) -> CmdResult<Value> {
-    let limit = args.limit.unwrap_or(100);
+    let command = list_continuation_prefix(&args);
+    let limit = args.limit.unwrap_or(20);
     let report = agent_task_service_direct::discover_runs_page(
         filter,
         agent_task_service_direct::AgentTaskDiscoveryPageOptions {
@@ -1226,10 +1227,11 @@ pub(super) fn list_runs_page(
             state: args.state,
             placement: args.run_placement,
             parent_id: args.parent_id,
+            branch: args.branch,
         },
     )?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value, Some("homeboy agent-task list"));
+    attach_agent_task_discovery_actionable(&mut value, Some(&command));
     Ok((value, 0))
 }
 
@@ -1272,12 +1274,14 @@ pub(super) fn list_active(
 }
 
 pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
-    let limit = args.limit.unwrap_or(100);
+    let command = active_continuation_prefix(&args);
+    let limit = args.limit.unwrap_or(20);
     let report = agent_task_service_direct::discover_runs_page(
         agent_task_service::AgentTaskDiscoveryFilter::Active,
         agent_task_service_direct::AgentTaskDiscoveryPageOptions {
             limit,
             cursor: args.cursor,
+            branch: args.branch,
             ..Default::default()
         },
     )?;
@@ -1289,8 +1293,40 @@ pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
-    attach_agent_task_discovery_actionable(&mut value, Some("homeboy agent-task active"));
+    attach_agent_task_discovery_actionable(&mut value, Some(&command));
     Ok((value, 0))
+}
+
+fn list_continuation_prefix(args: &ListArgs) -> String {
+    let mut command = "homeboy agent-task list".to_string();
+    append_discovery_scope(
+        &mut command,
+        [
+            ("repo", args.repo.as_deref()),
+            ("worktree", args.worktree.as_deref()),
+            ("task-url", args.task_url.as_deref()),
+            ("submitted-after", args.submitted_after.as_deref()),
+            ("state", args.state.as_deref()),
+            ("run-placement", args.run_placement.as_deref()),
+            ("parent-id", args.parent_id.as_deref()),
+            ("branch", args.branch.as_deref()),
+        ],
+    );
+    command
+}
+
+fn active_continuation_prefix(args: &ActiveArgs) -> String {
+    let mut command = "homeboy agent-task active".to_string();
+    append_discovery_scope(&mut command, [("branch", args.branch.as_deref())]);
+    command
+}
+
+fn append_discovery_scope<const N: usize>(command: &mut String, fields: [(&str, Option<&str>); N]) {
+    for (flag, value) in fields {
+        if let Some(value) = value {
+            command.push_str(&format!(" --{flag} {}", quote_arg(value)));
+        }
+    }
 }
 
 /// `agent-task active --reconcile`: preview stale/suspect/unreconciled records
