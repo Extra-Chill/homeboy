@@ -77,6 +77,8 @@ const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SPAWN_ENV: &str =
     "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SPAWN";
 const TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT_ENV: &str =
     "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT";
+const TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH_ENV: &str =
+    "HOMEBOY_TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH";
 
 /// A parent is persisted before session setup or stdin capture. Until a daemon
 /// owns the child, an interrupted launcher must terminalize that parent instead
@@ -809,6 +811,7 @@ pub(super) fn intercept_local_detached_cook(
                 return Err(error);
             }
         };
+    pause_after_controller_start_for_test()?;
     if let Err(error) =
         agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
             &admission.store,
@@ -894,6 +897,24 @@ pub(super) fn intercept_local_detached_cook(
     // already accepted ownership, so losing this client cannot cancel provider work.
     let status = stream_attached_cook_log(&mut child, &log_path)?;
     Ok(Some(status.code().unwrap_or(1)))
+}
+
+/// Pause the real launcher at the only pre-projection boundary that has already
+/// started the daemon supervisor. The marker makes interruption coverage
+/// deterministic without changing the production handoff sequence.
+fn pause_after_controller_start_for_test() -> homeboy::core::Result<()> {
+    let Some(path) = std::env::var_os(TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH_ENV) else {
+        return Ok(());
+    };
+    std::fs::write(&path, b"controller_started").map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(PathBuf::from(path).display().to_string()),
+        )
+    })?;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn controller_job_daemon_build_mismatch(error: &Error) -> bool {
