@@ -1765,6 +1765,11 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 effect
             }
         };
+        if effect.recovery_required {
+            return Err(ControlPlaneError::unavailable(
+                "action effect requires authoritative recovery before redispatch",
+            ));
+        }
         if effect.state == ControlPlaneEffectState::Terminal {
             return effect
                 .terminal
@@ -1908,12 +1913,44 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     }
                 }
                 ControlPlaneAction::Reconcile => {
+                    let operation_intent = serde_json::to_value(request)
+                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+                    match crate::agent_task_lifecycle::claim_operation_with_intent_in_store(
+                        &self.lookup.store,
+                        &resolved,
+                        &operation_key,
+                        ACTION_LEASE,
+                        &operation_intent,
+                    ) {
+                        Ok(crate::agent_task_lifecycle::ClaimOutcome::Acquired) => {}
+                        Ok(crate::agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)) => {
+                            return Err(ControlPlaneError::unavailable(
+                                "reconciliation completed without its control-plane acknowledgement; recover the effect before redispatch",
+                            ));
+                        }
+                        Ok(crate::agent_task_lifecycle::ClaimOutcome::LeaseHeld) => {
+                            return Err(ControlPlaneError::unavailable(
+                                "reconciliation action is already leased; recover the effect before redispatch",
+                            ));
+                        }
+                        Err(error) => return Err(map_lifecycle_error(error)),
+                    }
                     match crate::agent_task_service::reconcile_run_in_store(
                         &self.lookup.store,
                         &resolved,
                         false,
                     ) {
                         Ok(report) => {
+                            let claim_result = serde_json::to_value(&report).map_err(|error| {
+                                ControlPlaneError::invalid_argument(error.to_string())
+                            })?;
+                            crate::agent_task_lifecycle::complete_cook_operation_in_store(
+                                &self.lookup.store,
+                                &resolved,
+                                &operation_key,
+                                claim_result,
+                            )
+                            .map_err(map_lifecycle_error)?;
                             let current = self
                                 .lookup
                                 .store

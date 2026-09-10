@@ -1,23 +1,28 @@
 //! Typed Extension API discovery and invocation for deployment providers.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::path::{Path, PathBuf};
 
 use homeboy_extension_contract::api::v1::{
     ExtensionApiCatalogEntryStatus, ExtensionApiCatalogRequest,
     ExtensionApiDeploymentProviderDescriptor, ExtensionApiDeploymentProviderDiagnostic,
-    ExtensionApiDeploymentProviderDiagnosticKind, ExtensionApiDeploymentProviderInventoryRequest,
-    ExtensionApiDeploymentProviderInventoryResponse, ExtensionApiDeploymentProviderInvokeRequest,
-    ExtensionApiDeploymentProviderInvokeResponse, ExtensionApiDeploymentProviderResolveRequest,
+    ExtensionApiDeploymentProviderDiagnosticKind, ExtensionApiDeploymentProviderEffectState,
+    ExtensionApiDeploymentProviderInventoryRequest,
+    ExtensionApiDeploymentProviderInventoryResponse, ExtensionApiDeploymentProviderResolveRequest,
     ExtensionApiDeploymentProviderResolveResponse, ExtensionApiDeploymentProviderResult,
+    ExtensionApiDeploymentProviderStatusRequest, ExtensionApiDeploymentProviderStatusResponse,
+    ExtensionApiDeploymentProviderSubmitRequest, ExtensionApiDeploymentProviderSubmitResponse,
     ExtensionApiDeploymentProviderValidation, ExtensionApiOperationFailure,
     DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_RESPONSE_SCHEMA,
-    EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA,
-    EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_RESPONSE_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_REQUEST_SCHEMA,
-    EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_RESPONSE_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA, EXTENSION_API_V1,
 };
 use homeboy_extension_contract::{DeploymentProviderManifest, ExtensionManifest};
 
@@ -42,6 +47,16 @@ pub struct DeploymentProviderApi {
 pub struct DeploymentProviderInvocationContext<'a> {
     pub component_path: &'a Path,
     pub input_path: &'a Path,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeploymentProviderEffectLedger {
+    request: ExtensionApiDeploymentProviderSubmitRequest,
+    state: ExtensionApiDeploymentProviderEffectState,
+    #[serde(default)]
+    result: Option<ExtensionApiDeploymentProviderResult>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 impl DeploymentProviderApi {
@@ -180,75 +195,121 @@ impl DeploymentProviderApi {
         }
     }
 
-    pub fn invoke_api(
+    pub fn submit_api(
         &self,
-        request: &ExtensionApiDeploymentProviderInvokeRequest,
+        request: &ExtensionApiDeploymentProviderSubmitRequest,
         context: DeploymentProviderInvocationContext<'_>,
-    ) -> ExtensionApiDeploymentProviderInvokeResponse {
+    ) -> ExtensionApiDeploymentProviderSubmitResponse {
         if let Some(failure) = validate_operation_request(
             &request.schema,
-            EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA,
+            EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA,
             request.api_version,
         ) {
-            return invoke_failure(failure);
+            return submit_failure(request, failure);
         }
         if let Some(failure) = self.failure.clone() {
-            return invoke_failure(failure);
+            return submit_failure(request, failure);
+        }
+        let (_lock, ledger_path) = match effect_ledger_lock(&request.effect_id.0) {
+            Ok(lock) => lock,
+            Err(error) => return submit_failure(request, internal_failure(error.to_string())),
+        };
+        match read_effect_ledger(&ledger_path) {
+            Ok(Some(ledger)) if ledger.request != *request => {
+                return submit_diagnostic(
+                    request,
+                    diagnostic(
+                        request,
+                        ExtensionApiDeploymentProviderDiagnosticKind::Conflict,
+                        "effect id was already submitted with a different immutable request",
+                    ),
+                )
+            }
+            Ok(Some(ledger)) => return submit_from_ledger(request, ledger),
+            Ok(None) => {}
+            Err(error) => return submit_failure(request, internal_failure(error.to_string())),
         }
         let candidate = match self.select(&request.extension_id, &request.provider_id) {
             Ok(candidate) => candidate,
-            Err(diagnostic) => return invoke_diagnostic(diagnostic),
+            Err(diagnostic) => return submit_diagnostic(request, diagnostic),
         };
         let Some(provider) = candidate.provider.as_ref() else {
-            return invoke_diagnostic(diagnostic(
+            return submit_diagnostic(
                 request,
-                ExtensionApiDeploymentProviderDiagnosticKind::Invalid,
-                "The installed deployment provider declaration is invalid.",
-            ));
+                diagnostic(
+                    request,
+                    ExtensionApiDeploymentProviderDiagnosticKind::Invalid,
+                    "The installed deployment provider declaration is invalid.",
+                ),
+            );
         };
         if request.dry_run && provider.dry_run_command.is_none() {
-            return invoke_diagnostic(diagnostic(
+            return submit_diagnostic(
                 request,
-                ExtensionApiDeploymentProviderDiagnosticKind::DryRunUnsupported,
-                &format!(
-                    "Provider '{}' does not declare a non-mutating dry-run command",
-                    request.provider_id
+                diagnostic(
+                    request,
+                    ExtensionApiDeploymentProviderDiagnosticKind::DryRunUnsupported,
+                    &format!(
+                        "Provider '{}' does not declare a non-mutating dry-run command",
+                        request.provider_id
+                    ),
                 ),
-            ));
+            );
         }
         let readiness = extension_ready_status(&candidate.extension);
         if readiness.ready != Some(true) {
-            return invoke_diagnostic(diagnostic(
+            return submit_diagnostic(
                 request,
-                ExtensionApiDeploymentProviderDiagnosticKind::NotReady,
-                readiness
-                    .detail
-                    .or(readiness.reason)
-                    .as_deref()
-                    .unwrap_or("The deployment extension is not ready."),
-            ));
+                diagnostic(
+                    request,
+                    ExtensionApiDeploymentProviderDiagnosticKind::NotReady,
+                    readiness
+                        .detail
+                        .or(readiness.reason)
+                        .as_deref()
+                        .unwrap_or("The deployment extension is not ready."),
+                ),
+            );
         }
         let Some(extension_path) = candidate.extension.extension_path.as_deref() else {
-            return invoke_diagnostic(diagnostic(
+            return submit_diagnostic(
                 request,
-                ExtensionApiDeploymentProviderDiagnosticKind::Invalid,
-                "The deployment extension has no installation path.",
-            ));
+                diagnostic(
+                    request,
+                    ExtensionApiDeploymentProviderDiagnosticKind::Invalid,
+                    "The deployment extension has no installation path.",
+                ),
+            );
         };
         let Some(input_path) = context.input_path.to_str() else {
-            return invoke_diagnostic(diagnostic(
+            return submit_diagnostic(
                 request,
-                ExtensionApiDeploymentProviderDiagnosticKind::InvalidInput,
-                "Deployment provider input path is not valid UTF-8.",
-            ));
+                diagnostic(
+                    request,
+                    ExtensionApiDeploymentProviderDiagnosticKind::InvalidInput,
+                    "Deployment provider input path is not valid UTF-8.",
+                ),
+            );
         };
         let Some(component_path) = context.component_path.to_str() else {
-            return invoke_diagnostic(diagnostic(
+            return submit_diagnostic(
                 request,
-                ExtensionApiDeploymentProviderDiagnosticKind::InvalidInput,
-                "Deployment component path is not valid UTF-8.",
-            ));
+                diagnostic(
+                    request,
+                    ExtensionApiDeploymentProviderDiagnosticKind::InvalidInput,
+                    "Deployment component path is not valid UTF-8.",
+                ),
+            );
         };
+        let mut ledger = DeploymentProviderEffectLedger {
+            request: request.clone(),
+            state: ExtensionApiDeploymentProviderEffectState::Running,
+            result: None,
+            message: None,
+        };
+        if let Err(error) = write_effect_ledger(&ledger_path, &ledger) {
+            return submit_failure(request, internal_failure(error.to_string()));
+        }
 
         let command = if request.dry_run {
             provider
@@ -280,32 +341,76 @@ impl DeploymentProviderApi {
         ) {
             Ok(execution) => execution,
             Err(error) => {
-                return invoke_diagnostic(diagnostic(
+                return submit_diagnostic(
                     request,
-                    ExtensionApiDeploymentProviderDiagnosticKind::ExecutionFailed,
-                    &error.to_string(),
-                ));
+                    diagnostic(
+                        request,
+                        ExtensionApiDeploymentProviderDiagnosticKind::ExecutionFailed,
+                        &error.to_string(),
+                    ),
+                );
             }
         };
         let evidence =
             provider_evidence(&execution.output.stdout, &execution.output.stderr, provider);
 
-        ExtensionApiDeploymentProviderInvokeResponse {
-            schema: EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_RESPONSE_SCHEMA.to_string(),
-            api_version: EXTENSION_API_V1,
-            result: Some(ExtensionApiDeploymentProviderResult {
-                exit_code: execution.exit_code,
-                evidence,
-                error: (execution.exit_code != 0).then(|| {
-                    if provider.layered_input.is_some() {
-                        "Deployment provider failed".to_string()
-                    } else {
-                        format!("{}{}", execution.output.stdout, execution.output.stderr)
-                    }
-                }),
+        ledger.result = Some(ExtensionApiDeploymentProviderResult {
+            exit_code: execution.exit_code,
+            evidence,
+            error: (execution.exit_code != 0).then(|| {
+                if provider.layered_input.is_some() {
+                    "Deployment provider failed".to_string()
+                } else {
+                    format!("{}{}", execution.output.stdout, execution.output.stderr)
+                }
             }),
-            diagnostic: None,
-            failure: None,
+        });
+        ledger.state = if execution.exit_code == 0 {
+            ExtensionApiDeploymentProviderEffectState::Succeeded
+        } else {
+            ExtensionApiDeploymentProviderEffectState::Failed
+        };
+        if let Err(error) = write_effect_ledger(&ledger_path, &ledger) {
+            return submit_failure(request, internal_failure(error.to_string()));
+        }
+        submit_from_ledger(request, ledger)
+    }
+
+    pub fn status_api(
+        &self,
+        request: &ExtensionApiDeploymentProviderStatusRequest,
+    ) -> ExtensionApiDeploymentProviderStatusResponse {
+        if let Some(failure) = validate_operation_request(
+            &request.schema,
+            EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA,
+            request.api_version,
+        ) {
+            return status_failure(request, failure);
+        }
+        let path = match effect_ledger_path(&request.effect_id.0) {
+            Ok(path) => path,
+            Err(error) => return status_failure(request, internal_failure(error.to_string())),
+        };
+        match read_effect_ledger(&path) {
+            Ok(Some(ledger)) => ExtensionApiDeploymentProviderStatusResponse {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                effect_id: request.effect_id.clone(),
+                state: ledger.state,
+                result: ledger.result,
+                message: ledger.message,
+                failure: None,
+            },
+            Ok(None) => ExtensionApiDeploymentProviderStatusResponse {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                effect_id: request.effect_id.clone(),
+                state: ExtensionApiDeploymentProviderEffectState::NotStarted,
+                result: None,
+                message: None,
+                failure: None,
+            },
+            Err(error) => status_failure(request, internal_failure(error.to_string())),
         }
     }
 
@@ -425,7 +530,7 @@ fn provider_evidence(
 }
 
 fn diagnostic(
-    request: &ExtensionApiDeploymentProviderInvokeRequest,
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
     kind: ExtensionApiDeploymentProviderDiagnosticKind,
     message: &str,
 ) -> ExtensionApiDeploymentProviderDiagnostic {
@@ -470,28 +575,119 @@ fn resolve_diagnostic(
     }
 }
 
-fn invoke_failure(
+fn submit_failure(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
     failure: ExtensionApiOperationFailure,
-) -> ExtensionApiDeploymentProviderInvokeResponse {
-    ExtensionApiDeploymentProviderInvokeResponse {
-        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_RESPONSE_SCHEMA.to_string(),
+) -> ExtensionApiDeploymentProviderSubmitResponse {
+    ExtensionApiDeploymentProviderSubmitResponse {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA.to_string(),
         api_version: EXTENSION_API_V1,
+        effect_id: request.effect_id.clone(),
+        state: ExtensionApiDeploymentProviderEffectState::Unknown,
         result: None,
         diagnostic: None,
         failure: Some(failure),
     }
 }
 
-fn invoke_diagnostic(
+fn submit_diagnostic(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
     diagnostic: ExtensionApiDeploymentProviderDiagnostic,
-) -> ExtensionApiDeploymentProviderInvokeResponse {
-    ExtensionApiDeploymentProviderInvokeResponse {
-        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_RESPONSE_SCHEMA.to_string(),
+) -> ExtensionApiDeploymentProviderSubmitResponse {
+    ExtensionApiDeploymentProviderSubmitResponse {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA.to_string(),
         api_version: EXTENSION_API_V1,
+        effect_id: request.effect_id.clone(),
+        state: ExtensionApiDeploymentProviderEffectState::Unknown,
         result: None,
         diagnostic: Some(diagnostic),
         failure: None,
     }
+}
+
+fn submit_from_ledger(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
+    ledger: DeploymentProviderEffectLedger,
+) -> ExtensionApiDeploymentProviderSubmitResponse {
+    ExtensionApiDeploymentProviderSubmitResponse {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        effect_id: request.effect_id.clone(),
+        state: ledger.state,
+        result: ledger.result,
+        diagnostic: None,
+        failure: None,
+    }
+}
+
+fn status_failure(
+    request: &ExtensionApiDeploymentProviderStatusRequest,
+    failure: ExtensionApiOperationFailure,
+) -> ExtensionApiDeploymentProviderStatusResponse {
+    ExtensionApiDeploymentProviderStatusResponse {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        effect_id: request.effect_id.clone(),
+        state: ExtensionApiDeploymentProviderEffectState::Unknown,
+        result: None,
+        message: None,
+        failure: Some(failure),
+    }
+}
+
+fn internal_failure(message: String) -> ExtensionApiOperationFailure {
+    ExtensionApiOperationFailure {
+        code: homeboy_extension_contract::api::v1::ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
+        message,
+    }
+}
+
+fn effect_ledger_path(effect_id: &str) -> crate::error::Result<PathBuf> {
+    Ok(crate::paths::PathRoots::from_environment()?
+        .data()
+        .join("deployment-provider-effects")
+        .join(format!(
+            "{}.json",
+            homeboy_engine_primitives::content_hash::sha256_hex(effect_id.as_bytes())
+        )))
+}
+
+fn effect_ledger_lock(effect_id: &str) -> crate::error::Result<(File, PathBuf)> {
+    let path = effect_ledger_path(effect_id)?;
+    fs::create_dir_all(path.parent().expect("effect ledger parent"))?;
+    let lock_path = path.with_extension("lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    crate::config::lock_exclusive_bounded(&lock, &lock_path, "lock deployment provider effect")?;
+    Ok((lock, path))
+}
+
+fn read_effect_ledger(path: &Path) -> crate::error::Result<Option<DeploymentProviderEffectLedger>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    serde_json::from_slice(&fs::read(path)?)
+        .map(Some)
+        .map_err(|error| {
+            crate::Error::internal_json(error.to_string(), Some(path.display().to_string()))
+        })
+}
+
+fn write_effect_ledger(
+    path: &Path,
+    ledger: &DeploymentProviderEffectLedger,
+) -> crate::error::Result<()> {
+    let temporary = path.with_extension("tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(ledger)
+            .map_err(|error| crate::Error::internal_json(error.to_string(), None))?,
+    )?;
+    fs::rename(temporary, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -539,20 +735,23 @@ mod tests {
         })
     }
 
-    fn invoke(
+    fn submit(
         api: &DeploymentProviderApi,
         extension_id: &str,
         provider_id: &str,
         input_path: &std::path::Path,
         component_path: &std::path::Path,
         dry_run: bool,
-    ) -> ExtensionApiDeploymentProviderInvokeResponse {
-        api.invoke_api(
-            &ExtensionApiDeploymentProviderInvokeRequest {
-                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA.to_string(),
+    ) -> ExtensionApiDeploymentProviderSubmitResponse {
+        api.submit_api(
+            &ExtensionApiDeploymentProviderSubmitRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA.to_string(),
                 api_version: EXTENSION_API_V1,
                 extension_id: extension_id.to_string(),
                 provider_id: provider_id.to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "test:{extension_id}:{provider_id}:{dry_run}"
+                )),
                 project_id: "site".to_string(),
                 component_id: "fixture".to_string(),
                 dry_run,
@@ -618,11 +817,11 @@ mod tests {
                 .expect("deployment capability");
             assert_eq!(
                 capability.input_schema.as_ref().expect("input").schema,
-                EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA
+                EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA
             );
             assert_eq!(
                 capability.output_schema.as_ref().expect("output").schema,
-                EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_RESPONSE_SCHEMA
+                EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA
             );
         });
     }
@@ -651,7 +850,7 @@ mod tests {
             let input = tempfile::NamedTempFile::new().expect("input");
             let component = tempfile::tempdir().expect("component");
 
-            let response = invoke(
+            let response = submit(
                 &api,
                 "fixture-provider",
                 "fixture.deploy",
@@ -723,7 +922,7 @@ mod tests {
             .expect("payload");
             let component = tempfile::tempdir().expect("component");
 
-            let response = invoke(
+            let response = submit(
                 &api,
                 "fixture-provider",
                 "fixture.deploy",
@@ -736,6 +935,134 @@ mod tests {
             assert!(!serde_json::to_string(&result)
                 .unwrap()
                 .contains("private-target"));
+        });
+    }
+
+    #[test]
+    fn effect_submission_is_idempotent_conflict_safe_and_status_authoritative() {
+        homeboy_core::test_support::with_isolated_home(|context| {
+            let counter = context.path().join("provider-calls");
+            write_extension(
+                "fixture-provider",
+                serde_json::json!([{
+                    "id": "fixture.deploy",
+                    "command": format!("sh {{{{extension_path}}}}/run.sh {}", counter.display())
+                }]),
+                "#!/bin/sh\nprintf 'call\\n' >> \"$1\"\nprintf '{\"schema\":\"fixture/result/v1\"}'\n",
+            );
+            let api = std::sync::Arc::new(discover());
+            let input = tempfile::NamedTempFile::new().expect("input");
+            let component = tempfile::tempdir().expect("component");
+            let request = ExtensionApiDeploymentProviderSubmitRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: "fixture-provider".to_string(),
+                provider_id: "fixture.deploy".to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "test:concurrent-submit".to_string(),
+                ),
+                project_id: "site".to_string(),
+                component_id: "fixture".to_string(),
+                dry_run: false,
+            };
+            std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    api.submit_api(
+                        &request,
+                        DeploymentProviderInvocationContext {
+                            component_path: component.path(),
+                            input_path: input.path(),
+                        },
+                    )
+                });
+                let second = scope.spawn(|| {
+                    api.submit_api(
+                        &request,
+                        DeploymentProviderInvocationContext {
+                            component_path: component.path(),
+                            input_path: input.path(),
+                        },
+                    )
+                });
+                assert_eq!(
+                    first.join().expect("first submit").state,
+                    ExtensionApiDeploymentProviderEffectState::Succeeded
+                );
+                assert_eq!(
+                    second.join().expect("second submit").state,
+                    ExtensionApiDeploymentProviderEffectState::Succeeded
+                );
+            });
+            assert_eq!(
+                fs::read_to_string(&counter)
+                    .expect("external calls")
+                    .lines()
+                    .count(),
+                1
+            );
+
+            let status = api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                effect_id: request.effect_id.clone(),
+            });
+            assert_eq!(
+                status.state,
+                ExtensionApiDeploymentProviderEffectState::Succeeded
+            );
+            assert_eq!(status.result.expect("durable result").exit_code, 0);
+
+            let mut mismatch = request.clone();
+            mismatch.component_id = "other".to_string();
+            assert_eq!(
+                api.submit_api(
+                    &mismatch,
+                    DeploymentProviderInvocationContext {
+                        component_path: component.path(),
+                        input_path: input.path()
+                    }
+                )
+                .diagnostic
+                .expect("conflict")
+                .kind,
+                ExtensionApiDeploymentProviderDiagnosticKind::Conflict
+            );
+
+            let unknown = homeboy_control_plane_contract::EffectId("test:unknown".to_string());
+            let path = effect_ledger_path(&unknown.0).expect("ledger path");
+            fs::create_dir_all(path.parent().expect("ledger parent")).expect("ledger directory");
+            fs::write(&path, b"not JSON").expect("corrupt ledger");
+            assert_eq!(
+                api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
+                    schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
+                    api_version: EXTENSION_API_V1,
+                    effect_id: unknown
+                })
+                .state,
+                ExtensionApiDeploymentProviderEffectState::Unknown
+            );
+
+            write_extension(
+                "failed-provider",
+                serde_json::json!([{ "id": "fixture.deploy", "command": "false" }]),
+                "",
+            );
+            let failed = discover().submit_api(
+                &ExtensionApiDeploymentProviderSubmitRequest {
+                    extension_id: "failed-provider".to_string(),
+                    effect_id: homeboy_control_plane_contract::EffectId("test:failed".to_string()),
+                    ..request
+                },
+                DeploymentProviderInvocationContext {
+                    component_path: component.path(),
+                    input_path: input.path(),
+                },
+            );
+            assert_eq!(
+                failed.state,
+                ExtensionApiDeploymentProviderEffectState::Failed
+            );
+            assert_eq!(failed.result.expect("failed result").exit_code, 1);
         });
     }
 }

@@ -1,16 +1,19 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use homeboy_control_plane_contract::EffectId;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
 use homeboy_extension_contract::api::v1::{
     ExtensionApiDeploymentProviderDiagnostic, ExtensionApiDeploymentProviderDiagnosticKind,
-    ExtensionApiDeploymentProviderInventoryRequest, ExtensionApiDeploymentProviderInvokeRequest,
-    ExtensionApiDeploymentProviderResolveRequest,
+    ExtensionApiDeploymentProviderEffectState, ExtensionApiDeploymentProviderInventoryRequest,
+    ExtensionApiDeploymentProviderResolveRequest, ExtensionApiDeploymentProviderStatusRequest,
+    ExtensionApiDeploymentProviderSubmitRequest,
     EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_REQUEST_SCHEMA,
-    EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA,
-    EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_REQUEST_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA, EXTENSION_API_V1,
 };
 
 use super::lifecycle::DeployObservation;
@@ -384,21 +387,56 @@ fn apply_component(
         PreparedProviderInput::Layered(payload) => (payload.path(), true),
         PreparedProviderInput::Repository(contract) => (contract.as_path(), false),
     };
-    let response = provider_api.invoke_api(
-        &ExtensionApiDeploymentProviderInvokeRequest {
-            schema: EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA.to_string(),
-            api_version: EXTENSION_API_V1,
-            extension_id: extension,
-            provider_id: provider,
+    let effect_id = EffectId(match observation.as_deref() {
+        Some(observation) => format!(
+            "deploy-provider:{}:{}:{}",
+            observation.run_id(),
             project_id,
-            component_id: component.id.clone(),
-            dry_run,
-        },
-        homeboy_core::extension::deployment_api::DeploymentProviderInvocationContext {
-            component_path: Path::new(&component.local_path),
-            input_path: input,
-        },
-    );
+            component.id
+        ),
+        None => format!(
+            "deploy-provider:manual:{}",
+            homeboy_engine_primitives::content_hash::sha256_hex(
+                format!("{project_id}:{extension}:{provider}:{}", component.id).as_bytes(),
+            )
+        ),
+    });
+    let status = provider_api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
+        schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        effect_id: effect_id.clone(),
+    });
+    if let Some(failure) = status.failure {
+        return Err(deployment_provider_operation_error(failure.message));
+    }
+    let response = if status.state == ExtensionApiDeploymentProviderEffectState::NotStarted {
+        provider_api.submit_api(
+            &ExtensionApiDeploymentProviderSubmitRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: extension,
+                provider_id: provider,
+                effect_id,
+                project_id,
+                component_id: component.id.clone(),
+                dry_run,
+            },
+            homeboy_core::extension::deployment_api::DeploymentProviderInvocationContext {
+                component_path: Path::new(&component.local_path),
+                input_path: input,
+            },
+        )
+    } else {
+        homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderSubmitResponse {
+            schema: homeboy_extension_contract::api::v1::EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            effect_id,
+            state: status.state,
+            result: status.result,
+            diagnostic: None,
+            failure: None,
+        }
+    };
     if let Some(failure) = response.failure {
         return Err(deployment_provider_operation_error(failure.message));
     }
@@ -406,7 +444,15 @@ fn apply_component(
         return Err(deployment_provider_diagnostic_error(diagnostic));
     }
     let run = response.result.ok_or_else(|| {
-        deployment_provider_operation_error("Deployment provider invocation returned no result")
+        deployment_provider_operation_error(match response.state {
+            ExtensionApiDeploymentProviderEffectState::Running => {
+                "Deployment provider effect is still running"
+            }
+            ExtensionApiDeploymentProviderEffectState::Unknown => {
+                "Deployment provider effect status is unknown; it will not be resubmitted"
+            }
+            _ => "Deployment provider submission returned no terminal result",
+        })
     })?;
     if !dry_run {
         if let Some(observation) = observation {

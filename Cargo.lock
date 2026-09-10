@@ -979,6 +979,7 @@ dependencies = [
  "chrono",
  "glob",
  "glob-match",
+ "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension-contract",

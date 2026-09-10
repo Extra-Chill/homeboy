@@ -407,6 +407,34 @@ const MIGRATIONS: &[Migration] = &[
             ON control_plane_resource_aliases(resource_type, resource_id);
         "#,
     },
+    Migration {
+        // Some pre-release databases recorded migration 23 before its resource
+        // projection tables were present. Reassert the idempotent DDL as a new
+        // migration so an already-recorded version cannot leave action routing
+        // without its canonical authority.
+        version: 24,
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS control_plane_resources (
+            resource_type TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            state TEXT NOT NULL,
+            eligibility_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(resource_type, resource_id)
+        );
+        CREATE TABLE IF NOT EXISTS control_plane_resource_aliases (
+            resource_type TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            PRIMARY KEY(resource_type, alias),
+            FOREIGN KEY(resource_type, resource_id)
+                REFERENCES control_plane_resources(resource_type, resource_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_plane_resource_aliases_target
+            ON control_plane_resource_aliases(resource_type, resource_id);
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

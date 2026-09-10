@@ -113,5 +113,11 @@ pub fn fail_next_record_write_for_test() {
     store::fail_next_record_write_for_test();
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn fail_next_cook_index_projection_write_for_test() {
+    store::fail_next_cook_index_projection_write_for_test();
+}
+
 #[cfg(test)]
 mod tests;

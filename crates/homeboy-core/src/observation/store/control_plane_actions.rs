@@ -52,12 +52,77 @@ pub enum ControlPlaneEffectAdmission {
 }
 
 impl ObservationStore {
+    /// Repair the pre-release migration state where an already-recorded schema
+    /// version omitted the resource authority tables. Normal initialization
+    /// creates them in migration 24; this guard makes an interrupted or skewed
+    /// historical database recover before it serves an action decision.
+    fn ensure_control_plane_resource_authority(&self) -> Result<()> {
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS control_plane_resources (resource_type TEXT NOT NULL, resource_id TEXT NOT NULL, version TEXT NOT NULL, state TEXT NOT NULL, eligibility_json TEXT NOT NULL DEFAULT '{}', provenance_json TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(resource_type, resource_id));
+             CREATE TABLE IF NOT EXISTS control_plane_resource_aliases (resource_type TEXT NOT NULL, alias TEXT NOT NULL, resource_id TEXT NOT NULL, PRIMARY KEY(resource_type, alias), FOREIGN KEY(resource_type, resource_id) REFERENCES control_plane_resources(resource_type, resource_id));
+             CREATE INDEX IF NOT EXISTS idx_control_plane_resource_aliases_target ON control_plane_resource_aliases(resource_type, resource_id);"
+        ).map_err(sqlite_error("ensure control-plane resource authority"))
+    }
+
+    /// Atomically replace a related set of resource projections. This is used
+    /// when an alias moves between resources: readers observe either the old
+    /// owner or the new owner, never a filesystem-derived intermediate state.
+    pub fn replace_control_plane_resource_projections(
+        &self,
+        projections: &[ControlPlaneResourceProjection],
+    ) -> Result<()> {
+        self.ensure_control_plane_resource_authority()?;
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error(
+                "begin control-plane resource projection replacement",
+            ))?;
+        let result = (|| {
+            for projection in projections {
+                self.connection.execute(
+                    "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
+                    params![projection.resource_type, projection.resource_id],
+                ).map_err(sqlite_error("clear replaced control-plane resource aliases"))?;
+            }
+            for projection in projections {
+                let eligibility = serde_json::to_string(&projection.eligibility)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?;
+                let provenance = serde_json::to_string(&projection.provenance)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?;
+                self.connection.execute(
+                    "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
+                    params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
+                ).map_err(sqlite_error("replace control-plane resource projection"))?;
+                for alias in &projection.aliases {
+                    self.connection.execute(
+                        "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
+                        params![projection.resource_type, alias, projection.resource_id],
+                    ).map_err(sqlite_error("claim replaced control-plane resource alias"))?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error(
+                    "commit control-plane resource projection replacement",
+                )),
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     /// Replace one resource's canonical projection and its complete alias set.
     /// Alias collisions fail rather than silently changing an action target.
     pub fn upsert_control_plane_resource_projection(
         &self,
         projection: &ControlPlaneResourceProjection,
     ) -> Result<()> {
+        self.ensure_control_plane_resource_authority()?;
         self.connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error("begin control-plane resource projection"))?;
@@ -99,6 +164,7 @@ impl ObservationStore {
         resource_type: &str,
         id_or_alias: &str,
     ) -> Result<Option<ControlPlaneResourceProjection>> {
+        self.ensure_control_plane_resource_authority()?;
         let row: Option<(String, String, String, String, String)> = self.connection.query_row(
             "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r LEFT JOIN control_plane_resource_aliases a ON a.resource_type = r.resource_type AND a.resource_id = r.resource_id WHERE r.resource_type = ?1 AND (r.resource_id = ?2 OR a.alias = ?2) LIMIT 1",
             params![resource_type, id_or_alias],
@@ -149,7 +215,7 @@ impl ObservationStore {
                 if existing.intent.request_digest != intent.request_digest {
                     return Err(Error::validation_invalid_argument(
                         "effect_id",
-                        "control-plane effect id was already used for different input",
+                        "effect id was already used with different action intent",
                         None,
                         None,
                     ));
@@ -195,7 +261,7 @@ impl ObservationStore {
                 if existing.intent.request_digest != intent.request_digest {
                     return Err(Error::validation_invalid_argument(
                         "idempotency_key",
-                        "control-plane action idempotency key was already used for different input",
+                        "idempotency key was already used with different action intent",
                         None,
                         None,
                     ));
@@ -429,7 +495,7 @@ impl ObservationStore {
         if stored_digest != request_digest {
             return Err(Error::validation_invalid_argument(
                 "idempotency_key",
-                "control-plane action idempotency key was already used for different input",
+                "idempotency key was already used with different action intent",
                 None,
                 None,
             ));
@@ -495,7 +561,7 @@ impl ObservationStore {
                 if stored_digest != request_digest {
                     return Err(Error::validation_invalid_argument(
                         "idempotency_key",
-                        "control-plane action idempotency key was already used for different input",
+                        "idempotency key was already used with different action intent",
                         None,
                         None,
                     ));
