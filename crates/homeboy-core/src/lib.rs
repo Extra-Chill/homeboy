@@ -62,12 +62,12 @@ pub mod artifact_inputs;
 pub mod artifact_links;
 pub mod artifact_manifest;
 pub mod artifact_metadata;
-pub mod artifact_origin;
+pub(crate) mod artifact_origin;
 pub mod artifact_postprocess;
-pub mod artifact_preview;
+pub(crate) mod artifact_preview;
 pub mod artifact_ref;
 pub mod broker_auth;
-pub mod browser_evidence;
+pub(crate) mod browser_evidence;
 pub mod build_identity;
 pub mod capacity;
 pub mod change_artifact;
@@ -88,15 +88,16 @@ pub mod controller_runtime;
 pub use homeboy_lifecycle_contract::cook_status;
 pub mod daemon;
 pub mod deps;
+pub mod duration;
 pub mod engine;
 pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
 // `crate::error::*` call sites keep working unchanged.
 pub use homeboy_error as error;
-pub mod build_artifact_path;
-pub mod component_build_provider;
-pub mod component_install_provider;
-pub mod component_script_provider;
+pub(crate) mod build_artifact_path;
+pub(crate) mod component_build_provider;
+pub(crate) mod component_install_provider;
+pub(crate) mod component_script_provider;
 pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
@@ -108,7 +109,6 @@ pub use homeboy_finding as finding;
 pub mod fleet;
 pub use homeboy_gate_contract::gate;
 pub mod control_plane;
-pub mod gate_feedback_baseline;
 pub mod git;
 pub mod harvest;
 pub mod host_mutation_lifecycle;
@@ -149,7 +149,7 @@ pub mod process;
 pub use homeboy_product_identity as product_identity;
 pub mod project;
 pub mod proof;
-pub mod publication_artifacts;
+pub(crate) mod publication_artifacts;
 pub mod quality;
 // redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
 // existing `crate::redaction::*` call sites keep working unchanged.
@@ -161,6 +161,7 @@ pub mod repository_integrity;
 pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;
 pub mod resource_policy_context;
+pub mod resource_topology;
 pub mod resources;
 pub mod rig_provider;
 pub mod rig_toolchain_provider;
@@ -192,7 +193,7 @@ pub mod server;
 pub mod setup;
 pub mod source_snapshot;
 pub mod stream_capture;
-pub mod structured_sidecar;
+pub(crate) mod structured_sidecar;
 pub mod tag_gap;
 pub mod trace_secrets;
 pub(crate) mod transient_workspace_policy;
@@ -205,12 +206,12 @@ pub(crate) mod transient_workspace_policy;
 #[doc(hidden)]
 pub mod test_support;
 pub mod update_check_cache;
+pub mod validation;
 pub mod validation_progress;
 pub mod workspace_claim;
 pub mod workspace_snapshot;
 pub mod worktree;
 pub mod worktree_provider;
-pub mod worktree_providers;
 
 // Internal path resolution helpers.
 // paths moved to the internal `homeboy-paths` crate. Re-exported so existing

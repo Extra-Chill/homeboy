@@ -192,30 +192,89 @@ pub(super) fn cleanup_with_store(
     options: WorktreeCleanupOptions,
     store: &Path,
 ) -> Result<WorktreeCleanupOutput> {
+    cleanup_with_store_page(
+        WorktreeCleanupPageOptions {
+            cleanup: options,
+            limit: usize::MAX,
+            cursor: None,
+            deadline: None,
+        },
+        store,
+    )
+}
+
+pub(super) fn cleanup_with_store_page(
+    page: WorktreeCleanupPageOptions,
+    store: &Path,
+) -> Result<WorktreeCleanupOutput> {
+    let options = page.cleanup.clone();
     let mut candidates = Vec::new();
     let mut removed = Vec::new();
     let mut skipped = Vec::new();
-    for record in list_with_store(store)?.worktrees {
+    let mut records = list_with_store(store)?
+        .worktrees
+        .into_iter()
+        .filter(|record| {
+            page.cursor
+                .as_ref()
+                .is_none_or(|cursor| record.id > *cursor)
+        });
+    let mut next_cursor = None;
+    let mut continuation = None;
+    // Only advance the cursor after a record has been fully inspected. If the
+    // deadline interrupts an inspection, resuming after that record would drop
+    // it from every subsequent page.
+    let mut last_id = None;
+    for record in records.by_ref().take(page.limit.max(1)) {
+        if page
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            next_cursor = last_id.clone().or_else(|| page.cursor.clone());
+            continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
+            break;
+        }
         if record.state != TaskWorktreeState::Active {
+            last_id = Some(record.id.clone());
             continue;
         }
         if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
+            last_id = Some(record.id.clone());
             continue;
         }
-        let safety = match safety_report(&record) {
+        let safety = match safety_report_until(&record, page.deadline) {
             Ok(safety) => safety,
             Err(error) => {
+                if deadline_exhausted(page.deadline) {
+                    next_cursor = last_id.clone().or_else(|| page.cursor.clone());
+                    continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
+                    break;
+                }
                 skipped.push(WorktreeCleanupSkipped {
-                    record,
+                    record: record.clone(),
                     safety: None,
                     reasons: vec![error.message],
                 });
+                last_id = Some(record.id.clone());
                 continue;
             }
         };
-        let branch_cleanup = branch_cleanup_report(&record)
-            .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
-        let skip_reasons = cleanup_skip_reasons(&safety, options.force);
+        let branch_cleanup = match branch_cleanup_report_until(&record, page.deadline) {
+            Ok(report) => report,
+            Err(_error) if deadline_exhausted(page.deadline) => {
+                next_cursor = last_id.clone().or_else(|| page.cursor.clone());
+                continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
+                break;
+            }
+            Err(error) => branch_cleanup_unknown(&record, error.message),
+        };
+        let live_owner_count = live_workspace_owner_count(&record, store)?;
+        if deadline_exhausted(page.deadline) {
+            next_cursor = last_id.clone().or_else(|| page.cursor.clone());
+            continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
+            break;
+        }
+        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force, live_owner_count);
         if !skip_reasons.is_empty() {
             skipped.push(WorktreeCleanupSkipped {
                 record,
@@ -232,7 +291,15 @@ pub(super) fn cleanup_with_store(
         });
 
         if !options.dry_run {
-            match remove_with_store(
+            if page
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                next_cursor = last_id.clone();
+                continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
+                break;
+            }
+            match remove_with_store_until(
                 WorktreeRemoveOptions {
                     id: record.id.clone(),
                     force: options.force,
@@ -240,15 +307,21 @@ pub(super) fn cleanup_with_store(
                     allow_unmerged_branch: options.allow_unmerged_branches,
                 },
                 store,
+                page.deadline,
             ) {
                 Ok(output) => removed.push(output),
                 Err(error) => skipped.push(WorktreeCleanupSkipped {
-                    record,
+                    record: record.clone(),
                     safety: Some(safety),
                     reasons: vec![error.message],
                 }),
             }
         }
+        last_id = Some(record.id.clone());
+    }
+    if next_cursor.is_none() && records.next().is_some() {
+        next_cursor = last_id;
+        continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
     }
     let branch_delete_candidates = candidates
         .iter()
@@ -286,11 +359,44 @@ pub(super) fn cleanup_with_store(
         candidates,
         removed,
         skipped,
+        next_cursor,
+        continuation,
     })
 }
 
-fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<String> {
+fn cleanup_continuation(page: &WorktreeCleanupPageOptions, cursor: Option<&str>) -> String {
+    let cursor = cursor
+        .map(|cursor| format!(" --cursor {}", shell_arg(cursor)))
+        .unwrap_or_default();
+    let apply = (!page.cleanup.dry_run)
+        .then_some(" --apply")
+        .unwrap_or_default();
+    format!(
+        "homeboy cleanup --include task-worktrees --limit {}{apply}{cursor}",
+        page.limit.max(1)
+    )
+}
+
+fn deadline_exhausted(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+}
+
+fn cleanup_skip_reasons(
+    record: &TaskWorktreeRecord,
+    safety: &WorktreeSafetyReport,
+    force: bool,
+    live_owner_count: usize,
+) -> Vec<String> {
     let mut reasons = Vec::new();
+    if let Some(owner) = record
+        .run_id
+        .as_deref()
+        .filter(|_| record.terminal_disposition.as_deref() != Some("succeeded"))
+    {
+        reasons.push(format!(
+            "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"
+        ));
+    }
     if safety.primary_checkout {
         reasons.push("refuses to remove primary checkout".to_string());
     }
@@ -299,6 +405,18 @@ fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<Strin
     }
     if safety.worktree_missing {
         reasons.push("missing active worktree requires `worktree inventory --apply` reconciliation authority".to_string());
+    }
+    if safety
+        .reasons
+        .iter()
+        .any(|reason| reason == LIVE_CWD_REASON)
+    {
+        reasons.push(LIVE_CWD_REASON.to_string());
+    }
+    if live_owner_count > 0 {
+        reasons.push(format!(
+            "refuses to remove workspace held by {live_owner_count} durable live owner(s)"
+        ));
     }
     if !force {
         if safety.dirty {
@@ -545,12 +663,12 @@ struct PendingHandoffFreshness {
 
 fn prepare_handoff_freshness(source: &Path, base_ref: &str) -> Result<PendingHandoffFreshness> {
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    git::run_git_with_env_timeout(
+    git::fetch_remote_tracking_refs_until(
         source,
         &["fetch", "origin"],
         "git fetch origin for worktree handoff",
         &[],
-        TIMEOUT,
+        std::time::Instant::now() + TIMEOUT,
     )?;
     let advertised = git::run_git_with_env_timeout(
         source,
@@ -818,7 +936,16 @@ fn remove_exact_stale_worktree_registration(source: &Path, worktree: &Path) -> R
 }
 
 fn git_common_dir(source: &Path) -> Result<PathBuf> {
-    let raw = git::run_git(source, &["rev-parse", "--git-common-dir"], "git common dir")?;
+    git_common_dir_until(source, None)
+}
+
+fn git_common_dir_until(source: &Path, deadline: Option<std::time::Instant>) -> Result<PathBuf> {
+    let raw = run_inventory_git_until(
+        source,
+        &["rev-parse", "--git-common-dir"],
+        "git common dir",
+        deadline,
+    )?;
     let path = PathBuf::from(raw.trim());
     let path = if path.is_absolute() {
         path
@@ -895,20 +1022,38 @@ fn create_evidence(
 
 pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     let mut worktrees = Vec::new();
+    let mut diagnostics = Vec::new();
     if !store_dir.exists() {
-        return Ok(WorktreeListOutput { worktrees });
+        return Ok(WorktreeListOutput {
+            worktrees,
+            diagnostics,
+        });
     }
-    for entry in fs::read_dir(store_dir)
+    let mut entries: Vec<_> = fs::read_dir(store_dir)
         .map_err(|err| Error::internal_io(err.to_string(), Some(store_dir.display().to_string())))?
-    {
-        let entry = entry.map_err(|err| Error::internal_io(err.to_string(), None))?;
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        worktrees.push(read_record_path(&entry.path())?);
+        match read_record_path(&entry.path()) {
+            Ok(record) => worktrees.push(record),
+            Err(error) => diagnostics.push(WorktreeListDiagnostic::from_error(
+                error,
+                None,
+                Some(entry.path().display().to_string()),
+            )),
+        }
     }
     worktrees.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(WorktreeListOutput { worktrees })
+    Ok(WorktreeListOutput {
+        worktrees,
+        diagnostics,
+    })
 }
 
 pub(super) fn inventory_with_store_and_authority(
@@ -917,7 +1062,18 @@ pub(super) fn inventory_with_store_and_authority(
     adopted_store_dir: &Path,
     authority: &dyn WorktreeReconciliationAuthority,
 ) -> Result<WorktreeInventoryOutput> {
+    const APPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
     let limit = options.limit.max(1);
+    let apply_refusal = options
+        .apply
+        .then(|| authority.bounded_inventory_apply_refusal())
+        .flatten();
+    let apply = options.apply && apply_refusal.is_none();
+    let apply_deadline = apply.then(|| {
+        options
+            .apply_deadline
+            .unwrap_or_else(|| std::time::Instant::now() + APPLY_TIMEOUT)
+    });
     let worktrees = list_with_store(store_dir)?.worktrees;
     let total = worktrees.len();
     let mut worktrees = worktrees.into_iter().filter(|record| {
@@ -927,35 +1083,83 @@ pub(super) fn inventory_with_store_and_authority(
             .is_none_or(|cursor| record.id.as_str() > cursor.as_str())
     });
     let records_page: Vec<_> = worktrees.by_ref().take(limit).collect();
-    let next_cursor = worktrees.next().map(|_| {
+    let mut next_cursor = worktrees.next().map(|_| {
         records_page
             .last()
             .expect("a page with a following record is non-empty")
             .id
             .clone()
     });
-    let truncated = next_cursor.is_some();
+    let mut truncated = next_cursor.is_some();
     let mut records = Vec::new();
+    let mut apply_continuation = None;
 
     for mut record in records_page {
+        if apply_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            let cursor = records
+                .last()
+                .map(|item: &WorktreeInventoryRecord| item.record.id.clone())
+                .or_else(|| options.cursor.clone());
+            apply_continuation = Some(inventory_apply_continuation(limit, cursor.as_deref()));
+            next_cursor = cursor;
+            truncated = true;
+            break;
+        }
         let mut path_exists = Path::new(&record.worktree_path).exists();
         let mut missing_active = if record.state == TaskWorktreeState::Active && !path_exists {
-            Some(missing_active_worktree(&record))
+            Some(missing_active_worktree(&record, apply_deadline))
         } else {
             None
         };
-        let reconciliation = if options.apply && missing_active.is_some() {
-            let authority_snapshot = authority.acquire(&record)?;
+        if apply_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            let cursor = records
+                .last()
+                .map(|item: &WorktreeInventoryRecord| item.record.id.clone())
+                .or_else(|| options.cursor.clone());
+            apply_continuation = Some(inventory_apply_continuation(limit, cursor.as_deref()));
+            next_cursor = cursor;
+            truncated = true;
+            break;
+        }
+        let reconciliation = if apply
+            && missing_active.as_ref().is_some_and(|missing| {
+                missing.reason == MissingActiveWorktreeReason::RequiresAuthoritativeLiveness
+            }) {
+            let deadline = apply_deadline.expect("apply has an authority deadline");
+            if std::time::Instant::now() >= deadline {
+                let cursor = records
+                    .last()
+                    .map(|item: &WorktreeInventoryRecord| item.record.id.clone())
+                    .or_else(|| options.cursor.clone());
+                apply_continuation = Some(inventory_apply_continuation(limit, cursor.as_deref()));
+                next_cursor = cursor;
+                truncated = true;
+                break;
+            }
+            let authority_snapshot = authority.acquire(&record, deadline)?;
+            if std::time::Instant::now() >= deadline {
+                if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
+                    let _ = authority.release(claim, deadline);
+                }
+                let cursor = records
+                    .last()
+                    .map(|item: &WorktreeInventoryRecord| item.record.id.clone())
+                    .or_else(|| options.cursor.clone());
+                apply_continuation = Some(inventory_apply_continuation(limit, cursor.as_deref()));
+                next_cursor = cursor;
+                truncated = true;
+                break;
+            }
             if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
                 let validation = claim
                     .verify_shape(chrono::Utc::now().timestamp_millis().max(0) as u64)
-                    .and_then(|_| authority.validate(&record, claim));
+                    .and_then(|_| authority.validate(&record, claim, deadline));
                 let valid = match validation {
                     Ok(valid) => valid,
                     Err(error) => {
                         // A validation transport failure still owns a fence.
                         // Release it before returning a typed, non-mutating refusal.
-                        let release = authority.release(claim);
+                        let release = authority.release(claim, deadline);
                         records.push(WorktreeInventoryRecord {
                             record,
                             path_exists,
@@ -966,12 +1170,19 @@ pub(super) fn inventory_with_store_and_authority(
                                 reason: Some(error.message),
                             }),
                         });
-                        release?;
+                        if release.is_err() && std::time::Instant::now() >= deadline {
+                            let cursor = records.last().map(|item| item.record.id.clone());
+                            apply_continuation =
+                                Some(inventory_apply_continuation(limit, cursor.as_deref()));
+                            next_cursor = cursor;
+                            truncated = true;
+                            break;
+                        }
                         continue;
                     }
                 };
                 if !valid {
-                    let release = authority.release(claim);
+                    let release = authority.release(claim, deadline);
                     records.push(WorktreeInventoryRecord {
                         record,
                         path_exists,
@@ -982,24 +1193,51 @@ pub(super) fn inventory_with_store_and_authority(
                             reason: Some("workspace owner rejected, expired, or does not support the reconciliation claim".to_string()),
                         }),
                     });
-                    release?;
+                    if release.is_err() && std::time::Instant::now() >= deadline {
+                        let cursor = records.last().map(|item| item.record.id.clone());
+                        apply_continuation =
+                            Some(inventory_apply_continuation(limit, cursor.as_deref()));
+                        next_cursor = cursor;
+                        truncated = true;
+                        break;
+                    }
                     continue;
                 }
+            }
+            if std::time::Instant::now() >= deadline {
+                if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
+                    let _ = authority.release(claim, deadline);
+                }
+                let cursor = records
+                    .last()
+                    .map(|item: &WorktreeInventoryRecord| item.record.id.clone())
+                    .or_else(|| options.cursor.clone());
+                apply_continuation = Some(inventory_apply_continuation(limit, cursor.as_deref()));
+                next_cursor = cursor;
+                truncated = true;
+                break;
             }
             let reconciliation = reconcile_missing_record_with_store(
                 store_dir,
                 &record,
                 &authority_snapshot,
                 authority,
+                deadline,
             );
-            if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
-                authority.release(claim)?;
-            }
+            let release = match &authority_snapshot {
+                WorktreeLivenessAuthority::Terminal { claim, .. } => {
+                    authority.release(claim, deadline)
+                }
+                _ => Ok(()),
+            };
+            // Reconciliation may have committed a state transition, so a
+            // failed release is never safe to hide from the caller.
             let (reread, reread_path_exists, result) = reconciliation?;
+            release?;
             record = reread;
             path_exists = reread_path_exists;
             missing_active = (record.state == TaskWorktreeState::Active && !path_exists)
-                .then(|| missing_active_worktree(&record));
+                .then(|| missing_active_worktree(&record, apply_deadline));
             Some(result)
         } else {
             None
@@ -1058,12 +1296,15 @@ pub(super) fn inventory_with_store_and_authority(
 
     Ok(WorktreeInventoryOutput {
         schema: "homeboy/worktree-inventory/v1",
-        authorization: if options.apply {
+        authorization: if apply {
             WorktreeInventoryAuthorization::ExplicitApply
+        } else if options.apply {
+            WorktreeInventoryAuthorization::ApplyRefused
         } else {
             WorktreeInventoryAuthorization::Preview
         },
-        apply_refusal: None,
+        apply_refusal,
+        apply_continuation,
         cursor: options.cursor,
         next_cursor,
         limit,
@@ -1082,18 +1323,28 @@ pub(super) fn inventory_with_store_and_authority(
     })
 }
 
-fn missing_active_worktree(record: &TaskWorktreeRecord) -> MissingActiveWorktree {
+fn inventory_apply_continuation(limit: usize, cursor: Option<&str>) -> String {
+    let cursor = cursor
+        .map(|cursor| format!(" --cursor {}", shell_arg(cursor)))
+        .unwrap_or_default();
+    format!("homeboy worktree inventory --apply --limit {limit}{cursor}")
+}
+
+fn missing_active_worktree(
+    record: &TaskWorktreeRecord,
+    deadline: Option<std::time::Instant>,
+) -> MissingActiveWorktree {
     if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
         return MissingActiveWorktree {
             reason: MissingActiveWorktreeReason::PreserveOnFailure,
-            local_evidence: local_inventory_evidence(record),
+            local_evidence: local_inventory_evidence(record, deadline),
             continuation: format!(
                 "Inspect preserved task worktree `{}` and explicitly remove it when terminal.",
                 record.id
             ),
         };
     }
-    let evidence = local_inventory_evidence(record);
+    let evidence = local_inventory_evidence(record, deadline);
     let reason = if !evidence.source_checkout_exists {
         MissingActiveWorktreeReason::SourceCheckoutUnavailable
     } else if evidence.source_dirty == Some(true) {
@@ -1123,8 +1374,9 @@ fn reconcile_missing_record_with_store(
     expected: &TaskWorktreeRecord,
     authority_snapshot: &WorktreeLivenessAuthority,
     authority: &dyn WorktreeReconciliationAuthority,
+    deadline: std::time::Instant,
 ) -> Result<(TaskWorktreeRecord, bool, WorktreeReconciliationResult)> {
-    with_task_worktree_registry_write_lock(|| {
+    with_task_worktree_registry_write_lock_until(deadline, || {
         // Re-read under the exclusive registry lease. Any concurrent publisher must
         // finish before this snapshot is evaluated and conditionally written.
         let mut record = read_record(store_dir, &expected.id)?;
@@ -1149,7 +1401,7 @@ fn reconcile_missing_record_with_store(
                 },
             ));
         }
-        let evidence = local_inventory_evidence(&record);
+        let evidence = local_inventory_evidence(&record, Some(deadline));
         let shared_active_owner = list_with_store(store_dir)?
             .worktrees
             .into_iter()
@@ -1194,6 +1446,7 @@ fn reconcile_missing_record_with_store(
             WorktreeLivenessAuthority::Terminal { claim, provenance } => {
                 let identity = record.effective_workspace_identity()?;
                 if claim.workspace != identity
+                    || std::time::Instant::now() >= deadline
                     || (authority.requires_terminal_workspace_authority_proof()
                         && !record
                             .terminal_workspace_authority
@@ -1206,7 +1459,7 @@ fn reconcile_missing_record_with_store(
                     return Ok((record, false, WorktreeReconciliationResult {
                         action: WorktreeReconciliationAction::Refused,
                         provenance: "leased manifest re-read".to_string(),
-                        reason: Some("workspace identity changed or the local reconciliation claim budget expired before commit".to_string()),
+                        reason: Some("workspace identity changed or the reconciliation authority budget expired before commit".to_string()),
                     }));
                 }
                 record.state = TaskWorktreeState::Removed;
@@ -1252,7 +1505,10 @@ fn reconcile_missing_record_with_store(
     })
 }
 
-fn local_inventory_evidence(record: &TaskWorktreeRecord) -> WorktreeInventoryLocalEvidence {
+fn local_inventory_evidence(
+    record: &TaskWorktreeRecord,
+    deadline: Option<std::time::Instant>,
+) -> WorktreeInventoryLocalEvidence {
     let source = Path::new(&record.source_checkout);
     if !source.is_dir() {
         return WorktreeInventoryLocalEvidence {
@@ -1262,9 +1518,9 @@ fn local_inventory_evidence(record: &TaskWorktreeRecord) -> WorktreeInventoryLoc
             unavailable_reason: Some("recorded source checkout is unavailable".to_string()),
         };
     }
-    let source_dirty = is_dirty(source).ok();
+    let source_dirty = is_dirty_until(source, deadline).ok();
     let unpushed_branch_commits =
-        unpushed_branch_commit_count(source, &record.branch, &record.base_ref).ok();
+        unpushed_branch_commit_count_until(source, &record.branch, &record.base_ref, deadline).ok();
     let unavailable_reason = match (&source_dirty, &unpushed_branch_commits) {
         (None, _) => Some("could not inspect source checkout dirtiness".to_string()),
         (_, None) => Some("could not inspect task branch push state".to_string()),
@@ -1278,8 +1534,13 @@ fn local_inventory_evidence(record: &TaskWorktreeRecord) -> WorktreeInventoryLoc
     }
 }
 
-fn unpushed_branch_commit_count(source: &Path, branch: &str, base_ref: &str) -> Result<u32> {
-    git::run_git(
+fn unpushed_branch_commit_count_until(
+    source: &Path,
+    branch: &str,
+    base_ref: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<u32> {
+    run_inventory_git_until(
         source,
         &[
             "show-ref",
@@ -1288,8 +1549,9 @@ fn unpushed_branch_commit_count(source: &Path, branch: &str, base_ref: &str) -> 
             &format!("refs/heads/{branch}"),
         ],
         "git show-ref task branch",
+        deadline,
     )?;
-    let upstream = git::run_git(
+    let upstream = run_inventory_git_until(
         source,
         &[
             "rev-parse",
@@ -1297,19 +1559,42 @@ fn unpushed_branch_commit_count(source: &Path, branch: &str, base_ref: &str) -> 
             &format!("{branch}@{{upstream}}"),
         ],
         "git task branch upstream",
+        deadline,
     );
     let range = match upstream {
         Ok(upstream) if !upstream.trim().is_empty() => format!("{}..{branch}", upstream.trim()),
         _ => format!("{base_ref}..{branch}"),
     };
-    let count = git::run_git(
+    let count = run_inventory_git_until(
         source,
         &["rev-list", "--count", &range],
         "git task branch rev-list",
+        deadline,
     )?;
     count.trim().parse::<u32>().map_err(|error| {
         Error::internal_unexpected(format!("invalid task branch commit count: {error}"))
     })
+}
+
+fn run_inventory_git_until(
+    source: &Path,
+    args: &[&str],
+    context: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<String> {
+    match deadline {
+        Some(deadline) => {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .ok_or_else(|| {
+                    Error::internal_unexpected(
+                        "worktree inventory apply deadline exhausted during local git preflight",
+                    )
+                })?;
+            git::run_git_with_env_timeout(source, args, context, &[], remaining)
+        }
+        None => git::run_git(source, args, context),
+    }
 }
 
 pub(super) fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWorkspaceRecord>> {
@@ -1340,9 +1625,45 @@ pub(super) fn remove_with_store(
     options: WorktreeRemoveOptions,
     store_dir: &Path,
 ) -> Result<WorktreeRemoveOutput> {
+    remove_with_store_until(options, store_dir, None)
+}
+
+fn remove_with_store_until(
+    options: WorktreeRemoveOptions,
+    store_dir: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<WorktreeRemoveOutput> {
+    match deadline {
+        Some(deadline) => with_task_worktree_registry_write_lock_until(deadline, || {
+            remove_with_store_unlocked_until(options, store_dir, Some(deadline))
+        }),
+        None => with_task_worktree_registry_write_lock(|| {
+            remove_with_store_unlocked_until(options, store_dir, None)
+        }),
+    }
+}
+
+fn remove_with_store_unlocked(
+    options: WorktreeRemoveOptions,
+    store_dir: &Path,
+) -> Result<WorktreeRemoveOutput> {
+    remove_with_store_unlocked_until(options, store_dir, None)
+}
+
+fn remove_with_store_unlocked_until(
+    options: WorktreeRemoveOptions,
+    store_dir: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<WorktreeRemoveOutput> {
+    // The registry lease fences the complete decision and Git mutation. Always
+    // re-read under it so finalization that won the lease first is preserved.
     let mut record = read_record(store_dir, &options.id)?;
-    repair_record_source_checkout_if_needed(&mut record, store_dir)?;
-    let safety = safety_report(&record)?;
+    if !Path::new(&record.source_checkout).exists() {
+        record.source_checkout = recovered_component_source_checkout(&record)?
+            .to_string_lossy()
+            .to_string();
+    }
+    let safety = safety_report_until(&record, deadline)?;
     if !options.force && !safety.safe {
         return Err(Error::validation_invalid_argument(
             "worktree",
@@ -1359,37 +1680,144 @@ pub(super) fn remove_with_store(
             Some(safety.reasons.clone()),
         ));
     }
+    if safety
+        .reasons
+        .iter()
+        .any(|reason| reason == LIVE_CWD_REASON)
+    {
+        return Err(Error::validation_invalid_argument(
+            "worktree",
+            "Task worktree contains the caller's live current working directory",
+            Some(record.id.clone()),
+            Some(safety.reasons.clone()),
+        ));
+    }
+    let live_owner_count = live_workspace_owner_count(&record, store_dir)?;
+    if live_owner_count > 0 {
+        return Err(Error::validation_invalid_argument(
+            "workspace_claim",
+            format!("Task worktree is held by {live_owner_count} durable live owner(s)"),
+            Some(record.id.clone()),
+            None,
+        ));
+    }
 
-    if !safety.worktree_missing {
-        let mut args = vec!["worktree", "remove"];
-        if options.force {
-            args.push("--force");
+    let claims = workspace_claim_store_for_worktrees(store_dir)?;
+    let claim = claims.acquire(
+        record.effective_workspace_identity()?,
+        crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+        now_ms(),
+    )?;
+    let worktree_parent = Path::new(&record.worktree_path)
+        .parent()
+        .map(Path::to_path_buf);
+    let git_common_dir = git_common_dir_until(Path::new(&record.source_checkout), deadline)?;
+    let result = claims.with_reconciliation_fence(&claim, || {
+        if !safety.worktree_missing {
+            let mut args = vec!["worktree", "remove"];
+            if options.force {
+                args.push("--force");
+            }
+            args.push(&record.worktree_path);
+            run_inventory_git_until(
+                Path::new(&record.source_checkout),
+                &args,
+                "git worktree remove",
+                deadline,
+            )?;
         }
-        args.push(&record.worktree_path);
-        git::run_git(
-            Path::new(&record.source_checkout),
-            &args,
-            "git worktree remove",
-        )?;
+        if let Some(parent) = &worktree_parent {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+                })?;
+        }
+        let registrations = git_common_dir.join("worktrees");
+        let git_metadata_parent = if registrations.exists() {
+            registrations.as_path()
+        } else {
+            git_common_dir.as_path()
+        };
+        fs::File::open(git_metadata_parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(git_metadata_parent.display().to_string()),
+                )
+            })?;
+        let mut branch_cleanup = branch_cleanup_report_until(&record, deadline)
+            .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
+        // The worktree is physically gone at this point. Publish that durable
+        // fact before optional branch cleanup so a branch-delete failure cannot
+        // leave an active manifest pointing at a removed checkout.
+        record.state = TaskWorktreeState::Removed;
+        record.lifecycle_revision = record.lifecycle_revision.checked_add(1).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lifecycle_revision",
+                "task worktree lifecycle revision overflowed during removal",
+                Some(record.id.clone()),
+                None,
+            )
+        })?;
+        write_record_unlocked(store_dir, &record)?;
+        if options.cleanup_branch {
+            branch_cleanup = apply_branch_cleanup_until(
+                &record,
+                branch_cleanup,
+                options.allow_unmerged_branch,
+                deadline,
+            )
+            .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
+        }
+        Ok(WorktreeRemoveOutput {
+            record,
+            safety,
+            branch_cleanup,
+            removed: true,
+        })
+    });
+    let release = claims.release(&claim, now_ms());
+    match result {
+        Err(error) => Err(error),
+        Ok(output) => {
+            release?;
+            Ok(output)
+        }
     }
-    let mut branch_cleanup = branch_cleanup_report(&record)
-        .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
-    if options.cleanup_branch {
-        branch_cleanup =
-            apply_branch_cleanup(&record, branch_cleanup, options.allow_unmerged_branch)?;
-    }
-    record.state = TaskWorktreeState::Removed;
-    write_record(store_dir, &record)?;
-    Ok(WorktreeRemoveOutput {
-        record,
-        safety,
-        branch_cleanup,
-        removed: true,
-    })
+}
+
+fn live_workspace_owner_count(record: &TaskWorktreeRecord, store_dir: &Path) -> Result<usize> {
+    let claims = workspace_claim_store_for_worktrees(store_dir)?;
+    Ok(claims
+        .owner_status(&record.effective_workspace_identity()?, now_ms())?
+        .len())
+}
+
+fn workspace_claim_store_for_worktrees(
+    store_dir: &Path,
+) -> Result<crate::workspace_claim::WorkspaceClaimStore> {
+    let data_root = store_dir.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store `{}` has no data root",
+            store_dir.display()
+        ))
+    })?;
+    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root.join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    ))
 }
 
 pub(super) fn branch_cleanup_report(
     record: &TaskWorktreeRecord,
+) -> Result<WorktreeBranchCleanupReport> {
+    branch_cleanup_report_until(record, None)
+}
+
+fn branch_cleanup_report_until(
+    record: &TaskWorktreeRecord,
+    deadline: Option<std::time::Instant>,
 ) -> Result<WorktreeBranchCleanupReport> {
     let cleanup_command = format!(
         "homeboy worktree remove {} --cleanup-branch",
@@ -1409,7 +1837,7 @@ pub(super) fn branch_cleanup_report(
     }
     let source = resolved_source_checkout(record)?;
     let branch = record.branch.as_str();
-    let exists = git::run_git(
+    let exists = run_inventory_git_until(
         &source,
         &[
             "show-ref",
@@ -1418,6 +1846,7 @@ pub(super) fn branch_cleanup_report(
             &format!("refs/heads/{branch}"),
         ],
         "git show-ref branch",
+        deadline,
     )
     .is_ok();
     if !exists {
@@ -1433,10 +1862,11 @@ pub(super) fn branch_cleanup_report(
         });
     }
     let base_ref = branch_cleanup_base_ref(record);
-    let merged = git::run_git(
+    let merged = run_inventory_git_until(
         &source,
         &["merge-base", "--is-ancestor", branch, &base_ref],
         "git merge-base branch cleanup",
+        deadline,
     )
     .is_ok();
     Ok(WorktreeBranchCleanupReport {
@@ -1461,8 +1891,17 @@ pub(super) fn branch_cleanup_report(
 
 fn apply_branch_cleanup(
     record: &TaskWorktreeRecord,
+    report: WorktreeBranchCleanupReport,
+    allow_unmerged_branch: bool,
+) -> Result<WorktreeBranchCleanupReport> {
+    apply_branch_cleanup_until(record, report, allow_unmerged_branch, None)
+}
+
+fn apply_branch_cleanup_until(
+    record: &TaskWorktreeRecord,
     mut report: WorktreeBranchCleanupReport,
     allow_unmerged_branch: bool,
+    deadline: Option<std::time::Instant>,
 ) -> Result<WorktreeBranchCleanupReport> {
     if report.status == BranchCleanupStatus::Missing || report.deleted {
         return Ok(report);
@@ -1474,10 +1913,11 @@ fn apply_branch_cleanup(
     // Homeboy has already verified this branch is contained in its configured cleanup base.
     // Use that proof instead of Git's separate upstream-based `-d` heuristic.
     let delete_flag = "-D";
-    git::run_git(
+    run_inventory_git_until(
         &source,
         &["branch", delete_flag, &record.branch],
         "git branch delete task worktree branch",
+        deadline,
     )?;
     report.deleted = true;
     report.status = BranchCleanupStatus::Deleted;
@@ -1531,6 +1971,13 @@ fn shell_arg(value: &str) -> String {
 }
 
 pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
+    safety_report_until(record, None)
+}
+
+fn safety_report_until(
+    record: &TaskWorktreeRecord,
+    deadline: Option<std::time::Instant>,
+) -> Result<WorktreeSafetyReport> {
     let source = resolved_source_checkout(record)?;
     let parent = source.parent().ok_or_else(|| {
         Error::internal_unexpected(format!(
@@ -1554,11 +2001,16 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     let worktree_missing = !raw_worktree.exists();
     let primary_checkout = source == worktree;
     let path_contained = worktree.starts_with(parent) && worktree != source;
-    let dirty = !worktree_missing && is_dirty(&worktree)?;
+    let caller_cwd =
+        std::env::current_dir().map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let caller_cwd = normalize_missing_path(&caller_cwd);
+    let live_caller_cwd =
+        !worktree_missing && (caller_cwd == worktree || caller_cwd.starts_with(&worktree));
+    let dirty = !worktree_missing && is_dirty_until(&worktree, deadline)?;
     let unpushed_commits = if worktree_missing {
         0
     } else {
-        unpushed_commit_count(&worktree, &record.base_ref)?
+        unpushed_commit_count_until(&worktree, &record.base_ref, deadline)?
     };
     let mut reasons = Vec::new();
     if dirty {
@@ -1573,6 +2025,9 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     if !path_contained {
         reasons.push("worktree path is outside the component checkout parent".to_string());
     }
+    if live_caller_cwd {
+        reasons.push(LIVE_CWD_REASON.to_string());
+    }
     let safe = reasons.is_empty();
     Ok(WorktreeSafetyReport {
         dirty,
@@ -1585,6 +2040,8 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     })
 }
 
+const LIVE_CWD_REASON: &str = "refuses to remove the caller's live current working directory";
+
 pub(super) fn is_dirty(path: &Path) -> Result<bool> {
     Ok(
         !git::run_git(path, &["status", "--porcelain=v1"], "git status")?
@@ -1593,8 +2050,29 @@ pub(super) fn is_dirty(path: &Path) -> Result<bool> {
     )
 }
 
+fn is_dirty_until(path: &Path, deadline: Option<std::time::Instant>) -> Result<bool> {
+    Ok(
+        !run_inventory_git_until(path, &["status", "--porcelain=v1"], "git status", deadline)?
+            .trim()
+            .is_empty(),
+    )
+}
+
 pub(super) fn unpushed_commit_count(path: &Path, base_ref: &str) -> Result<u32> {
-    let upstream = git::run_git(path, &["rev-parse", "--abbrev-ref", "@{u}"], "git upstream");
+    unpushed_commit_count_until(path, base_ref, None)
+}
+
+fn unpushed_commit_count_until(
+    path: &Path,
+    base_ref: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<u32> {
+    let upstream = run_inventory_git_until(
+        path,
+        &["rev-parse", "--abbrev-ref", "@{u}"],
+        "git upstream",
+        deadline,
+    );
     let range = if let Ok(upstream) = upstream {
         let upstream = upstream.trim();
         if upstream.is_empty() {
@@ -1605,7 +2083,12 @@ pub(super) fn unpushed_commit_count(path: &Path, base_ref: &str) -> Result<u32> 
     } else {
         format!("{base_ref}..HEAD")
     };
-    let count = git::run_git(path, &["rev-list", "--count", &range], "git rev-list")?;
+    let count = run_inventory_git_until(
+        path,
+        &["rev-list", "--count", &range],
+        "git rev-list",
+        deadline,
+    )?;
     Ok(count.trim().parse::<u32>().unwrap_or(0))
 }
 
@@ -1765,9 +2248,7 @@ pub(super) fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Res
 
 pub(super) fn write_record_unlocked(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
     let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
-    fs::create_dir_all(store_dir).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
-    })?;
+    crate::engine::local_files::create_dir_all_durably(store_dir)?;
     let json = serde_json::to_string_pretty(record)
         .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
     let path = record_path(store_dir, &record.id);

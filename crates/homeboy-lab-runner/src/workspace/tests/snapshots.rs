@@ -1,13 +1,14 @@
 use std::fs;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::git;
 use crate::workspace::snapshot::{incremental_prepare_command_fits, snapshot_manifest_delta};
 use crate::workspace::sync::{
     prepared_source_cache_command, prepared_source_view_command,
     reuse_compatible_snapshot_workspace, save_prepared_source_cache, sync_workspace,
-    workspace_snapshot_scan_command, workspace_snapshots,
+    sync_workspace_before, workspace_snapshot_scan_command, workspace_snapshots,
 };
 use crate::workspace::types::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -742,14 +743,15 @@ fn incremental_snapshots_reuse_unchanged_content_and_reconcile_deltas() {
         .expect("first snapshot");
         fs::write(source.path().join("src/changed.txt"), "second\n").expect("small delta");
         fs::remove_file(source.path().join("removed.txt")).expect("delete source file");
-        let (second, _) = sync_workspace(
+        let (second, _) = sync_workspace_before(
             "lab-local-incremental",
             sync_options(
                 source.path().display().to_string(),
                 Some("second".to_string()),
             ),
+            Instant::now() + Duration::from_secs(5),
         )
-        .expect("incremental snapshot");
+        .expect("deadline-bound incremental snapshot");
 
         let transfer = second
             .materialization_plan

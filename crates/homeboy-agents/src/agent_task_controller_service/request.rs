@@ -52,6 +52,7 @@ pub fn controller_request_dispatch_command(
             tasks_json: optional_string(dispatch, "tasks_json"),
             provider_config: optional_string(dispatch, "provider_config"),
             client_context: optional_string(dispatch, "client_context"),
+            generated_fanout_context: false,
             // An absent key is "unspecified", not "one execution and no
             // rotation": the dispatch-plan layer resolves it against the
             // configured provider rotation (#11082).

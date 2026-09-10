@@ -15,7 +15,7 @@ use homeboy::rig::{self, RigResourcesSpec, RigSpec};
 pub enum RigCommandOutput {
     List(RigListOutput),
     Show(Box<RigShowOutput>),
-    Materialize(RigMaterializeOutput),
+    Materialize(CommandReport<rig::MaterializedRigResource>),
     Up(RigUpOutput),
     UpPlan(RigUpPlanOutput),
     Check(RigCheckOutput),
@@ -89,13 +89,6 @@ pub struct RigShowOutput {
     pub rig: RigSpec,
     #[serde(skip_serializing_if = "RigResourcesSpec::is_unset")]
     pub resources: RigResourcesSpec,
-}
-
-/// Canonical, inheritance-resolved rig JSON for package tooling.
-#[derive(Serialize)]
-pub struct RigMaterializeOutput {
-    pub command: &'static str,
-    pub rig: serde_json::Value,
 }
 
 pub type RigUpOutput = CommandReport<rig::UpReport>;
@@ -231,9 +224,14 @@ mod tests {
 
     #[test]
     fn rig_materialize_output_uses_the_machine_readable_variant() {
-        let output = RigCommandOutput::Materialize(RigMaterializeOutput {
+        let output = RigCommandOutput::Materialize(CommandReport {
             command: "rig.materialize",
-            rig: serde_json::json!({ "id": "example" }),
+            report: rig::MaterializedRigResource {
+                schema: rig::MATERIALIZED_RIG_RESOURCE_SCHEMA.to_string(),
+                rig_id: "example".to_string(),
+                materialized_rig_json_sha256: "sha256:abc123".to_string(),
+                rig: serde_json::json!({ "id": "example" }),
+            },
         });
 
         assert_eq!(
@@ -242,6 +240,9 @@ mod tests {
                 "variant": "materialize",
                 "payload": {
                     "command": "rig.materialize",
+                    "schema": "homeboy/materialized-rig/v1",
+                    "rig_id": "example",
+                    "materialized_rig_json_sha256": "sha256:abc123",
                     "rig": { "id": "example" }
                 }
             })

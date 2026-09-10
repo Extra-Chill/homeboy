@@ -275,7 +275,25 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
         report.checks[0].details["daemon_build_identity"],
         "homeboy 0.284.0+live"
     );
-    assert_eq!(report.daemon_recovery.expect("recovery").active_jobs, 1);
+    assert_eq!(
+        report
+            .daemon_recovery
+            .as_ref()
+            .expect("recovery")
+            .active_jobs,
+        1
+    );
+
+    let compact = output_projection(report, false);
+    assert_eq!(
+        compact["failure"]["code"],
+        "runner.doctor.daemon_recovery.pid_dead"
+    );
+    assert_eq!(compact["failure"]["details"]["lease_id"], "lease-dead");
+    assert_eq!(
+        compact["failure"]["next_actions"][0]["command"],
+        "homeboy runner connect lab --adopt-orphan-lease lease-dead"
+    );
 }
 
 #[test]
@@ -332,6 +350,7 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         live_daemon_job_count: 0,
         retained_durable_job_count: 0,
         unresolved_retained_projection_count: 0,
+        retained_job_inconsistency: None,
         admission_blocking_job_ids: Vec::new(),
         unresolved_job_owners: Vec::new(),
         unresolved_generation_ids: Vec::new(),

@@ -84,6 +84,10 @@ fn temp_home_dir() -> TempDir {
         .expect("inventory test temp home")
 }
 
+fn registered_components_in_home(home: &std::path::Path) -> crate::error::Result<Vec<Component>> {
+    registered_in_root(&home.join(".config").join("homeboy"))
+}
+
 /// Helper: create a standalone component JSON file in a directory.
 fn write_standalone_json(dir: &std::path::Path, id: &str, local_path: &str) {
     let path = dir.join(format!("{}.json", id));
@@ -134,8 +138,6 @@ fn write_standalone_registration_rejects_blank_id() {
 
 #[test]
 fn standalone_prefers_portable_config_when_available() {
-    // This test calls load_standalone_components() which reads from
-    // paths::components(). We set HOME to an isolated temp dir.
     let dir = temp_home_dir();
     let config_components = dir
         .path()
@@ -175,11 +177,7 @@ fn standalone_prefers_portable_config_when_available() {
     )
     .unwrap();
 
-    // Override HOME via the serialized guard so parallel tests can't
-    // race on this process-global env var. See the HOME_LOCK comment.
-    let _home = with_home_override(dir.path());
-
-    let result = load_standalone_components();
+    let result = registered_components_in_home(dir.path());
 
     let components = result.unwrap();
     let plugin = components
@@ -242,9 +240,7 @@ fn portable_config_fields_override_standalone_registration() {
     )
     .unwrap();
 
-    let _home = with_home_override(dir.path());
-
-    let components = load_standalone_components().unwrap();
+    let components = registered_components_in_home(dir.path()).unwrap();
     let plugin = components
         .iter()
         .find(|c| c.id == "repo-owned-plugin")
@@ -690,8 +686,7 @@ fn load_standalone_skips_missing_local_path() {
     )
     .unwrap();
 
-    let _home = with_home_override(dir.path());
-    let result = load_standalone_components();
+    let result = registered_components_in_home(dir.path());
 
     let components = result.unwrap();
     assert!(
@@ -715,8 +710,7 @@ fn load_standalone_skips_non_json_files() {
     // Create an invalid JSON file
     fs::write(config_components.join("broken.json"), "not valid json").unwrap();
 
-    let _home = with_home_override(dir.path());
-    let result = load_standalone_components();
+    let result = registered_components_in_home(dir.path());
 
     let components = result.unwrap();
     assert!(
@@ -743,8 +737,7 @@ fn load_standalone_reads_json_files() {
 
     write_standalone_json(&config_components, "my-plugin", &repo_dir.to_string_lossy());
 
-    let _home = with_home_override(dir.path());
-    let result = load_standalone_components();
+    let result = registered_components_in_home(dir.path());
 
     let components = result.unwrap();
     assert!(
@@ -791,8 +784,7 @@ fn stale_standalone_path_discovers_renamed_sibling_portable_component() {
     )
     .unwrap();
 
-    let _home = with_home_override(dir.path());
-    let components = load_standalone_components().unwrap();
+    let components = registered_components_in_home(dir.path()).unwrap();
 
     let renamed = components
         .iter()
@@ -1040,7 +1032,7 @@ fn write_standalone_creates_and_reads_back() {
     );
 
     // Verify we can read it back
-    let read_result = load_standalone_components();
+    let read_result = registered_components_in_home(dir.path());
 
     assert!(read_result.is_ok());
     let components = read_result.unwrap();

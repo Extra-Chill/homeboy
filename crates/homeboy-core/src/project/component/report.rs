@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::component::Component;
 use crate::error::{Error, Result};
 use crate::project::{
-    component_local_path_blockers, load, resolve_project_components, Project,
-    ProjectComponentAttachment,
+    component_local_path_blockers, component_local_path_diagnostic, load,
+    resolve_project_component_with_standalone_snapshot, resolve_project_components,
+    ComponentLocalPathDiagnostic, Project, ProjectComponentAttachment,
+    StandaloneComponentConfigSnapshot,
 };
 
 use super::{
@@ -19,6 +21,7 @@ use super::{
 pub struct ProjectComponentsOutput {
     pub action: String,
     pub project_id: String,
+    pub status: ProjectComponentsStatus,
     pub component_ids: Vec<String>,
     pub component_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,10 +32,19 @@ pub struct ProjectComponentsOutput {
     pub components: Vec<Component>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub local_path_diagnostics: Vec<ComponentLocalPathDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchComponentAttachmentOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monorepo: Option<MonorepoComponentAttachmentOutput>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectComponentsStatus {
+    Complete,
+    Partial,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,7 +136,7 @@ pub struct BatchComponentAttachmentOutput {
 
 pub fn list_components(project_id: &str) -> Result<ProjectComponentsOutput> {
     let project = load(project_id)?;
-    build_components_output(project_id, "list", &project)
+    build_components_list_output(project_id, &project)
 }
 
 pub fn set_components(project_id: &str, json_spec: &str) -> Result<ProjectComponentsOutput> {
@@ -337,6 +349,7 @@ pub fn attach_component_paths_report(
     Ok(ProjectComponentsOutput {
         action: "attach_paths".to_string(),
         project_id: project_id.to_string(),
+        status: ProjectComponentsStatus::Complete,
         component_ids: project
             .as_ref()
             .map(project_component_ids)
@@ -352,6 +365,7 @@ pub fn attach_component_paths_report(
             .as_ref()
             .map(component_local_path_blockers)
             .unwrap_or_default(),
+        local_path_diagnostics: Vec::new(),
         batch: Some(batch),
         monorepo: None,
     })
@@ -431,12 +445,54 @@ fn build_components_output(
     Ok(ProjectComponentsOutput {
         action: action.to_string(),
         project_id: project_id.to_string(),
+        status: ProjectComponentsStatus::Complete,
         component_ids: project_component_ids(project),
         component_count: project.components.len(),
         attached_component_id: None,
         attached_path: None,
         components,
         warnings: Vec::new(),
+        local_path_diagnostics: Vec::new(),
+        batch: None,
+        monorepo: None,
+    })
+}
+
+fn build_components_list_output(
+    project_id: &str,
+    project: &Project,
+) -> Result<ProjectComponentsOutput> {
+    let standalone_snapshot = StandaloneComponentConfigSnapshot::load();
+    let mut components = Vec::new();
+    let mut local_path_diagnostics = Vec::new();
+
+    for attachment in &project.components {
+        if let Some(diagnostic) = component_local_path_diagnostic(project, attachment) {
+            local_path_diagnostics.push(diagnostic);
+            continue;
+        }
+        components.push(resolve_project_component_with_standalone_snapshot(
+            project,
+            &attachment.id,
+            Some(&standalone_snapshot),
+        )?);
+    }
+
+    Ok(ProjectComponentsOutput {
+        action: "list".to_string(),
+        project_id: project_id.to_string(),
+        status: if local_path_diagnostics.is_empty() {
+            ProjectComponentsStatus::Complete
+        } else {
+            ProjectComponentsStatus::Partial
+        },
+        component_ids: project_component_ids(project),
+        component_count: project.components.len(),
+        attached_component_id: None,
+        attached_path: None,
+        components,
+        warnings: Vec::new(),
+        local_path_diagnostics,
         batch: None,
         monorepo: None,
     })
@@ -452,12 +508,14 @@ fn build_components_summary(
     Ok(ProjectComponentsOutput {
         action: action.to_string(),
         project_id: project_id.to_string(),
+        status: ProjectComponentsStatus::Complete,
         component_ids: project_component_ids(project),
         component_count: project.components.len(),
         attached_component_id,
         attached_path,
         components: Vec::new(),
         warnings: component_local_path_blockers(project),
+        local_path_diagnostics: Vec::new(),
         batch: None,
         monorepo: None,
     })
@@ -466,12 +524,14 @@ fn build_components_summary(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_component_paths_report, build_components_summary, remove_components_report,
-        BatchComponentAttachmentFailurePolicy, BatchComponentAttachmentInput,
-        BatchComponentAttachmentItemStatus, BatchComponentAttachmentWorktreePolicy,
+        attach_component_paths_report, build_components_summary, list_components,
+        remove_components_report, BatchComponentAttachmentFailurePolicy,
+        BatchComponentAttachmentInput, BatchComponentAttachmentItemStatus,
+        BatchComponentAttachmentWorktreePolicy, ProjectComponentsStatus,
     };
     use crate::project::{
-        build_components_output, load, save, Project, ProjectComponentAttachment,
+        build_components_output, load, resolve_project_component, save, Project,
+        ProjectComponentAttachment,
     };
     use crate::test_support::with_isolated_home;
     use std::fs;
@@ -570,6 +630,55 @@ mod tests {
             let project = load("site").expect("project still loads");
             assert_eq!(project.components.len(), 1);
             assert_eq!(project.components[0].id, "stale-remaining");
+        });
+    }
+
+    #[test]
+    fn list_components_returns_healthy_rows_and_stale_path_diagnostics() {
+        with_isolated_home(|home| {
+            let healthy = home.path().join("healthy");
+            write_component(&healthy, "healthy");
+            let stale = home.path().join("stale");
+            save(&Project {
+                id: "site".to_string(),
+                components: vec![
+                    ProjectComponentAttachment {
+                        id: "healthy".to_string(),
+                        local_path: healthy.to_string_lossy().to_string(),
+                        ..Default::default()
+                    },
+                    ProjectComponentAttachment {
+                        id: "stale".to_string(),
+                        local_path: stale.to_string_lossy().to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            })
+            .expect("save project");
+
+            let output = list_components("site").expect("partial list output");
+
+            assert!(matches!(output.status, ProjectComponentsStatus::Partial));
+            assert_eq!(output.components.len(), 1);
+            assert_eq!(output.components[0].id, "healthy");
+            assert_eq!(output.local_path_diagnostics.len(), 1);
+            let diagnostic = &output.local_path_diagnostics[0];
+            assert_eq!(diagnostic.component_id, "stale");
+            assert!(matches!(
+                diagnostic.status,
+                crate::project::ComponentLocalPathDiagnosticStatus::Stale
+            ));
+            assert_eq!(diagnostic.local_path, stale.to_string_lossy());
+            assert_eq!(
+                diagnostic.repair_command,
+                "homeboy project components attach-path site <local-path>"
+            );
+
+            let project = load("site").expect("load project");
+            let error = resolve_project_component(&project, "stale")
+                .expect_err("targeted resolution must reject stale component");
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
         });
     }
 

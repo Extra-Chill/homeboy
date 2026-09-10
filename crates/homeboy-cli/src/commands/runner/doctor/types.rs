@@ -27,6 +27,10 @@ pub struct RunnerDoctorOutput {
     pub runner_id: String,
     pub runner: RunnerTargetSummary,
     pub status: RunnerDoctorStatus,
+    /// The selected, actionable root cause when doctor reports a nonzero
+    /// readiness result. This is lifted into the command-result envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunnerDoctorFailure>,
     pub capabilities: RunnerCapabilities,
     pub resources: RunnerResources,
     pub checks: Vec<RunnerCheck>,
@@ -49,6 +53,17 @@ pub struct RunnerDoctorOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RunnerDoctorFailure {
+    pub code: String,
+    pub message: String,
+    pub details: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<crate::commands::utils::response::CommandNextAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RunnerDoctorDiagnostics {
     pub status: &'static str,
     pub completed_checks: usize,
@@ -58,8 +73,15 @@ pub struct RunnerDoctorDiagnostics {
 
 #[derive(Debug, Serialize)]
 pub struct RunnerDoctorProviderReadiness {
+    /// Providers with a selected, successful provider-owned live auth check.
     pub ready_for: Vec<String>,
+    /// Providers whose selected live auth check failed or whose runner substrate failed.
     pub blocked_for: Vec<String>,
+    /// Providers whose runtime/load checks may have passed but did not run a
+    /// provider-owned live auth check, so they are not dispatch-ready.
+    pub unverified_for: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unverified_remediation: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +185,11 @@ pub struct DiskProbe {
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolProbe {
     pub available: bool,
+    /// True when the lookup itself could not run, so absence was never
+    /// established. `available: false` alone cannot carry this: reporting a
+    /// broken probe as "not found on PATH" is the readiness lie #14374 is about.
+    #[serde(skip_serializing_if = "is_false")]
+    pub probe_failed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +197,44 @@ pub struct ToolProbe {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl ToolProbe {
+    pub fn found(path: String, version: Option<String>) -> Self {
+        Self {
+            available: true,
+            probe_failed: false,
+            path: Some(path),
+            version,
+            error: None,
+        }
+    }
+
+    pub fn not_found() -> Self {
+        Self {
+            available: false,
+            probe_failed: false,
+            path: None,
+            version: None,
+            error: Some(TOOL_NOT_FOUND_ERROR.to_string()),
+        }
+    }
+
+    pub fn probe_failed(reason: String) -> Self {
+        Self {
+            available: false,
+            probe_failed: true,
+            path: None,
+            version: None,
+            error: Some(reason),
+        }
+    }
+}
+
+pub const TOOL_NOT_FOUND_ERROR: &str = "not found on PATH";
 
 #[derive(Debug, Serialize)]
 pub struct RunnerCheck {

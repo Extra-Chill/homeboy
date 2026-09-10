@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,32 +62,36 @@ pub(crate) fn run_with_options(
 ) -> CmdResult<RunnerDoctorOutput> {
     options.scope = repair_scope(options.scope, options.repair);
     let target = target::resolve(runner_id)?;
-    let mut report = match &target {
-        target::RunnerTarget::Local { id, runner } => {
-            // The local probe's artifact root is the only filesystem root this
-            // command reads, so it is resolved once here at the entry point
-            // rather than inside the probe. The SSH branch resolves its root on
-            // the remote host and deliberately does not take this one.
-            let artifact_root = crate::core::paths::artifact_root().ok();
-            local::report(id, runner.as_ref(), &options, artifact_root.as_deref())
-        }
-        target::RunnerTarget::Ssh {
-            id,
-            runner,
-            server,
-            client,
-        } => remote::report(id, runner, server, client, &options),
-    };
+    let mut report = report_for_target(&target, &options);
 
     let migration = runner::secret_env_migration_plan(runner_id)?;
     report.secret_env_migration = (!migration.is_empty()).then_some(migration);
 
     if options.repair {
         repair::apply(&target, &options, &mut report);
+
+        // Repair is not success by itself. Re-probe the same resolved target so
+        // the terminal report verifies its identity, binary, SSH, workspace,
+        // daemon, and provider readiness after the mutation.
+        let mut repairs = std::mem::take(&mut report.repairs);
+        report = report_for_target(&target, &options);
+        match target.ensure_current() {
+            Ok(()) => {
+                let migration = runner::secret_env_migration_plan(runner_id)?;
+                report.secret_env_migration = (!migration.is_empty()).then_some(migration);
+            }
+            Err(error) => repairs.push(types::RunnerRepair {
+                id: "repair.target_identity".to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: error.message,
+                commands: Vec::new(),
+            }),
+        }
+        report.repairs = repairs;
     }
 
     // Only general doctor observes the complete capability surface. Scoped
-    // Lab diagnostics deliberately skip CPU, tools, workspace, and artifact
+    // Lab diagnostics deliberately skip CPU, tools, and artifact
     // probes, so treating that partial report as a complete observation would
     // evict known-good admission evidence.
     if observes_complete_capabilities(options.scope) {
@@ -106,8 +111,31 @@ pub(crate) fn run_with_options(
     } else {
         report.status = checks::overall_status(&report.checks);
     }
+    ensure_failure(&mut report);
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
+}
+
+fn report_for_target(
+    target: &target::RunnerTarget,
+    options: &RunnerDoctorOptions,
+) -> RunnerDoctorOutput {
+    match target {
+        target::RunnerTarget::Local { id, runner } => {
+            // The local probe's artifact root is the only filesystem root this
+            // command reads, so it is resolved once here at the entry point
+            // rather than inside the probe. The SSH branch resolves its root on
+            // the remote host and deliberately does not take this one.
+            let artifact_root = crate::core::paths::artifact_root().ok();
+            local::report(id, runner.as_ref(), &options, artifact_root.as_deref())
+        }
+        target::RunnerTarget::Ssh {
+            id,
+            runner,
+            server,
+            client,
+        } => remote::report(id, runner, server, client, &options),
+    }
 }
 
 const COMPACT_CHECK_LIMIT: usize = 12;
@@ -117,7 +145,8 @@ const COMPACT_PROJECTION_BYTES: usize = 8 * 1024;
 
 /// Keep default doctor output to the facts needed to decide whether the runner
 /// is usable. `--full` remains a lossless, redacted evidence surface.
-pub(crate) fn output_projection(report: RunnerDoctorOutput, full: bool) -> serde_json::Value {
+pub(crate) fn output_projection(mut report: RunnerDoctorOutput, full: bool) -> serde_json::Value {
+    ensure_failure(&mut report);
     let value = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
     if full {
         return homeboy::core::redaction::redact_json(&value);
@@ -147,38 +176,62 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
                 "status": check.status,
                 "message": bounded_text(&check.message),
                 "remediation": check.remediation.as_deref().map(bounded_text),
+                "remediation_action": compact_remediation_action(check.remediation_action.as_ref()),
             })
         })
         .collect::<Vec<_>>();
-    let (ready_for, blocked_for) = report.provider_readiness.as_ref().map_or_else(
-        || (Vec::new(), Vec::new()),
-        |readiness| {
-            (
-                readiness
-                    .ready_for
-                    .iter()
-                    .take(COMPACT_PROVIDER_LIMIT)
-                    .map(|value| bounded_text(value))
-                    .collect::<Vec<_>>(),
-                readiness
-                    .blocked_for
-                    .iter()
-                    .take(COMPACT_PROVIDER_LIMIT)
-                    .map(|value| bounded_text(value))
-                    .collect::<Vec<_>>(),
-            )
-        },
-    );
+    let (ready_for, blocked_for, unverified_for, unverified_remediation) =
+        report.provider_readiness.as_ref().map_or_else(
+            || (Vec::new(), Vec::new(), Vec::new(), None),
+            |readiness| {
+                (
+                    readiness
+                        .ready_for
+                        .iter()
+                        .take(COMPACT_PROVIDER_LIMIT)
+                        .map(|value| bounded_text(value))
+                        .collect::<Vec<_>>(),
+                    readiness
+                        .blocked_for
+                        .iter()
+                        .take(COMPACT_PROVIDER_LIMIT)
+                        .map(|value| bounded_text(value))
+                        .collect::<Vec<_>>(),
+                    readiness
+                        .unverified_for
+                        .iter()
+                        .take(COMPACT_PROVIDER_LIMIT)
+                        .map(|value| bounded_text(value))
+                        .collect::<Vec<_>>(),
+                    readiness
+                        .unverified_remediation
+                        .as_deref()
+                        .map(bounded_text),
+                )
+            },
+        );
     let provider_total = report.provider_readiness.as_ref().map_or(0, |readiness| {
-        readiness.ready_for.len() + readiness.blocked_for.len()
+        readiness.ready_for.len() + readiness.blocked_for.len() + readiness.unverified_for.len()
     });
     let runner_id = bounded_text(&report.runner_id);
+    let failed_repairs = report
+        .repairs
+        .iter()
+        .filter(|repair| repair.status != RunnerDoctorStatus::Ok)
+        .map(|repair| serde_json::json!({
+            "id": bounded_text(&repair.id),
+            "status": repair.status,
+            "message": bounded_text(&repair.message),
+            "commands": repair.commands.iter().take(1).map(|command| bounded_text(command)).collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>();
     let projection = serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": report.command,
         "runner_id": runner_id,
         "runner": compact_runner_summary(&report.runner),
         "status": report.status,
+        "failure": report.failure.as_ref().map(compact_failure),
         "operator_summary": {
             "identity": "runner doctor",
             "state": match report.status { RunnerDoctorStatus::Ok => "ready", RunnerDoctorStatus::Warning => "degraded", RunnerDoctorStatus::Error => "blocked" },
@@ -192,14 +245,166 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
             "cpu": { "count": report.resources.cpu.count },
         },
         "checks": checks,
-        "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for }) },
+        "repairs": failed_repairs,
+        "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for, "unverified_for": unverified_for, "guidance": unverified_remediation }) },
         "truncation": {
             "checks": { "shown": checks.len(), "omitted": report.checks.len().saturating_sub(checks.len()), "evidence_ref": "runner:doctor:checks", "full_command": format!("homeboy runner doctor {runner_id} --full") },
-            "provider_readiness": { "shown": ready_for.len() + blocked_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {runner_id} --full") },
-            "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "repairs", "secret_env_migration", "daemon_recovery", "admission_summary"],
+            "provider_readiness": { "shown": ready_for.len() + blocked_for.len() + unverified_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len() + unverified_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {runner_id} --full") },
+            "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "secret_env_migration", "daemon_recovery", "admission_summary"],
         }
     });
     projection
+}
+
+/// Every nonzero doctor result names one current failed check at the payload
+/// root so the generic command-result envelope can preserve its cause.
+fn ensure_failure(report: &mut RunnerDoctorOutput) {
+    if report.status != RunnerDoctorStatus::Error || report.failure.is_some() {
+        return;
+    }
+    let Some(check) = report
+        .checks
+        .iter()
+        .find(|check| check.status == RunnerDoctorStatus::Error)
+    else {
+        report.failure = Some(types::RunnerDoctorFailure {
+            code: "runner.doctor.readiness_error".to_string(),
+            message: "Runner doctor reported an error without a failed check".to_string(),
+            details: BTreeMap::from([("runner_id".to_string(), bounded_text(&report.runner_id))]),
+            next_actions: vec![crate::commands::utils::response::CommandNextAction::new(
+                "inspect runner doctor evidence",
+                bounded_text(&format!(
+                    "homeboy runner doctor {} --full",
+                    report.runner_id
+                )),
+            )
+            .with_kind(crate::commands::utils::response::CommandNextActionKind::Show)],
+            retryable: None,
+        });
+        return;
+    };
+
+    let reason_code = check.details.get("reason_code").map(String::as_str);
+    let code = format!(
+        "runner.doctor.{}{}",
+        failure_code_segment(&check.id),
+        reason_code
+            .map(|reason| format!(".{}", failure_code_segment(reason)))
+            .unwrap_or_default(),
+    );
+    let mut details = BTreeMap::from([
+        ("runner_id".to_string(), redacted_text(&report.runner_id)),
+        ("check_id".to_string(), redacted_text(&check.id)),
+    ]);
+    for (key, value) in check.details.iter().take(6) {
+        details.insert(redacted_text(key), redacted_text(value));
+    }
+    let next_actions = match check
+        .remediation
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| is_homeboy_command(command))
+    {
+        Some(command) => {
+            let kind = remediation_action_kind(command);
+            vec![crate::commands::utils::response::CommandNextAction::new(
+                format!(
+                    "{} {}",
+                    if matches!(
+                        kind,
+                        crate::commands::utils::response::CommandNextActionKind::Repair
+                    ) {
+                        "repair"
+                    } else {
+                        "inspect"
+                    },
+                    redacted_text(&check.id)
+                ),
+                redacted_text(command),
+            )
+            .with_kind(kind)]
+        }
+        _ => vec![crate::commands::utils::response::CommandNextAction::new(
+            format!("inspect {}", redacted_text(&check.id)),
+            redacted_text(&format!(
+                "homeboy runner doctor {} --full",
+                report.runner_id
+            )),
+        )
+        .with_kind(crate::commands::utils::response::CommandNextActionKind::Show)],
+    };
+    report.failure = Some(types::RunnerDoctorFailure {
+        code: redacted_text(&code),
+        message: redacted_text(&check.message),
+        details: details.into_iter().collect(),
+        next_actions,
+        retryable: None,
+    });
+}
+
+fn is_homeboy_command(value: &str) -> bool {
+    value.trim_start().starts_with("homeboy ")
+}
+
+fn remediation_action_kind(
+    command: &str,
+) -> crate::commands::utils::response::CommandNextActionKind {
+    if command.starts_with("homeboy runner connect ")
+        || (command.contains("homeboy runner doctor ") && command.contains(" --repair"))
+    {
+        crate::commands::utils::response::CommandNextActionKind::Repair
+    } else {
+        crate::commands::utils::response::CommandNextActionKind::Show
+    }
+}
+
+fn redacted_text(value: &str) -> String {
+    homeboy::core::redaction::redact_string(value)
+}
+
+fn failure_code_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn compact_failure(failure: &types::RunnerDoctorFailure) -> serde_json::Value {
+    serde_json::json!({
+        "code": bounded_text(&failure.code),
+        "message": bounded_text(&failure.message),
+        "details": failure.details.iter().take(8).map(|(key, value)| (bounded_text(key), bounded_text(value))).collect::<BTreeMap<_, _>>(),
+        "next_actions": failure.next_actions.iter().take(1).map(|action| serde_json::json!({
+            "label": bounded_text(&action.label),
+            "command": bounded_text(&action.command),
+            "kind": action.kind.as_ref(),
+        })).collect::<Vec<_>>(),
+        "retryable": failure.retryable,
+    })
+}
+
+fn compact_remediation_action(action: Option<&types::RunnerRepairAction>) -> serde_json::Value {
+    match action {
+        Some(types::RunnerRepairAction::RefreshHomeboy {
+            git_ref,
+            allow_downgrade,
+        }) => serde_json::json!({
+            "action": "refresh_homeboy",
+            "git_ref": git_ref.as_deref().map(bounded_text),
+            "allow_downgrade": allow_downgrade,
+        }),
+        Some(types::RunnerRepairAction::Reconnect) => serde_json::json!({ "action": "reconnect" }),
+        Some(types::RunnerRepairAction::RefreshManagedSources) => {
+            serde_json::json!({ "action": "refresh_managed_sources" })
+        }
+        None => serde_json::Value::Null,
+    }
 }
 
 fn compact_runner_summary(runner: &types::RunnerTargetSummary) -> serde_json::Value {
@@ -221,10 +426,24 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
     if projection_envelope_bytes(&projection).is_ok_and(|bytes| bytes <= COMPACT_PROJECTION_BYTES) {
         return projection;
     }
+    // Even the size-cap fallback must retain the failed repair that explains
+    // why the operator should not retry a generic connect choreography.
+    let repairs = projection
+        .get("repairs")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|repairs| repairs.first())
+        .cloned()
+        .map(|repair| vec![repair])
+        .unwrap_or_default();
+    let failure = projection
+        .get("failure")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": "runner.doctor",
         "status": "error",
+        "failure": failure,
         "operator_summary": {
             "identity": "runner doctor",
             "state": "blocked",
@@ -232,6 +451,7 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
             "next_action": "homeboy runner doctor <runner-id> --full",
         },
         "checks": [],
+        "repairs": repairs,
         "truncation": { "checks": { "shown": 0, "omitted": "see_full_output", "full_command": "homeboy runner doctor <runner-id> --full" } },
     })
 }

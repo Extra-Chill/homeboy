@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::super::{export_runs, import_runs, RunsExportArgs, RunsImportArgs, RunsOutput};
-use super::{sample_run, XdgGuard};
+use super::sample_run;
 
 /// The observation store the enclosing isolated home installs.
 ///
@@ -29,7 +29,7 @@ fn read_bundle_test_json<T: for<'de> Deserialize<'de>>(path: &Path) -> T {
 #[test]
 fn export_one_run_writes_directory_bundle() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
@@ -68,7 +68,7 @@ fn export_one_run_writes_directory_bundle() {
 #[test]
 fn export_includes_findings_and_test_failures() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("test", "homeboy", "studio", Value::Null))
@@ -133,7 +133,7 @@ fn export_includes_findings_and_test_failures() {
 #[test]
 fn export_since_writes_multiple_runs() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let first = store
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
@@ -165,7 +165,7 @@ fn export_since_writes_multiple_runs() {
 #[test]
 fn export_embeds_local_file_artifact_bytes() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
@@ -203,7 +203,7 @@ fn export_embeds_local_file_artifact_bytes() {
 #[test]
 fn export_rewrites_unproven_remote_artifact_paths_as_metadata_only() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
@@ -248,7 +248,7 @@ fn export_rewrites_unproven_remote_artifact_paths_as_metadata_only() {
 #[test]
 fn export_trace_spans_when_present() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
@@ -283,7 +283,7 @@ fn export_trace_spans_when_present() {
 #[test]
 fn import_into_empty_db_and_reimport_is_idempotent() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let bundle = home.path().join("portable-bundle");
         let run_id = {
             let store = ObservationStore::open_initialized().expect("store");
@@ -368,7 +368,7 @@ fn import_into_empty_db_and_reimport_is_idempotent() {
 #[test]
 fn malformed_bundle_validation_fails_clearly() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let bundle = home.path().join("bad-bundle");
         std::fs::create_dir_all(&bundle).expect("bundle dir");
         std::fs::write(bundle.join("manifest.json"), "not json").expect("manifest");
@@ -391,7 +391,7 @@ fn malformed_bundle_validation_fails_clearly() {
 #[test]
 fn conflicting_existing_rows_fail_clearly() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))

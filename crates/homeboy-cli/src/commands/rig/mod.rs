@@ -13,14 +13,13 @@ use homeboy::runner::runners;
 
 use self::output::{
     RigAppOutput, RigArtifactRegisterOutput, RigCheckOutput, RigDownOutput, RigInstallOutput,
-    RigInstalledStackSummary, RigInstalledSummary, RigListOutput, RigMaterializeOutput,
-    RigReleaseLockOutput, RigRepairOutput, RigRunOutput, RigShowOutput, RigSourceSummary,
-    RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput, RigUpPlanOutput, RigUpPlanStep,
-    RigUpdateOutput,
+    RigInstalledStackSummary, RigInstalledSummary, RigListOutput, RigReleaseLockOutput,
+    RigRepairOutput, RigRunOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary,
+    RigSyncOutput, RigUpOutput, RigUpPlanOutput, RigUpPlanStep, RigUpdateOutput,
 };
 use super::bench::RigRunBenchOptions;
 use super::utils::args::SettingArgs;
-use super::CmdResult;
+use super::{CmdResult, CommandReport};
 use crate::command_contract::{
     CommandPortabilityContract, LabCommandContract, LAB_NO_EXTRA_CAPABILITIES, RIG_CHECK_LAB_LABEL,
     RIG_RUN_LAB_LABEL, RIG_SOURCE_MANAGEMENT_LAB_LABEL,
@@ -431,14 +430,14 @@ fn materialize(
     rig_path: &std::path::Path,
     source_root: Option<&std::path::Path>,
 ) -> CmdResult<RigCommandOutput> {
-    let rig = match source_root {
-        Some(source_root) => rig::materialize_rig_spec(rig_path, source_root)?,
-        None => rig::materialize_rig_spec_with_default_source_root(rig_path)?,
+    let report = match source_root {
+        Some(source_root) => rig::materialize_rig_resource(rig_path, source_root)?,
+        None => rig::materialize_rig_resource_with_default_source_root(rig_path)?,
     };
     Ok((
-        RigCommandOutput::Materialize(RigMaterializeOutput {
+        RigCommandOutput::Materialize(CommandReport {
             command: "rig.materialize",
-            rig,
+            report,
         }),
         0,
     ))
@@ -1446,19 +1445,25 @@ mod tests {
         let (output, exit_code) = materialize(&rig_path, None).expect("materialize rig");
 
         assert_eq!(exit_code, 0);
+        let output = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(output["variant"], "materialize");
+        assert_eq!(output["payload"]["command"], "rig.materialize");
         assert_eq!(
-            serde_json::to_value(output).expect("serialize output"),
+            output["payload"]["rig"],
             serde_json::json!({
-                "variant": "materialize",
-                "payload": {
-                    "command": "rig.materialize",
-                    "rig": {
-                        "id": "example",
-                        "settings": { "inherited": true }
-                    }
-                }
-            })
+                "id": "example",
+                "settings": { "inherited": true }
+            }),
+            "payload.rig remains the existing normalized rig document"
         );
+        assert_eq!(
+            output["payload"]["schema"],
+            rig::MATERIALIZED_RIG_RESOURCE_SCHEMA
+        );
+        assert_eq!(output["payload"]["rig_id"], "example");
+        assert!(output["payload"]["materialized_rig_json_sha256"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
     }
 
     #[test]

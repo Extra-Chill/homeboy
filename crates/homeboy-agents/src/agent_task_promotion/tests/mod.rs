@@ -5,15 +5,12 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use super::apply::{
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider,
-};
+use super::apply::{AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace};
 
 use super::promote::promote_with_provider;
 use super::types::{
-    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport,
+    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionReport,
+    AgentTaskPromotionRequest,
 };
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
@@ -43,8 +40,8 @@ pub(super) struct FakePromotionWorkspaceProvider {
     replace_source_on_apply: Option<(PathBuf, String)>,
 }
 
-impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
-    fn apply_patch(
+impl FakePromotionWorkspaceProvider {
+    pub(super) fn apply_patch(
         &mut self,
         request: AgentTaskPromotionApplyRequest,
     ) -> Result<AgentTaskPromotionWorkspace> {
@@ -86,55 +83,11 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
         })
     }
 
-    fn verify(
-        &mut self,
-        cwd: &Path,
-        index: usize,
-        command: &str,
-        visibility: AgentTaskGateVisibility,
-        reveal_policy: AgentTaskGateRevealPolicy,
-    ) -> Result<AgentTaskGateReport> {
-        self.verify_calls.push((
-            cwd.to_path_buf(),
-            command.to_string(),
-            visibility,
-            reveal_policy,
-        ));
-        if self.verify_transport_error {
-            return Err(Error::internal_io(
-                "simulated verification transport interruption",
-                Some("promotion gate transport".to_string()),
-            ));
-        }
-        let status = Command::new("git")
-            .args(["status", "--porcelain", "--untracked-files=all"])
-            .current_dir(cwd)
-            .output();
-        self.verify_worktrees_clean
-            .push(status.is_ok_and(|status| status.status.success() && status.stdout.is_empty()));
-        if self.run_verify_command {
-            return crate::agent_task_gate::run_gate_command_with_policy(
-                cwd,
-                index,
-                command,
-                visibility,
-                reveal_policy,
-            );
-        }
-        Ok(AgentTaskGateReport::new(
-            format!("gate-{index}"),
-            vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
-            self.verify_exit_code,
-            String::new(),
-            String::new(),
-            None,
-            visibility,
-            reveal_policy,
-            crate::agent_task_gate::AgentTaskGateEnvironment::default(),
-        ))
-    }
-
-    fn verify_with_runtime_tmpdir(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test gate injection mirrors the native verifier inputs"
+    )]
+    pub(super) fn verify_with_runtime_tmpdir(
         &mut self,
         cwd: &Path,
         index: usize,
@@ -386,7 +339,7 @@ pub(super) fn promote_recoverable_patch_count(
         ..Default::default()
     };
     let result = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
@@ -421,8 +374,8 @@ pub(super) fn git(cwd: &Path, args: &[&str]) {
     );
 }
 
-pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionOptions {
-    AgentTaskPromotionOptions {
+pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionRequest {
+    AgentTaskPromotionRequest {
         source: "{}".to_string(),
         source_run_id: None,
         source_path: None,
@@ -446,7 +399,7 @@ pub(super) fn adopted_commit_options(
     base: String,
     candidate_ref: String,
     gates: VerifyGateOptions,
-) -> AgentTaskPromotionOptions {
+) -> AgentTaskPromotionRequest {
     let source_path = temp.path().join("adoption-outcome.json");
     let source = serde_json::json!({
         "schema": AGENT_TASK_OUTCOME_SCHEMA,
@@ -456,7 +409,7 @@ pub(super) fn adopted_commit_options(
     })
     .to_string();
     std::fs::write(&source_path, &source).expect("write adoption outcome");
-    AgentTaskPromotionOptions {
+    AgentTaskPromotionRequest {
         source,
         source_run_id: Some("adoption-run".to_string()),
         source_path: Some(source_path),

@@ -4,30 +4,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use homeboy_core::gate_feedback_baseline::{
-    register_gate_feedback_baseline_provider, GateFeedbackBaselineProvider,
-};
 use homeboy_core::{Error, Result};
-
-struct AgentTaskGateFeedbackBaselineProvider;
-
-impl GateFeedbackBaselineProvider for AgentTaskGateFeedbackBaselineProvider {
-    fn validate_gate_feedback_candidate_baseline(
-        &self,
-        root: &Path,
-        baseline: &Value,
-    ) -> Result<String> {
-        validate_gate_feedback_candidate_baseline(root, baseline)
-    }
-}
-
-/// Register the agent-task gate-feedback candidate-baseline provider. Called
-/// once at startup so core's worktree-safety logic can accept a dirty worktree
-/// that is a verified gate-feedback candidate without depending on the
-/// agent-task subsystem.
-pub fn register() {
-    register_gate_feedback_baseline_provider(Box::new(AgentTaskGateFeedbackBaselineProvider));
-}
 
 /// Verify that a dirty worktree is exactly the gate-feedback candidate described
 /// by its durable promotion artifact, without mutating its real Git index.

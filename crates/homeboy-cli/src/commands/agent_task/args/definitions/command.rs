@@ -20,7 +20,7 @@ use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
-    LifecycleReadArgs, LogsArgs, PromoteArgs, QuarantineArgs, RearmArgs,
+    LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs,
     RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
     SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
@@ -80,7 +80,7 @@ pub enum AgentTaskCommand {
     /// `--detach-after-handoff` rather than rely on the default, and read the
     /// terminal outcome from `agent-task status <run-id>` in either case.
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test' --preview\n\nUse --help-full for the complete advanced option reference."
+        after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy' --preview\n\nUse --help-full for the complete advanced option reference."
     )]
     Cook(Box<AgentTaskCookArgs>),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
@@ -167,6 +167,8 @@ pub enum AgentTaskCommand {
     Rearm(RearmArgs),
     /// Resume a queued or stale-running durable run.
     Resume(ResumeArgs),
+    /// Change an unexecuted queued Cook's placement after explicit confirmation.
+    PlacementUpdate(PlacementUpdateArgs),
     /// Submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
     /// Cook, submit, and inspect batches of independent tasks.
@@ -249,7 +251,7 @@ pub struct CookContinueArgs {
     #[arg(long)]
     pub preflight: bool,
     /// Explicitly rearm one failed terminal continuation before consuming it.
-    #[arg(long, conflicts_with = "preflight")]
+    #[arg(long)]
     pub rearm: bool,
     /// Select the patch artifact to promote when the durable attempt produced
     /// more than one patch candidate. This resumes controller-side promotion
@@ -272,9 +274,110 @@ pub struct CookContinueArgs {
         conflicts_with_all = ["preflight", "rearm", "artifact_id", "timeout_ms"]
     )]
     pub review_form_timeout_ms: Option<u64>,
+    /// Backend for a rearmed Cook retry. The original Cook recipe remains
+    /// authoritative for prompt, gates, worktree, notification, and disclosure.
+    #[arg(long, value_name = "BACKEND", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub backend: Option<String>,
+    /// Provider-specific selector for a rearmed Cook retry.
+    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub selector: Option<String>,
+    /// Model for a rearmed Cook retry. This pins rotation unless explicitly
+    /// paired with --allow-provider-rotation or a positive --provider-rotations.
+    #[arg(long, value_name = "MODEL", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub model: Option<String>,
+    /// Re-enable configured provider/model rotation after a route override.
+    #[arg(long, requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub allow_provider_rotation: bool,
+    /// Explicit cross-provider/model rotations after a route override.
+    #[arg(long, value_name = "N", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub provider_rotations: Option<u32>,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
+}
+
+#[cfg(test)]
+mod cook_continue_tests {
+    use clap::Parser;
+
+    use crate::{
+        cli_surface::{Cli, Commands},
+        commands::agent_task::AgentTaskCommand,
+    };
+
+    #[test]
+    fn continuation_preflight_parses_the_public_rearm_and_artifact_path() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "run-a",
+            "--preflight",
+            "--rearm",
+            "--artifact-id",
+            "patch-a",
+            "--full",
+        ])
+        .expect("continuation rearm preflight parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::CookContinue(args) = agent_task.command else {
+            panic!("expected cook-continue command");
+        };
+        assert!(args.preflight);
+        assert!(args.rearm);
+        assert_eq!(args.artifact_id.as_deref(), Some("patch-a"));
+        assert!(args.full);
+
+        for rejected in [
+            vec!["--preflight", "--timeout-ms", "1000"],
+            vec!["--rearm", "--timeout-ms", "1000"],
+            vec!["--artifact-id", "patch-a", "--timeout-ms", "1000"],
+        ] {
+            let mut argv = vec!["homeboy", "agent-task", "cook-continue", "run-a"];
+            argv.extend(rejected);
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn continuation_route_override_requires_rearm_and_preserves_rotation_semantics() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "run-a",
+            "--rearm",
+            "--backend",
+            "replacement",
+            "--selector",
+            "replacement-selector",
+            "--model",
+            "replacement-model",
+            "--allow-provider-rotation",
+        ])
+        .expect("route override parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::CookContinue(args) = agent_task.command else {
+            panic!("expected cook-continue command");
+        };
+        assert_eq!(args.backend.as_deref(), Some("replacement"));
+        assert_eq!(args.selector.as_deref(), Some("replacement-selector"));
+        assert_eq!(args.model.as_deref(), Some("replacement-model"));
+        assert!(args.allow_provider_rotation);
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "run-a",
+            "--model",
+            "replacement-model",
+        ])
+        .is_err());
+    }
 }
 
 #[derive(Args, Debug)]
@@ -546,4 +649,27 @@ pub struct CompileLoopArgs {
     /// Declarative loop definition to compile into an agent-task plan.
     #[arg(long, value_name = "SPEC")]
     pub definition: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn cook_help_recommends_review_test() {
+        let help = crate::cli_surface::Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("cook")
+            .expect("cook command")
+            .clone()
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains("--verify 'homeboy review test homeboy'"),
+            "{help}"
+        );
+        assert!(!help.contains("--verify 'cargo test'"), "{help}");
+    }
 }

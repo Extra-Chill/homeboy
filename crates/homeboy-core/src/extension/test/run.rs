@@ -57,6 +57,7 @@ pub struct TestRunWorkflowArgs {
     pub restore_checkout: bool,
     pub ci_env: Vec<(String, String)>,
     pub passthrough_args: Vec<String>,
+    pub test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
 }
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
@@ -365,14 +366,10 @@ fn execution_fingerprint(
     )
 }
 
-pub(crate) fn test_timeout() -> Duration {
-    homeboy_engine_primitives::test_execution::suite_timeout_from_env().suite_timeout()
-}
-
 /// Resolve the optional changed-scope selection cap.
 ///
-/// Mirrors `test_timeout()`: the value is read from the process environment
-/// (what a workflow step `env:` block sets and the CLI process inherits),
+/// The value is read from the process environment (what a workflow step `env:`
+/// block sets and the CLI process inherits),
 /// must parse as a positive integer, and unset, unparseable, or zero values
 /// disable the guard entirely. Every existing consumer is therefore
 /// byte-for-byte unaffected when the cap is not configured (#12365).
@@ -1367,22 +1364,50 @@ fn run_main_test_workflow_inner(
                     preview
                 };
 
-                let message = format!(
-                    "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
-                    impacted.len(),
-                );
+                // A harness-config change cannot be answered by "add a test":
+                // the changed file decides how tests run, so only executing the
+                // suite proves it still works. Say that instead.
+                let harness_only = impacted
+                    .iter()
+                    .all(|file| crate::extension::test::drift::is_test_harness_config_path(file));
+
+                let message = if harness_only {
+                    format!(
+                        "Changed-scope test gate selected zero tests, but {} test-harness config file(s) changed since {changed_ref}: {impacted_summary}. A harness change is the one change a zero-test run cannot evidence, because the harness itself was never exercised.",
+                        impacted.len(),
+                    )
+                } else {
+                    format!(
+                        "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
+                        impacted.len(),
+                    )
+                };
                 let findings = Some(vec![HomeboyFinding::builder("test", message.clone())
-                    .rule("changed_scope_zero_tests_for_source_change")
+                    .rule(if harness_only {
+                        "changed_scope_zero_tests_for_harness_change"
+                    } else {
+                        "changed_scope_zero_tests_for_source_change"
+                    })
                     .category("test-scope")
                     .severity("error")
                     .build()]);
-                let hints = Some(vec![
-                    format!(
-                        "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
-                        args.component_id
-                    ),
-                    "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
-                ]);
+                let hints = Some(if harness_only {
+                    vec![
+                        format!(
+                            "Run the full suite so the harness change is exercised: homeboy review test {}",
+                            args.component_id
+                        ),
+                        "A green changed-scope run here would only mean no source changed, not that the harness still works.".to_string(),
+                    ]
+                } else {
+                    vec![
+                        format!(
+                            "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
+                            args.component_id
+                        ),
+                        "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
+                    ]
+                });
 
                 return Ok(TestRunWorkflowResult {
                     status: "failed".to_string(),
@@ -1555,8 +1580,7 @@ fn run_main_test_workflow_inner(
     let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
     let write_results_helper = write_test_results_helper(run_dir)?;
-    let test_plan = homeboy_engine_primitives::test_execution::suite_timeout_from_env();
-    let (suite_timeout_env, suite_timeout_value) = test_plan.suite_timeout_env();
+    let (suite_timeout_env, suite_timeout_value) = args.test_execution_plan.suite_timeout_env();
     let inventory_profile = test_context.as_ref().and_then(|_| {
         InventoryProfile::resolve(
             test_config
@@ -1625,7 +1649,7 @@ fn run_main_test_workflow_inner(
                             .env_remove_if(true, "HOMEBOY_CHANGED_SINCE")
                             .env_remove_if(true, "HOMEBOY_CHANGED_TEST_FILES")
                             .passthrough(false)
-                            .timeout(Some(test_timeout()))
+                            .timeout(Some(args.test_execution_plan.suite_timeout()))
                             .run()?;
                         if !output.success {
                             let _ = unlink_test_inventory(&binding);
@@ -1740,7 +1764,7 @@ fn run_main_test_workflow_inner(
         vec![("test runner".to_string(), args.component_label.clone())],
     )?;
     progress.start(0)?;
-    let timeout = test_plan.suite_timeout();
+    let timeout = args.test_execution_plan.suite_timeout();
     homeboy_core::log_status!(
         "test",
         "phase=child command=test runner timeout={}s; streaming bounded child supervision",
@@ -2248,23 +2272,7 @@ fn run_review_test_lifecycle(
 
 impl TestCheckoutGuard {
     fn capture(path: &Path) -> homeboy_core::Result<Self> {
-        let changes = homeboy_core::git::get_uncommitted_changes(&path.to_string_lossy())?;
-        if changes.has_changes {
-            let files = changes
-                .staged
-                .iter()
-                .chain(changes.unstaged.iter())
-                .chain(changes.untracked.iter())
-                .take(10)
-                .cloned()
-                .collect::<Vec<_>>();
-            return Err(Error::validation_invalid_argument(
-                "working_tree",
-                "Review tests require a clean component checkout",
-                None,
-                Some(vec![format!("Dirty files: {}", files.join(", "))]),
-            ));
-        }
+        ensure_clean_review_checkout(path)?;
 
         let head =
             homeboy_core::git::run_git(path, &["rev-parse", "HEAD"], "capture review test HEAD")?;
@@ -2294,6 +2302,33 @@ impl TestCheckoutGuard {
         }
         Ok(())
     }
+}
+
+/// Confirm that a checkout can safely run the review test lifecycle, which
+/// resets tracked files and removes generated files when it completes.
+pub fn ensure_clean_review_checkout(path: &Path) -> homeboy_core::Result<()> {
+    let changes = homeboy_core::git::get_uncommitted_changes(&path.to_string_lossy())?;
+    if !changes.has_changes {
+        return Ok(());
+    }
+
+    let files = changes
+        .staged
+        .iter()
+        .chain(changes.unstaged.iter())
+        .chain(changes.untracked.iter())
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>();
+    Err(Error::validation_invalid_argument(
+        "working_tree",
+        "Review tests require a clean component checkout",
+        None,
+        Some(vec![
+            format!("Dirty files: {}", files.join(", ")),
+            "For dirty changed-file review, run `homeboy review --changed-only audit` and `homeboy review --changed-only lint` separately.".to_string(),
+        ]),
+    ))
 }
 
 fn failed_test_workflow(
@@ -2601,12 +2636,14 @@ pub fn run_self_check_test_workflow(
     source_path: &Path,
     component_label: String,
     json_summary: bool,
+    test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy_core::Result<TestRunWorkflowResult> {
     run_self_check_test_workflow_with_progress(
         component,
         source_path,
         component_label,
         json_summary,
+        test_execution_plan,
         None,
         None,
     )
@@ -2617,14 +2654,21 @@ pub fn run_self_check_test_workflow_with_progress(
     source_path: &Path,
     component_label: String,
     json_summary: bool,
+    test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
     run_dir: Option<&RunDir>,
     observation: Option<&homeboy_core::observation::ActiveObservation>,
 ) -> homeboy_core::Result<TestRunWorkflowResult> {
+    let (suite_timeout_env, suite_timeout_value) = test_execution_plan.suite_timeout_env();
+    let execution_policy = extension::self_check::SelfCheckExecutionPolicy::bounded(
+        test_execution_plan.suite_timeout(),
+        vec![(suite_timeout_env.to_string(), suite_timeout_value)],
+    );
     let output = extension::self_check::run_self_checks_with_passthrough_and_progress(
         component,
         ExtensionCapability::Test,
         source_path,
         !json_summary,
+        Some(&execution_policy),
         run_dir,
         observation,
     )?;
@@ -3076,6 +3120,11 @@ mod tests {
             restore_checkout: false,
             ci_env: Vec::new(),
             passthrough_args: Vec::new(),
+            test_execution_plan:
+                homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                    Duration::from_secs(42),
+                )
+                .expect("positive timeout"),
         }
     }
 
@@ -3161,6 +3210,75 @@ mod tests {
                 .expect("non-matching declaration")
                 .is_empty());
 
+            assert!(
+                !marker.exists(),
+                "resolving declared names must not spawn the test child"
+            );
+        });
+    }
+
+    /// Release resolves the component from its persisted `homeboy.json`
+    /// (portable discovery or the standalone overlay), not from an in-memory
+    /// fixture. The projection `when` must therefore be satisfied by settings
+    /// declared in the component config file — including when flat extension
+    /// keys sit beside the nested `settings` object, which is the shape
+    /// components like `data-machine-events` ship. (#14449)
+    #[test]
+    fn declared_secret_env_names_resolve_from_persisted_component_extension_settings() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = conditional_secret_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            conditional_test_component(home.path(), source.path(), "remote");
+
+            std::fs::write(
+                source.path().join("homeboy.json"),
+                r#"{
+                    "id": "conditional-secret-consumer",
+                    "extensions": {
+                        "conditional-secret-fixture": {
+                            "toolchain": "fixture",
+                            "settings": {
+                                "service": {
+                                    "mode": "remote",
+                                    "secret_env": {
+                                        "first": "FIRST_PROJECTED_SECRET",
+                                        "second": "SECOND_PROJECTED_SECRET"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .expect("persisted homeboy.json");
+
+            let component = crate::component::portable::try_discover_from_portable(source.path())
+                .expect("portable discovery")
+                .expect("component from persisted config");
+            assert_eq!(
+                component
+                    .extensions
+                    .as_ref()
+                    .and_then(|extensions| extensions
+                        .get("conditional-secret-fixture")
+                        .map(|config| config.settings.contains_key("service"))),
+                Some(true),
+                "fixture must model persisted extension settings"
+            );
+
+            let marker = source.path().join("declared-names-child-ran");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .expect("marker script");
+            let names = crate::extension::test::declared_secret_env_names(&component)
+                .expect("persisted-settings declaration");
+            assert_eq!(
+                names,
+                vec!["FIRST_PROJECTED_SECRET", "SECOND_PROJECTED_SECRET"]
+            );
             assert!(
                 !marker.exists(),
                 "resolving declared names must not spawn the test child"
@@ -3263,6 +3381,7 @@ mod tests {
                     restore_checkout: false,
                     ci_env: Vec::new(),
                     passthrough_args: Vec::new(),
+                    test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(Duration::from_secs(42)).expect("positive timeout"),
                 },
                 &run_dir,
             )
@@ -3402,19 +3521,7 @@ mod tests {
     }
     use homeboy_core::test_support::{exec_capable_tempdir, with_isolated_home};
 
-    fn run_git(dir: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use crate::test_support::git_command_output as run_git;
 
     fn clean_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -3451,7 +3558,13 @@ mod tests {
             Err(Error::internal_unexpected("fixture setup failed"))
         })
         .expect("setup failure should become a test result");
-        let (output, exit_code) = super::super::report::from_main_workflow(result);
+        let (output, exit_code) = super::super::report::from_main_workflow(
+            result,
+            &homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        );
         let json = serde_json::to_value(output).expect("structured output");
 
         assert_eq!(exit_code, 2);
@@ -3503,7 +3616,13 @@ mod tests {
             })
         })
         .expect("test failure should remain a test result");
-        let (output, exit_code) = super::super::report::from_main_workflow(result);
+        let (output, exit_code) = super::super::report::from_main_workflow(
+            result,
+            &homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        );
         let json = serde_json::to_value(output).expect("structured output");
 
         assert_eq!(exit_code, 1);
@@ -3574,31 +3693,37 @@ mod tests {
 "#;
         let input = parse_compiler_failures(output, "").expect("compiler finding");
         let findings = homeboy_findings_from_test_analysis_input(&input).expect("findings");
-        let (report, exit_code) = super::super::report::from_main_workflow(TestRunWorkflowResult {
-            status: "failed".to_string(),
-            component: "homeboy".to_string(),
-            exit_code: 101,
-            runner_exit_code: None,
-            test_counts: None,
-            test_inventory: None,
-            test_inventory_rejection: None,
-            test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
-                reason: "compiler failure did not map to an executed test identity".to_string(),
-            }),
-            test_durations: None,
-            findings: Some(findings),
-            failure_analysis_input: Some(input),
-            coverage: None,
-            baseline_comparison: None,
-            analysis: None,
-            autofix: None,
-            hints: None,
-            test_scope: None,
-            summary: None,
-            raw_output: None,
-            extension_phase_timings: Vec::new(),
-            cargo_target: None,
-        });
+        let (report, exit_code) = super::super::report::from_main_workflow(
+            TestRunWorkflowResult {
+                status: "failed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 101,
+                runner_exit_code: None,
+                test_counts: None,
+                test_inventory: None,
+                test_inventory_rejection: None,
+                test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+                    reason: "compiler failure did not map to an executed test identity".to_string(),
+                }),
+                test_durations: None,
+                findings: Some(findings),
+                failure_analysis_input: Some(input),
+                coverage: None,
+                baseline_comparison: None,
+                analysis: None,
+                autofix: None,
+                hints: None,
+                test_scope: None,
+                summary: None,
+                raw_output: None,
+                extension_phase_timings: Vec::new(),
+                cargo_target: None,
+            },
+            &homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        );
         let json = serde_json::to_value(report).expect("report json");
 
         assert_eq!(exit_code, 101);
@@ -5877,9 +6002,15 @@ printf 'not json\n'
 
     #[test]
     fn test_run_self_check_test_workflow() {
+        let _env_lock = homeboy_core::test_support::env_lock();
         let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("test.sh"), "printf test-ok\n")
-            .expect("script should be written");
+        let _timeout =
+            homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_TEST_TIMEOUT_SECONDS", "99");
+        std::fs::write(
+            dir.path().join("test.sh"),
+            "printf '%s' \"$HOMEBOY_TEST_TIMEOUT_SECONDS\" > timeout.txt\nprintf test-ok\n",
+        )
+        .expect("script should be written");
 
         let mut component = Component::new(
             "fixture".to_string(),
@@ -5897,14 +6028,118 @@ printf 'not json\n'
             deps: Vec::new(),
         });
 
-        let result =
-            run_self_check_test_workflow(&component, dir.path(), "fixture".to_string(), true)
-                .expect("test self-check should run");
+        let result = run_self_check_test_workflow(
+            &component,
+            dir.path(),
+            "fixture".to_string(),
+            true,
+            homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        )
+        .expect("test self-check should run");
 
         assert_eq!(result.status, "passed");
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.component, "fixture");
         assert!(result.summary.is_some());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("timeout.txt")).expect("recorded timeout"),
+            "42"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_check_timeout_reaps_descendants_and_reports_the_supplied_plan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("test.sh"),
+            "#!/bin/sh\nprintf '%s' \"$HOMEBOY_TEST_TIMEOUT_SECONDS\" > timeout.txt\n(sh -c 'trap \"\" TERM; while :; do sleep 1; done') &\necho $! > descendant.pid\ntrap '' TERM\nwhile :; do sleep 1; done\n",
+        )
+        .expect("script should be written");
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.scripts = Some(ComponentScriptsConfig {
+            test: vec!["sh test.sh".to_string()],
+            ..Default::default()
+        });
+        let plan =
+            homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(1),
+            )
+            .expect("positive timeout");
+
+        let result = run_self_check_test_workflow(
+            &component,
+            dir.path(),
+            "fixture".to_string(),
+            true,
+            plan.clone(),
+        )
+        .expect("timed-out self-check becomes a workflow result");
+        let descendant = std::fs::read_to_string(dir.path().join("descendant.pid"))
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        let (output, exit_code) = super::super::report::from_main_workflow(result, &plan);
+
+        assert_eq!(exit_code, 124);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("timeout.txt")).expect("recorded timeout"),
+            "1"
+        );
+        assert!(
+            !homeboy_engine_primitives::command::process_is_running(descendant),
+            "timeout supervisor must reap descendant {descendant}"
+        );
+        assert!(output
+            .phase
+            .expect("timeout phase")
+            .summary
+            .contains("after 1s"));
+    }
+
+    #[test]
+    fn main_workflow_exports_its_supplied_test_plan() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let component = conditional_test_component(home.path(), source.path(), "local");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"$HOMEBOY_TEST_TIMEOUT_SECONDS\" > '{}'\nexit 1\n",
+                    source.path().join("timeout.txt").display()
+                ),
+            )
+            .expect("extension script");
+            let mut args = fixture_workflow_args(&component);
+            args.test_execution_plan =
+                homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                    Duration::from_secs(42),
+                )
+                .expect("positive timeout");
+
+            let _ = run_main_test_workflow(
+                &component,
+                source.path(),
+                args,
+                &RunDir::create().expect("run dir"),
+            );
+
+            assert_eq!(
+                std::fs::read_to_string(source.path().join("timeout.txt"))
+                    .expect("recorded timeout"),
+                "42"
+            );
+        });
     }
 }
 

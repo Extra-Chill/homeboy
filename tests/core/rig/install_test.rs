@@ -3,8 +3,9 @@
 use crate::install::local_package_source_root_for_dependencies;
 use crate::{
     declared_id, default_materialize_source_root, discover_rigs, install, list, list_ids, load,
-    load_local_source, materialize_rig_spec, materialize_rig_spec_with_default_source_root,
-    read_source_metadata_in_root, read_stack_source_metadata_in_root, run_check, run_lint,
+    load_local_source, materialize_rig_resource, materialize_rig_spec,
+    materialize_rig_spec_with_default_source_root, read_source_metadata_in_root,
+    read_stack_source_metadata_in_root, run_check, run_lint, MATERIALIZED_RIG_RESOURCE_SCHEMA,
 };
 use homeboy_core::test_support::HomeGuard;
 use homeboy_core::ErrorCode;
@@ -23,7 +24,9 @@ fn test_config_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-use crate::rig_test_support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
+use crate::rig_test_support::{
+    clone_bare, commit_all, init_main, minimal_rig, minimal_stack, write_rig, write_stack,
+};
 
 fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
     fs::create_dir_all(dir).expect("single rig dir");
@@ -34,9 +37,9 @@ fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
 }
 
 fn bare_package(package: &Path) -> tempfile::TempDir {
-    let git = GitFixture::init(package);
-    git.commit("update rigs");
-    git.clone_bare()
+    init_main(package);
+    commit_all(package, "update rigs");
+    clone_bare(package)
 }
 
 mod discovery {
@@ -187,6 +190,53 @@ mod materialization {
     }
 
     #[test]
+    fn materialized_resource_resolves_inheritance_and_digests_canonical_json() {
+        let package = tempfile::tempdir().expect("package");
+        let template = package.path().join("template.json");
+        let first = package.path().join("first.json");
+        let reordered = package.path().join("reordered.json");
+        let changed = package.path().join("changed.json");
+        fs::write(
+            &template,
+            r#"{ "settings": { "inherited": true, "nested": { "a": 1, "b": 2 } } }"#,
+        )
+        .expect("template");
+        fs::write(
+            &first,
+            r#"{ "extends": "./template.json", "id": "example", "components": { "app": { "path": "./app", "branch": "main" } } }"#,
+        )
+        .expect("first rig");
+        fs::write(
+            &reordered,
+            r#"{ "components": { "app": { "branch": "main", "path": "./app" } }, "id": "example", "extends": "./template.json" }"#,
+        )
+        .expect("reordered rig");
+        fs::write(
+            &changed,
+            r#"{ "extends": "./template.json", "id": "example", "components": { "app": { "path": "./app", "branch": "next" } } }"#,
+        )
+        .expect("changed rig");
+
+        let first = materialize_rig_resource(&first, package.path()).expect("first resource");
+        let reordered =
+            materialize_rig_resource(&reordered, package.path()).expect("reordered resource");
+        let changed = materialize_rig_resource(&changed, package.path()).expect("changed resource");
+
+        assert_eq!(first.schema, MATERIALIZED_RIG_RESOURCE_SCHEMA);
+        assert_eq!(first.rig_id, "example");
+        assert_eq!(first.rig["settings"]["inherited"], true);
+        assert!(first.rig.get("extends").is_none());
+        assert_eq!(
+            first.materialized_rig_json_sha256, reordered.materialized_rig_json_sha256,
+            "object key order must not change the materialized rig digest"
+        );
+        assert_ne!(
+            first.materialized_rig_json_sha256, changed.materialized_rig_json_sha256,
+            "a changed materialized rig must have a different digest"
+        );
+    }
+
+    #[test]
     fn materialize_allows_declared_shared_template_root() {
         let repo = tempfile::tempdir().expect("repo");
         let package = repo.path().join("packages/app");
@@ -208,7 +258,8 @@ mod materialization {
             }"#,
         )
         .expect("rig");
-        GitFixture::init(repo.path()).commit("shared template");
+        init_main(repo.path());
+        commit_all(repo.path(), "shared template");
 
         assert_eq!(
             materialize_rig_spec(&rig, &package).expect("materialize"),
@@ -230,7 +281,8 @@ mod materialization {
             r#"{ "extends": "../../../../shared/templates/base.json" }"#,
         )
         .expect("rig");
-        GitFixture::init(repo.path()).commit("undeclared shared template");
+        init_main(repo.path());
+        commit_all(repo.path(), "undeclared shared template");
 
         let error = materialize_rig_spec(&rig, &package).expect_err("undeclared template rejected");
         assert_eq!(error.details["field"], "extends");
@@ -500,7 +552,8 @@ mod install_flows {
                 }
             }"#,
         );
-        GitFixture::init(repo.path()).commit("nested package with shared dependency");
+        init_main(repo.path());
+        commit_all(repo.path(), "nested package with shared dependency");
 
         let result = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect("install nested package");
@@ -619,7 +672,8 @@ mod install_flows {
                 "package_dependencies": ["../../../outside-shared"]
             }"#,
         );
-        GitFixture::init(&repo).commit("bad dependency");
+        init_main(&repo);
+        commit_all(&repo, "bad dependency");
 
         let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect_err("dependency outside repo should fail");
@@ -643,7 +697,8 @@ mod install_flows {
                 "package_dependencies": ["/tmp/shared"]
             }"#,
         );
-        GitFixture::init(repo.path()).commit("bad dependency");
+        init_main(repo.path());
+        commit_all(repo.path(), "bad dependency");
 
         let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
             .expect_err("absolute dependency should fail");

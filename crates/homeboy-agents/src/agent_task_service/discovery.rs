@@ -78,8 +78,12 @@ pub struct AgentTaskDiscoveryReport {
     pub next_cursor: Option<usize>,
     pub runs: Vec<AgentTaskDiscoveryRun>,
     /// Bounded health evidence for malformed, legacy, conflicting, or
-    /// quarantined lifecycle rows omitted from the typed run projection.
+    /// quarantined lifecycle rows in the returned page.
     pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
+    /// Health for the complete local lifecycle registry. This is deliberately
+    /// separate from `record_health` so a narrow filter is not obscured by
+    /// unrelated historical rows.
+    pub global_record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
     /// Liveness buckets for the `active` filter so operators can separate
     /// genuinely-active runs from stale/suspect/unreconciled records at a
     /// glance. Only populated for the `active` filter; `None` elsewhere.
@@ -261,6 +265,23 @@ pub fn discover_runs_with_options(
     discovery_report(filter, options, records, record_health)
 }
 
+/// [`discover_runs_with_options`] against an explicitly injected lifecycle
+/// store. Reconciliation uses this to verify the same durable projection it
+/// just changed rather than consulting ambient storage.
+pub(crate) fn discover_runs_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    filter: AgentTaskDiscoveryFilter,
+) -> Result<AgentTaskDiscoveryReport> {
+    let (records, record_health) =
+        agent_task_lifecycle::read_records_with_health_in_store(lifecycle_store)?;
+    discovery_report(
+        filter,
+        AgentTaskDiscoveryOptions::default(),
+        records,
+        record_health,
+    )
+}
+
 /// Find the newest run matching list filters without treating a bounded display
 /// snapshot as the complete search corpus.
 pub fn discover_filtered_latest_run(
@@ -293,6 +314,10 @@ fn discovery_report(
     // Cook test. Treat only the durable fixture provenance as non-production;
     // an unknown runner with any real/unknown executor stays visible and blocks.
     records.retain(|record| !is_fixture_runner_record(record));
+    // Lifecycle records and unmaterialized Cook admissions share durable run
+    // IDs. Keep one canonical control-plane record if a source is replayed.
+    let mut seen_run_ids = BTreeSet::new();
+    records.retain(|record| seen_run_ids.insert(record.run_id.clone()));
     let is_active = filter == AgentTaskDiscoveryFilter::Active;
     if is_active {
         records.retain(|record| {
@@ -327,6 +352,11 @@ fn discovery_report(
         .map(|limit| cursor.saturating_add(limit).min(total))
         .unwrap_or(total);
     let records = records.drain(cursor..end).collect::<Vec<_>>();
+    let scoped_record_health = AgentTaskRecordHealthSummary {
+        schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
+        healthy: records.len(),
+        ..Default::default()
+    };
 
     let runs: Vec<_> = records
         .into_iter()
@@ -351,7 +381,8 @@ fn discovery_report(
         truncated,
         next_cursor: truncated.then_some(end),
         runs,
-        record_health,
+        record_health: scoped_record_health,
+        global_record_health: record_health,
         liveness_summary,
         federated_command: FEDERATED_DISCOVERY_COMMAND,
     })
@@ -392,20 +423,7 @@ fn matches_discovery_options(
 
     let plan = agent_task_lifecycle::load_controller_plan(&record.run_id).ok();
     let first_task = plan.as_ref().and_then(|plan| plan.tasks.first());
-    let repo = plan
-        .as_ref()
-        .and_then(|plan| plan.group_key.as_deref())
-        .or_else(|| first_task.and_then(|task| task.group_key.as_deref()))
-        .or_else(|| first_task.and_then(|task| task.workspace.component_id.as_deref()))
-        .or_else(|| first_task.and_then(|task| task.workspace.slug.as_deref()));
-    let remote_workspace = metadata_string(&record.metadata, "remote_workspace");
-    let workspace = first_task
-        .and_then(|task| task.workspace.root.as_deref())
-        .or(remote_workspace.as_deref());
-    let sourced_task_url = first_task.and_then(task_source_url);
-    let task_url = first_task
-        .and_then(|task| task.workspace.task_url.as_deref())
-        .or(sourced_task_url.as_deref());
+    let identity = discovery_identity(record);
     let parent_matches = first_task
         .map(|task| task.parent_plan_id.as_deref() == options.parent_id.as_deref())
         .unwrap_or(false);
@@ -413,16 +431,64 @@ fn matches_discovery_options(
     options
         .repo
         .as_deref()
-        .is_none_or(|value| repo == Some(value))
+        .is_none_or(|value| identity.repo.as_deref() == Some(value))
         && options
             .workspace
             .as_deref()
-            .is_none_or(|value| workspace == Some(value))
+            .is_none_or(|value| identity.workspace.as_deref() == Some(value))
         && options
             .task_url
             .as_deref()
-            .is_none_or(|value| task_url == Some(value))
+            .is_none_or(|value| identity.task_url.as_deref() == Some(value))
         && options.parent_id.as_deref().is_none_or(|_| parent_matches)
+}
+
+struct DiscoveryIdentity {
+    repo: Option<String>,
+    workspace: Option<String>,
+    task_url: Option<String>,
+}
+
+/// Materialized plans are the primary identity source. Before Cook creates a
+/// task, its immutable admission binding is the only durable task identity.
+fn discovery_identity(record: &AgentTaskRunRecord) -> DiscoveryIdentity {
+    let plan = agent_task_lifecycle::load_controller_plan(&record.run_id).ok();
+    let first_task = plan.as_ref().and_then(|plan| plan.tasks.first());
+    let plan_repo = plan
+        .as_ref()
+        .and_then(|plan| plan.group_key.clone())
+        .or_else(|| first_task.and_then(|task| task.group_key.clone()))
+        .or_else(|| first_task.and_then(|task| task.workspace.component_id.clone()))
+        .or_else(|| first_task.and_then(|task| task.workspace.slug.clone()));
+    let plan_workspace = first_task
+        .and_then(|task| task.workspace.root.clone())
+        .or_else(|| metadata_string(&record.metadata, "remote_workspace"));
+    let plan_task_url = first_task
+        .and_then(|task| task.workspace.task_url.clone())
+        .or_else(|| first_task.and_then(task_source_url));
+    let binding = record
+        .metadata
+        .pointer("/unmaterialized_cook_admission/binding");
+    DiscoveryIdentity {
+        repo: plan_repo.or_else(|| {
+            binding
+                .and_then(|value| value.pointer("/source/repository"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        workspace: plan_workspace.or_else(|| {
+            binding
+                .and_then(|value| value.get("worktree_ref"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        task_url: plan_task_url.or_else(|| {
+            binding
+                .and_then(|value| value.pointer("/source/task_refs/0"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+    }
 }
 
 fn parse_submitted_after(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
@@ -449,8 +515,7 @@ fn liveness_summary_for_records(
         ..Default::default()
     };
     for record in records {
-        let liveness =
-            classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+        let liveness = liveness_for_record(record, now);
         match liveness {
             AgentTaskLiveness::Active => summary.active += 1,
             AgentTaskLiveness::Stale => summary.stale += 1,
@@ -462,6 +527,15 @@ fn liveness_summary_for_records(
         }
     }
     summary
+}
+
+/// Classify one record with the same ownership rules used by active discovery
+/// and controller-upgrade admission.
+pub fn liveness_for_record(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AgentTaskLiveness {
+    classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now)
 }
 
 /// Read-only controller-upgrade admission derived from the same liveness model
@@ -511,9 +585,12 @@ pub(crate) fn controller_upgrade_admission_for_records(
         // Durable terminal state is authoritative even when stale ownership
         // metadata remains from the process that produced it.
         .filter(|record| !record.state.is_terminal())
+        // A Cook that has not materialized any task and is blocked only by a
+        // stale runner needs this controller replacement to converge runtime.
+        // It owns no executable work, so it cannot safely block that upgrade.
+        .filter(|record| !is_unmaterialized_runtime_convergence_blocker(record))
         .filter_map(|record| {
-            let liveness =
-                classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+            let liveness = liveness_for_record(record, now);
             let runner_unverified = record.runner_job_id().is_some()
                 && matches!(
                     liveness,
@@ -634,6 +711,12 @@ pub(crate) fn controller_upgrade_admission_for_records(
         record_health: serde_json::to_value(record_health).unwrap_or(serde_json::Value::Null),
         blockers,
     }
+}
+
+fn is_unmaterialized_runtime_convergence_blocker(record: &AgentTaskRunRecord) -> bool {
+    record.tasks.is_empty()
+        && agent_task_lifecycle::is_unmaterialized_cook_admission(record)
+        && record.metadata["unmaterialized_cook_admission"]["state"] == "blocked_runner_stale"
 }
 
 struct AgentTaskControllerUpgradeAdmissionProvider;
@@ -849,13 +932,7 @@ fn discovery_run(
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskDiscoveryRun {
     let plan = agent_task_lifecycle::load_controller_plan(&record.run_id).ok();
-    let first_task = plan.as_ref().and_then(|plan| plan.tasks.first());
-    let repo = plan
-        .as_ref()
-        .and_then(|plan| plan.group_key.clone())
-        .or_else(|| first_task.and_then(|task| task.group_key.clone()))
-        .or_else(|| first_task.and_then(|task| task.workspace.component_id.clone()))
-        .or_else(|| first_task.and_then(|task| task.workspace.slug.clone()));
+    let identity = discovery_identity(&record);
     let component = plan.as_ref().and_then(|plan| {
         plan.metadata
             .pointer("/cook_repository_identity/component_id")
@@ -863,12 +940,6 @@ fn discovery_run(
             .and_then(Value::as_str)
             .map(str::to_string)
     });
-    let workspace = first_task
-        .and_then(|task| task.workspace.root.clone())
-        .or_else(|| metadata_string(&record.metadata, "remote_workspace"));
-    let task_url = first_task
-        .and_then(|task| task.workspace.task_url.clone())
-        .or_else(|| first_task.and_then(task_source_url));
     let aggregate_path = record.aggregate_path.clone();
     let run_id = record.run_id.clone();
 
@@ -906,10 +977,10 @@ fn discovery_run(
     AgentTaskDiscoveryRun {
         run_id: run_id.clone(),
         state: record.state,
-        repo,
+        repo: identity.repo,
         component,
-        workspace,
-        task_url,
+        workspace: identity.workspace,
+        task_url: identity.task_url,
         counts: discovery_counts(&record.tasks),
         submitted_at: record.submitted_at,
         updated_at: record.updated_at,
@@ -1059,5 +1130,21 @@ mod tests {
             classify_liveness(&invalid, Some(10), now),
             AgentTaskLiveness::Stale
         );
+    }
+
+    #[test]
+    fn discovery_deduplicates_replayed_control_plane_records_by_run_id() {
+        let record = queued_record(json!({}));
+        let report = discovery_report(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions::default(),
+            vec![record.clone(), record],
+            AgentTaskRecordHealthSummary::healthy(),
+        )
+        .expect("deduplicated discovery report");
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.count, 1);
+        assert_eq!(report.runs[0].run_id, "retry-attempt");
     }
 }

@@ -34,6 +34,7 @@ mod action_eligibility;
 pub mod activity_provider;
 pub mod agent_task_handoff_event;
 pub mod agent_task_lifecycle_event;
+mod aggregate_transition;
 mod artifact_materialization;
 mod cancellation;
 mod control_plane_identities;
@@ -67,11 +68,12 @@ pub use acceptance_verifier::{
     AgentTaskAcceptanceVerifier, AgentTaskAcceptanceVerifierProvenance,
 };
 pub use action_eligibility::*;
+pub(crate) use aggregate_transition::*;
 pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use control_plane_identities::{
     canonical_control_plane_identities, canonical_control_plane_identities_for_run,
-    CanonicalControlPlaneIdentities,
+    canonical_fanout_mission, canonical_mission, CanonicalControlPlaneIdentities,
 };
 pub use failure_recording::*;
 pub use health::*;
@@ -94,7 +96,8 @@ pub use runner_continuation::{
 };
 pub use runner_continuation::{
     register_runner_continuation_provider, runner_authority, runner_live_job_authority,
-    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
+    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationSubmission,
+    RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
 pub use runner_exec::*;
 pub use workspace_authority::*;

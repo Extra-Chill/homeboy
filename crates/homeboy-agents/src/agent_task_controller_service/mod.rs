@@ -75,10 +75,9 @@ use artifacts::*;
 pub use dispatch_defaults::*;
 use pr_ownership::*;
 pub use proof::{
-    derive_proof_identity, prepare_controller_proof, resolve_proof_profile, CatalogReadinessProbe,
+    derive_proof_identity, prepare_controller_proof, resolve_proof_profile,
     ControllerProofIdentity, ControllerProofPreflightCheck, ControllerProofPreparation,
-    ControllerProofProfile, ProcessSecretEnv, ProofReadinessProbe, ProofSecretEnv,
-    CONTROLLER_PROOF_PREFLIGHT_SCHEMA,
+    ControllerProofProfile, CONTROLLER_PROOF_PREFLIGHT_SCHEMA,
 };
 pub use reports::*;
 pub use request::*;

@@ -20,6 +20,7 @@ use crate::agent_task_scheduler::{
 };
 use crate::agent_task_secrets::validate_secret_env;
 use homeboy_core::{defaults, worktree, Error, Result};
+use homeboy_runner_contract::WorkspaceIdentity;
 
 use super::agent_task_dispatch_service::{
     initial_provider_route_from_policy, AgentTaskDispatchRequest, AgentTaskModelSelection,
@@ -154,7 +155,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let mut provider_config = dispatch_provider_config(
+    let (mut provider_config, mut generated_provider_client_context) = dispatch_provider_config(
         request,
         &repo,
         &component,
@@ -163,6 +164,18 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?;
     let policy = request.core.resolved_provider_policy.clone();
     let initial_route = policy.map(initial_provider_route_from_policy);
+    if let Some(overrides) = initial_route
+        .as_ref()
+        .and_then(|route| route.provider_config.as_object())
+    {
+        // A selected policy route owns its explicit context, even when the
+        // base config received a Homeboy-generated fanout context.
+        generated_provider_client_context &= !overrides.contains_key("client_context");
+        provider_config
+            .as_object_mut()
+            .expect("dispatch provider config object")
+            .extend(overrides.clone());
+    }
     let policy_backend = initial_route
         .as_ref()
         .map(|route| route.backend.clone())
@@ -351,6 +364,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "resolved_runtime_identity": request.core.resolved_provider_policy
                     .as_ref()
                     .and_then(|policy| policy.runtime_identity.as_ref()),
+                "provider_readiness_generated_fanout_context": request.core.generated_fanout_context && generated_provider_client_context,
             }),
         });
     }
@@ -590,65 +604,23 @@ fn resolve_dispatch_workspace(
         return Ok(Some(DispatchWorkspaceTarget::path(path, "workspace-path")));
     }
 
-    let target = homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
-        workspace,
-        &homeboy_core::defaults::load_config(),
-        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
-    )
-    .map_err(|error| {
-        if error
-            .details
-            .pointer("/workspace/classification")
-            .and_then(Value::as_str)
-            == Some("workspace.resolved_but_dirty")
-        {
-            return error;
-        }
+    let record = worktree::resolve_workspace_ref_if_present(workspace)?
+        .ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace",
             format!(
-                "agent-task cook workspace '{}' is neither an existing directory nor a resolvable managed worktree handle: {}",
-                workspace, error.message
+                "agent-task cook workspace '{}' is neither an existing directory nor a native managed worktree handle",
+                workspace
             ),
             Some(workspace.clone()),
             Some(vec![
                 "Pass --cwd <path> for an explicit checkout".to_string(),
                 "Pass --workspace <path> for an existing workspace path".to_string(),
                 "Create or list Homeboy task worktrees with `homeboy worktree create` and `homeboy worktree list`".to_string(),
-                "Configure a worktree provider that can resolve the managed handle.".to_string(),
             ]),
         )
     })?;
-    if target.provider == homeboy_core::worktree_provider::WorktreeProviderIdentity::Native {
-        let record = worktree::resolve_workspace_ref_if_present(workspace)?.ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "native provider selected workspace `{workspace}` without a registry record"
-            ))
-        })?;
-        return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
-    }
-    let root = target.path.clone();
-    if !root.is_dir() {
-        let provider = match &target.provider {
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => "native",
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
-                provider
-            }
-        };
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            format!(
-                "managed worktree '{}' resolved by provider '{}' points at a missing directory {}",
-                workspace,
-                provider,
-                root.display()
-            ),
-            Some(workspace.clone()),
-            None,
-        ));
-    }
-
-    Ok(Some(DispatchWorkspaceTarget::provider(target)))
+    DispatchWorkspaceTarget::workspace_ref(record).map(Some)
 }
 
 #[derive(Debug, Clone)]
@@ -659,7 +631,7 @@ pub(crate) struct DispatchWorkspaceTarget {
     component_id: Option<String>,
     branch: Option<String>,
     base_ref: Option<String>,
-    workspace_identity: Option<homeboy_core::workspace_claim::WorkspaceIdentity>,
+    workspace_identity: Option<WorkspaceIdentity>,
     pub(crate) metadata: Value,
 }
 
@@ -739,48 +711,6 @@ impl DispatchWorkspaceTarget {
             }),
         })
     }
-
-    fn provider(target: homeboy_core::worktree_provider::WorktreeMutationTarget) -> Self {
-        let root = target.path;
-        let provider_id = match target.provider {
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
-                "native".to_string()
-            }
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
-                provider
-            }
-        };
-        let safety =
-            target
-                .safety
-                .unwrap_or(homeboy_core::worktree_provider::WorktreeProviderSafety {
-                    dirty: false,
-                    unpushed: false,
-                    primary: false,
-                    missing: false,
-                });
-        Self {
-            root: root.clone(),
-            slug: Some(target.handle.clone()),
-            kind: Some("worktree-provider".to_string()),
-            component_id: None,
-            branch: target.branch.clone(),
-            base_ref: None,
-            workspace_identity: None,
-            metadata: serde_json::json!({
-                "kind": "worktree-provider",
-                "provider_id": provider_id,
-                "handle": target.handle,
-                "root": root.display().to_string(),
-                "branch": target.branch,
-                "safety": {
-                    "dirty": safety.dirty,
-                    "unpushed": safety.unpushed,
-                    "primary": safety.primary,
-                },
-            }),
-        }
-    }
 }
 
 fn dispatch_workspace_materialization(
@@ -836,7 +766,6 @@ mod tests {
     use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
     use homeboy_core::test_support::with_isolated_home;
     use std::collections::HashMap;
-    use std::process::Command;
     use std::sync::Arc;
 
     #[test]
@@ -1335,6 +1264,78 @@ mod tests {
                 .filter_map(|entry| entry.model.as_deref())
                 .collect::<Vec<_>>(),
             ["model-two", "model-three"]
+        );
+    }
+
+    #[test]
+    fn policy_route_client_context_is_not_marked_as_generated_fanout_context() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with the policy provider context.".to_string()),
+            core: DispatchCoreInputs {
+                generated_fanout_context: true,
+                resolved_provider_policy: Some(
+                    crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                        backend: "policy-backend".to_string(),
+                        selector: None,
+                        model: None,
+                        rotation: Some(AgentTaskProviderRotationPolicy {
+                            entries: vec![
+                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                    provider_config: serde_json::json!({
+                                        "client_context": {"fanout": {"cook_id": "caller-owned"}}
+                                    }),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }),
+                        rotation_starts_with_first_entry: true,
+                        retry: AgentTaskRetryPolicy::default(),
+                        liveness_timeout_ms: None,
+                        runtime_identity: None,
+                    },
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].executor.config["client_context"]["fanout"]["cook_id"],
+            "caller-owned"
+        );
+        assert_eq!(
+            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
+            false
+        );
+    }
+
+    #[test]
+    fn generated_fanout_context_remains_marked_for_readiness_identity() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with generated fanout context.".to_string()),
+            core: DispatchCoreInputs {
+                generated_fanout_context: true,
+                client_context: Some(
+                    serde_json::json!({
+                        "fanout": {
+                            "id": "shared-fanout",
+                            "semantics": "batch_cook",
+                            "cook_id": "generated-child"
+                        }
+                    })
+                    .to_string(),
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
+            true
         );
     }
 
@@ -2068,14 +2069,7 @@ mod tests {
         run_git(path, &["commit", "-m", "init"]);
     }
 
-    fn run_git(path: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git command runs");
-        assert!(status.success(), "git {:?} failed", args);
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     #[test]
     fn resolves_workspace_path_without_specialized_coupling() {
@@ -2306,6 +2300,7 @@ mod tests {
                 tasks_json: overrides.core.tasks_json,
                 provider_config: overrides.core.provider_config,
                 client_context: overrides.core.client_context,
+                generated_fanout_context: overrides.core.generated_fanout_context,
                 attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
                 provider_rotations: overrides.core.provider_rotations,
@@ -2320,17 +2315,5 @@ mod tests {
         }
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as git;
 }

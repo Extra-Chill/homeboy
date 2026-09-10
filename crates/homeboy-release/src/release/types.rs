@@ -464,6 +464,14 @@ pub struct ReleaseOptions {
     pub(crate) preflight_placement: ReleasePreflightPlacement,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) readiness: Option<ReleaseReadinessEnvelope>,
+    #[serde(skip)]
+    pub(crate) control_plane: Option<ReleaseControlPlaneContext>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReleaseControlPlaneContext {
+    pub(crate) mission_id: String,
+    pub(crate) release_run_id: String,
 }
 
 /// Typed placement policy for the portable portion of release preflight.
@@ -617,6 +625,11 @@ pub struct ReleaseCommandInput {
     pub dry_run: bool,
     #[serde(default)]
     pub recover: bool,
+    /// Exact finalized changelog versions to inspect against immutable
+    /// release-tag snapshots. With `--apply`, remove only entries proven to
+    /// have been inserted after their section's release tag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_changelog_history: Vec<String>,
     /// During `--recover`, when the release tag exists but points at a commit
     /// strictly behind HEAD (e.g. config-only commits landed after tagging),
     /// move the tag to HEAD instead of refusing. Guarded: the tagged commit
@@ -757,7 +770,32 @@ pub struct ReleaseCommandResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub release_summary: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub changelog_history_recovery: Option<ChangelogHistoryRecoveryReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<ReleaseReadinessEnvelope>,
+}
+
+/// Immutable tag evidence and the exact post-release entries it proves were
+/// added to a finalized changelog section.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangelogHistoryRecoveryReport {
+    pub mode: String,
+    pub applied: bool,
+    pub affected_versions: Vec<ChangelogHistoryAffectedVersion>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangelogHistoryAffectedVersion {
+    pub version: String,
+    pub entries: Vec<String>,
+    pub evidence: ChangelogHistoryEvidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangelogHistoryEvidence {
+    pub tag: String,
+    pub tag_commit: String,
+    pub changelog_path: String,
 }
 
 /// Result of a batch release across multiple components.

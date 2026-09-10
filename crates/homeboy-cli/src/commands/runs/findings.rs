@@ -181,25 +181,6 @@ mod tests {
 
     use super::*;
 
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn labeled_run(store: &ObservationStore, label: &str) -> String {
         store
             .start_run(
@@ -241,7 +222,7 @@ mod tests {
         // alias, and filtering on the resolved id is what makes the lookup
         // return the run's findings instead of an empty list.
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run_id = labeled_run(&store, "findings-label");
             record_finding(&store, &run_id);
@@ -270,7 +251,7 @@ mod tests {
         // Behavior preservation: the facade tries the exact record id first, so
         // the pre-existing contract is unchanged.
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run_id = labeled_run(&store, "findings-exact");
             record_finding(&store, &run_id);
@@ -296,7 +277,7 @@ mod tests {
     #[test]
     fn findings_report_the_facade_missing_run_error() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let _store = ObservationStore::open_initialized().expect("store");
             // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
             let error = match findings(

@@ -517,7 +517,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         // that happened to be holding the pen when the filesystem gave out. It
         // shares the operational exit code so a wrapper can distinguish it from
         // an internal error and route to cleanup (#11127).
-        ErrorCode::StorageExhausted => 20,
+        ErrorCode::ResourceCapacityReserve | ErrorCode::StorageExhausted => 20,
 
         // A contended runtime promotion (another owner holds the lease) is a
         // transient "busy" condition, not a hard failure — map it to the
@@ -647,7 +647,17 @@ fn envelope_for_data(
         operation: identity.operation.clone(),
         success,
         exit_code,
-        status: status_for_result(Some(&data), exit_code),
+        status: if exit_code == 0
+            && matches!(
+                (identity.command.as_str(), identity.operation.as_deref()),
+                ("agent-task", Some("fanout resume"))
+            ) {
+            // Resume can successfully reconcile a batch whose durable subject
+            // remains failed; retain that subject outcome below instead.
+            "succeeded".to_string()
+        } else {
+            status_for_result(Some(&data), exit_code)
+        },
         subject_state,
         run,
         refs,
@@ -673,6 +683,10 @@ fn subject_state_for_identity(identity: &CommandIdentity, data: &Value) -> Optio
     match (identity.command.as_str(), identity.operation.as_deref()) {
         ("agent-task", Some("status")) => data
             .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ("agent-task", Some("fanout resume")) => data
+            .get("status")
             .and_then(Value::as_str)
             .map(str::to_string),
         _ => None,
@@ -730,6 +744,13 @@ fn failure_diagnostics_for_data(
         return None;
     }
 
+    if let Some(diagnostics) = upgrade_runner_convergence_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
+    if let Some(diagnostics) = runner_reconciliation_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
+
     let specialized_digest = release_failure_digest(data)
         .or_else(|| cook_batch_failure_digest(data))
         .or_else(|| formatting_failure_digest(data));
@@ -737,28 +758,17 @@ fn failure_diagnostics_for_data(
         return Some(command_failed_diagnostics(exit_code, failure_digest));
     }
     if let Some(failure) = declared_failure(data) {
-        let mut details = failure.details;
-        details.insert("exit_code".to_string(), Value::from(exit_code));
-        details.insert(
-            "source_pointer".to_string(),
-            Value::String("/failure".to_string()),
-        );
-        let failure_digest = CommandFailureDigest {
-            summary: failure.message.clone(),
-            stdout_tail: failure.stdout_tail,
-            stderr_tail: failure.stderr_tail,
-            artifact_refs: Vec::new(),
-            next_actions: failure.next_actions,
-            retryable: failure.retryable,
-        };
-        return Some(CommandDiagnostics {
-            code: failure.code,
-            message: failure.message,
-            details: Value::Object(details),
-            hints: None,
-            retryable: failure.retryable,
-            failure_digest: Some(failure_digest),
-        });
+        return Some(declared_failure_diagnostics(exit_code, failure, "/failure"));
+    }
+    if let Some(failure) = bounded_refresh_typed_error(data) {
+        return Some(declared_failure_diagnostics(exit_code, failure, "/error"));
+    }
+    if let Some(failure) = unresolved_provider_workspace_failure(data) {
+        return Some(declared_failure_diagnostics(
+            exit_code,
+            failure,
+            "/resolved/workspace",
+        ));
     }
 
     let failure_digest = failure_digest_for_data(data).or_else(|| {
@@ -766,6 +776,209 @@ fn failure_diagnostics_for_data(
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
     failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+/// Promote the blocker already computed by `runner reconcile` into the command
+/// envelope. The full reconciliation report remains under `data` (#14498).
+fn runner_reconciliation_diagnostics(exit_code: i32, data: &Value) -> Option<CommandDiagnostics> {
+    if data.get("command").and_then(Value::as_str) != Some("runner.reconcile") {
+        return None;
+    }
+
+    let reconciliation = data.get("reconciliation")?;
+    let status = reconciliation.get("status")?.as_str()?;
+    if !matches!(status, "blocked" | "partial_progress") {
+        return None;
+    }
+    let blocker = reconciliation.get("remaining_blocker")?.as_str()?;
+    let retry_predicate = reconciliation
+        .get("retry_predicate")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let message = match retry_predicate.as_deref() {
+        Some(predicate) => format!("runner reconcile {status}: {blocker}; {predicate}"),
+        None => format!("runner reconcile {status}: {blocker}"),
+    };
+    let next_actions = reconciliation
+        .get("next_action")
+        .and_then(Value::as_str)
+        .map(|command| {
+            vec![CommandNextAction::new(
+                "resolve the runner reconciliation blocker",
+                command,
+            )]
+        })
+        .unwrap_or_default();
+    let mut details = Map::new();
+    details.insert("exit_code".to_string(), Value::from(exit_code));
+    details.insert(
+        "source_pointer".to_string(),
+        Value::String("/reconciliation".to_string()),
+    );
+    details.insert(
+        "reconciliation_status".to_string(),
+        Value::String(status.to_string()),
+    );
+    details.insert(
+        "remaining_blocker".to_string(),
+        Value::String(blocker.to_string()),
+    );
+    if let Some(retry_predicate) = retry_predicate {
+        details.insert(
+            "retry_predicate".to_string(),
+            Value::String(retry_predicate),
+        );
+    }
+    if let Some(ownership_evidence) = data
+        .pointer("/connection/daemon_freshness/ownership_evidence")
+        .and_then(Value::as_str)
+    {
+        details.insert(
+            "ownership_evidence".to_string(),
+            Value::String(ownership_evidence.to_string()),
+        );
+    }
+
+    let failure_digest = CommandFailureDigest {
+        summary: message.clone(),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
+        retryable: None,
+    };
+    Some(CommandDiagnostics {
+        code: format!("runner.reconcile.{blocker}"),
+        message,
+        details: Value::Object(details),
+        hints: None,
+        retryable: None,
+        failure_digest: Some(failure_digest),
+    })
+}
+
+fn declared_failure_diagnostics(
+    exit_code: i32,
+    failure: DeclaredFailure,
+    source_pointer: &str,
+) -> CommandDiagnostics {
+    let mut details = failure.details;
+    details.insert("exit_code".to_string(), Value::from(exit_code));
+    details.insert(
+        "source_pointer".to_string(),
+        Value::String(source_pointer.to_string()),
+    );
+    let failure_digest = CommandFailureDigest {
+        summary: failure.message.clone(),
+        stdout_tail: failure.stdout_tail,
+        stderr_tail: failure.stderr_tail,
+        artifact_refs: Vec::new(),
+        next_actions: failure.next_actions,
+        retryable: failure.retryable,
+    };
+    CommandDiagnostics {
+        code: failure.code,
+        message: failure.message,
+        details: Value::Object(details),
+        hints: None,
+        retryable: failure.retryable,
+        failure_digest: Some(failure_digest),
+    }
+}
+
+fn upgrade_runner_convergence_diagnostics(
+    exit_code: i32,
+    data: &Value,
+) -> Option<CommandDiagnostics> {
+    if !is_partial_upgrade_outcome(data) {
+        return None;
+    }
+
+    let message = data
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("Controller installation succeeded, but configured runners did not converge")
+        .to_string();
+    let runners = data
+        .get("runners_updated")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            data.get("runners_skipped")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter(|runner| {
+            runner.get("success").and_then(Value::as_bool) == Some(false)
+                || data.get("new_version").and_then(Value::as_str).is_some_and(
+                    |controller_version| {
+                        runner.get("new_version").and_then(Value::as_str)
+                            != Some(controller_version)
+                    },
+                )
+        })
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_actions = runners
+        .iter()
+        .flat_map(|runner| {
+            let runner_id = runner
+                .get("runner_id")
+                .and_then(Value::as_str)
+                .unwrap_or("runner");
+            runner
+                .get("recovery_commands")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(move |command| {
+                    CommandNextAction::new(format!("repair {runner_id}"), command)
+                        .with_kind(CommandNextActionKind::Repair)
+                })
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    let details = serde_json::json!({
+        "exit_code": exit_code,
+        "source_pointer": "/runner_convergence",
+        "outcome": data.get("outcome"),
+        "operation_id": data.get("operation_id"),
+        "controller": data.get("controller"),
+        "runners": data.get("runners"),
+        "runner_convergence": data.get("runner_convergence"),
+        "runner_failures": runners,
+    });
+    let failure_digest = CommandFailureDigest {
+        summary: message.clone(),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
+        retryable: Some(true),
+    };
+    Some(CommandDiagnostics {
+        code: "upgrade.runner_convergence_partial".to_string(),
+        message,
+        details,
+        hints: None,
+        retryable: Some(true),
+        failure_digest: Some(failure_digest),
+    })
+}
+
+fn is_partial_upgrade_outcome(data: &Value) -> bool {
+    data.get("command").and_then(Value::as_str) == Some("upgrade")
+        && data.get("partial").and_then(Value::as_bool) == Some(true)
+        && data.get("runner_convergence").and_then(Value::as_str) == Some("partial")
+        && matches!(
+            data.pointer("/controller/status").and_then(Value::as_str),
+            Some("updated" | "unchanged")
+        )
 }
 
 fn command_failed_diagnostics(
@@ -796,7 +1009,21 @@ struct DeclaredFailure {
 /// causal subprocess failures here; unrelated nested historical records are
 /// data and must not be attributed to this command invocation.
 fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
-    let object = data.get("failure")?.as_object()?;
+    declared_failure_object(data.get("failure")?.as_object()?)
+}
+
+/// The bounded refresh projection keeps a typed command error under `error`.
+/// Lift it only from that schema so arbitrary nested error records remain data.
+fn bounded_refresh_typed_error(data: &Value) -> Option<DeclaredFailure> {
+    if data.get("schema").and_then(Value::as_str)
+        != Some("homeboy/runner-refresh-homeboy-bounded-output/v1")
+    {
+        return None;
+    }
+    declared_failure_object(data.get("error")?.as_object()?)
+}
+
+fn declared_failure_object(object: &Map<String, Value>) -> Option<DeclaredFailure> {
     let message = ["message", "problem", "summary"]
         .into_iter()
         .find_map(|key| object.get(key).and_then(Value::as_str))
@@ -850,15 +1077,72 @@ fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .take(4)
             .filter_map(|action| serde_json::from_value(action.clone()).ok())
-            .collect::<Vec<_>>()
-            .into_iter()
+            .chain(
+                details
+                    .get(ACTIONS_DETAILS_KEY)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|action| {
+                        serde_json::from_value::<ExecutableAction>(action.clone()).ok()
+                    })
+                    .map(CommandNextAction::from_action),
+            )
             .chain(failure_replay_action(&details))
             .take(4)
             .collect(),
         details,
         retryable,
+    })
+}
+
+/// An unresolved provider is the current failure only in the Cook preview
+/// envelope. Other nested workspace records can be historical observations.
+fn unresolved_provider_workspace_failure(data: &Value) -> Option<DeclaredFailure> {
+    if data.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-cook-preview/v1") {
+        return None;
+    }
+    let workspace = data.pointer("/resolved/workspace")?.as_object()?;
+    if workspace.get("action").and_then(Value::as_str) != Some("unresolved_provider") {
+        return None;
+    }
+    let message = workspace.get("reason").and_then(Value::as_str)?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let mut details = workspace
+        .get("details")
+        .map(bounded_failure_detail)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(remediation) = workspace
+        .get("remediation")
+        .filter(|value| !value.is_null())
+    {
+        details.insert(
+            "remediation".to_string(),
+            bounded_failure_detail(remediation),
+        );
+    }
+    if let Some(provider_id) = workspace
+        .get("provider_id")
+        .filter(|value| !value.is_null())
+    {
+        details.insert(
+            "provider_id".to_string(),
+            bounded_failure_detail(provider_id),
+        );
+    }
+    let next_actions = failure_replay_action(&details).into_iter().collect();
+    Some(DeclaredFailure {
+        code: "worktree.provider_unresolved".to_string(),
+        message: bounded_text(message, 1_000),
+        stdout_tail: None,
+        stderr_tail: None,
+        next_actions,
+        details,
+        retryable: None,
     })
 }
 
@@ -885,6 +1169,11 @@ fn failure_replay_action(details: &Map<String, Value>) -> Option<CommandNextActi
         .and_then(Value::as_str)
         .or_else(|| details.get("replay_command").and_then(Value::as_str))
         .or_else(|| details.get("recovery_command").and_then(Value::as_str))
+        .or_else(|| {
+            details
+                .get("worktree_provider_replay_command")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             details
                 .get("remediation")
@@ -1471,6 +1760,9 @@ fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
                 .expect("matched canonical status")
                 .to_string();
         }
+        if data.is_some_and(is_partial_upgrade_outcome) {
+            return "partial_failure".to_string();
+        }
         return "failed".to_string();
     }
 
@@ -1905,6 +2197,96 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_runner_partial_retains_typed_public_diagnostics() {
+        let payload = json!({
+            "command": "upgrade",
+            "partial": true,
+            "outcome": "controller_updated_runner_failed",
+            "operation_id": "upgrade-123",
+            "new_version": "0.304.0",
+            "runner_convergence": "partial",
+            "message": "PARTIAL: controller upgraded, but 1 selected runner did not converge",
+            "controller": {
+                "status": "updated",
+                "summary": "controller installation completed"
+            },
+            "runners": {
+                "status": "partial",
+                "summary": "0 converged, 1 require repair"
+            },
+            "runners_updated": [{
+                "runner_id": "stale-success",
+                "success": true,
+                "new_version": "0.301.2",
+                "recovery_commands": ["homeboy upgrade --upgrade-runner stale-success"]
+            }, {
+                "runner_id": "aligned-success",
+                "success": true,
+                "new_version": "0.304.0",
+                "recovery_commands": ["must-not-appear"]
+            }],
+            "runners_skipped": [{
+                "runner_id": "homeboy-lab",
+                "success": false,
+                "detail": "runner unavailable",
+                "recovery_commands": [
+                    "homeboy upgrade --force --upgrade-runner homeboy-lab"
+                ]
+            }]
+        });
+        let envelope = cli_response_for_json_result_for_command(&Ok(payload), 1, "upgrade", None);
+        let value = serde_json::to_value(envelope).expect("serialize envelope");
+
+        assert_eq!(value["status"], "partial_failure");
+        assert_eq!(
+            value["diagnostics"]["code"],
+            "upgrade.runner_convergence_partial"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["outcome"],
+            "controller_updated_runner_failed"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["operation_id"],
+            "upgrade-123"
+        );
+        let actions = value["next_actions"].as_array().expect("next actions");
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy upgrade --upgrade-runner stale-success"
+        }));
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy upgrade --force --upgrade-runner homeboy-lab"
+        }));
+        assert!(actions
+            .iter()
+            .all(|action| action["command"] != "must-not-appear"));
+        assert_eq!(value["data"]["runner_convergence"], "partial");
+        assert_eq!(
+            value["diagnostics"]["details"]["runner_failures"][0]["runner_id"],
+            "stale-success"
+        );
+        assert!(value["diagnostics"]["details"]["runner_failures"]
+            .as_array()
+            .expect("runner failures")
+            .iter()
+            .all(|runner| runner["runner_id"] != "aligned-success"));
+    }
+
+    #[test]
+    fn upgrade_preflight_failure_is_not_misclassified_as_partial_installation() {
+        let payload = json!({
+            "command": "upgrade",
+            "partial": true,
+            "outcome": "extension_preflight_failed",
+            "controller": { "status": "extension_preflight_failed" },
+            "runner_convergence": null
+        });
+
+        assert_eq!(status_for_result(Some(&payload), 1), "failed");
+        assert!(upgrade_runner_convergence_diagnostics(1, &payload).is_none());
+    }
+
+    #[test]
     fn runtime_inventory_fingerprint_matches_python_json_for_unicode_and_controls() {
         let tests = vec![
             homeboy_extension_contract::test_results::TestRuntimeIdentity {
@@ -2011,8 +2393,8 @@ mod tests {
         for subject_state in ["queued", "running", "failed", "succeeded"] {
             let response = cli_response_for_json_result_for_identity(
                 &Ok(json!({
-                    "schema": "homeboy/agent-task-status-summary/v1",
-                    "run_id": "run-1",
+                    "schema": "homeboy/control-plane-run/v1",
+                    "run": "run-1",
                     "state": subject_state,
                 })),
                 0,
@@ -2271,6 +2653,53 @@ mod tests {
     }
 
     #[test]
+    fn cook_preview_lifts_unresolved_provider_workspace_reason_without_failure() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "failure": null,
+            "resolved": {
+                "workspace": {
+                    "action": "unresolved_provider",
+                    "disposition": "unresolved",
+                    "provider_id": "fixture",
+                    "reason": "Component not found",
+                    "remediation": ["Register the component, then replay the provider plan."],
+                    "details": {
+                        "id": "example-repository",
+                        "field": "repository",
+                        "worktree_provider_phase": "worktree_provider_plan",
+                        "worktree_provider_replay_command": "workspace-provider plan example-repository",
+                    },
+                },
+            },
+        });
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(payload.clone()),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "worktree.provider_unresolved");
+        assert_eq!(value["summary"], "Component not found");
+        assert_eq!(
+            value["diagnostics"]["details"]["remediation"],
+            json!(["Register the component, then replay the provider plan."])
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["source_pointer"],
+            "/resolved/workspace"
+        );
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "workspace-provider plan example-repository"
+        );
+        assert_eq!(value["data"], payload, "nested evidence remains lossless");
+    }
+
+    #[test]
     fn historical_nested_errors_are_not_attributed_to_the_current_exit() {
         let response = cli_response_for_json_result_for_identity(
             &Ok(json!({
@@ -2295,6 +2724,156 @@ mod tests {
             .as_str()
             .expect("summary")
             .contains("earlier attempt"));
+    }
+
+    #[test]
+    fn bounded_refresh_typed_errors_are_promoted_for_nonzero_exits() {
+        for (exit_code, code, message) in [
+            (
+                1,
+                "runner.policy_denied",
+                "runner rotation is blocked by the current admission policy",
+            ),
+            (
+                2,
+                "validation.invalid_argument",
+                "Invalid argument reconnect: runner cannot bootstrap over diagnostic SSH until its authoritative admission snapshot permits daemon rotation",
+            ),
+        ] {
+            let payload = json!({
+                "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+                "command": "runner.refresh_homeboy",
+                "exit_code": exit_code,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "details": {
+                        "argument": "reconnect",
+                        "_homeboy_actions": [{
+                            "id": "inspect-runner-status",
+                            "label": "inspect runner admission",
+                            "program": "homeboy",
+                            "args": ["runner", "status", "homeboy-lab"],
+                            "safety": "read_only"
+                        }]
+                    }
+                },
+                "artifacts": { "run_id": "refresh-run" },
+            });
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(payload.clone()),
+                exit_code,
+                &CommandIdentity::with_operation("runner", "refresh-homeboy"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["diagnostics"]["code"], code, "exit {exit_code}");
+            assert_eq!(value["summary"], message, "exit {exit_code}");
+            assert_eq!(
+                value["diagnostics"]["failure_digest"]["summary"],
+                message,
+                "exit {exit_code}"
+            );
+            assert_eq!(
+                value["diagnostics"]["details"]["source_pointer"],
+                "/error",
+                "exit {exit_code}"
+            );
+            assert_eq!(
+                value["next_actions"][0]["command"],
+                "homeboy runner status homeboy-lab",
+                "exit {exit_code}"
+            );
+            assert_eq!(value["data"], payload, "exit {exit_code} keeps all evidence");
+        }
+    }
+
+    #[test]
+    fn runner_reconcile_blockers_are_promoted_with_only_legal_actions() {
+        for (label, payload, code, action) in [
+            (
+                "incompatible daemon",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "daemon_compatibility",
+                        "next_action": "homeboy runner doctor homeboy-lab --scope lab-offload",
+                        "retry_predicate": "daemon_compatible=true after the selected daemon identity is repaired",
+                    },
+                }),
+                "runner.reconcile.daemon_compatibility",
+                Some("homeboy runner doctor homeboy-lab --scope lab-offload"),
+            ),
+            (
+                "ownership evidence unavailable",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "daemon_ownership_evidence_unavailable",
+                        "retry_predicate": "ownership evidence required before daemon recovery: remote daemon lease ownership could not be established",
+                    },
+                    "connection": {
+                        "action": "status",
+                        "daemon_freshness": {
+                            "ownership_evidence": "remote daemon lease ownership could not be established",
+                        },
+                    },
+                }),
+                "runner.reconcile.daemon_ownership_evidence_unavailable",
+                None,
+            ),
+        ] {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(payload.clone()),
+                1,
+                &CommandIdentity::with_operation("runner", "reconcile"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["diagnostics"]["code"], code, "{label}");
+            assert_eq!(
+                value["diagnostics"]["details"]["remaining_blocker"],
+                payload["reconciliation"]["remaining_blocker"],
+                "{label}"
+            );
+            assert_eq!(
+                value["diagnostics"]["details"]["retry_predicate"],
+                payload["reconciliation"]["retry_predicate"],
+                "{label}"
+            );
+            if label == "ownership evidence unavailable" {
+                assert_eq!(
+                    value["diagnostics"]["details"]["ownership_evidence"],
+                    "remote daemon lease ownership could not be established"
+                );
+            }
+            assert_eq!(value["data"], payload, "{label} keeps all evidence");
+            match action {
+                Some(action) => assert_eq!(value["next_actions"][0]["command"], action, "{label}"),
+                None => assert!(value["next_actions"].is_null(), "{label}"),
+            }
+        }
+    }
+
+    #[test]
+    fn successful_runner_reconcile_has_no_failure_diagnostics() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "command": "runner.reconcile",
+                "reconciliation": { "status": "converged" },
+            })),
+            0,
+            &CommandIdentity::with_operation("runner", "reconcile"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], true);
+        assert!(value["diagnostics"].is_null());
     }
 
     #[test]
@@ -2325,8 +2904,8 @@ mod tests {
     #[test]
     fn failed_results_always_name_their_cause() {
         let causeless = json!({
-            "schema": "homeboy/agent-task-status-summary/v1",
-            "run_id": "run-1",
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "run-1",
             "state": "succeeded",
         });
         for (label, result, exit_code) in [
@@ -2604,6 +3183,40 @@ mod tests {
             payload.expect_err("error payload").code,
             ErrorCode::ValidationMissingArgument
         );
+    }
+
+    #[test]
+    fn reserve_pressure_keeps_a_resource_exit_code_and_actionable_recovery() {
+        let error = Error::capacity_reserve(homeboy::core::error::CapacityReserveDetails {
+            filesystem: "/workspace".to_string(),
+            available_bytes: 90,
+            reserve_bytes: 100,
+            shortfall_bytes: 10,
+        })
+        .with_action(ExecutableAction::new(
+            "capacity.reserve.inspect_cleanup",
+            "inspect scoped rebuildable artifacts",
+            "homeboy",
+            ["cleanup", "artifacts", "--path", "/workspace"],
+            homeboy::core::error::ActionSafety::ReadOnly,
+        ));
+        let (payload, exit_code) = map_cmd_result_to_json::<serde_json::Value>(Err(error));
+        let error = payload.expect_err("reserve pressure error");
+        let response = CommandResultEnvelope::<()>::from_error(
+            &CommandIdentity::top_level("agent-task"),
+            &error,
+            exit_code,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(exit_code, 20);
+        assert_eq!(value["diagnostics"]["code"], "resource.capacity_reserve");
+        assert_eq!(value["diagnostics"]["details"]["shortfall_bytes"], 10);
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "homeboy cleanup artifacts --path /workspace"
+        );
+        assert_eq!(value["next_actions"][0]["action"]["safety"], "read_only");
     }
 
     #[test]

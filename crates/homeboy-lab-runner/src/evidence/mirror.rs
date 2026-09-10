@@ -168,6 +168,19 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
                 "homeboy runs artifact get {} {} -o <path>",
                 controller_run_id, artifact.id
             );
+            let unreachable_aliases =
+                homeboy_core::artifact_links::unreachable_public_artifact_aliases(&artifact)
+                    .iter()
+                    .map(homeboy_core::artifact_links::public_artifact_url_validation_json)
+                    .collect::<Vec<_>>();
+            let mut metadata = json!({
+                "controller_run_id": controller_run_id,
+                "controller_owned": true,
+                "fetch_command": fetch_command,
+            });
+            if !unreachable_aliases.is_empty() {
+                metadata["unreachable_aliases"] = json!(unreachable_aliases);
+            }
             Ok(JobArtifactMetadata {
                 id: artifact.id,
                 name: None,
@@ -179,11 +192,7 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
                     .and_then(|size| u64::try_from(size).ok()),
                 sha256: artifact.sha256,
                 content_base64: None,
-                metadata: Some(json!({
-                    "controller_run_id": controller_run_id,
-                    "controller_owned": true,
-                    "fetch_command": fetch_command,
-                })),
+                metadata: Some(metadata),
             })
         })
         .collect()
@@ -206,18 +215,19 @@ fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
             None,
         )
     })?;
-    let expected_sha256 = artifact
+    if artifact
         .sha256
         .as_deref()
         .filter(|sha| !sha.is_empty())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact.sha256",
-                "terminal artifact is missing controller checksum metadata",
-                Some(artifact.id.clone()),
-                None,
-            )
-        })?;
+        .is_none()
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact.sha256",
+            "terminal artifact is missing controller checksum metadata",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
     if artifact.mime.as_deref().is_none_or(str::is_empty) {
         return Err(Error::validation_invalid_argument(
             "artifact.mime",
@@ -240,15 +250,25 @@ fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
             None,
         ));
     }
-    if homeboy_core::artifact_metadata::sha256_file(path)? != expected_sha256 {
-        return Err(Error::validation_invalid_argument(
-            "artifact.sha256",
-            "terminal artifact bytes do not match controller checksum metadata",
-            Some(artifact.id.clone()),
-            None,
-        ));
+    match homeboy_core::artifact_links::classify_retained_artifact_availability(artifact)? {
+        homeboy_core::artifact_links::RetainedArtifactAvailability::Available { .. } => Ok(()),
+        homeboy_core::artifact_links::RetainedArtifactAvailability::Missing { reason } => {
+            Err(Error::validation_invalid_argument(
+                "artifact.path",
+                reason,
+                Some(artifact.id.clone()),
+                None,
+            ))
+        }
+        homeboy_core::artifact_links::RetainedArtifactAvailability::ChecksumMismatch { .. } => {
+            Err(Error::validation_invalid_argument(
+                "artifact.sha256",
+                "terminal artifact bytes do not match controller checksum metadata",
+                Some(artifact.id.clone()),
+                None,
+            ))
+        }
     }
-    Ok(())
 }
 
 /// Takes the caller's roots because the evidence this mirrors describes the run
@@ -587,25 +607,6 @@ fn record_reverse_broker_metadata(
     context.store.update_run_metadata(&run.id, metadata)
 }
 
-pub fn mirror_daemon_job_progress(
-    runner: &Runner,
-    cwd: &str,
-    command: &[String],
-    job: &Job,
-    events: &[JobEvent],
-    run_id: Option<&str>,
-) -> Result<RunRecord> {
-    mirror_daemon_job_progress_with_ownership(
-        runner,
-        cwd,
-        command,
-        job,
-        events,
-        run_id,
-        MirrorRunOwnership::Inferred,
-    )
-}
-
 pub(crate) fn mirror_daemon_job_progress_with_ownership(
     runner: &Runner,
     cwd: &str,
@@ -707,10 +708,8 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         Some(broker_url) => {
             crate::connection::reverse_broker_job_snapshot_at(broker_url, &runner_id, &job_id)?
         }
-        None => (
-            fetch_daemon_job(&runner_id, &job_id)?,
-            fetch_daemon_events(&runner_id, &job_id)?,
-        ),
+        None => runner_job_log_snapshot_with_owner_recovery(&runner_id, &job_id)
+            .map(|snapshot| (snapshot.job, snapshot.events))?,
     };
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let cwd = run.cwd.as_deref().unwrap_or("");
@@ -847,6 +846,55 @@ pub fn runner_job_log_snapshot(runner_id: &str, job_id: &str) -> Result<RunnerJo
         job: fetch_daemon_job(runner_id, job_id)?,
         events: fetch_daemon_events(runner_id, job_id)?,
     })
+}
+
+/// Refresh one mirrored run through its original daemon generation when the
+/// mutable admission daemon has rotated away from that job.
+fn runner_job_log_snapshot_with_owner_recovery(
+    runner_id: &str,
+    job_id: &str,
+) -> Result<RunnerJobLogSnapshot> {
+    runner_job_log_snapshot_with_owner_recovery_with(
+        runner_id,
+        job_id,
+        || runner_job_log_snapshot(runner_id, job_id),
+        |runner_id, job_id| crate::connection::reconnect_job_log_owner(runner_id, job_id),
+        |session, job_id| runner_job_log_snapshot_for_session(session, job_id),
+        crate::connection::close_reconnected_job_log_owner,
+    )
+}
+
+/// Keep the routing transaction independent from its direct-SSH transport so
+/// the exact owner selection remains deterministic and testable.
+pub(super) fn runner_job_log_snapshot_with_owner_recovery_with<
+    Owner,
+    Current,
+    Reconnect,
+    Snapshot,
+    Close,
+>(
+    runner_id: &str,
+    job_id: &str,
+    current: Current,
+    reconnect: Reconnect,
+    snapshot: Snapshot,
+    close: Close,
+) -> Result<RunnerJobLogSnapshot>
+where
+    Current: FnOnce() -> Result<RunnerJobLogSnapshot>,
+    Reconnect: FnOnce(&str, &str) -> Result<Owner>,
+    Snapshot: FnOnce(&Owner, &str) -> Result<RunnerJobLogSnapshot>,
+    Close: FnOnce(&Owner),
+{
+    match current() {
+        Ok(snapshot) => Ok(snapshot),
+        Err(_) => {
+            let owner = reconnect(runner_id, job_id)?;
+            let recovered = snapshot(&owner, job_id);
+            close(&owner);
+            recovered
+        }
+    }
 }
 
 pub fn runner_job_log_snapshot_for_session(

@@ -91,8 +91,8 @@ fn collect_ssh_child_output(
     pid: u32,
     status: Option<std::io::Result<std::process::ExitStatus>>,
     stdin_failed: bool,
-    stdout: Option<Receiver<String>>,
-    stderr: Option<Receiver<String>>,
+    stdout: Option<Receiver<Vec<u8>>>,
+    stderr: Option<Receiver<Vec<u8>>>,
 ) -> CommandOutput {
     let wait_failed = status.as_ref().is_some_and(|status| status.is_err());
     let deadline = Instant::now() + PROCESS_CLEANUP_ALLOWANCE;
@@ -576,6 +576,52 @@ impl SshClient {
         self.execute_ssh_with_timeout(&effective, None, timeout)
     }
 
+    /// Execute with this client's environment delivered over stdin instead of
+    /// interpolated into the remote command argv.
+    ///
+    /// This preserves the configured environment while keeping request-sized
+    /// values out of the controller and remote shell command lines.
+    pub fn execute_with_materialized_env(&self, command: &str) -> CommandOutput {
+        let env = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let command = wrap_command_with_secret_env_read_loop(&format!(
+            "{} && {}",
+            remote_shell_path_preamble(),
+            command
+        ));
+        let input = build_secret_env_stdin_block(&env);
+        if self.is_local {
+            return execute_local_command_with_stdin(&command, &input);
+        }
+        self.execute_with_stdin(&command, SshStdin::Inline(&input))
+    }
+
+    /// Execute with a materialized environment and a hard wall-clock deadline.
+    pub fn execute_with_materialized_env_and_timeout(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> CommandOutput {
+        let env = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let command = wrap_command_with_secret_env_read_loop(&format!(
+            "{} && {}",
+            remote_shell_path_preamble(),
+            command
+        ));
+        let input = build_secret_env_stdin_block(&env);
+        if self.is_local {
+            return execute_local_command_with_stdin_and_timeout(&command, &input, timeout);
+        }
+        self.execute_ssh_with_timeout(&command, Some(&input), timeout)
+    }
+
     /// Execute a command with replayable bytes delivered over stdin and a hard
     /// wall-clock deadline.
     pub fn execute_with_input_and_timeout(
@@ -702,21 +748,24 @@ pub(super) fn run_command_with_stdin_source(
     collect_ssh_child_output(&mut child, pid, Some(status), stdin_failed, stdout, stderr)
 }
 
-fn read_stream(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
+pub(super) fn read_stream(mut pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = pipe.read_to_end(&mut bytes);
-        let _ = sender.send(String::from_utf8_lossy(&bytes).to_string());
+        // Signal EOF before decoding potentially large output. Snapshot metadata
+        // can be hundreds of megabytes, and UTF-8 conversion must not consume the
+        // process cleanup allowance after the SSH child has already succeeded.
+        let _ = sender.send(bytes);
     });
     receiver
 }
 
-fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Instant) -> (String, bool) {
+fn collect_stream_before(receiver: Option<Receiver<Vec<u8>>>, deadline: Instant) -> (String, bool) {
     match receiver {
         Some(receiver) => {
             match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(output) => (output, false),
+                Ok(output) => (String::from_utf8_lossy(&output).into_owned(), false),
                 Err(RecvTimeoutError::Timeout) => (String::new(), true),
                 Err(RecvTimeoutError::Disconnected) => (String::new(), false),
             }
@@ -726,8 +775,8 @@ fn collect_stream_before(receiver: Option<Receiver<String>>, deadline: Instant) 
 }
 
 fn collect_streams_before(
-    stdout: Option<Receiver<String>>,
-    stderr: Option<Receiver<String>>,
+    stdout: Option<Receiver<Vec<u8>>>,
+    stderr: Option<Receiver<Vec<u8>>>,
     deadline: Instant,
 ) -> (String, String, bool) {
     let (stdout, stdout_stalled) = collect_stream_before(stdout, deadline);
@@ -1424,11 +1473,16 @@ const PROCESS_TERMINATION_GRACE: Duration = Duration::from_millis(100);
 /// backgrounding and then explicitly redirect the child's fd 0 from fd 3,
 /// restoring the original stdin stream.
 pub(super) fn wrap_owned_remote_command(command: &str) -> String {
+    // Bind the payload once. Embedding it separately in the setsid and Perl
+    // branches doubled every remote command inside a single `exec` argv, and
+    // large payloads (capability probes composed from runner env plus required
+    // tool, command, and capability entries) reached the exec limit and failed
+    // with `Argument list too long` before any branch ran. See #14304, and
+    // #8855, #8951, #9009, #10492 for the same limit at other sites.
     format!(
-        "exec 3<&0 || {{ printf '%s\\n' 'Homeboy SSH execution could not preserve remote stdin.' >&2; exit 1; }}; if command -v setsid >/dev/null 2>&1; then setsid sh -c {} <&3 & elif command -v perl >/dev/null 2>&1; then perl -MPOSIX -e {} sh -c {} <&3 & else printf '%s\\n' 'Homeboy SSH execution requires remote session authority (setsid or Perl POSIX).' >&2; exec 3<&-; exit 127; fi; __homeboy_remote_pid=$!; exec 3<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
+        "exec 3<&0 || {{ printf '%s\\n' 'Homeboy SSH execution could not preserve remote stdin.' >&2; exit 1; }}; __homeboy_remote_command={}; if command -v setsid >/dev/null 2>&1; then setsid sh -c \"$__homeboy_remote_command\" <&3 & elif command -v perl >/dev/null 2>&1; then perl -MPOSIX -e {} sh -c \"$__homeboy_remote_command\" <&3 & else printf '%s\\n' 'Homeboy SSH execution requires remote session authority (setsid or Perl POSIX).' >&2; exec 3<&-; exit 127; fi; __homeboy_remote_pid=$!; exec 3<&-; __homeboy_remote_cleanup() {{ kill -TERM -\"$__homeboy_remote_pid\" 2>/dev/null || true; __homeboy_remote_attempt=0; while kill -0 -\"$__homeboy_remote_pid\" 2>/dev/null && [ \"$__homeboy_remote_attempt\" -lt 10 ]; do sleep 0.01; __homeboy_remote_attempt=$((__homeboy_remote_attempt + 1)); done; kill -KILL -\"$__homeboy_remote_pid\" 2>/dev/null || true; }}; trap '__homeboy_remote_cleanup; exit 143' HUP INT TERM; wait \"$__homeboy_remote_pid\"; __homeboy_remote_status=$?; __homeboy_remote_cleanup; exit \"$__homeboy_remote_status\"",
         shell::quote_arg(command),
         shell::quote_arg("POSIX::setsid() >= 0 or die \"setsid: $!\\n\"; exec @ARGV or die \"exec: $!\\n\";"),
-        shell::quote_arg(command),
     )
 }
 

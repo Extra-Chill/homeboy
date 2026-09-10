@@ -8,11 +8,11 @@ use crate::agent_task_handoff_event::{
 };
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events;
 use homeboy_core::api_jobs::{
-    Job, JobArtifactMetadata, RemoteRunnerJobRequest, RemoteRunnerJobResult,
-    RemoteRunnerObservationRunDetail,
+    Job, JobArtifactMetadata, RemoteRunnerJobResult, RemoteRunnerObservationRunDetail,
 };
 use homeboy_core::execution_contract::EXECUTION_CONTRACT;
 use homeboy_core::run_outcome_envelope::RunOutcomeEnvelope;
+use homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope;
 
 use super::super::capabilities::RunnerCapabilityPreflight;
 use super::types::{ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
@@ -83,6 +83,18 @@ pub(super) fn remote_runner_result_from_exec_output(
         data[AGENT_TASK_DISPATCH_HANDOFF_EVENT_KEY] =
             serde_json::to_value(handoff_event).unwrap_or(serde_json::Value::Null);
     }
+    let fallback_outcome_run_id = lab_runner_workload
+        .as_ref()
+        .map(|workload| {
+            workload
+                .agent_task
+                .as_ref()
+                .map(|agent_task| agent_task.run_id.clone())
+                .unwrap_or_else(|| workload.workload_id.clone())
+        })
+        .or_else(|| exec_output.mirror_run_id.clone())
+        .or_else(|| exec_output.job_id.clone())
+        .unwrap_or_else(|| exec_output.runner_id.clone());
     if let Some(lab_runner_workload) = lab_runner_workload {
         data["runner_workload"] = serde_json::to_value(
             super::super::workload::lab_runner_workload_with_result_refs(
@@ -94,13 +106,8 @@ pub(super) fn remote_runner_result_from_exec_output(
         )
         .unwrap_or(serde_json::Value::Null);
     }
-    let fallback_outcome_run_id = exec_output
-        .mirror_run_id
-        .clone()
-        .or_else(|| exec_output.job_id.clone())
-        .unwrap_or_else(|| exec_output.runner_id.clone());
     let mut outcome = if let Some(execution_record) = execution_record.as_ref() {
-        RunOutcomeEnvelope::from_runner_execution_record(execution_record)
+        RunOutcomeEnvelope::from_runner_execution_record(&fallback_outcome_run_id, execution_record)
     } else {
         RunOutcomeEnvelope::new(if exit_code == 0 {
             "succeeded"
@@ -378,9 +385,11 @@ pub(super) fn cancelled_output(
 /// available on this runner before execution starts, mirroring the direct
 /// `runner exec` path's preflight contract (#5093).
 pub(super) fn reverse_worker_capability_preflight(
-    request: &RemoteRunnerJobRequest,
+    envelope: &RunnerExecutionEnvelope,
 ) -> Option<RunnerCapabilityPreflight> {
-    let required_commands: Vec<String> = request
+    let required_commands: Vec<String> = envelope
+        .dispatch
+        .as_ref()?
         .command
         .first()
         .filter(|program| !program.trim().is_empty())

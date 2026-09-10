@@ -422,14 +422,7 @@ mod tests {
         });
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git starts");
-        assert!(status.success(), "git {args:?}");
-    }
+    use crate::test_support::run_git_command as git;
 
     fn install_managed_root_extension(root: &Path) {
         crate::extension::catalog::save_manifest(&ExtensionManifest {

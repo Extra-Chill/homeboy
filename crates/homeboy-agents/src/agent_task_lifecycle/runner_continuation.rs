@@ -16,7 +16,7 @@ use homeboy_core::api_jobs::{
     Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot,
 };
 use homeboy_core::error::{Error, Result};
-use homeboy_core::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
+use homeboy_runner_contract::{RunnerApiSubmitRequest, WorkspaceClaim, WorkspaceIdentity};
 
 /// Result of reconciling a runner job across its known daemon generations.
 ///
@@ -55,6 +55,14 @@ pub enum RunnerLiveJobAuthority {
     Unknown,
 }
 
+/// One reverse-broker submission operation. Current callers use the Runner API;
+/// the legacy variant exists only to replay request-shaped durable records
+/// without changing their established idempotency fingerprint.
+pub enum RunnerContinuationSubmission {
+    RunnerApi(RunnerApiSubmitRequest),
+    LegacyReplay(RemoteRunnerJobRequest),
+}
+
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
 /// resuming a run that was handed off to a remote runner.
 pub trait RunnerContinuationProvider: Send + Sync {
@@ -88,6 +96,7 @@ pub trait RunnerContinuationProvider: Send + Sync {
         _runner_id: &str,
         _workspace: WorkspaceIdentity,
         _lifecycle_revision: u64,
+        _deadline: std::time::Instant,
     ) -> Result<WorkspaceClaim> {
         Err(Error::validation_invalid_argument(
             "workspace_claim",
@@ -97,11 +106,21 @@ pub trait RunnerContinuationProvider: Send + Sync {
         ))
     }
 
-    fn validate_workspace_claim(&self, _runner_id: &str, _claim: &WorkspaceClaim) -> Result<bool> {
+    fn validate_workspace_claim(
+        &self,
+        _runner_id: &str,
+        _claim: &WorkspaceClaim,
+        _deadline: std::time::Instant,
+    ) -> Result<bool> {
         Ok(false)
     }
 
-    fn release_workspace_claim(&self, _runner_id: &str, _claim: &WorkspaceClaim) -> Result<()> {
+    fn release_workspace_claim(
+        &self,
+        _runner_id: &str,
+        _claim: &WorkspaceClaim,
+        _deadline: std::time::Instant,
+    ) -> Result<()> {
         Err(Error::validation_invalid_argument(
             "workspace_claim",
             "runner does not advertise workspace claim capability",
@@ -141,6 +160,17 @@ pub trait RunnerContinuationProvider: Send + Sync {
         }
     }
 
+    /// Recover an accepted runner job whose response did not reach the
+    /// controller. The durable run id is the daemon's idempotency key, so a
+    /// unique matching active job is sufficient to bind the handoff safely.
+    fn runner_job_id_for_durable_run(
+        &self,
+        _runner_id: &str,
+        _durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
 
@@ -177,10 +207,10 @@ pub trait RunnerContinuationProvider: Send + Sync {
     ) -> Result<i32>;
 
     /// Submit a replayable reverse-broker request during lifecycle reconciliation.
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        request: RemoteRunnerJobRequest,
+        submission: RunnerContinuationSubmission,
     ) -> Result<Job>;
 
     fn lookup_reverse_broker_submission(
@@ -225,10 +255,10 @@ impl RunnerContinuationProvider for NoopProvider {
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected(
             "runner subsystem is unavailable: cannot submit reverse broker job",
@@ -378,10 +408,10 @@ mod tests {
             Err(Error::internal_unexpected("unused in fixture"))
         }
 
-        fn submit_reverse_broker_job(
+        fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _request: RemoteRunnerJobRequest,
+            _submission: RunnerContinuationSubmission,
         ) -> Result<Job> {
             Err(Error::internal_unexpected("unused in fixture"))
         }

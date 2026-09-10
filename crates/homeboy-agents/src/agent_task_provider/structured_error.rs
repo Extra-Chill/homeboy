@@ -41,6 +41,16 @@ pub const RUNTIME_STREAM_TAIL_BYTES: usize = 8 * 1024;
 /// until the account changes: retrying the same provider cannot succeed.
 pub const PROVIDER_ACCOUNT_BLOCKED: &str = "provider_account_blocked";
 
+/// The selected route exhausted an allocated provider usage quota.
+pub const PROVIDER_QUOTA_EXHAUSTED: &str = "provider_quota_exhausted";
+
+/// The selected route is blocked by billing, payment, credit, or subscription
+/// state.
+pub const PROVIDER_BILLING_BLOCKED: &str = "provider_billing_blocked";
+
+/// The selected route's credential or authentication material was rejected.
+pub const PROVIDER_CREDENTIALS_EXHAUSTED: &str = "provider_credentials_exhausted";
+
 /// The provider throttled the request (HTTP 429 or an explicit retryable
 /// flag). Retrying — possibly on another provider route — can succeed.
 pub const PROVIDER_RATE_LIMITED: &str = "provider_rate_limited";
@@ -84,10 +94,10 @@ pub fn normalized_structured_error(value: &Value) -> Option<Value> {
 
 /// Projection-level failure classification for a normalized structured error.
 ///
-/// An account/quota rejection requires billing vocabulary (credits, quota,
-/// spending limit, subscription, ...) — an HTTP 403 alone can also mean a
-/// forbidden resource, which is a different failure — combined with either an
-/// account-status code (401/402/403) or an explicit non-retryable flag.
+/// Permanent capacity rejections are divided into quota, billing, and
+/// credential failures. An HTTP 403 alone can also mean a forbidden resource,
+/// so classification requires explicit permanent evidence plus relevant
+/// provider-neutral vocabulary.
 pub fn structured_error_failure_classification(
     message: &str,
     status_code: Option<i64>,
@@ -96,32 +106,76 @@ pub fn structured_error_failure_classification(
     if matches!(status_code, Some(429)) || retryable == Some(true) {
         return PROVIDER_RATE_LIMITED;
     }
-    if account_quota_rejected(message, status_code, retryable) {
-        return PROVIDER_ACCOUNT_BLOCKED;
+    if permanently_rejected(message, status_code, retryable) {
+        let lowered = message.to_ascii_lowercase();
+        if contains_any(
+            &lowered,
+            &[
+                "credential",
+                "api key",
+                "api-key",
+                "token",
+                "authentication",
+                "authenticate",
+                "unauthorized",
+                "expired key",
+                "invalid key",
+            ],
+        ) {
+            return PROVIDER_CREDENTIALS_EXHAUSTED;
+        }
+        if contains_any(
+            &lowered,
+            &[
+                "billing",
+                "payment",
+                "credit",
+                "spending limit",
+                "spending-limit",
+                "subscription",
+                "run out of",
+            ],
+        ) {
+            return PROVIDER_BILLING_BLOCKED;
+        }
+        if contains_any(
+            &lowered,
+            &["quota", "usage limit", "usage cap", "allowance"],
+        ) {
+            return PROVIDER_QUOTA_EXHAUSTED;
+        }
     }
     PROVIDER_ERROR
 }
 
-fn account_quota_rejected(
-    message: &str,
-    status_code: Option<i64>,
-    retryable: Option<bool>,
-) -> bool {
-    const BILLING_VOCABULARY: [&str; 9] = [
-        "credit",
-        "quota",
-        "spending limit",
-        "spending-limit",
-        "subscription",
-        "billing",
-        "payment",
-        "insufficient",
-        "run out of",
-    ];
+fn permanently_rejected(message: &str, status_code: Option<i64>, retryable: Option<bool>) -> bool {
     let lowered = message.to_ascii_lowercase();
-    let vocabulary_hit = BILLING_VOCABULARY
-        .iter()
-        .any(|pattern| lowered.contains(pattern));
+    let vocabulary_hit = contains_any(
+        &lowered,
+        &[
+            "credit",
+            "quota",
+            "spending limit",
+            "spending-limit",
+            "subscription",
+            "billing",
+            "payment",
+            "insufficient",
+            "run out of",
+            "credential",
+            "api key",
+            "api-key",
+            "token",
+            "authentication",
+            "authenticate",
+            "unauthorized",
+            "expired key",
+            "invalid key",
+            "usage limit",
+            "usage cap",
+            "allowance",
+        ],
+    );
     let account_status = matches!(status_code, Some(401 | 402 | 403));
     match retryable {
         // The provider itself declared the failure permanent; billing
@@ -132,6 +186,10 @@ fn account_quota_rejected(
         None => account_status && vocabulary_hit,
         Some(true) => false,
     }
+}
+
+fn contains_any(message: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|pattern| message.contains(pattern))
 }
 
 /// Build the normalized error from parsed fields.
@@ -266,8 +324,21 @@ fn normalize_opencode_error_value(value: &Value) -> Option<Value> {
 pub fn normalized_error_failure_classification(
     value: &Value,
 ) -> Option<AgentTaskFailureClassification> {
-    (value.get("failure_classification").and_then(Value::as_str) == Some(PROVIDER_ACCOUNT_BLOCKED))
-        .then_some(AgentTaskFailureClassification::ProviderAccountBlocked)
+    match value.get("failure_classification").and_then(Value::as_str) {
+        Some(PROVIDER_QUOTA_EXHAUSTED) => {
+            Some(AgentTaskFailureClassification::ProviderQuotaExhausted)
+        }
+        Some(PROVIDER_BILLING_BLOCKED) => {
+            Some(AgentTaskFailureClassification::ProviderBillingBlocked)
+        }
+        Some(PROVIDER_CREDENTIALS_EXHAUSTED) => {
+            Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
+        }
+        Some(PROVIDER_ACCOUNT_BLOCKED) => {
+            Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+        }
+        _ => None,
+    }
 }
 
 /// The bounded tail of a provider runtime stream.
@@ -341,7 +412,7 @@ mod tests {
         assert_eq!(normalized["retryable"], false);
         assert_eq!(
             normalized["failure_classification"],
-            PROVIDER_ACCOUNT_BLOCKED
+            PROVIDER_BILLING_BLOCKED
         );
         assert_eq!(normalized["error_name"], "APIError");
     }
@@ -388,6 +459,20 @@ mod tests {
         )
         .expect("normalized");
         assert_eq!(normalized["failure_classification"], PROVIDER_ERROR);
+    }
+
+    #[test]
+    fn distinguishes_permanent_quota_billing_and_credential_rejections() {
+        for (message, expected) in [
+            ("usage quota exhausted", PROVIDER_QUOTA_EXHAUSTED),
+            ("billing payment required", PROVIDER_BILLING_BLOCKED),
+            ("API key expired", PROVIDER_CREDENTIALS_EXHAUSTED),
+        ] {
+            assert_eq!(
+                structured_error_failure_classification(message, Some(403), Some(false)),
+                expected
+            );
+        }
     }
 
     #[test]

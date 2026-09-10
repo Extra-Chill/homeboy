@@ -224,41 +224,11 @@ mod tests {
     use homeboy::core::observation::{NewRunRecord, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
-    fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-        NewRunRecord::builder(kind)
-            .component_id(component_id)
-            .command(format!("homeboy {kind} {component_id}"))
-            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-            .homeboy_version("test-version")
-            .git_sha(Some("abc123".to_string()))
-            .rig_id(rig_id)
-            .metadata(metadata)
-            .build()
-    }
-
+    use crate::commands::runs::test_support::sample_run;
     #[test]
     fn distribution_counts_scalar_metadata_values() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             for family in ["serif", "sans", "serif"] {
                 let run = store
@@ -298,7 +268,7 @@ mod tests {
     #[test]
     fn distribution_flattens_array_metadata_values() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             for motifs in [
                 serde_json::json!(["grid", "cards"]),
@@ -338,7 +308,7 @@ mod tests {
     #[test]
     fn distribution_reports_missing_fields() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             for metadata in [
                 serde_json::json!({ "category": "timeout" }),
@@ -370,7 +340,7 @@ mod tests {
     #[test]
     fn distribution_applies_run_filters_and_scenario_filter() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let matching = store
                 .start_run(sample_run(
@@ -449,7 +419,7 @@ mod tests {
     #[test]
     fn distribution_traverses_nested_arrays_in_metadata_paths() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             for motifs in [
                 serde_json::json!(["terminal_window", "glow_overlay"]),
@@ -496,7 +466,7 @@ mod tests {
     #[test]
     fn distribution_reports_repeated_categories_by_occurrence() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run(

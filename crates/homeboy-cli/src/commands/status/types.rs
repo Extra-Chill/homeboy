@@ -204,6 +204,11 @@ pub struct StatusPartial {
     /// The inspection phases that produced degraded observations per component.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub degraded_component_phases: Vec<StatusPartialComponent>,
+    /// Exact context probes that had not completed when an isolated probe was stopped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unfinished_probes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_probe: Option<String>,
     /// Deterministic commands that replay the omitted or degraded inspection.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub replay_commands: Vec<String>,

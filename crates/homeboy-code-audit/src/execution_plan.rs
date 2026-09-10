@@ -118,7 +118,7 @@ impl DetectorAccess {
 pub(crate) enum DetectorRuntime {
     /// Detectors the engine still sequences by hand because they have a
     /// non-uniform shape: the convention pipeline (`conventions`), the
-    /// multi-pass `duplication` family (five timing spans plus the
+    /// multi-pass `duplication` family (six timing spans plus the
     /// `duplicate_groups` side output), and `artifact_portability` (logs scan
     /// statistics even when it finds nothing). Everything else is data-driven.
     Manual,

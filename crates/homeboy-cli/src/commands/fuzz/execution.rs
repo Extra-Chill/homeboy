@@ -91,6 +91,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let target_inventory = build_target_inventory(
         &ctx.component_id,
         &workloads,
+        selected_workload,
         args.run_id.clone(),
         args.inventory.as_deref(),
     )?;
@@ -661,6 +662,18 @@ pub(super) fn fuzz_run_outcome(
             status: "timeout",
             success: false,
             exit_code: 124,
+        };
+    }
+
+    if results.is_none() {
+        return FuzzRunOutcome {
+            status: "failed",
+            success: false,
+            exit_code: if runner_exit_code == 0 {
+                1
+            } else {
+                runner_exit_code
+            },
         };
     }
 

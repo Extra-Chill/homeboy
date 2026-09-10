@@ -53,13 +53,7 @@ fn declared_agent_task_controller_run_from_spec_includes_dispatch_provider_confi
 }
 
 #[test]
-fn lab_secret_env_handoff_plan_hydrates_controller_dispatch_provider_config_secret() {
-    let _secret = RemovedEnvVar::new("HOMEBOY_CONTROLLER_PROVIDER_TOKEN");
-    std::env::set_var(
-        "HOMEBOY_CONTROLLER_PROVIDER_TOKEN",
-        "controller-secret-value",
-    );
-
+fn lab_secret_env_handoff_plan_defers_provider_credentials_to_runner_references() {
     let plan = build_lab_secret_env_handoff_plan(
         &[LabSecretEnvSource::AgentTask],
         &[
@@ -83,39 +77,34 @@ fn lab_secret_env_handoff_plan_hydrates_controller_dispatch_provider_config_secr
         plan.secret_env_names,
         vec!["HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string()]
     );
+    assert!(plan.env_delta.is_empty());
     assert_eq!(
-        plan.env_delta
-            .get("HOMEBOY_CONTROLLER_PROVIDER_TOKEN")
-            .map(String::as_str),
-        Some("controller-secret-value")
+        plan.runner_deferred_secret_env,
+        vec!["HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string()]
     );
-    assert_eq!(
-        plan.env_delta,
-        plan.secret_env_plan
-            .materialize([(
-                "HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string(),
-                "controller-secret-value".to_string(),
-            )])
-            .into_iter()
-            .collect::<HashMap<_, _>>()
-    );
+    let runner = fixture_runner(HashMap::from([(
+        "HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string(),
+        RunnerSecretEnvRef {
+            env: Some("HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string()),
+            file: None,
+            secret: None,
+        },
+    )]));
+    preflight_lab_secret_env_handoff("lab-a", Some(&runner), &plan.env_delta, &plan)
+        .expect("runner-owned reference admits the provider handoff");
     assert!(plan
         .diagnostics
         .to_string()
         .contains("HOMEBOY_CONTROLLER_PROVIDER_TOKEN"));
-    assert!(!plan
-        .diagnostics
-        .to_string()
-        .contains("controller-secret-value"));
 }
 
 #[test]
-fn hydrate_agent_task_secret_env_fails_missing_controller_dispatch_provider_config_secret() {
+fn hydrate_agent_task_secret_env_defers_missing_controller_dispatch_provider_config_secret() {
     let _secret = RemovedEnvVar::new("HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN");
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut env = HashMap::new();
 
-        let err = hydrate_agent_task_secret_env(
+        let metadata = hydrate_agent_task_secret_env(
             &[
                 "homeboy".to_string(),
                 "agent-task".to_string(),
@@ -131,14 +120,13 @@ fn hydrate_agent_task_secret_env_fails_missing_controller_dispatch_provider_conf
             ],
             &mut env,
         )
-        .expect_err("missing controller dispatch provider config secret should fail");
+        .expect("provider credential should be deferred to the runner");
 
-        assert_eq!(err.details["field"].as_str(), Some("secret-env"));
-        assert!(err
-            .message
-            .contains("HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN"));
-        assert!(err.message.contains("missing"));
-        assert!(err.details.to_string().contains("agent-task auth map-env"));
+        assert!(env.is_empty());
+        assert_eq!(
+            runner_deferred_secret_env_names(&metadata),
+            vec!["HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN".to_string()]
+        );
     });
 }
 
@@ -288,6 +276,35 @@ fn declared_agent_task_cook_provider_defaults_include_controller_sources() {
         Some("~/.example-provider/auth.json")
     );
     assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
+}
+
+#[test]
+fn lab_dispatch_model_route_does_not_require_an_unrelated_sole_provider_default() {
+    let provider = fixture_provider_with_example_defaults();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--backend".to_string(),
+        "sample-runtime".to_string(),
+        "--model".to_string(),
+        "xai/grok-4.6".to_string(),
+    ];
+
+    let names = declared_agent_task_controller_secret_env_with_providers(
+        &args,
+        std::slice::from_ref(&provider),
+    )
+    .expect("model route secret discovery");
+    let sources = declared_agent_task_controller_secret_sources_with_providers(
+        &args,
+        1,
+        std::slice::from_ref(&provider),
+    )
+    .expect("model route source discovery");
+
+    assert!(names.is_empty());
+    assert!(sources.is_empty());
 }
 
 #[test]
@@ -456,7 +473,7 @@ fn hydrate_agent_task_secret_env_defers_run_plan_secrets_to_runner() {
 }
 
 #[test]
-fn hydrate_agent_task_secret_env_resolves_provider_default_run_plan_secrets_on_controller() {
+fn hydrate_agent_task_secret_env_defers_provider_default_run_plan_secrets_to_runner_refs() {
     let _access_token_env = RemovedEnvVar::new("EXAMPLE_PROVIDER_ACCESS_TOKEN");
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -502,27 +519,116 @@ fn hydrate_agent_task_secret_env_resolves_provider_default_run_plan_secrets_on_c
             &mut env,
             std::slice::from_ref(&provider),
         )
-        .expect("provider default source should resolve on controller");
+        .expect("provider default source should defer to the runner");
 
-        assert!(matches!(
-            env.get("EXAMPLE_PROVIDER_ACCESS_TOKEN").map(String::as_str),
-            Some("controller-access-token")
-        ));
+        assert!(env.is_empty());
         assert_eq!(
             diagnostics["runner_deferred_secret_env"],
-            serde_json::json!([])
-        );
-        assert_eq!(
-            diagnostics["secret_env"],
             serde_json::json!([
                 {
                     "name": "EXAMPLE_PROVIDER_ACCESS_TOKEN",
-                    "configured": true,
-                    "source": "json-file"
+                    "source": "runner"
                 }
             ])
         );
         assert!(!diagnostics.to_string().contains("controller-access-token"));
+    });
+}
+
+#[test]
+fn provider_run_plan_credential_handoff_uses_runner_ref_without_serializing_value() {
+    let _access_token_env = RemovedEnvVar::new("EXAMPLE_PROVIDER_ACCESS_TOKEN");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let primary_auth = temp.path().join("primary-auth.json");
+        let fallback_auth = temp.path().join("fallback-auth.json");
+        std::fs::write(
+            &primary_auth,
+            r#"{"tokens":{"access_token":"primary-token"}}"#,
+        )
+        .expect("write primary auth");
+        std::fs::write(
+            &fallback_auth,
+            r#"{"tokens":{"access_token":"fallback-token"}}"#,
+        )
+        .expect("write fallback auth");
+        let mut primary =
+            fixture_provider_with_example_defaults_at(&primary_auth.display().to_string());
+        primary.id = "sample-runtime.primary".to_string();
+        let mut fallback =
+            fixture_provider_with_example_defaults_at(&fallback_auth.display().to_string());
+        fallback.id = "sample-runtime.fallback".to_string();
+        let plan_path = temp.path().join("plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "bound-fallback-secret-plan",
+                "tasks": [{
+                    "schema": "homeboy/agent-task-request/v1",
+                    "task_id": "provider-task",
+                    "executor": {
+                        "backend": "sample-runtime",
+                        "selector": "sample-runtime.fallback",
+                        "config": { "provider": "example-oauth" }
+                    },
+                    "instructions": "Use the admitted fallback.",
+                    "metadata": {
+                        "provider_readiness_routing": { "next_rotation_index": 2 }
+                    }
+                }],
+                "options": {
+                    "rotation": {
+                        "entries": [
+                            { "selector": "sample-runtime.primary" },
+                            { "selector": "sample-runtime.fallback" }
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write bound plan");
+        let mut env = HashMap::new();
+
+        let diagnostics = hydrate_agent_task_secret_env_with_providers(
+            &run_plan_args(&plan_path),
+            &mut env,
+            &[primary, fallback],
+        )
+        .expect("bound fallback source defers to the runner");
+
+        assert!(env.is_empty());
+        assert_eq!(
+            diagnostics["runner_deferred_secret_env"],
+            serde_json::json!([
+                {
+                    "name": "EXAMPLE_PROVIDER_ACCESS_TOKEN",
+                    "source": "runner"
+                }
+            ])
+        );
+        assert!(!diagnostics.to_string().contains("primary-token"));
+        assert!(!diagnostics.to_string().contains("fallback-token"));
+
+        let runner = fixture_runner(HashMap::from([(
+            "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
+            RunnerSecretEnvRef {
+                env: Some("EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()),
+                file: None,
+                secret: None,
+            },
+        )]));
+        let args = run_plan_args(&plan_path);
+        let secret_env_plan = secret_env_plan_from_args(&args);
+        preflight_agent_task_runner_secret_env_plan(
+            "lab-a",
+            &runner,
+            &args,
+            &env,
+            &secret_env_plan,
+        )
+        .expect("runner-owned provider credential should be admitted without an inline value");
     });
 }
 

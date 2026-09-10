@@ -637,6 +637,7 @@ mod tests {
                 run_max_bytes: 1024 * 1024,
                 run_max_count: 10,
                 cursor: None,
+                deadline: None,
             },
         )
         .expect("cleanup inventory");

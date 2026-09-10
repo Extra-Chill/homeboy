@@ -2,15 +2,15 @@
 
 use super::runner_continuation::with_runner_continuation;
 use super::*;
-use homeboy_core::engine::local_files::write_json_file_owner_only;
-use homeboy_core::workspace_claim::{
-    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceClaimStore, WorkspaceIdentity,
-    WorkspaceOwnerLease, MAX_WORKSPACE_CLAIM_TTL_MS,
-};
+use homeboy_core::engine::local_files::{remove_file_durably, write_json_file_owner_only};
+use homeboy_core::workspace_claim::{WorkspaceClaimStore, MAX_WORKSPACE_CLAIM_TTL_MS};
 use homeboy_core::worktree::{
     authority_set_fingerprint, TaskWorktreeRecord, TerminalWorkspaceAuthorityObservation,
     TerminalWorkspaceAuthorityProof, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
     TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+};
+use homeboy_runner_contract::{
+    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceIdentity, WorkspaceOwnerLease,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -289,6 +289,67 @@ fn configured_terminal_authorities() -> std::result::Result<Vec<String>, String>
     Ok(authorities)
 }
 
+/// Validate only durable/configured authority identity. This deliberately avoids
+/// live runner probes; bounded claim acquisition supplies that liveness fence.
+pub fn cached_terminal_workspace_authority(
+    record: &TaskWorktreeRecord,
+) -> std::result::Result<Option<Box<TerminalWorkspaceAuthorityProof>>, String> {
+    let Some(proof) = record.terminal_workspace_authority.as_ref() else {
+        return Ok(None);
+    };
+    let runner_ids = with_runner_continuation(|provider| {
+        let ids = provider.terminal_workspace_authority_runner_ids()?;
+        if !ids.is_empty() && !provider.supports_terminal_workspace_authority() {
+            return Err(Error::validation_invalid_argument(
+                "terminal_workspace_authority",
+                "configured runner does not support terminal workspace authority",
+                None,
+                None,
+            ));
+        }
+        if ids.iter().any(|id| {
+            id.trim().is_empty()
+                || id == "controller"
+                || !provider.runner_authority(id).is_configured()
+        }) {
+            return Err(Error::validation_invalid_argument(
+                "terminal_workspace_authority",
+                "configured terminal workspace authority is missing",
+                None,
+                None,
+            ));
+        }
+        Ok(ids)
+    })
+    .map_err(|error| error.message)?;
+    let mut authority_set = vec!["controller".to_string()];
+    authority_set.extend(runner_ids);
+    authority_set.sort();
+    // A cached remote receipt cannot establish that its accepted runner job is
+    // still terminal without the same bounded reconciliation used at issuance.
+    // Keep local-only proofs usable; fail closed for remote authority until a
+    // deadline-aware refresh protocol exists.
+    if authority_set.len() != 1 {
+        return Ok(None);
+    }
+    Ok((proof.exact_for(record, record.run_id.as_deref())
+        && proof.authority_set == authority_set
+        && proof.authority_set_fingerprint == authority_set_fingerprint(&authority_set))
+    .then(|| Box::new(proof.clone())))
+}
+
+/// Bounded worktree inventory currently supports controller-local evidence
+/// only. A remote authority needs a durable release receipt that survives the
+/// page deadline before it can participate in destructive reconciliation.
+pub fn bounded_inventory_requires_remote_claims() -> bool {
+    with_runner_continuation(|provider| {
+        let claims = provider.workspace_claim_runner_ids()?;
+        let terminal = provider.terminal_workspace_authority_runner_ids()?;
+        Ok::<bool, Error>(!claims.is_empty() || !terminal.is_empty())
+    })
+    .unwrap_or(true)
+}
+
 /// The complete authority set for a workspace mutation. Each remote component
 /// has its own opaque token; callers must validate and release every component.
 #[derive(Debug, Clone)]
@@ -476,7 +537,11 @@ impl CompositeWorkspaceClaimAcquisitionGuard {
         }
     }
 
-    fn fail(mut self, mut primary: Error) -> CompositeWorkspaceClaimAcquisitionFailure {
+    fn fail(
+        mut self,
+        mut primary: Error,
+        deadline: std::time::Instant,
+    ) -> CompositeWorkspaceClaimAcquisitionFailure {
         let mut rollback_failures = Vec::new();
         if let Err(error) = release_local_workspace_claim(&self.local) {
             rollback_failures.push(CompositeWorkspaceClaimRollbackFailure {
@@ -493,7 +558,7 @@ impl CompositeWorkspaceClaimAcquisitionGuard {
             .all(|failure| failure.component != "local");
         for component in &mut self.runners {
             if let Err(error) = with_runner_continuation(|provider| {
-                provider.release_workspace_claim(&component.runner_id, &component.claim)
+                provider.release_workspace_claim(&component.runner_id, &component.claim, deadline)
             }) {
                 rollback_failures.push(CompositeWorkspaceClaimRollbackFailure {
                     component: component.runner_id.clone(),
@@ -538,9 +603,27 @@ pub fn acquire_composite_workspace_claim(
     workspace: WorkspaceIdentity,
     generation: u64,
 ) -> std::result::Result<CompositeWorkspaceClaim, CompositeWorkspaceClaimAcquisitionFailure> {
-    // Recovery is bounded and does not let an unrelated unreachable authority
-    // prevent a distinct workspace from being reconciled.
-    let _ = retry_pending_composite_workspace_cleanups(32);
+    acquire_composite_workspace_claim_until(
+        workspace,
+        generation,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "failure retains all acquired authority receipts for deterministic rollback"
+)]
+pub fn acquire_composite_workspace_claim_until(
+    workspace: WorkspaceIdentity,
+    generation: u64,
+    deadline: std::time::Instant,
+) -> std::result::Result<CompositeWorkspaceClaim, CompositeWorkspaceClaimAcquisitionFailure> {
+    if std::time::Instant::now() >= deadline {
+        return Err(CompositeWorkspaceClaimAcquisitionFailure::from(
+            composite_error("workspace claim acquisition deadline exhausted", Vec::new()),
+        ));
+    }
     if let Some(status) = composite_acquisition_intent_for_workspace(&workspace) {
         let mut failure = CompositeWorkspaceClaimAcquisitionFailure::from(composite_error(
             "workspace has unresolved composite acquisition intent",
@@ -573,19 +656,20 @@ pub fn acquire_composite_workspace_claim(
         requested_ttl_ms: LOCAL_WORKSPACE_CLAIM_TTL_MS,
         state: "acquiring".into(),
     };
-    if let Err(error) =
-        homeboy_core::config::with_config_lock(|| write_composite_acquisition_intent(&intent))
-    {
+    if let Err(error) = homeboy_core::config::with_config_lock_until(deadline, || {
+        write_composite_acquisition_intent(&intent)
+    }) {
         return Err(CompositeWorkspaceClaimAcquisitionFailure::from(error));
     }
-    match acquire_composite_workspace_claim_unrecovered(workspace, generation) {
+    match acquire_composite_workspace_claim_unrecovered(workspace, generation, deadline) {
         Ok(claim) => {
             let mut active = intent;
             active.state = "active".into();
-            if let Err(error) = homeboy_core::config::with_config_lock(|| {
+            if let Err(error) = homeboy_core::config::with_config_lock_until(deadline, || {
                 write_composite_acquisition_intent(&active)
             }) {
-                let status = persist_and_retry_composite_workspace_cleanup(claim, &error);
+                let status =
+                    persist_and_retry_composite_workspace_cleanup_until(claim, &error, deadline);
                 let mut failure = CompositeWorkspaceClaimAcquisitionFailure::from(error);
                 failure.primary.retryable = Some(true);
                 failure.primary.details["workspace_claim_composite_cleanup"] = serde_json::json!({
@@ -598,8 +682,11 @@ pub fn acquire_composite_workspace_claim(
         }
         Err(mut failure) => {
             if let Some(cleanup) = failure.cleanup.take() {
-                let status =
-                    persist_and_retry_composite_workspace_cleanup(cleanup, &failure.primary);
+                let status = persist_and_retry_composite_workspace_cleanup_until(
+                    cleanup,
+                    &failure.primary,
+                    deadline,
+                );
                 failure.primary.retryable = Some(true);
                 failure.primary.details["workspace_claim_composite_cleanup"] = serde_json::json!({
                     "status": status.public_summary(),
@@ -608,7 +695,7 @@ pub fn acquire_composite_workspace_claim(
             } else {
                 // Every acquired component was released, so the intent is no
                 // longer a crash-recovery obligation.
-                let _ = homeboy_core::config::with_config_lock(|| {
+                let _ = homeboy_core::config::with_config_lock_until(deadline, || {
                     remove_composite_acquisition_intent(&intent.workspace)
                 });
             }
@@ -624,6 +711,7 @@ pub fn acquire_composite_workspace_claim(
 fn acquire_composite_workspace_claim_unrecovered(
     workspace: WorkspaceIdentity,
     generation: u64,
+    deadline: std::time::Instant,
 ) -> std::result::Result<CompositeWorkspaceClaim, CompositeWorkspaceClaimAcquisitionFailure> {
     workspace.verify()?;
     let local = acquire_local_workspace_claim(workspace.clone(), generation)?;
@@ -632,42 +720,51 @@ fn acquire_composite_workspace_claim_unrecovered(
     let runner_ids =
         match with_runner_continuation(|provider| provider.workspace_claim_runner_ids()) {
             Ok(runner_ids) => runner_ids,
-            Err(error) => return Err(guard.fail(error)),
+            Err(error) => return Err(guard.fail(error, deadline)),
         };
     let mut unique_runner_ids = std::collections::BTreeSet::new();
     for runner_id in &runner_ids {
         if runner_id.trim().is_empty() || runner_id != runner_id.trim() || runner_id == "controller"
         {
-            return Err(guard.fail(Error::validation_invalid_argument(
-                "workspace_claim_runner_ids",
-                "configured workspace claim runner id is malformed",
-                Some(runner_id.clone()),
-                None,
-            )));
+            return Err(guard.fail(
+                Error::validation_invalid_argument(
+                    "workspace_claim_runner_ids",
+                    "configured workspace claim runner id is malformed",
+                    Some(runner_id.clone()),
+                    None,
+                ),
+                deadline,
+            ));
         }
         if !unique_runner_ids.insert(runner_id) {
-            return Err(guard.fail(Error::validation_invalid_argument(
-                "workspace_claim_runner_ids",
-                "configured workspace claim runner ids are not unique",
-                Some(runner_id.clone()),
-                None,
-            )));
+            return Err(guard.fail(
+                Error::validation_invalid_argument(
+                    "workspace_claim_runner_ids",
+                    "configured workspace claim runner ids are not unique",
+                    Some(runner_id.clone()),
+                    None,
+                ),
+                deadline,
+            ));
         }
     }
     if !runner_ids.is_empty()
         && !with_runner_continuation(|provider| provider.supports_workspace_claims())
     {
-        return Err(guard.fail(composite_error(
-            "workspace claim provider does not support configured remote authorities",
-            Vec::new(),
-        )));
+        return Err(guard.fail(
+            composite_error(
+                "workspace claim provider does not support configured remote authorities",
+                Vec::new(),
+            ),
+            deadline,
+        ));
     }
     for runner_id in runner_ids {
         let acquired = match with_runner_continuation(|provider| {
-            provider.acquire_workspace_claim(&runner_id, workspace.clone(), generation)
+            provider.acquire_workspace_claim(&runner_id, workspace.clone(), generation, deadline)
         }) {
             Ok(claim) => claim,
-            Err(error) => return Err(guard.fail(error)),
+            Err(error) => return Err(guard.fail(error, deadline)),
         };
         match acquired {
             claim if claim.workspace == workspace => {
@@ -678,12 +775,15 @@ fn acquire_composite_workspace_claim_unrecovered(
                 });
             }
             _ => {
-                return Err(guard.fail(Error::validation_invalid_argument(
-                    "workspace_claim",
-                    "runner returned a workspace claim for another workspace",
-                    Some(runner_id),
-                    None,
-                )));
+                return Err(guard.fail(
+                    Error::validation_invalid_argument(
+                        "workspace_claim",
+                        "runner returned a workspace claim for another workspace",
+                        Some(runner_id),
+                        None,
+                    ),
+                    deadline,
+                ));
             }
         }
     }
@@ -708,6 +808,16 @@ pub fn composite_workspace_claim_ready_to_commit(claim: &CompositeWorkspaceClaim
 }
 
 pub fn validate_composite_workspace_claim(claim: &CompositeWorkspaceClaim) -> Result<bool> {
+    validate_composite_workspace_claim_until(
+        claim,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+}
+
+pub fn validate_composite_workspace_claim_until(
+    claim: &CompositeWorkspaceClaim,
+    deadline: std::time::Instant,
+) -> Result<bool> {
     claim.workspace.verify()?;
     if claim.local.workspace != claim.workspace || !validate_local_workspace_claim(&claim.local)? {
         return Ok(false);
@@ -716,7 +826,7 @@ pub fn validate_composite_workspace_claim(claim: &CompositeWorkspaceClaim) -> Re
         if component.runner_id.trim().is_empty()
             || component.claim.workspace != claim.workspace
             || !with_runner_continuation(|provider| {
-                provider.validate_workspace_claim(&component.runner_id, &component.claim)
+                provider.validate_workspace_claim(&component.runner_id, &component.claim, deadline)
             })?
         {
             return Ok(false);
@@ -733,6 +843,16 @@ pub enum CompositeWorkspaceClaimRelease {
 pub fn release_composite_workspace_claim(
     claim: &mut CompositeWorkspaceClaim,
 ) -> Result<CompositeWorkspaceClaimRelease> {
+    release_composite_workspace_claim_until(
+        claim,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+}
+
+pub fn release_composite_workspace_claim_until(
+    claim: &mut CompositeWorkspaceClaim,
+    deadline: std::time::Instant,
+) -> Result<CompositeWorkspaceClaimRelease> {
     let mut failures = Vec::new();
     // Release the primary inventory authority first; retries skip evidence of a
     // successful release and fan out only to unresolved remote components.
@@ -747,7 +867,7 @@ pub fn release_composite_workspace_claim(
             continue;
         }
         if let Err(error) = with_runner_continuation(|provider| {
-            provider.release_workspace_claim(&component.runner_id, &component.claim)
+            provider.release_workspace_claim(&component.runner_id, &component.claim, deadline)
         }) {
             failures.push(format!("{}: {}", component.runner_id, error.message));
         } else {
@@ -755,7 +875,7 @@ pub fn release_composite_workspace_claim(
         }
     }
     if failures.is_empty() {
-        homeboy_core::config::with_config_lock(|| {
+        homeboy_core::config::with_config_lock_until(deadline, || {
             remove_composite_acquisition_intent(&claim.workspace)
         })?;
         Ok(CompositeWorkspaceClaimRelease::Released)
@@ -825,6 +945,53 @@ pub fn persist_and_retry_composite_workspace_cleanup(
     })
 }
 
+/// Persist a cleanup receipt while respecting a caller-owned operation budget.
+/// An expired apply page leaves the receipt for the normal recovery worker
+/// rather than starting a fresh remote release window.
+pub fn persist_and_retry_composite_workspace_cleanup_until(
+    claim: CompositeWorkspaceClaim,
+    error: &Error,
+    deadline: std::time::Instant,
+) -> CompositeWorkspaceCleanupStatus {
+    let pending = PendingCompositeWorkspaceCleanup {
+        schema: PENDING_COMPOSITE_WORKSPACE_CLEANUP_SCHEMA.into(),
+        recovery_id: uuid::Uuid::new_v4().to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        workspace: claim.workspace,
+        generation: claim.generation,
+        local: claim.local,
+        local_released: claim.local_released,
+        runners: claim
+            .runners
+            .into_iter()
+            .map(|component| PendingCompositeWorkspaceCleanupComponent {
+                runner_id: component.runner_id,
+                claim: component.claim,
+                released: component.released,
+            })
+            .collect(),
+        attempt_count: 0,
+        last_error: PendingCompositeWorkspaceCleanupError {
+            code: error.code.as_str().into(),
+            message: error.message.clone(),
+        },
+    };
+    let recovery_id = pending.recovery_id.clone();
+    match homeboy_core::config::with_config_lock_until(deadline, || {
+        write_pending_composite_cleanup(&pending)
+    }) {
+        Ok(()) => CompositeWorkspaceCleanupStatus::Pending {
+            recovery_id,
+            attempt_count: 0,
+            failures: vec!["reconciliation deadline exhausted before release".into()],
+        },
+        Err(error) => CompositeWorkspaceCleanupStatus::Quarantined {
+            recovery_id,
+            reason: format!("could not persist cleanup receipt: {}", error.message),
+        },
+    }
+}
+
 /// Explicit lifecycle recovery API. Every pending receipt is replayed at most
 /// `limit` times; completed receipts are removed atomically after all component
 /// releases have reported success.
@@ -869,9 +1036,7 @@ fn retry_pending_composite_workspace_cleanup(
         };
         match release_composite_workspace_claim(&mut claim)? {
             CompositeWorkspaceClaimRelease::Released => {
-                fs::remove_file(path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some("pending composite cleanup".into()))
-                })?;
+                remove_file_durably(&path, "pending composite cleanup")?;
                 Ok(CompositeWorkspaceCleanupStatus::Released)
             }
             CompositeWorkspaceClaimRelease::Partial { failures } => {
@@ -964,14 +1129,7 @@ fn write_composite_acquisition_intent(intent: &CompositeAcquisitionIntent) -> Re
 
 fn remove_composite_acquisition_intent(workspace: &WorkspaceIdentity) -> Result<()> {
     let path = composite_acquisition_intent_path(workspace)?;
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some(path.display().to_string()),
-        )),
-    }
+    remove_file_durably(&path, &path.display().to_string())
 }
 
 fn composite_acquisition_intent_for_workspace(
@@ -1146,8 +1304,7 @@ fn quarantine_pending_composite_cleanup(
     };
     let quarantine_path = path.with_file_name(format!("{recovery_id}.quarantine.json"));
     write_json_file_owner_only(&quarantine_path, &quarantine)?;
-    fs::remove_file(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+    remove_file_durably(path, &path.display().to_string())
 }
 
 fn quarantined_composite_cleanup_for_workspace(
@@ -1388,7 +1545,7 @@ pub(crate) fn identity_for_plan(plan: &AgentTaskPlan) -> Result<Option<Workspace
 mod tests {
     use super::*;
     use homeboy_core::test_support::with_isolated_home;
-    use homeboy_core::workspace_claim::{WorkspaceClaimProtocol, WORKSPACE_CLAIM_SCHEMA};
+    use homeboy_runner_contract::{WorkspaceClaimProtocol, WORKSPACE_CLAIM_SCHEMA};
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
@@ -1428,6 +1585,7 @@ mod tests {
             runner_id: &str,
             workspace: WorkspaceIdentity,
             _lifecycle_revision: u64,
+            _deadline: std::time::Instant,
         ) -> Result<WorkspaceClaim> {
             if self.fail_acquire_for.as_deref() == Some(runner_id)
                 && workspace.locator == "workspace-claim-rollback"
@@ -1443,7 +1601,12 @@ mod tests {
             Ok(Self::claim(workspace, runner_id))
         }
 
-        fn release_workspace_claim(&self, runner_id: &str, _claim: &WorkspaceClaim) -> Result<()> {
+        fn release_workspace_claim(
+            &self,
+            runner_id: &str,
+            _claim: &WorkspaceClaim,
+            _deadline: std::time::Instant,
+        ) -> Result<()> {
             self.released
                 .lock()
                 .expect("release log")
@@ -1502,10 +1665,10 @@ mod tests {
             ))
         }
 
-        fn submit_reverse_broker_job(
+        fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _request: homeboy_core::api_jobs::RemoteRunnerJobRequest,
+            _submission: RunnerContinuationSubmission,
         ) -> Result<homeboy_core::api_jobs::Job> {
             Err(Error::internal_unexpected(
                 "not used by workspace claim tests",
@@ -1546,6 +1709,48 @@ mod tests {
             commit_budget_ms(10_000, [310_000, 12_500].into_iter()),
             1_500
         );
+    }
+
+    #[test]
+    fn cached_terminal_authority_refuses_a_stale_authority_set_fingerprint() {
+        let workspace = workspace();
+        let record = TaskWorktreeRecord {
+            id: "fixture@task".into(),
+            component_id: "fixture".into(),
+            source_checkout: "/tmp/source".into(),
+            worktree_path: "/tmp/worktree".into(),
+            branch: "task".into(),
+            base_ref: "HEAD".into(),
+            workspace_identity: Some(workspace.clone()),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: homeboy_core::worktree::CleanupPolicy::RemoveWhenSafe,
+            terminal_disposition: Some("succeeded".into()),
+            branch_cleanup_intent: homeboy_core::worktree::BranchCleanupIntent::DeleteWhenMerged,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            state: homeboy_core::worktree::TaskWorktreeState::Active,
+            lifecycle_revision: 0,
+            terminal_workspace_authority: Some(TerminalWorkspaceAuthorityProof {
+                schema: TERMINAL_WORKSPACE_AUTHORITY_SCHEMA.into(),
+                capability: TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY.into(),
+                capability_version: 1,
+                workspace,
+                task_worktree_id: "fixture@task".into(),
+                manifest_revision: 0,
+                run_id: None,
+                controller_state: "Succeeded".into(),
+                controller_version: 0,
+                accepted_runner_id: None,
+                accepted_runner_job_id: None,
+                authority_set: vec!["retired-runner".into()],
+                authority_set_fingerprint: authority_set_fingerprint(&["retired-runner".into()]),
+                observations: Vec::new(),
+                issued_evidence: Vec::new(),
+            }),
+        };
+        assert!(cached_terminal_workspace_authority(&record)
+            .expect("local current-authority validation")
+            .is_none());
     }
 
     #[test]

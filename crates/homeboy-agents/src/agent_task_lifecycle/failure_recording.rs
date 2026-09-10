@@ -93,12 +93,13 @@ fn record_interrupted_local_owner_locked(
 ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
     let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     let now = now_timestamp();
-    let (has_succeeded, has_failed, recovery_identity) = match decision {
+    let (has_succeeded, has_failed, has_cancelled, recovery_identity) = match decision {
         LocalProviderOwnerDecision::Interrupted {
             has_succeeded,
             has_failed,
+            has_cancelled,
             recovery_identity,
-        } => (has_succeeded, has_failed, recovery_identity),
+        } => (has_succeeded, has_failed, has_cancelled, recovery_identity),
         LocalProviderOwnerDecision::StayRunning | LocalProviderOwnerDecision::NotApplicable => {
             let identity = record
                 .metadata
@@ -111,7 +112,7 @@ fn record_interrupted_local_owner_locked(
                         .collect()
                 })
                 .unwrap_or_default();
-            (false, false, identity)
+            (false, false, false, identity)
         }
     };
     let consumed = record
@@ -177,6 +178,12 @@ fn record_interrupted_local_owner_locked(
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
             "provider_failed",
             false,
+        )
+    } else if has_cancelled {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled,
+            "provider_cancelled",
+            true,
         )
     } else {
         (
@@ -866,6 +873,9 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
     if error.details["pre_execution_phase"] == "gate_toolchain_preflight" {
         return AgentTaskFailureClassification::CapabilityMissing;
     }
+    if error.code == homeboy_core::ErrorCode::ResourceCapacityReserve {
+        return AgentTaskFailureClassification::Capacity;
+    }
     if error.retryable == Some(true) {
         AgentTaskFailureClassification::Transient
     } else {
@@ -1351,13 +1361,6 @@ pub(crate) fn record_aggregate_in_store(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let aggregate_path = lifecycle_store.aggregate_path(&record.run_id);
-    apply_aggregate_to_record(
-        record,
-        plan,
-        aggregate,
-        aggregate_path.display().to_string(),
-    );
     let mut retained_roots = Vec::new();
     let roots: Vec<PathBuf> = plan
         .tasks
@@ -1400,8 +1403,14 @@ pub(crate) fn record_aggregate_in_store(
         &aggregate.outcomes,
     )?;
     crate::controller_scratch::finalize_run_at(&lifecycle_store.data_root(), &record.run_id)?;
-    lifecycle_store.write_aggregate_and_record(record, aggregate)?;
-    record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
+    apply_aggregate_transition_in_store(
+        lifecycle_store,
+        AgentTaskAggregateTransition {
+            record,
+            plan,
+            aggregate,
+        },
+    )?;
     // The Cook index this completion updates belongs to the same store the
     // aggregate was just committed into. Resolving it ambiently made this
     // rooted function write its substantive-candidate pointer into whatever
@@ -1839,7 +1848,42 @@ pub fn terminal_artifact_projection_readiness_bounded_in_store(
         &record,
         lifecycle_store.read_aggregate_bounded(&record.run_id),
         |record, aggregate| {
-            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
+        },
+    )
+}
+
+/// Read-only promotion-path counterpart that preserves execution's mirrored
+/// aggregate preference while avoiding observation-store initialization.
+pub fn terminal_artifact_projection_readiness_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let (record, aggregate) =
+        lifecycle_store.read_record_with_aggregate_bounded(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+        lifecycle_store,
+        &record,
+        aggregate.as_ref(),
+    )
+}
+
+pub fn terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Result<Option<String>> {
+    terminal_artifact_projection_readiness_for_record_with(
+        record,
+        aggregate
+            .cloned()
+            .ok_or_else(|| Error::internal_unexpected("authoritative aggregate mirror is absent")),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
         },
     )
 }
@@ -2327,6 +2371,53 @@ fn reusable_terminal_artifact(
     ))
 }
 
+/// Declared authority of one controller-side projection.
+///
+/// Terminal projection deliberately keeps a legacy import as evidence while the
+/// finalized record carries the derived controller identity, so both records can
+/// legitimately share a task and logical artifact id. Resolution therefore
+/// selects by declared authority rather than by discovery order.
+fn controller_projection_precedence(
+    record: &homeboy_core::observation::ArtifactRecord,
+) -> (u8, &str) {
+    let rank = match record
+        .metadata_json
+        .pointer("/agent_task/projection")
+        .and_then(Value::as_str)
+    {
+        Some("controller_finalized") => 0,
+        Some("controller_local") => 1,
+        Some("runner_mirrored") => 2,
+        _ => 3,
+    };
+    (rank, record.id.as_str())
+}
+
+/// Reduce equivalent controller projections of one logical artifact to the
+/// single authoritative record. Candidates that disagree on content identity
+/// are a real conflict and still fail closed, naming the records involved.
+fn select_controller_artifact_projection(
+    candidates: Vec<homeboy_core::observation::ArtifactRecord>,
+) -> std::result::Result<homeboy_core::observation::ArtifactRecord, Vec<String>> {
+    let identity = |record: &homeboy_core::observation::ArtifactRecord| {
+        (record.sha256.clone(), record.size_bytes)
+    };
+    if let Some(first) = candidates.first().map(&identity) {
+        if candidates.iter().any(|record| identity(record) != first) {
+            let mut conflicting: Vec<String> =
+                candidates.iter().map(|record| record.id.clone()).collect();
+            conflicting.sort();
+            return Err(conflicting);
+        }
+    }
+    candidates
+        .into_iter()
+        .min_by(|left, right| {
+            controller_projection_precedence(left).cmp(&controller_projection_precedence(right))
+        })
+        .ok_or_else(Vec::new)
+}
+
 fn controller_projection_artifact_id(artifact_id: &str) -> String {
     let mut controller_hash = sha2::Sha256::new();
     sha2::Digest::update(&mut controller_hash, b"controller");
@@ -2524,7 +2615,7 @@ pub fn verified_controller_artifact_projection_path_in_store(
     else {
         return Ok(None);
     };
-    let mut candidates: Vec<_> = store
+    let candidates: Vec<_> = store
         .list_artifacts(run_id)?
         .into_iter()
         .filter(|candidate| {
@@ -2555,18 +2646,18 @@ pub fn verified_controller_artifact_projection_path_in_store(
     if candidates.is_empty() {
         return Ok(None);
     }
-    if candidates.len() != 1 {
-        return Err(Error::validation_invalid_argument(
+    let mut candidate = select_controller_artifact_projection(candidates).map_err(|conflicting| {
+        Error::validation_invalid_argument(
             "artifact_id",
             format!(
-                "multiple controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{}'",
-                artifact.id
+                "conflicting controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{}': {}",
+                artifact.id,
+                conflicting.join(", ")
             ),
             Some(artifact.id.clone()),
             None,
-        ));
-    }
-    let mut candidate = candidates.pop().expect("one candidate checked above");
+        )
+    })?;
     let path = PathBuf::from(&candidate.path);
     let actual_size = std::fs::metadata(&path)
         .ok()
@@ -2598,13 +2689,15 @@ pub fn verified_controller_artifact_projection_path_in_store(
             None,
         ));
     }
-    if !matches!(
-        candidate
-            .metadata_json
-            .pointer("/agent_task/projection")
-            .and_then(serde_json::Value::as_str),
-        Some("controller_local" | "controller_finalized" | "runner_mirrored")
-    ) {
+    if !store.is_readonly()
+        && !matches!(
+            candidate
+                .metadata_json
+                .pointer("/agent_task/projection")
+                .and_then(serde_json::Value::as_str),
+            Some("controller_local" | "controller_finalized" | "runner_mirrored")
+        )
+    {
         candidate.metadata_json["agent_task"]["projection"] = json!("controller_local");
         store.update_artifact_metadata(&candidate.id, candidate.metadata_json)?;
     }
@@ -2665,17 +2758,25 @@ pub fn verified_controller_artifact_projection_in_store(
     if candidates.is_empty() {
         return Ok(None);
     }
-    if candidates.len() != 1 {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            format!(
-                "multiple controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}'"
-            ),
-            Some(logical_artifact_id.to_string()),
-            None,
-        ));
-    }
-    let candidate = &candidates[0];
+    // An explicitly pinned record stays authoritative; selection only resolves
+    // equivalent projections the caller has not already chosen between.
+    let selected = match expected_record_id
+        .and_then(|id| candidates.iter().position(|candidate| candidate.id == id))
+    {
+        Some(index) => candidates.into_iter().nth(index).expect("located candidate"),
+        None => select_controller_artifact_projection(candidates).map_err(|conflicting| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!(
+                    "conflicting controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': {}",
+                    conflicting.join(", ")
+                ),
+                Some(logical_artifact_id.to_string()),
+                None,
+            )
+        })?,
+    };
+    let candidate = &selected;
     if expected_record_id.is_some_and(|id| id != candidate.id) {
         return Err(Error::validation_invalid_argument(
             "gate_feedback_candidate_baseline",
@@ -2760,7 +2861,21 @@ pub(crate) fn apply_aggregate_to_record(
     aggregate_path: String,
 ) {
     record.updated_at = Some(now_timestamp());
-    set_run_state(record, run_state_for_aggregate(aggregate));
+    let terminal_state = run_state_for_aggregate(aggregate);
+    if record.state != AgentTaskRunState::Cancelled {
+        // A controller failure is durable terminal evidence. Never project an
+        // aggregate as successful while that evidence remains attached.
+        set_run_state(
+            record,
+            if terminal_state == AgentTaskRunState::Succeeded
+                && record.metadata.get("cook_controller_failure").is_some()
+            {
+                AgentTaskRunState::Failed
+            } else {
+                terminal_state
+            },
+        );
+    }
     record.aggregate_path = Some(aggregate_path);
     record.totals = Some(aggregate.totals.clone());
     record.tasks = tasks_for_aggregate(plan, aggregate);
@@ -2987,5 +3102,150 @@ mod tests {
         assert_ne!(left, right);
         assert_eq!(std::fs::read(left).unwrap(), b"left");
         assert_eq!(std::fs::read(right).unwrap(), b"right");
+    }
+
+    /// Register one logical artifact twice the way terminal projection does for
+    /// a Lab run: a legacy import stamped with the lifecycle identity, plus the
+    /// finalized controller projection that carries projection authority.
+    fn record_duplicate_projections(
+        store: &homeboy_core::observation::ObservationStore,
+        run_id: &str,
+        legacy_bytes: &[u8],
+        finalized_bytes: &[u8],
+    ) {
+        let root = store.artifact_root().expect("artifact root");
+        std::fs::create_dir_all(&root).expect("artifact root directory");
+        let legacy_path = root.join("legacy-transcript.txt");
+        let finalized_path = root.join("finalized-transcript.txt");
+        std::fs::write(&legacy_path, legacy_bytes).expect("legacy bytes");
+        std::fs::write(&finalized_path, finalized_bytes).expect("finalized bytes");
+        store
+            .record_verified_artifact_with_id(
+                run_id,
+                "transcript",
+                &legacy_path,
+                "agent-task-legacy",
+                Some(legacy_bytes.len() as i64),
+                Some(&format!("{:x}", sha2::Sha256::digest(legacy_bytes))),
+                json!({
+                    "agent_task": { "task_id": "task", "logical_artifact_id": "transcript" }
+                }),
+            )
+            .expect("legacy projection");
+        store
+            .record_verified_artifact_with_id(
+                run_id,
+                "transcript",
+                &finalized_path,
+                "agent-task-finalized",
+                Some(finalized_bytes.len() as i64),
+                Some(&format!("{:x}", sha2::Sha256::digest(finalized_bytes))),
+                json!({
+                    "agent_task": {
+                        "task_id": "task",
+                        "logical_artifact_id": "transcript",
+                        "projection": "controller_finalized",
+                    }
+                }),
+            )
+            .expect("finalized projection");
+    }
+
+    fn transcript_artifact(bytes: &[u8]) -> AgentTaskArtifact {
+        let mut artifact = artifact("transcript", "transcript", None);
+        artifact.size_bytes = Some(bytes.len() as u64);
+        artifact.sha256 = Some(format!("{:x}", sha2::Sha256::digest(bytes)));
+        artifact
+    }
+
+    #[test]
+    fn equivalent_duplicate_projections_resolve_to_the_finalized_record() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let run = store
+                .start_run(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            let bytes = b"transcript bytes";
+            record_duplicate_projections(&store, &run.id, bytes, bytes);
+
+            // A Lab run legitimately retains its legacy import alongside the
+            // finalized projection, so this must resolve rather than abort the
+            // owning Cook (#14164).
+            let resolved = verified_controller_artifact_projection_path_in_store(
+                &store,
+                &run.id,
+                "task",
+                &transcript_artifact(bytes),
+            )
+            .expect("equivalent duplicates resolve")
+            .expect("a controller projection is available");
+
+            // Projection authority, not discovery order, selects the record.
+            assert!(
+                resolved
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains("agent-task-finalized")),
+                "expected the finalized projection, got {}",
+                resolved.display()
+            );
+            assert_eq!(std::fs::read(&resolved).expect("resolved bytes"), bytes);
+
+            let (_, bytes_read) = verified_controller_artifact_projection_in_store(
+                &store,
+                &run.id,
+                "task",
+                "transcript",
+                "transcript",
+                &format!("{:x}", sha2::Sha256::digest(bytes)),
+                None,
+            )
+            .expect("equivalent duplicates resolve for byte reads")
+            .expect("a controller projection is available");
+
+            assert_eq!(bytes_read, bytes);
+        });
+    }
+
+    #[test]
+    fn conflicting_duplicate_projections_still_fail_closed() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let run = store
+                .start_run(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            let bytes = b"transcript bytes";
+            record_duplicate_projections(&store, &run.id, b"different transcript", bytes);
+
+            let error = verified_controller_artifact_projection_path_in_store(
+                &store,
+                &run.id,
+                "task",
+                &transcript_artifact(bytes),
+            )
+            .expect_err("projections that disagree on content must fail closed");
+
+            assert!(
+                error.message.contains("conflicting"),
+                "got {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("agent-task-finalized")
+                    && error.message.contains("agent-task-legacy"),
+                "the conflicting records must be named: {}",
+                error.message
+            );
+        });
     }
 }

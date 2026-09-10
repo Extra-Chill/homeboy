@@ -21,9 +21,11 @@ pub use child::{
     InvocationChildRecord,
 };
 pub use runtime::{
-    enforce_path_budget, invocation_runtime_root, short_invocation_id,
+    canonical_budget_path, enforce_path_budget, invocation_runtime_root, short_invocation_id,
     HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, SOCKET_HEADROOM_BYTES, SUN_PATH_CAPACITY,
 };
+
+use super::temp::TempPlacement;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InvocationRequirements {
@@ -216,8 +218,13 @@ impl InvocationGuard {
             return Err(error);
         }
 
-        let (runtime_tmp_dir, runtime_tmp_pin) =
-            match super::temp::managed_run_temp_dir_for_producer(
+        // Socket-safe allocation: the exported TMPDIR is canonicalized by real
+        // workloads before they bind sockets under it, so the *durable* path —
+        // not just the short alias pointing at it — has to fit the
+        // `sockaddr_un` budget (#14384).
+        let (runtime_tmp_dir, runtime_tmp_pin, tmp_placement) =
+            match super::temp::socket_safe_run_temp_dir(
+                &short,
                 "homeboy-invocation-tmp",
                 Some("invocation"),
             ) {
@@ -236,17 +243,21 @@ impl InvocationGuard {
             let _ = fs::remove_dir_all(&artifact_dir);
             return Err(error);
         }
-        let (exported_tmp_dir, runtime_tmp_alias) =
-            match exported_runtime_tmp_dir(&runtime_root, &short, &runtime_tmp_dir) {
-                Ok(exported) => exported,
-                Err(error) => {
-                    let _ = fs::remove_dir_all(&runtime_tmp_dir);
-                    let _ = fs::remove_file(lease_path_in_root(&config_root, &id));
-                    let _ = fs::remove_dir_all(&state_dir);
-                    let _ = fs::remove_dir_all(&artifact_dir);
-                    return Err(error);
-                }
-            };
+        let (exported_tmp_dir, runtime_tmp_alias) = match exported_runtime_tmp_dir(
+            &runtime_root,
+            &short,
+            &runtime_tmp_dir,
+            tmp_placement,
+        ) {
+            Ok(exported) => exported,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&runtime_tmp_dir);
+                let _ = fs::remove_file(lease_path_in_root(&config_root, &id));
+                let _ = fs::remove_dir_all(&state_dir);
+                let _ = fs::remove_dir_all(&artifact_dir);
+                return Err(error);
+            }
+        };
         let cleanup_paths = [state_dir.clone(), artifact_dir.clone()];
         Ok(Self {
             env: InvocationEnv {
@@ -403,14 +414,31 @@ impl Drop for InvocationGuard {
     }
 }
 
+/// Resolve the `TMPDIR` handed to child workloads, and the alias to remove on
+/// teardown when one was created.
+///
+/// The alias exists to keep the *handed-out* string short. It cannot make the
+/// target short, and a workload that calls `realpath()` on `$TMPDIR` — which is
+/// what anything creating a UNIX socket or proving symlink-free containment
+/// does — binds against the target. So the target is budget-checked here too;
+/// checking only the alias made the guarantee decorative (#14384).
+///
+/// A fallback-placed owner is already under the short runtime root, so it is
+/// exported directly with no alias at all.
 #[cfg(unix)]
 pub(crate) fn exported_runtime_tmp_dir(
     runtime_root: &Path,
     short: &str,
     runtime_tmp_dir: &Path,
+    placement: TempPlacement,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
+    if placement == TempPlacement::InvocationRuntimeRoot {
+        return Ok((runtime_tmp_dir.to_path_buf(), None));
+    }
     let alias = runtime_root.join(format!("{short}.t"));
     enforce_path_budget(&alias)?;
+    // The alias resolves here; a consumer that canonicalizes gets this path.
+    enforce_path_budget(runtime_tmp_dir)?;
     std::os::unix::fs::symlink(runtime_tmp_dir, &alias).map_err(|error| {
         Error::internal_io(
             format!(
@@ -429,6 +457,7 @@ pub(crate) fn exported_runtime_tmp_dir(
     _runtime_root: &Path,
     _short: &str,
     runtime_tmp_dir: &Path,
+    _placement: TempPlacement,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
     Ok((runtime_tmp_dir.to_path_buf(), None))
 }

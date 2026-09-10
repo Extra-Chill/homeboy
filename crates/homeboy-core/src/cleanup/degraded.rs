@@ -317,6 +317,7 @@ pub fn degraded_cleanup(
             run_max_bytes: u64::MAX,
             run_max_count: usize::MAX,
             cursor: None,
+            deadline: None,
         }) {
             Ok(outcome) => DegradedCleanupCategory {
                 category: "runtime-tmp",

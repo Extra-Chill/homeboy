@@ -64,6 +64,7 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::RuntimeRecover(_)
         | agent_task::AgentTaskCommand::RuntimeValidate(_)
         | agent_task::AgentTaskCommand::Cancel(_)
+        | agent_task::AgentTaskCommand::PlacementUpdate(_)
         | agent_task::AgentTaskCommand::Quarantine(_)
         | agent_task::AgentTaskCommand::Rearm(_)
         | agent_task::AgentTaskCommand::Prompts(_)
@@ -74,6 +75,9 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::RecordReplacementGateProof(_) => AgentTaskResourceBehavior::LocalControl,
         agent_task::AgentTaskCommand::Cook(cook) if cook.dispatch.core.queue_only => {
             AgentTaskResourceBehavior::LocalControl
+        }
+        agent_task::AgentTaskCommand::CookContinue(args) if args.preflight => {
+            AgentTaskResourceBehavior::BoundedMetadataRead
         }
         agent_task::AgentTaskCommand::Cook(_)
         | agent_task::AgentTaskCommand::CookContinue(_)

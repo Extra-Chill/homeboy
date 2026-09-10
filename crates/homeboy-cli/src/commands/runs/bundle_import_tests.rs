@@ -20,29 +20,10 @@ fn test_store() -> homeboy::core::observation::ObservationStore {
     homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
 }
 
-struct XdgGuard(Option<String>);
-
-impl XdgGuard {
-    fn unset() -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::remove_var("XDG_DATA_HOME");
-        Self(prior)
-    }
-}
-
-impl Drop for XdgGuard {
-    fn drop(&mut self) {
-        match &self.0 {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-}
-
 #[test]
 fn lab_bundle_run_id_conflicts_are_remapped_idempotently() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
@@ -207,7 +188,7 @@ fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
     let mut exported_size_bytes = None;
 
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("fuzz", "homeboy", "rig-a", Value::Null))
@@ -257,7 +238,7 @@ fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
     });
 
     with_isolated_home(|_| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         import_runs(
             &test_store(),
             RunsImportArgs {
@@ -289,7 +270,7 @@ fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
     let mut exported_size_bytes = None;
 
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run("fuzz", "homeboy", "rig-a", Value::Null))
@@ -343,7 +324,7 @@ fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
     });
 
     with_isolated_home(|_| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         import_runs(
             &test_store(),
             RunsImportArgs {
@@ -375,18 +356,7 @@ fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
     });
 }
 
-fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-    NewRunRecord::builder(kind)
-        .component_id(component_id)
-        .command(format!("homeboy {kind} {component_id}"))
-        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-        .homeboy_version("test-version")
-        .git_sha(Some("abc123".to_string()))
-        .rig_id(rig_id)
-        .metadata(metadata)
-        .build()
-}
-
+use crate::commands::runs::test_support::sample_run;
 fn read_bundle_test_json<T: for<'de> Deserialize<'de>>(path: &Path) -> T {
     serde_json::from_str(&std::fs::read_to_string(path).expect("read json")).expect("json")
 }

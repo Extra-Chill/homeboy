@@ -6,6 +6,14 @@ mod part_c;
 
 use super::*;
 
+/// The ambient roots, for tests that still isolate by mutating process env.
+///
+/// Rooted entry points take their root explicitly; a test still running under
+/// `with_isolated_home` passes the isolated home this resolves to.
+fn ambient_roots() -> homeboy_core::paths::PathRoots {
+    homeboy_core::paths::PathRoots::from_environment().expect("ambient path roots")
+}
+
 pub(super) fn ssh_bootstrap_plan() -> HomeboyBinaryRefreshPlan {
     HomeboyBinaryRefreshPlan {
         runner_id: "lab-local".to_string(),

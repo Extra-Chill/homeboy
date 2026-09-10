@@ -60,3 +60,9 @@ the command output as `min_age_seconds`, `max_total_bytes`, and `limit`.
 `--ignore-retention` discards that window and purges every unreferenced pin. It
 is destructive and never the default; reference-based retention still applies,
 but the operator's age and size budget does not.
+
+`eligible` lists only pins a prune under the current policy can actually remove.
+Every retention decision — an active reference, the active generation, the
+configured age and size budget, or this pass's removal limit — is recorded in the
+identity's `retention_reasons` and clears its `eligible` flag, so a pin can never
+be advertised as reclaimable while something still protects it.

@@ -72,6 +72,11 @@ struct TestFunction {
     body: String,
     line: usize,
     nested: bool,
+    /// `cfg` predicates guarding this test, in source order.
+    ///
+    /// A platform-split pair shares one name deliberately: exactly one arm
+    /// compiles per target, so neither shadows the other.
+    cfgs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -244,11 +249,15 @@ fn collect_local_product_symbols(content: &str) -> BTreeSet<String> {
 }
 
 fn detect_duplicate_test_names(file: &str, tests: &[TestFunction]) -> Vec<Finding> {
-    let mut seen = BTreeMap::<&str, usize>::new();
+    let mut seen = BTreeMap::<(&str, Vec<String>), usize>::new();
     let mut findings = Vec::new();
 
     for test in tests {
-        if let Some(first_line) = seen.insert(&test.name, test.line) {
+        // A name repeated under different `cfg` predicates is a platform split,
+        // not shadowed coverage: only one arm is ever compiled.
+        let mut guards = test.cfgs.clone();
+        guards.sort();
+        if let Some(first_line) = seen.insert((&test.name, guards), test.line) {
             findings.push(Finding {
                 convention: "test_quality".to_string(),
                 severity: Severity::Info,
@@ -511,8 +520,26 @@ fn extract_test_functions(content: &str) -> Vec<TestFunction> {
         }
 
         let nested = !function_end_depths.is_empty();
+        let mut cfgs = Vec::new();
+        let mut attr_line = i;
+        while attr_line > 0 {
+            let candidate = lines[attr_line - 1].trim();
+            if candidate.starts_with("#[cfg(") {
+                cfgs.push(candidate.to_string());
+                attr_line -= 1;
+                continue;
+            }
+            if candidate.starts_with("#[") || candidate.starts_with("///") {
+                attr_line -= 1;
+                continue;
+            }
+            break;
+        }
         let mut fn_line = i + 1;
         while fn_line < lines.len() && !lines[fn_line].contains("fn ") {
+            if lines[fn_line].trim().starts_with("#[cfg(") {
+                cfgs.push(lines[fn_line].trim().to_string());
+            }
             fn_line += 1;
         }
         if fn_line >= lines.len() {
@@ -561,6 +588,7 @@ fn extract_test_functions(content: &str) -> Vec<TestFunction> {
             body: body_lines.join("\n"),
             line: fn_line + 1,
             nested,
+            cfgs,
         });
         for line in &lines[i..=j.min(lines.len().saturating_sub(1))] {
             enclosing_depth += brace_delta(line);
@@ -1081,6 +1109,36 @@ fn duplicate_behavior() {
         assert!(findings.iter().any(|finding| finding
             .description
             .contains("Duplicate test name `duplicate_behavior`")));
+    }
+
+    #[test]
+    fn platform_split_test_names_are_not_shadowed_coverage() {
+        // Verbatim shape of `tests/core/daemon/control_test.rs`, where one name
+        // is implemented per platform. Exactly one arm compiles per target, so
+        // reporting it as shadowed coverage sent readers to delete correct code.
+        let findings = detect_vacuous_tests(
+            "tests/core/daemon/control_test.rs",
+            r#"
+#[cfg(target_os = "linux")]
+#[test]
+fn recovery_is_idempotent() {
+    crate::thing::run_with_procfs();
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn recovery_is_idempotent() {
+    crate::thing::run_without_procfs();
+}
+"#,
+        );
+
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.description.contains("Duplicate test name")),
+            "platform-split pair reported as duplicate: {findings:?}"
+        );
     }
 
     #[test]

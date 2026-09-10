@@ -155,12 +155,33 @@ fn write_file_atomic_with_owner_only(
     operation: &str,
     owner_only: bool,
 ) -> Result<()> {
+    write_file_atomic_with_owner_only_writer(
+        path,
+        content,
+        operation,
+        owner_only,
+        write_file_owner_only,
+    )
+}
+
+fn write_file_atomic_with_owner_only_writer(
+    path: &Path,
+    content: &str,
+    operation: &str,
+    owner_only: bool,
+    owner_only_writer: fn(&Path, &str, &str) -> Result<()>,
+) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::internal_io(
             format!("Invalid path: {}", path.display()),
             Some(operation.to_string()),
         )
     })?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
 
     let filename = path.file_name().ok_or_else(|| {
         Error::internal_io(
@@ -172,17 +193,55 @@ fn write_file_atomic_with_owner_only(
     let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
 
     if owner_only {
-        write_file_owner_only(&tmp_path, content, &format!("{} (write temp)", operation))?;
+        if let Err(error) =
+            owner_only_writer(&tmp_path, content, &format!("{} (write temp)", operation))
+        {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
     } else {
-        fs::write(&tmp_path, content).map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("{} (write temp)", operation)))
-        })?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("{} (create temp)", operation)),
+                )
+            })?;
+        use std::io::Write;
+        if let Err(error) = file.write_all(content.as_bytes()) {
+            drop(file);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("{} (write temp)", operation)),
+            ));
+        }
     }
-
-    fs::rename(&tmp_path, path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("{} (rename)", operation))))?;
-
-    Ok(())
+    if let Err(error) = fs::File::open(&tmp_path).and_then(|file| file.sync_all()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("{} (sync temp)", operation)),
+        ));
+    }
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("{} (rename)", operation)),
+        ));
+    }
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("{} (sync parent)", operation)),
+            )
+        })
 }
 
 /// Create parent directories and atomically persist pretty-printed JSON.
@@ -195,6 +254,29 @@ pub fn write_json_file_owner_only<T: Serialize>(path: &Path, value: &T) -> Resul
     write_json_file_with_owner_only(path, value, true)
 }
 
+/// Remove a durable marker and sync its directory so a crash cannot resurrect it.
+pub fn remove_file_durably(path: &Path, operation: &str) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(operation.to_string()),
+            ));
+        }
+    }
+    let parent = path.parent().ok_or_else(|| {
+        Error::internal_io(
+            format!("Invalid path: {}", path.display()),
+            Some(operation.to_string()),
+        )
+    })?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))
+}
+
 fn write_json_file_with_owner_only<T: Serialize>(
     path: &Path,
     value: &T,
@@ -203,9 +285,12 @@ fn write_json_file_with_owner_only<T: Serialize>(
     let parent = path.parent().ok_or_else(|| {
         Error::internal_unexpected(format!("path has no parent: {}", path.display()))
     })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-    })?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    create_dir_all_durably(parent)?;
     let json = serde_json::to_string_pretty(value).map_err(|error| {
         Error::internal_json(error.to_string(), Some(path.display().to_string()))
     })?;
@@ -215,6 +300,31 @@ fn write_json_file_with_owner_only<T: Serialize>(
         &path.display().to_string(),
         owner_only,
     )
+}
+
+pub fn create_dir_all_durably(path: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    while !current.exists() {
+        missing.push(current.to_path_buf());
+        current = current.parent().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "directory has no existing ancestor: {}",
+                path.display()
+            ))
+        })?;
+    }
+    fs::create_dir_all(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    for directory in missing.iter().rev() {
+        let parent = directory.parent().expect("missing directory has parent");
+        fs::File::open(parent)
+            .and_then(|parent| parent.sync_all())
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+            })?;
+    }
+    Ok(())
 }
 
 /// Create a file owner-only on Unix before writing its contents.
@@ -244,9 +354,13 @@ fn unique_temp_path(parent: &Path, filename: &str) -> PathBuf {
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     parent.join(format!(
-        ".{}.{}.{}.tmp",
+        ".{}.{}.{}.{}.tmp",
         filename,
         std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }
@@ -258,6 +372,24 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
     use tempfile::NamedTempFile;
+
+    fn partially_write_owner_only_then_fail(
+        path: &Path,
+        content: &str,
+        operation: &str,
+    ) -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
+        file.write_all(&content.as_bytes()[..1])
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
+        Err(Error::internal_io(
+            "injected owner-only partial-write failure",
+            Some(operation.to_string()),
+        ))
+    }
 
     #[test]
     fn test_local_fs_write_read() {
@@ -296,6 +428,42 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(&content).expect("valid json");
         let temp_files: Vec<_> = fs::read_dir(dir.path())
             .expect("list tempdir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            temp_files.is_empty(),
+            "temp files left behind: {temp_files:?}"
+        );
+    }
+
+    #[test]
+    fn owner_only_atomic_write_cleans_temp_after_partial_write_failure() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "original").unwrap();
+
+        let error = write_file_atomic_with_owner_only_writer(
+            &path,
+            "replacement",
+            "replace owner-only config",
+            true,
+            partially_write_owner_only_then_fail,
+        )
+        .expect_err("injected partial write must fail");
+
+        assert_eq!(error.code.as_str(), "internal.io_error");
+        assert_eq!(
+            error.details["error"],
+            "injected owner-only partial-write failure"
+        );
+        assert_eq!(
+            error.details["context"],
+            "replace owner-only config (write temp)"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        let temp_files: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
             .collect();
@@ -383,5 +551,23 @@ mod tests {
             fs::read_to_string(path).unwrap(),
             "{\n  \"name\": \"homeboy\"\n}\n"
         );
+    }
+
+    #[test]
+    fn atomic_writer_accepts_a_relative_filename() {
+        let filename = format!(
+            ".homeboy-local-files-relative-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = Path::new(&filename);
+
+        write_file_atomic(path, "relative content", "relative atomic write").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "relative content");
+        fs::remove_file(path).unwrap();
     }
 }

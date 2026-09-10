@@ -96,6 +96,7 @@ fn observe_remote_version_from_applied_tree(
 #[cfg(test)]
 mod tests {
     use super::{remote_version_after_deploy_effect, PostDeployVerification};
+    use crate::test_support::local_client;
     use crate::types::DeployEffect;
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::project::Project;
@@ -287,17 +288,5 @@ mod tests {
             panic!("expected verified outcome");
         };
         assert_eq!(version.as_deref(), Some("1.0.0"));
-    }
-
-    fn local_client() -> SshClient {
-        SshClient {
-            host: "localhost".to_string(),
-            user: "test".to_string(),
-            port: 22,
-            identity_file: None,
-            auth: None,
-            is_local: true,
-            env: HashMap::new(),
-        }
     }
 }

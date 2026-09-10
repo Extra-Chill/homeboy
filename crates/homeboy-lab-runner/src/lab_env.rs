@@ -20,10 +20,8 @@ pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &s
     }
 }
 
-pub(super) fn forward_release_ci_env(env: &mut HashMap<String, String>) {
-    for name in ["GITHUB_ACTIONS", "RELEASE_BLOCKING_COMMANDS"] {
-        forward_env_if_present(env, name);
-    }
+pub(super) fn forward_ci_env(env: &mut HashMap<String, String>) {
+    forward_env_if_present(env, "GITHUB_ACTIONS");
 }
 
 pub(crate) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
@@ -72,13 +70,13 @@ fn subprocess_lab_offload_metadata(lab_metadata: &serde_json::Value) -> serde_js
     })
 }
 
-/// Forward the preview metadata/public-url passthroughs plus release CI context
+/// Forward the preview metadata/public-url passthroughs plus CI context
 /// into a Lab offload env. Centralizes the repeated forward sequence shared by
 /// the offload dispatch paths so they stay in lock-step.
-pub(super) fn forward_preview_and_release_ci_env(env: &mut HashMap<String, String>) {
+pub(super) fn forward_preview_and_ci_env(env: &mut HashMap<String, String>) {
     forward_env_if_present(env, PREVIEW_METADATA_ENV);
     forward_env_if_present(env, PREVIEW_PUBLIC_URL_ENV);
-    forward_release_ci_env(env);
+    forward_ci_env(env);
 }
 
 /// Build a fresh Lab offload env from `lab_metadata` and forward the preview and
@@ -87,7 +85,7 @@ pub(super) fn build_lab_offload_env_with_passthroughs(
     lab_metadata: &serde_json::Value,
 ) -> HashMap<String, String> {
     let mut env = build_lab_offload_env(lab_metadata);
-    forward_preview_and_release_ci_env(&mut env);
+    forward_preview_and_ci_env(&mut env);
     env
 }
 
@@ -682,18 +680,13 @@ mod tests {
     }
 
     #[test]
-    fn forward_release_ci_env_preserves_release_gate_context() {
+    fn forward_ci_env_preserves_github_actions_context() {
         let _github_actions = EnvVarGuard::set("GITHUB_ACTIONS", "true");
-        let _blocking = EnvVarGuard::set("RELEASE_BLOCKING_COMMANDS", "lint,test");
         let mut env = HashMap::new();
 
-        forward_release_ci_env(&mut env);
+        forward_ci_env(&mut env);
 
         assert_eq!(env.get("GITHUB_ACTIONS").map(String::as_str), Some("true"));
-        assert_eq!(
-            env.get("RELEASE_BLOCKING_COMMANDS").map(String::as_str),
-            Some("lint,test")
-        );
     }
 
     #[test]

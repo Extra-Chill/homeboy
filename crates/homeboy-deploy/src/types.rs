@@ -22,6 +22,16 @@ use super::path_roots::resolve_effective_remote_path;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PreparedDeployProjection {
     pub components: BTreeMap<String, Component>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<DeployControlPlaneLineage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DeployControlPlaneLineage {
+    pub mission_id: String,
+    pub release_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_component_id: Option<String>,
 }
 
 /// Parse bulk component IDs from a JSON spec.
@@ -1357,19 +1367,7 @@ mod tests {
         );
     }
 
-    fn run_git(path: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     #[test]
     fn release_state_status_uses_needs_release_public_name() {

@@ -237,11 +237,6 @@ mod tests {
             nul_separated_digest(["run", "runner", "/ws"]),
             "edb57fdec3c0765ebda93bceac4f73c7c423fe4ac4f76507f6be859199adf6b7"
         );
-        // was: worktree_providers::compatibility_identity_token (sans prefix)
-        assert_eq!(
-            nul_separated_digest(["p", "h", "pa", "br"]),
-            "f54325cdac18afbc3abefc904101cee3e5e639868a2b805fdb4e246cf80482d4"
-        );
         // was: agent_task_lifecycle::workspace_claims::composite_acquisition_intent_path
         assert_eq!(
             nul_separated_digest(["s", "k", "l"]),

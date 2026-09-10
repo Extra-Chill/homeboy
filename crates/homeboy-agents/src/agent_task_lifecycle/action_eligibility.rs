@@ -18,6 +18,7 @@ pub fn lifecycle_action_eligibility(
         Err(error) => unavailable(error.message),
     };
     let resume = resume_availability(record);
+    let placement_update = placement_update_availability(record);
     let retry = retry_availability(record, plan);
     let promotion = if matches!(
         record.state,
@@ -58,20 +59,20 @@ pub fn lifecycle_action_eligibility(
                 "agent_task_run",
             ),
             action(
+                ControlPlaneAction::PlacementUpdate,
+                placement_update,
+                ControlPlaneActionConfirmation::Required,
+                vec!["placement"],
+                true,
+                "agent_task_run",
+            ),
+            action(
                 ControlPlaneAction::Retry,
                 retry,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
                 true,
                 "agent_task_run",
-            ),
-            action(
-                ControlPlaneAction::Review,
-                available("review is a non-mutating read available for every durable run"),
-                ControlPlaneActionConfirmation::None,
-                Vec::new(),
-                true,
-                "agent_task_review",
             ),
             action(
                 ControlPlaneAction::Promote,
@@ -91,6 +92,27 @@ pub fn lifecycle_action_eligibility(
             ),
         ],
     }
+}
+
+fn placement_update_availability(
+    record: &AgentTaskRunRecord,
+) -> (ControlPlaneActionAvailability, String) {
+    let admission = &record.metadata["unmaterialized_cook_admission"];
+    if record.state != AgentTaskRunState::Queued || !admission.is_object() {
+        return unavailable("placement updates require a queued unmaterialized Cook admission");
+    }
+    if record.metadata["provider_executions"]
+        .as_array()
+        .is_some_and(|executions| !executions.is_empty())
+        || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"].is_string()
+        || matches!(
+            admission["lease"]["state"].as_str(),
+            Some("claimed" | "consumed" | "materializing")
+        )
+    {
+        return unavailable("execution ownership has crossed the placement-update safety boundary");
+    }
+    available("explicit local placement can be confirmed before provider execution")
 }
 
 fn action(
@@ -130,7 +152,33 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
         return unavailable("run is quarantined and must be re-armed before resume");
     }
     match record.state {
-        AgentTaskRunState::Queued => available("queued run can re-enter execution"),
+        AgentTaskRunState::Queued => {
+            if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
+                let state = admission["state"].as_str().unwrap_or("queued");
+                if state == "exhausted" {
+                    return unavailable(
+                        "bounded admission retry budget is exhausted; create a new retry after remediation",
+                    );
+                }
+                if matches!(
+                    admission["lease"]["state"].as_str(),
+                    Some("claimed" | "consumed" | "materializing")
+                ) {
+                    return unavailable(
+                        "unmaterialized Cook admission is owned by an active replay or materialization",
+                    );
+                }
+                if let Some(next_attempt_at) = scheduled_unmaterialized_admission_retry(record) {
+                    return available(format!(
+                        "resume is legal but explicitly re-arms this admission; automatic reconciliation is scheduled for {next_attempt_at}, so waiting is the recommended next action"
+                    ));
+                }
+                return available(
+                    "unmaterialized Cook admission can be explicitly rearmed after remediation and revalidates runner eligibility",
+                );
+            }
+            available("queued run can re-enter execution")
+        }
         AgentTaskRunState::Running => match record.local_owner_liveness() {
             LocalOwnerLiveness::Live => unavailable("run has an authoritative live local owner"),
             LocalOwnerLiveness::Unverifiable => {
@@ -142,6 +190,18 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
         },
         _ => unavailable("terminal runs cannot be resumed"),
     }
+}
+
+fn scheduled_unmaterialized_admission_retry(record: &AgentTaskRunRecord) -> Option<String> {
+    let admission = record.metadata.get("unmaterialized_cook_admission")?;
+    if !admission.is_object() || record.state.is_terminal() {
+        return None;
+    }
+    let next_attempt_at = admission.pointer("/retry/next_attempt_at")?.as_str()?;
+    let next_attempt_at = chrono::DateTime::parse_from_rfc3339(next_attempt_at)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    (next_attempt_at > chrono::Utc::now()).then(|| next_attempt_at.to_rfc3339())
 }
 
 fn retry_availability(
@@ -162,6 +222,37 @@ fn retry_availability(
                 && acceptance.verdict != super::AgentTaskAcceptanceVerdict::Rejected)
     }) {
         return unavailable("acceptance rejection repair budget is exhausted for this lineage");
+    }
+    if super::is_unmaterialized_cook_admission(record) {
+        if !record.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]
+            .as_object()
+            .is_some_and(|intent| intent.get("argv").is_some_and(serde_json::Value::is_array))
+        {
+            return unavailable(
+                "terminal unmaterialized Cook admission lacks its durable replay intent",
+            );
+        }
+        return available(
+            "terminal unmaterialized Cook admission retains its immutable replay binding; retry will reserve a new admission and revalidate runner readiness",
+        );
+    }
+    if record.metadata["cook_id"].is_string() {
+        match crate::agent_task_service::retry_admission_for_projection(&record.run_id) {
+            Ok(crate::agent_task_service::RetryProjectionAdmission::DurableCook) => {
+                return available(
+                "durable Cook retry is admitted; runtime admission will be revalidated before execution",
+            )
+            }
+            Ok(crate::agent_task_service::RetryProjectionAdmission::GenericLifecycle) => {
+                return available(
+                    "generic lifecycle retry is admitted; runtime admission will be revalidated before execution",
+                )
+            }
+            Err(error) => return unavailable(format!(
+                "durable Cook retry is unavailable: {}; inspect this exact attempt with: homeboy agent-task status {}",
+                error.message, record.run_id
+            )),
+        }
     }
     match plan {
         Some(plan) if super::plan_has_retry_materialization_identity(plan) => {
@@ -215,10 +306,6 @@ mod tests {
             let report = lifecycle_action_eligibility(&record(state, false), None);
             assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
             assert_eq!(report.actions.len(), 6);
-            assert_eq!(
-                decision(&report, ControlPlaneAction::Review),
-                ControlPlaneActionAvailability::Available
-            );
             if state.is_terminal() {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Cancel),
@@ -254,8 +341,10 @@ mod tests {
     #[test]
     fn unmaterialized_cook_resume_is_projected_as_idempotent() {
         let mut record = record(AgentTaskRunState::Queued, false);
-        record.metadata["unmaterialized_cook_admission"] =
-            serde_json::json!({"state": "blocked_runner_unavailable"});
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_unavailable",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
         let report = lifecycle_action_eligibility(&record, None);
         let resume = report
             .actions
@@ -266,6 +355,140 @@ mod tests {
         assert_eq!(
             resume.availability,
             ControlPlaneActionAvailability::Available
+        );
+        assert!(resume.reason.contains("explicitly rearmed"));
+        assert!(!resume
+            .reason
+            .contains("automatic admission retry is scheduled"));
+    }
+
+    #[test]
+    fn unmaterialized_metadata_does_not_bypass_resume_safety_preconditions() {
+        for state in [AgentTaskRunState::Cancelled, AgentTaskRunState::Succeeded] {
+            let mut record = record(state, false);
+            record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+                "state": "blocked_runner_stale",
+                "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+            });
+            assert_eq!(
+                decision(
+                    &lifecycle_action_eligibility(&record, None),
+                    ControlPlaneAction::Resume
+                ),
+                ControlPlaneActionAvailability::Unavailable
+            );
+        }
+
+        let mut running = record(AgentTaskRunState::Running, false);
+        running.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_stale",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
+        running.metadata["provider_executions"] = serde_json::json!([{
+            "state": "running", "owner_pid": std::process::id()
+        }]);
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&running, None),
+                ControlPlaneAction::Resume
+            ),
+            ControlPlaneActionAvailability::Unavailable
+        );
+
+        let mut quarantined = record(AgentTaskRunState::Queued, false);
+        quarantined.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_stale",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
+        quarantined.metadata["queue_quarantine"] = serde_json::json!({"reason": "fixture"});
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&quarantined, None),
+                ControlPlaneAction::Resume
+            ),
+            ControlPlaneActionAvailability::Unavailable
+        );
+
+        let mut exhausted = record(AgentTaskRunState::Queued, false);
+        exhausted.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "exhausted",
+            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
+        });
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&exhausted, None),
+                ControlPlaneAction::Resume
+            ),
+            ControlPlaneActionAvailability::Unavailable
+        );
+    }
+
+    #[test]
+    fn scheduled_unmaterialized_retry_describes_resume_as_a_manual_rearm() {
+        let mut record = record(AgentTaskRunState::Queued, false);
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_stale",
+            "retry": { "next_attempt_at": "2099-01-01T00:00:00Z" },
+        });
+
+        let report = lifecycle_action_eligibility(&record, None);
+        let resume = report
+            .actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Available
+        );
+        assert!(resume.reason.contains("explicitly re-arms"));
+        assert!(resume.reason.contains("recommended next action"));
+    }
+
+    #[test]
+    fn exhausted_unmaterialized_cook_retry_uses_its_replay_binding_not_plan_identity() {
+        let mut record = record(AgentTaskRunState::Failed, false);
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "exhausted",
+            "binding": {
+                "replay_intent": {
+                    "cook_id": "run",
+                    "argv": ["agent-task", "cook", "--run-id", "run"]
+                }
+            }
+        });
+
+        let report =
+            lifecycle_action_eligibility(&record, Some(&AgentTaskPlan::new("empty", vec![])));
+
+        assert_eq!(
+            decision(&report, ControlPlaneAction::Retry),
+            ControlPlaneActionAvailability::Available
+        );
+    }
+
+    #[test]
+    fn placement_update_is_available_only_before_execution_ownership() {
+        let mut record = record(AgentTaskRunState::Queued, false);
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "state": "blocked_runner_unavailable",
+            "binding": { "replay_intent": { "argv": ["homeboy"] } },
+        });
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&record, None),
+                ControlPlaneAction::PlacementUpdate
+            ),
+            ControlPlaneActionAvailability::Available
+        );
+        record.metadata["provider_executions"] = serde_json::json!([{ "state": "running" }]);
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&record, None),
+                ControlPlaneAction::PlacementUpdate
+            ),
+            ControlPlaneActionAvailability::Unavailable
         );
     }
 }

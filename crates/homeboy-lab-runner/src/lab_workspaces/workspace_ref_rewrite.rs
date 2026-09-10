@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use homeboy_core::worktree_provider::{self, WorktreeWorkspaceKind};
+use homeboy_core::worktree::{self, WorkspaceRefRecord};
 use homeboy_core::{Error, Result};
 
 use super::*;
@@ -163,7 +163,7 @@ pub(super) fn maybe_resolve_workspace_ref(
     let Some((handle, subpath)) = parse_workspace_ref(value) else {
         return Ok(None);
     };
-    let ownership = worktree_provider::resolve_worktree_ownership_if_present(&handle)
+    let ownership = worktree::resolve_workspace_ref_if_present(&handle)
         .map_err(|error| {
             Error::validation_invalid_argument(
                 "workspace_ref",
@@ -184,7 +184,18 @@ pub(super) fn maybe_resolve_workspace_ref(
                 ]),
             )
         })?;
-    let workspace_path = PathBuf::from(&ownership.path);
+    let (workspace_path, source_kind, provenance) = match ownership {
+        WorkspaceRefRecord::Task(record) => (
+            PathBuf::from(record.worktree_path),
+            "task_worktree".to_string(),
+            None,
+        ),
+        WorkspaceRefRecord::Adopted(record) => (
+            PathBuf::from(record.path),
+            "adopted_workspace".to_string(),
+            record.provenance,
+        ),
+    };
     let mut resolved = workspace_path.clone();
     if let Some(subpath) = subpath.as_deref() {
         resolved.push(subpath);
@@ -204,13 +215,8 @@ pub(super) fn maybe_resolve_workspace_ref(
         raw_ref: value.to_string(),
         handle,
         subpath,
-        source_kind: match ownership.kind {
-            WorktreeWorkspaceKind::TaskWorktree => "task_worktree",
-            WorktreeWorkspaceKind::AdoptedWorkspace => "adopted_workspace",
-            WorktreeWorkspaceKind::Configured => "configured_worktree",
-        }
-        .to_string(),
-        source_provenance: ownership.provenance,
+        source_kind,
+        source_provenance: provenance,
         workspace_path,
         resolved_path: resolved.clone(),
     });

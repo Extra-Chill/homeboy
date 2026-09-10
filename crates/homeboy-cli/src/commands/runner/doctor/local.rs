@@ -206,6 +206,7 @@ pub fn report(
         runner_id: runner_id.to_string(),
         runner: runner_summary("local", Some(runner), None),
         status: checks::overall_status(&checks),
+        failure: None,
         capabilities,
         resources,
         checks,

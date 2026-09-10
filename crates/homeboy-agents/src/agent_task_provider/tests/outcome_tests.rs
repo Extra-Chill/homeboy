@@ -53,6 +53,7 @@ fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
     provider_a.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "provider-a.auth".to_string(),
         label: "Provider A auth".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: vec!["PROVIDER_A_TOKEN".to_string()],
         env_path: None,
@@ -67,6 +68,7 @@ fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
     provider_b.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "provider-b.auth".to_string(),
         label: "Provider B auth".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: vec![
             "PROVIDER_B_TOKEN".to_string(),
@@ -168,6 +170,7 @@ fn provider_command_env_injects_declared_executable_candidate() {
     provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "provider.tool".to_string(),
         label: "Provider tool".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: Vec::new(),
         env_path: None,
@@ -197,6 +200,7 @@ fn provider_command_env_prefers_declared_executable_env_value() {
     provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "provider.tool".to_string(),
         label: "Provider tool".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: Vec::new(),
         env_path: None,
@@ -711,12 +715,12 @@ fn opencode_account_block_maps_to_rotatable_provider_classification() {
 
     assert_eq!(
         outcome.failure_classification,
-        Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+        Some(AgentTaskFailureClassification::ProviderBillingBlocked)
     );
     assert!(outcome
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.class == "provider.account_blocked"));
+        .any(|diagnostic| diagnostic.class == "provider.capacity_rejected"));
 }
 
 #[test]

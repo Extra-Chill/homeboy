@@ -23,8 +23,9 @@ pub(super) use homeboy_core::observation::{
 pub(super) use homeboy_core::plan::PlanKind;
 pub(super) use homeboy_core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_MODE_SNAPSHOT,
-    PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
+pub(super) use homeboy_lab_contract::path_materialization::PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT;
 
 mod capability_metadata;
 mod durable_fallbacks;

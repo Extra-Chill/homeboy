@@ -142,10 +142,9 @@ pub(crate) fn push_release_branch(
 /// diverged (the remote advanced past a shared ancestor); the caller-side
 /// ancestor checks are intentionally not duplicated here. The commits the remote
 /// gained during the release window are captured for issue #6141 reporting,
-/// HEAD is rebased onto `remote_commit`, and — when `retag` names the release
-/// tag — the tag is moved onto the rebased commit before the branch is pushed so
-/// a successful branch push is never left with a stranded, off-branch tag
-/// (issue #5502).
+/// HEAD is rebased onto `remote_commit`, the branch is pushed, and — only after
+/// that push succeeds — `retag` is moved onto the reachable release commit
+/// (issues #5502 and #14251).
 ///
 /// Returns `Ok(None)` when the rebase conflicts (it is aborted to leave a clean
 /// tree) so each caller can map the un-automatable state onto its own failure
@@ -189,16 +188,17 @@ pub(crate) fn rebase_onto_advanced_remote_and_push(
         return Ok(None);
     }
 
-    // The rebase moved the release commit to a new SHA on the branch line. Move
-    // the release tag onto the rebased release commit so it stays an ancestor of
-    // the pushed branch (issue #5502). Do this BEFORE pushing the branch so a
-    // successful branch push is never left with a stranded, off-branch tag.
-    if let Some(tag_name) = retag {
-        retag_rebased_release(component, component_id, branch, tag_name)?;
+    // A second remote advance can reject this bounded recovery push. Publish
+    // the moved tag only after the branch accepts the rebased release commit;
+    // otherwise the retry itself can strand a fresh tag off-branch (#14251).
+    let push = push_release_branch(component, component_id, branch)?;
+    if push.success {
+        if let Some(tag_name) = retag {
+            retag_rebased_release(component, component_id, branch, tag_name)?;
+        }
     }
 
-    push_release_branch(component, component_id, branch)
-        .map(|push| Some(AdvancedRemoteRecovery { push, advance }))
+    Ok(Some(AdvancedRemoteRecovery { push, advance }))
 }
 
 /// Resolve the commits that landed on the remote between the pre-rebase release
@@ -233,6 +233,7 @@ fn retag_rebased_release(
 ) -> Result<()> {
     let path = &component.local_path;
     let head_commit = git::get_head_commit(path)?;
+    require_unpublished_github_tag(component, tag_name)?;
 
     // If the tag already points at the rebased HEAD there is nothing to move.
     if git::tag_exists_locally(path, tag_name).unwrap_or(false) {
@@ -272,6 +273,7 @@ fn retag_rebased_release(
     // publishes as a clean, non-forced update. Tags are deliberately moved here:
     // the rebased commit supersedes the orphaned one within the same release.
     if git::tag_exists_on_remote(path, tag_name).unwrap_or(false) {
+        require_unpublished_github_tag(component, tag_name)?;
         let delete = git::delete_remote_tag(path, tag_name)?;
         if !delete.success {
             return Err(Error::git_command_failed(format!(
@@ -299,4 +301,41 @@ fn retag_rebased_release(
     }
 
     Ok(())
+}
+
+fn require_unpublished_github_tag(component: &Component, tag_name: &str) -> Result<()> {
+    let github_remote = component
+        .remote_url
+        .clone()
+        .or_else(|| {
+            git::release_download::detect_remote_url(std::path::Path::new(&component.local_path))
+        })
+        .and_then(|url| git::release_download::parse_github_url(&url));
+    if github_remote.is_none() {
+        return Ok(());
+    }
+
+    match super::executor::github_release_exists_for_tag(component, tag_name) {
+        Some(false) => Ok(()),
+        Some(true) => Err(Error::validation_invalid_argument(
+            "tag",
+            format!(
+                "Refusing to move '{}': a GitHub Release already exists for this tag",
+                tag_name
+            ),
+            None,
+            None,
+        )),
+        None => Err(Error::validation_invalid_argument(
+            "tag",
+            format!(
+                "Refusing to move '{}': could not verify whether a GitHub Release exists",
+                tag_name
+            ),
+            None,
+            Some(vec![
+                "Authenticate gh for this repository and retry release recovery.".to_string(),
+            ]),
+        )),
+    }
 }

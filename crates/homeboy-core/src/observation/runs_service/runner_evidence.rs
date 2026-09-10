@@ -52,9 +52,7 @@ pub struct StaleRunnerJobInfo {
     pub runner_id: String,
     pub job_id: String,
     pub status: String,
-    pub lifecycle_state: Option<String>,
     pub stale_reason: Option<String>,
-    pub retryable: Option<bool>,
 }
 
 /// The result of downloading a remote runner artifact, slimmed to what
@@ -693,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_daemon_job_not_found_becomes_stale_diagnostics() {
+    fn selected_authoritative_job_absence_becomes_evidence_unavailable() {
         let _lock = provider_lock().lock().expect("provider lock");
         with_isolated_home(|_| {
             let store = ObservationStore::open_initialized().expect("store");
@@ -719,7 +717,11 @@ mod tests {
             assert_eq!(refreshed.status, RunStatus::Stale.as_str());
             assert_eq!(
                 refreshed.metadata_json["runner_terminal_evidence"]["stale_reason"],
-                "daemon_job_not_found"
+                "authoritative_generation_did_not_retain_job"
+            );
+            assert_eq!(
+                refreshed.metadata_json["runner_terminal_evidence"]["status"],
+                "evidence_unavailable"
             );
             assert_eq!(
                 refreshed.metadata_json["runner_terminal_evidence"]["diagnostic"]["details"]

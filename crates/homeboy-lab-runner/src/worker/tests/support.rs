@@ -82,14 +82,11 @@ where
 {
     spawn_custom_broker(store, 1, None, move |store, request| {
         if request.path == "/runner/jobs/claim" {
-            let claim = store
-                .claim_remote_runner_job("lab", None, 30_000, None)
-                .expect("claim job");
-            let mut claim = serde_json::to_value(claim).expect("serialize claim");
-            mutate_claim(&mut claim);
+            let mut response = canonical_claim_response(store, request);
+            mutate_claim(&mut response["outcome"]["claim"]);
             return serde_json::json!({
                 "success": true,
-                "data": { "body": { "claim": claim } }
+                "data": { "body": { "response": response } }
             });
         }
         handle_request(store, request)
@@ -103,17 +100,18 @@ pub(super) fn spawn_cancelling_after_claim_broker(
 ) -> (String, std::thread::JoinHandle<()>) {
     spawn_custom_broker(store, expected_requests, seen_paths, |store, request| {
         if request.path == "/runner/jobs/claim" {
-            let claim = store
-                .claim_remote_runner_job("lab", None, 30_000, None)
-                .expect("claim job");
-            if let Some(claim) = &claim {
+            let response = canonical_claim_response(store, request);
+            if let Some(job_id) = response["outcome"]["claim"]["job_id"].as_str() {
                 store
-                    .cancel(claim.job.id, "user requested")
+                    .cancel(
+                        uuid::Uuid::parse_str(job_id).expect("claimed job id"),
+                        "user requested",
+                    )
                     .expect("cancel job");
             }
             return serde_json::json!({
                 "success": true,
-                "data": { "body": { "claim": claim } }
+                "data": { "body": { "response": response } }
             });
         }
         handle_request(store, request)
@@ -310,12 +308,10 @@ fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
         }
     }
     if request.path == "/runner/jobs/claim" {
-        let claim = store
-            .claim_remote_runner_job("lab", None, 30_000, None)
-            .expect("claim job");
+        let response = canonical_claim_response(store, request);
         return serde_json::json!({
             "success": true,
-            "data": { "body": { "claim": claim } }
+            "data": { "body": { "response": response } }
         });
     }
     if let Some(job_id) = request
@@ -337,6 +333,27 @@ fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
         return serde_json::json!({
             "success": true,
             "data": { "body": { "event": event } }
+        });
+    }
+    if let Some(job_id) = request
+        .path
+        .strip_prefix("/runner/jobs/")
+        .and_then(|tail| tail.strip_suffix("/heartbeat"))
+    {
+        let _job_id = uuid::Uuid::parse_str(job_id).expect("heartbeat job id");
+        let request: homeboy_runner_contract::RunnerApiHeartbeatRequest =
+            serde_json::from_value(request.body.clone()).expect("canonical heartbeat request");
+        let response = homeboy_runner_contract::RunnerApiHeartbeatResponse {
+            schema: homeboy_runner_contract::RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            outcome: homeboy_runner_contract::RunnerApiHeartbeatOutcome::Renewed {
+                claim_expires_at_ms: request.lease_ms,
+                workspace_owner_lease: request.workspace_owner_lease,
+            },
+        };
+        return serde_json::json!({
+            "success": true,
+            "data": { "body": { "response": response } }
         });
     }
     if let Some(job_id) = request
@@ -385,6 +402,38 @@ fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
         "success": false,
         "error": { "message": "unknown mock path" }
     })
+}
+
+fn canonical_claim_response(store: &JobStore, request: &MockRequest) -> Value {
+    let request: homeboy_runner_contract::RunnerApiClaimRequest =
+        serde_json::from_value(request.body.clone()).expect("parse canonical claim request");
+    let claim = store
+        .claim_remote_runner_job_with_protocols(
+            &request.runner_id,
+            request.project_id.as_deref(),
+            request.lease_ms.unwrap_or(30_000),
+            request.concurrency_limit,
+            homeboy_core::api_jobs::RemoteRunnerClaimProtocols {
+                execution: request.execution_protocol.as_ref(),
+                workspace_claim: request.workspace_claim_protocol.as_ref(),
+                workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+            },
+        )
+        .expect("claim job");
+    let outcome = match claim {
+        Some(claim) => homeboy_runner_contract::RunnerApiClaimOutcome::Claimed {
+            claim: claim
+                .runner_api_claimed_execution()
+                .expect("project canonical claim"),
+        },
+        None => homeboy_runner_contract::RunnerApiClaimOutcome::Empty,
+    };
+    serde_json::to_value(homeboy_runner_contract::RunnerApiClaimResponse {
+        schema: homeboy_runner_contract::RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
+        api_version: homeboy_runner_contract::RUNNER_API_V1,
+        outcome,
+    })
+    .expect("serialize canonical claim response")
 }
 
 fn write_response(stream: &mut std::net::TcpStream, body: Value) {

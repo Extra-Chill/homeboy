@@ -406,6 +406,7 @@ pub fn finish_candidate_adoption_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     error: Option<String>,
+    supersede_pre_execution_failure: bool,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let record = lifecycle_store.mutate_record(&run_id, |record| {
@@ -427,6 +428,12 @@ pub fn finish_candidate_adoption_in_store(
         }
         .to_string();
         attempt.phase = "terminal".to_string();
+        // Only a direct successful adoption replaces the failed attempt's
+        // execution result. A completed adoption can instead have dispatched
+        // remediation, whose successor remains authoritative.
+        if error.is_none() && supersede_pre_execution_failure {
+            set_run_state(record, AgentTaskRunState::Succeeded);
+        }
         record.updated_at = Some(now);
         true
     })?;
@@ -512,8 +519,10 @@ pub fn candidate_adoption_recovery_outcome(
             }
             None => false,
         };
-    let eligible_failed_preexecution = record.state == AgentTaskRunState::Failed
-        && record.metadata["provider_executions_consumed"] == 0
+    let eligible_failed_preexecution = matches!(
+        record.state,
+        AgentTaskRunState::Failed | AgentTaskRunState::Succeeded
+    ) && record.metadata["provider_executions_consumed"] == 0
         && record.provider_handles.is_empty()
         && no_runner_job_recorded(record)
         && record.lifecycle.external_runtime_ids.is_empty()

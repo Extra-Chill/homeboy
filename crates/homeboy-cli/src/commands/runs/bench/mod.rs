@@ -556,41 +556,11 @@ mod tests {
     use homeboy::core::observation::NewRunRecord;
     use homeboy::test_support::with_isolated_home;
 
-    struct XdgGuard(Option<String>);
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self(prior)
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
-    fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
-        NewRunRecord::builder(kind)
-            .component_id(component_id)
-            .command(format!("homeboy {kind} {component_id}"))
-            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-            .homeboy_version("test-version")
-            .git_sha(Some("abc123".to_string()))
-            .rig_id(rig_id)
-            .metadata(metadata)
-            .build()
-    }
-
+    use crate::commands::runs::test_support::sample_run;
     #[test]
     fn bench_compare_reports_deltas_and_missing_metrics() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let from = store
                 .start_run(sample_run(
@@ -718,7 +688,7 @@ mod tests {
     #[test]
     fn bench_compare_rejects_mismatched_shared_context() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let from = store
                 .start_run(sample_run(

@@ -19,6 +19,49 @@ fn test_create() {
 }
 
 #[test]
+fn inspection_reuses_the_canonical_job_and_keeps_events_separate() {
+    let store = JobStore::default();
+    let job = store.create("controller.work");
+    store.start(job.id).expect("start");
+    store
+        .complete(job.id, Some(json!({"exit_code": 0})))
+        .expect("complete");
+
+    let inspection = store.inspection(job.id).expect("inspection");
+    assert_eq!(inspection.job.id, job.id);
+    assert_eq!(inspection.job.status, JobStatus::Succeeded);
+    assert_eq!(
+        inspection.terminal_disposition.as_deref(),
+        Some("succeeded")
+    );
+    assert!(inspection.linked_durable_run_id.is_none());
+    assert!(store.events(job.id).expect("events").len() > 1);
+}
+
+#[test]
+fn inspection_projects_linked_durable_run_from_retained_event_metadata() {
+    let store = JobStore::default();
+    let job = store.create("controller.work");
+    store
+        .append_event(
+            job.id,
+            JobEventKind::Progress,
+            None,
+            Some(json!({"durable_run_id": "run-linked-1"})),
+        )
+        .expect("append linked run metadata");
+
+    assert_eq!(
+        store
+            .inspection(job.id)
+            .expect("inspection")
+            .linked_durable_run_id
+            .as_deref(),
+        Some("run-linked-1")
+    );
+}
+
+#[test]
 fn active_count_reads_durable_jobs_without_reconciling_them() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");
@@ -162,40 +205,6 @@ fn test_list() {
     assert_eq!(jobs.len(), 2);
     assert_eq!(jobs[0].id, first.id);
     assert_eq!(jobs[1].id, second.id);
-}
-
-#[test]
-fn active_runner_job_for_durable_run_id_excludes_terminal_jobs() {
-    // A terminal job for a durable_run_id must NOT be returned as an idempotent
-    // match: the finished run is done, so a resubmission is a genuinely new
-    // attempt that must enqueue a fresh job.
-    let store = JobStore::default();
-    let mut request = super::remote_runner_request("homeboy-lab", Some("extrachill"));
-    request.lifecycle = Some(RunnerJobLifecycleMetadata {
-        source: Some("runner-daemon".to_string()),
-        kind: Some("agent-task-run-plan".to_string()),
-        durable_run_id: Some("terminal-durable-run".to_string()),
-        active_child_count: None,
-        active_cell_count: None,
-    });
-    let job = store
-        .submit_remote_runner_job(request)
-        .expect("submit remote runner job");
-
-    // While queued, the resubmission dedupes to this job.
-    assert_eq!(
-        store
-            .active_runner_job_for_durable_run_id("terminal-durable-run")
-            .expect("queued job matches")
-            .id,
-        job.id
-    );
-
-    // Once terminal, the same run id no longer matches.
-    store.fail(job.id, "runner exec failed").expect("job fails");
-    assert!(store
-        .active_runner_job_for_durable_run_id("terminal-durable-run")
-        .is_none());
 }
 
 #[test]

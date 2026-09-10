@@ -67,6 +67,18 @@ pub struct ResumeArgs {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Args, Debug)]
+pub struct PlacementUpdateArgs {
+    /// Durable queued Cook ID whose unexecuted placement will be changed.
+    pub run_id: String,
+    /// Record the operator's confirmation of this execution-route change.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Stable key used to replay this placement update without changing it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
+}
+
 #[cfg_attr(test, derive(Default))]
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
@@ -165,7 +177,7 @@ pub struct RuntimeValidateArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use crate::{
         cli_surface::{Cli, Commands},
@@ -207,6 +219,21 @@ mod tests {
         assert_eq!(args.run_id, "run-a");
         assert_eq!(args.artifact.as_deref(), Some("/trusted/homeboy"));
         assert!(args.source.is_none());
+    }
+
+    #[test]
+    fn placement_update_requires_explicit_local_confirmation() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "placement-update",
+            "cook-a",
+            "--confirm",
+        ])
+        .expect("local placement update parses");
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Local);
     }
 
     #[test]
@@ -283,6 +310,56 @@ mod tests {
                 "recovery must reject {flag} instead of silently discarding it"
             );
         }
+    }
+
+    #[test]
+    fn manual_finalization_parses_component_selector_and_recovery_rejects_it() {
+        let help = Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("finalize-pr")
+            .expect("finalize-pr command")
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--component <COMPONENT_ID>"), "{help}");
+        assert!(help.contains("shared-repository worktree"), "{help}");
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "finalize-pr",
+            "--manual-finalization",
+            "--run-id",
+            "manual-component",
+            "--path",
+            "/tmp/manual-component",
+            "--component",
+            "nested-component",
+            "--title",
+            "Manual component",
+            "--commit-message",
+            "record component",
+        ])
+        .expect("manual finalization component parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+            panic!("expected finalize-pr command");
+        };
+        assert_eq!(args.component.as_deref(), Some("nested-component"));
+
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "finalize-pr",
+            "--recover",
+            "cook-a",
+            "--component",
+            "nested-component",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -474,11 +551,78 @@ pub struct RetryArgs {
     /// Stable caller key for safely replaying this retry reservation.
     #[arg(long, value_name = "KEY")]
     pub idempotency_key: Option<String>,
+    /// Backend for the next Cook attempt. This explicit route change is recorded
+    /// with its prior route and operator authority in the Cook lineage.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
+    /// Provider-specific selector for the next Cook attempt.
+    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR")]
+    pub selector: Option<String>,
+    /// Model for the next Cook attempt. A model override pins provider rotation
+    /// unless --allow-provider-rotation or a positive --provider-rotations is also supplied.
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
+    /// Re-enable configured provider/model rotation for this overridden route.
+    #[arg(long)]
+    pub allow_provider_rotation: bool,
+    /// Explicit cross-provider/model rotations available after this override.
+    #[arg(long, value_name = "N")]
+    pub provider_rotations: Option<u32>,
 }
+
+#[cfg(test)]
+mod retry_tests {
+    use clap::{CommandFactory, Parser};
+
+    use crate::{
+        cli_surface::{Cli, Commands},
+        commands::agent_task::AgentTaskCommand,
+    };
+
+    #[test]
+    fn retry_help_and_parser_expose_cook_route_recovery() {
+        let help = Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("retry")
+            .expect("retry command")
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--backend"), "{help}");
+        assert!(help.contains("--allow-provider-rotation"), "{help}");
+        assert!(help.contains("operator authority"), "{help}");
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "retry",
+            "cook-a",
+            "--model",
+            "replacement-model",
+            "--provider-rotations",
+            "2",
+        ])
+        .expect("route override parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Retry(args) = agent_task.command else {
+            panic!("expected retry command");
+        };
+        assert_eq!(args.model.as_deref(), Some("replacement-model"));
+        assert_eq!(args.provider_rotations, Some(2));
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct CancelArgs {
     /// Durable run or Cook ID to cancel.
     pub run_id: String,
+    /// Include the complete, redacted lifecycle record instead of the compact
+    /// cancellation acknowledgement.
+    #[arg(long)]
+    pub full: bool,
     /// Optional explanation recorded with the cancellation.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
@@ -569,8 +713,15 @@ pub struct PromoteArgs {
     /// Replay the exact gate policy from the source run's durable Cook recipe.
     /// Homeboy-generated review commands use this reference so private gate
     /// programs remain outside reviewer-facing command output.
-    #[arg(long = "gates-from-cook-recipe")]
+    #[arg(
+        long = "gates-from-cook-recipe",
+        conflicts_with = "gates_from_resume_contract"
+    )]
     pub gates_from_cook_recipe: bool,
+    /// Replay the exact gate policy from the source run's durable promotion
+    /// resume contract without exposing private gate programs in command output.
+    #[arg(long = "gates-from-resume-contract")]
+    pub gates_from_resume_contract: bool,
     /// Verification gate configuration to run before promotion.
     #[command(flatten)]
     pub gates: VerifyGateArgs,
@@ -621,6 +772,9 @@ pub struct FinalizePrArgs {
     /// Worktree path containing the manual finalization candidate.
     #[arg(long, value_name = "PATH", required_unless_present = "recover")]
     pub path: Option<String>,
+    /// Registered component identity for disambiguating a shared-repository worktree.
+    #[arg(long, value_name = "COMPONENT_ID", conflicts_with = "recover")]
+    pub component: Option<String>,
     /// Base branch for the manual finalization candidate.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
@@ -704,6 +858,9 @@ pub struct VerifyReplacementArgs {
     /// Explicit operator authorization for the replacement proof recorded by this command.
     #[arg(long, value_name = "TEXT")]
     pub authorize_external_proof: String,
+    /// Explicit operator authorization to rerun gates after an interrupted replacement execution. Homeboy still refuses while the original operation lease is live.
+    #[arg(long, value_name = "TEXT")]
+    pub authorize_interrupted_rerun: Option<String>,
     /// Verification gate configuration for the replacement candidate.
     #[command(flatten)]
     pub gates: VerifyGateArgs,

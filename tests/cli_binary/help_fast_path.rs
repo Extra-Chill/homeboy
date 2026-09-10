@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 #[test]
@@ -63,6 +64,25 @@ fn shipped_discovery_bypasses_runtime_with_composed_and_extension_commands() {
             );
         }
     }
+}
+
+#[test]
+fn invalid_help_subcommand_fails_locally_with_upgrade_suggestion() {
+    let args = ["homeboy", "update", "--help"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    let diagnostic = homeboy::cli_runtime::update_help_diagnostic(&args)
+        .expect("update help has a local diagnostic");
+    assert!(
+        started.elapsed() < Duration::from_millis(10),
+        "local help diagnostic exceeded 10ms"
+    );
+    assert!(
+        diagnostic.contains("unrecognized subcommand 'update'") && diagnostic.contains("upgrade"),
+        "missing upgrade suggestion: {diagnostic}"
+    );
 }
 
 fn write_cli_extension(home: &Path, id: &str, tool: &str) {

@@ -553,6 +553,7 @@ mod tests {
 
     use super::package::store_artifacts_from_output;
     use super::{github_release, package_preflight, run_cleanup, run_package, PackageRequest};
+    use crate::release::context::ReleaseExtension;
     use crate::release::types::ReleaseState;
     use crate::release::types::{ReleaseArtifact, ReleaseStepStatus};
     use homeboy_core::component::{Component, ScopedExtensionConfig};
@@ -950,7 +951,7 @@ mod tests {
             };
             let result = run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut state,
                 &component_config,
                 "fixture",
@@ -1021,7 +1022,7 @@ mod tests {
             };
             run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut state,
                 &component,
                 "plugin",
@@ -1151,7 +1152,7 @@ mod tests {
 
             let error = run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut ReleaseState::default(),
                 &Component::default(),
                 "plugin",
@@ -1322,7 +1323,11 @@ mod tests {
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
                 &test_roots(),
-                &[package_a, non_package_extension("docs"), package_b],
+                &[
+                    ReleaseExtension::from_manifest(&package_a),
+                    ReleaseExtension::from_manifest(&non_package_extension("docs")),
+                    ReleaseExtension::from_manifest(&package_b),
+                ],
                 &mut state,
                 &Component::default(),
                 "fixture",
@@ -1362,7 +1367,7 @@ mod tests {
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut state,
                 &Component::default(),
                 "intelligence-horse-theme",
@@ -1434,7 +1439,7 @@ mod tests {
             let mut state = ReleaseState::default();
             let result = run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut state,
                 &component,
                 "fixture",
@@ -1551,7 +1556,7 @@ mod tests {
             let mut state = ReleaseState::default();
             let err = run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut state,
                 &Component::default(),
                 "fixture",
@@ -1589,7 +1594,10 @@ mod tests {
             let mut state = crate::release::types::ReleaseState::default();
             let err = run_package(
                 &test_roots(),
-                &[package_a, package_b],
+                &[
+                    ReleaseExtension::from_manifest(&package_a),
+                    ReleaseExtension::from_manifest(&package_b),
+                ],
                 &mut state,
                 &Component::default(),
                 "fixture",
@@ -1632,7 +1640,7 @@ mod tests {
             let mut state = crate::release::types::ReleaseState::default();
             let err = run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut state,
                 &Component::default(),
                 "fixture",
@@ -1689,7 +1697,7 @@ mod tests {
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
                 &test_roots(),
-                &[package],
+                &[ReleaseExtension::from_manifest(&package)],
                 &mut state,
                 &Component::default(),
                 "fixture",

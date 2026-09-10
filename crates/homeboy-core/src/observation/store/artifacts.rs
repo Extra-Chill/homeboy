@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::*;
+use crate::resource_lifecycle_index::migrate_resource_lifecycle_index_metadata;
 
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactListFilter {
@@ -1534,6 +1535,47 @@ impl ObservationStore {
                 "Updated artifact record {artifact_id} but could not read it back"
             ))
         })
+    }
+
+    /// Persist canonical resource lifecycle metadata for a run's legacy artifacts.
+    ///
+    /// Each replacement writes the complete metadata document in one SQLite
+    /// statement. The compare-and-swap predicate preserves canonical-wins when
+    /// another writer updates an artifact between the scan and replacement.
+    pub fn reconcile_resource_lifecycle_index_metadata(&self, run_id: &str) -> Result<usize> {
+        let mut migrated = 0;
+        for artifact in self.list_artifacts(run_id)? {
+            let Some(replacement) =
+                migrate_resource_lifecycle_index_metadata(&artifact.metadata_json)?
+            else {
+                continue;
+            };
+            if self.replace_artifact_metadata_if_current(
+                &artifact.id,
+                &artifact.metadata_json,
+                &replacement,
+            )? {
+                migrated += 1;
+            }
+        }
+        Ok(migrated)
+    }
+
+    fn replace_artifact_metadata_if_current(
+        &self,
+        artifact_id: &str,
+        current: &serde_json::Value,
+        replacement: &serde_json::Value,
+    ) -> Result<bool> {
+        let current = serialize_metadata(current)?;
+        let replacement = serialize_metadata(replacement)?;
+        let rows = execute_with_retry("replace artifact metadata", || {
+            self.connection.execute(
+                "UPDATE artifacts SET metadata_json = ?1 WHERE id = ?2 AND metadata_json = ?3",
+                params![replacement, artifact_id, current],
+            )
+        })?;
+        Ok(rows == 1)
     }
 
     pub fn list_artifacts_for_runs(
@@ -3157,6 +3199,127 @@ mod tests {
             assert_eq!(artifact.viewer_links.len(), 1);
             assert_eq!(artifact.viewer_links[0].kind, "json");
         });
+    }
+
+    #[test]
+    fn reconciles_legacy_resource_lifecycle_metadata_once_across_restart() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database = tempdir.path().join("observation.sqlite3");
+        let store = ObservationStore::open_initialized_at(&database).expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("test")
+                    .cwd_path(tempdir.path())
+                    .build(),
+            )
+            .expect("run");
+        let metadata: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/resource_lifecycle_migration/resource_lifecycle.json"
+        ))
+        .expect("legacy fixture");
+        store
+            .import_artifact(&ArtifactRecord {
+                id: "legacy-lifecycle".to_string(),
+                run_id: run.id.clone(),
+                kind: "metadata".to_string(),
+                artifact_type: "metadata".to_string(),
+                path: "legacy.json".to_string(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: None,
+                size_bytes: None,
+                mime: Some("application/json".to_string()),
+                metadata_json: metadata,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .expect("legacy artifact");
+
+        assert_eq!(
+            store
+                .reconcile_resource_lifecycle_index_metadata(&run.id)
+                .expect("migrate legacy metadata"),
+            1
+        );
+        drop(store);
+
+        let restarted = ObservationStore::open_initialized_at(&database).expect("restart store");
+        assert_eq!(
+            restarted
+                .reconcile_resource_lifecycle_index_metadata(&run.id)
+                .expect("idempotent restart reconciliation"),
+            0
+        );
+        let artifact = restarted
+            .get_artifact("legacy-lifecycle")
+            .expect("read artifact")
+            .expect("artifact exists");
+        assert!(artifact.metadata_json.get("resource_lifecycle").is_none());
+        assert_eq!(
+            artifact.metadata_json["resource_lifecycle_index"]["resources"][0]
+                ["migration_provenance"]["source_key"],
+            "resource_lifecycle"
+        );
+    }
+
+    #[test]
+    fn resource_lifecycle_reconciliation_does_not_overwrite_a_concurrent_writer() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store =
+            ObservationStore::open_initialized_at(tempdir.path().join("observation.sqlite3"))
+                .expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("test")
+                    .cwd_path(tempdir.path())
+                    .build(),
+            )
+            .expect("run");
+        let legacy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/resource_lifecycle_migration/resource_lifecycle.json"
+        ))
+        .expect("legacy fixture");
+        store
+            .import_artifact(&ArtifactRecord {
+                id: "racing-lifecycle".to_string(),
+                run_id: run.id,
+                kind: "metadata".to_string(),
+                artifact_type: "metadata".to_string(),
+                path: "legacy.json".to_string(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: None,
+                size_bytes: None,
+                mime: Some("application/json".to_string()),
+                metadata_json: legacy.clone(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .expect("legacy artifact");
+        let replacement = migrate_resource_lifecycle_index_metadata(&legacy)
+            .expect("migration")
+            .expect("replacement");
+        let winner = serde_json::json!({
+            "resource_lifecycle_index": replacement["resource_lifecycle_index"].clone(),
+            "writer": "concurrent"
+        });
+        store
+            .update_artifact_metadata("racing-lifecycle", winner.clone())
+            .expect("concurrent update");
+
+        assert!(!store
+            .replace_artifact_metadata_if_current("racing-lifecycle", &legacy, &replacement)
+            .expect("losing compare-and-swap"));
+        assert_eq!(
+            store
+                .get_artifact("racing-lifecycle")
+                .expect("read artifact")
+                .expect("artifact exists")
+                .metadata_json,
+            winner
+        );
     }
 
     #[test]

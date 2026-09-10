@@ -38,6 +38,24 @@ pub(super) fn add_candidate_extra_workspace(
     seen: &mut BTreeSet<PathBuf>,
     workspaces: &mut Vec<ExtraLabWorkspace>,
 ) -> Result<()> {
+    add_candidate_extra_workspace_with_git_fetch_refs(
+        candidate,
+        role,
+        source_canon,
+        seen,
+        workspaces,
+        &[],
+    )
+}
+
+pub(super) fn add_candidate_extra_workspace_with_git_fetch_refs(
+    candidate: &str,
+    role: &str,
+    source_canon: &Path,
+    seen: &mut BTreeSet<PathBuf>,
+    workspaces: &mut Vec<ExtraLabWorkspace>,
+    git_fetch_refs: &[String],
+) -> Result<()> {
     let expanded = shellexpand::tilde(candidate).to_string();
     let path = Path::new(&expanded);
     let (workspace_path, snapshot_includes) = if path.is_dir() {
@@ -67,6 +85,11 @@ pub(super) fn add_candidate_extra_workspace(
                     existing.snapshot_includes.push(include);
                 }
             }
+            for git_ref in git_fetch_refs {
+                if !existing.git_fetch_refs.contains(git_ref) {
+                    existing.git_fetch_refs.push(git_ref.clone());
+                }
+            }
         }
         return Ok(());
     }
@@ -74,6 +97,7 @@ pub(super) fn add_candidate_extra_workspace(
         role: role.to_string(),
         path: canon,
         snapshot_includes,
+        git_fetch_refs: git_fetch_refs.to_vec(),
         allow_dirty_lab_workspace: false,
         source_provenance: None,
     });
@@ -273,6 +297,7 @@ pub(super) fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> 
                 role: "extra".to_string(),
                 path: canonical_existing_dir(&path, "extra_workspace")?,
                 snapshot_includes: Vec::new(),
+                git_fetch_refs: Vec::new(),
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             })
@@ -313,6 +338,7 @@ pub(super) fn discovered_validation_dependency_workspaces(
                 role: "dependency".to_string(),
                 path,
                 snapshot_includes: Vec::new(),
+                git_fetch_refs: Vec::new(),
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             });

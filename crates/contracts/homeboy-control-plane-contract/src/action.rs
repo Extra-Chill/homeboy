@@ -12,9 +12,14 @@ pub const CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA: &str =
     "homeboy/control-plane-empty-action-payload/v1";
 pub const CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-cancel-parameters/v1";
+pub const CONTROL_PLANE_CANCEL_RESULT_SCHEMA: &str = "homeboy/control-plane-cancel-result/v1";
 pub const CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA: &str = "homeboy/control-plane-retry-parameters/v1";
 pub const CONTROL_PLANE_RETRY_RESULT_SCHEMA: &str = "homeboy/control-plane-retry-result/v1";
 pub const CONTROL_PLANE_RESUME_RESULT_SCHEMA: &str = "homeboy/control-plane-resume-result/v1";
+pub const CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA: &str =
+    "homeboy/control-plane-placement-update-parameters/v1";
+pub const CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA: &str =
+    "homeboy/control-plane-placement-update-result/v1";
 pub const CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-promote-parameters/v1";
 pub const CONTROL_PLANE_PROMOTE_RESULT_SCHEMA: &str = "homeboy/control-plane-promote-result/v1";
@@ -43,6 +48,33 @@ pub struct ControlPlaneCancelParameters {
     pub reason: Option<String>,
 }
 
+/// The durable convergence observed after a cancellation request was accepted.
+///
+/// `Requested` means the request is durable, while terminalization was not
+/// observed within the bounded reconciliation window (or that observation
+/// failed). It is deliberately distinct from a failed cancellation action.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneCancelDisposition {
+    Cancelled,
+    TerminalWithoutCancellation,
+    DeferredForTerminalProvider,
+    Requested,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneCancelResult {
+    pub schema: String,
+    pub disposition: ControlPlaneCancelDisposition,
+    pub terminal: bool,
+    pub wait_timeout_seconds: u64,
+    pub waited_seconds: u64,
+    pub poll_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneRetryParameters {
@@ -50,6 +82,14 @@ pub struct ControlPlaneRetryParameters {
     pub new_run_id: Option<String>,
     #[serde(default)]
     pub force: bool,
+}
+
+/// A deliberate execution-route change. The control plane accepts only explicit
+/// local placement today, rather than silently broadening an automatic route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlanePlacementUpdateParameters {
+    pub placement: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +104,96 @@ pub struct ControlPlaneActionRequest {
     pub parameters: ControlPlaneActionPayload,
     #[serde(default)]
     pub confirmed: bool,
+}
+
+impl ControlPlaneActionRequest {
+    pub fn validate(&self) -> Result<(), crate::ControlPlaneError> {
+        const INPUT_BOUND: usize = 128;
+        const REASON_BOUND: usize = 1_024;
+
+        if self.schema != CONTROL_PLANE_ACTION_REQUEST_SCHEMA {
+            return Err(crate::ControlPlaneError::invalid_argument(
+                "unsupported control-plane action request schema",
+            ));
+        }
+        for (name, value) in [
+            ("idempotency_key", self.idempotency_key.as_str()),
+            ("actor", self.actor.as_str()),
+        ] {
+            if value.trim().is_empty() || value.len() > INPUT_BOUND {
+                return Err(crate::ControlPlaneError::invalid_argument(format!(
+                    "{name} must contain 1 to {INPUT_BOUND} bytes"
+                )));
+            }
+        }
+        let (name, expected_schema) = match self.action {
+            ControlPlaneAction::Cancel => ("cancel", CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA),
+            ControlPlaneAction::Promote => ("promote", CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA),
+            ControlPlaneAction::Reconcile => {
+                ("reconcile", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA)
+            }
+            ControlPlaneAction::Resume => ("resume", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
+            ControlPlaneAction::PlacementUpdate => (
+                "placement_update",
+                CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
+            ),
+            ControlPlaneAction::Retry => ("retry", CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA),
+        };
+        if self.parameters.schema != expected_schema {
+            return Err(crate::ControlPlaneError::invalid_argument(format!(
+                "{name} requires parameters schema {expected_schema}"
+            )));
+        }
+        if self.action == ControlPlaneAction::Cancel {
+            let parameters: ControlPlaneCancelParameters =
+                serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!(
+                        "cancel parameters: {error}"
+                    ))
+                })?;
+            if parameters
+                .reason
+                .as_ref()
+                .is_some_and(|reason| reason.len() > REASON_BOUND)
+            {
+                return Err(crate::ControlPlaneError::invalid_argument(format!(
+                    "reason exceeds {REASON_BOUND} bytes"
+                )));
+            }
+        }
+        if self.action == ControlPlaneAction::Retry {
+            serde_json::from_value::<ControlPlaneRetryParameters>(self.parameters.data.clone())
+                .map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
+                })?;
+        }
+        if self.action == ControlPlaneAction::PlacementUpdate {
+            let parameters: ControlPlanePlacementUpdateParameters =
+                serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!(
+                        "placement update parameters: {error}"
+                    ))
+                })?;
+            if parameters.placement != "local" {
+                return Err(crate::ControlPlaneError::invalid_argument(
+                    "placement update currently requires explicit local placement",
+                ));
+            }
+        }
+        if matches!(
+            self.action,
+            ControlPlaneAction::Cancel
+                | ControlPlaneAction::PlacementUpdate
+                | ControlPlaneAction::Promote
+                | ControlPlaneAction::Retry
+        ) && !self.confirmed
+        {
+            return Err(crate::ControlPlaneError::invalid_argument(format!(
+                "{name} requires explicit confirmation"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,5 +269,46 @@ mod tests {
         let value = serde_json::to_value(&acknowledgement).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA);
         assert_eq!(value["outcome"], "succeeded");
+    }
+
+    #[test]
+    fn cancel_result_is_versioned_and_distinguishes_unconverged_requests() {
+        let result = ControlPlaneCancelResult {
+            schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+            disposition: ControlPlaneCancelDisposition::Requested,
+            terminal: false,
+            wait_timeout_seconds: 15,
+            waited_seconds: 15,
+            poll_count: 15,
+            observation_error: Some("controller unavailable".to_string()),
+        };
+        let value = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(value["schema"], CONTROL_PLANE_CANCEL_RESULT_SCHEMA);
+        assert_eq!(value["disposition"], "requested");
+        assert_eq!(
+            serde_json::from_value::<ControlPlaneCancelResult>(value).expect("deserialize"),
+            result
+        );
+    }
+
+    #[test]
+    fn placement_update_requires_confirmation_and_explicit_local() {
+        let mut request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: ControlPlaneAction::PlacementUpdate,
+            idempotency_key: "placement-1".to_string(),
+            actor: "operator".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA.to_string(),
+                data: serde_json::json!({ "placement": "local" }),
+            },
+            confirmed: false,
+        };
+        assert!(request.validate().is_err());
+        request.confirmed = true;
+        assert!(request.validate().is_ok());
+        request.parameters.data = serde_json::json!({ "placement": "auto" });
+        assert!(request.validate().is_err());
     }
 }

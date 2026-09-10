@@ -160,7 +160,12 @@ pub(super) fn hostname_fallback() -> String {
 }
 
 pub(super) fn session_path(runner_id: &str) -> Result<PathBuf> {
-    paths::runner_controller_session_file(runner_id, &controller_id())
+    Ok(session_path_in_root(&paths::homeboy()?, runner_id))
+}
+
+/// [`session_path`] below an already-resolved config root.
+pub(super) fn session_path_in_root(config_root: &std::path::Path, runner_id: &str) -> PathBuf {
+    paths::runner_controller_session_file_in_root(config_root, runner_id, &controller_id())
 }
 
 pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
@@ -255,14 +260,23 @@ pub(super) fn read_session_for_status_until(
     runner_id: &str,
     deadline: Instant,
 ) -> Result<Option<RunnerSession>> {
+    read_session_for_status_until_in_root(&paths::homeboy()?, runner_id, deadline)
+}
+
+/// [`read_session_for_status_until`] below an already-resolved config root.
+pub(super) fn read_session_for_status_until_in_root(
+    config_root: &std::path::Path,
+    runner_id: &str,
+    deadline: Instant,
+) -> Result<Option<RunnerSession>> {
     let controller_id = controller_id();
-    let session = read_session_for_controller(runner_id, &controller_id)?;
+    let session = read_session_for_controller_in_root(config_root, runner_id, &controller_id)?;
     if session.as_ref().is_some_and(|session| {
         status_session_state_until(Some(session), deadline) == RunnerSessionState::Connected
     }) {
         return Ok(session);
     }
-    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
     match status_peer_session_in_until(&directory, &controller_id, deadline)? {
         StatusPeerSession::One(peer) => Ok(Some(*peer)),
         StatusPeerSession::None => Ok(session),
@@ -681,19 +695,28 @@ pub(super) fn status_session_state_until(
 /// tunnel for an in-process handoff. Borrowing never writes a controller
 /// record, so only the original controller may later tear down that tunnel.
 pub(super) fn read_session_or_live_peer(runner_id: &str) -> Result<Option<RunnerSession>> {
-    read_session_or_live_peer_for_controller(runner_id, &controller_id())
+    read_session_or_live_peer_in_root(&paths::homeboy()?, runner_id)
+}
+
+/// [`read_session_or_live_peer`] below an already-resolved config root.
+pub(super) fn read_session_or_live_peer_in_root(
+    config_root: &std::path::Path,
+    runner_id: &str,
+) -> Result<Option<RunnerSession>> {
+    read_session_or_live_peer_for_controller(config_root, runner_id, &controller_id())
 }
 
 fn read_session_or_live_peer_for_controller(
+    config_root: &std::path::Path,
     runner_id: &str,
     controller_id: &str,
 ) -> Result<Option<RunnerSession>> {
-    let session = read_session_for_controller(runner_id, controller_id)?;
+    let session = read_session_for_controller_in_root(config_root, runner_id, controller_id)?;
     if session.as_ref().is_some_and(session_is_live) {
         return Ok(session);
     }
 
-    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
     resolve_session_or_live_peer_in(&directory, controller_id, session, session_is_live)
 }
 
@@ -736,10 +759,20 @@ pub(super) fn read_session_for_controller(
     runner_id: &str,
     controller_id: &str,
 ) -> Result<Option<RunnerSession>> {
-    read_session_at(&paths::runner_controller_session_file(
+    read_session_for_controller_in_root(&paths::homeboy()?, runner_id, controller_id)
+}
+
+/// [`read_session_for_controller`] below an already-resolved config root.
+pub(super) fn read_session_for_controller_in_root(
+    config_root: &std::path::Path,
+    runner_id: &str,
+    controller_id: &str,
+) -> Result<Option<RunnerSession>> {
+    read_session_at(&paths::runner_controller_session_file_in_root(
+        config_root,
         runner_id,
         controller_id,
-    )?)
+    ))
 }
 
 pub(super) fn read_ownership(runner_id: &str) -> Result<Option<RunnerSession>> {
@@ -949,6 +982,7 @@ fn is_controller_session_file(path: &std::path::Path) -> bool {
         "generations.json",
         "pending-replacement.json",
         "replacement-operation.json",
+        "admission-mutation-reservation.json",
     ];
 
     path.is_file()
@@ -1294,8 +1328,16 @@ mod tests {
             "generations.json",
             "pending-replacement.json",
             "replacement-operation.json",
+            "admission-mutation-reservation.json",
         ] {
-            std::fs::write(root.path().join(sidecar), "{}").expect("write reserved sidecar");
+            let contents = match sidecar {
+                "admission-mutation-reservation.json" => {
+                    r#"{"operation_id":"operation","owner_pid":1,"owner_start_identity":{"platform":"macos","start_seconds":1,"start_microseconds":1},"created_at":"2026-09-09T00:00:00Z","operation":"ensure_remote_daemon"}"#
+                }
+                "replacement-operation.json" => r#"{"runner_id":"lab","operation_id":"operation"}"#,
+                _ => "{}",
+            };
+            std::fs::write(root.path().join(sidecar), contents).expect("write reserved sidecar");
         }
 
         let live_peer = live_peer_session_in(

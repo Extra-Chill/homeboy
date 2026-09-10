@@ -10,12 +10,8 @@ use super::types::{InstallMethod, VersionCheck};
 /// downloading it. That is the only method for which the check can promise the
 /// reported release is the one the upgrade will install.
 ///
-/// The legacy secondary method runs the same installer but is not
-/// release-pinned — it always resolves `latest/download` — so reporting an
-/// older installable release for it would describe an upgrade it cannot
-/// perform. It keeps the newest-tag semantics it has always had.
 pub(crate) fn selects_an_installable_release(method: InstallMethod) -> bool {
-    matches!(method, InstallMethod::Binary)
+    matches!(method, InstallMethod::Binary | InstallMethod::Secondary)
 }
 
 pub fn check_for_updates() -> Result<VersionCheck> {
@@ -237,12 +233,11 @@ mod tests {
         assert!(check.uninstallable_versions.is_empty());
     }
 
-    /// Only the method that pins a chosen release may report installability;
-    /// the others would be describing an upgrade they cannot perform.
+    /// Both release-asset methods pin the selected installable release.
     #[test]
     fn only_the_release_pinning_method_consults_the_release_catalog() {
         assert!(selects_an_installable_release(InstallMethod::Binary));
-        assert!(!selects_an_installable_release(InstallMethod::Secondary));
+        assert!(selects_an_installable_release(InstallMethod::Secondary));
         assert!(!selects_an_installable_release(InstallMethod::Homebrew));
         assert!(!selects_an_installable_release(InstallMethod::Source));
         assert!(!selects_an_installable_release(InstallMethod::Unknown));
