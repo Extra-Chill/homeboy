@@ -423,6 +423,45 @@ impl Default for HermeticTestContext {
     }
 }
 
+/// Stops daemons created by an isolated test context during unwinding as well
+/// as on the passing path.
+///
+/// Fixture subprocesses may launch a detached daemon supervisor. The test
+/// process cannot reap that supervisor itself, so teardown goes through the
+/// daemon's ownership-checked stop protocol rather than signaling by name.
+pub struct HermeticDaemonGuard<'a> {
+    context: &'a HermeticTestContext,
+    binary: TestBinary,
+}
+
+impl<'a> HermeticDaemonGuard<'a> {
+    pub fn new(context: &'a HermeticTestContext, binary: TestBinary) -> Self {
+        Self { context, binary }
+    }
+}
+
+impl Drop for HermeticDaemonGuard<'_> {
+    fn drop(&mut self) {
+        let output = self
+            .context
+            .command(self.binary)
+            .args(["daemon", "stop"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // `output()` waits for EOF on captured pipes. A daemon descendant
+            // can inherit those descriptors while its supervisor is stopping,
+            // so wait only for this stop command's exit status.
+            .status();
+        if let Err(error) = output {
+            eprintln!("hermetic daemon teardown could not invoke daemon stop: {error}");
+        } else if let Ok(status) = output {
+            if !status.success() {
+                eprintln!("hermetic daemon teardown failed with {status}");
+            }
+        }
+    }
+}
+
 /// Overrides [`DEFAULT_HERMETIC_SUBPROCESS_BUDGET`] for hosts that are slower
 /// than the budget assumes. It bounds a *stuck* child, not a slow one, so the
 /// default is deliberately far above any healthy invocation.
