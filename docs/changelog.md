@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.4] - 2026-09-10
+
+### Changed
+- build the ssh fixtures once
+- build the trace fixtures once per crate
+- build the runs fixture once
+- declare two copy-pasted helpers once
+
+### Fixed
+- fence retained count disagreement
+- block-comment openers take precedence over doc line prefixes
+- stop authoritative rebound through SSH
+
 ## [0.371.3] - 2026-09-09
 
 ### Changed
