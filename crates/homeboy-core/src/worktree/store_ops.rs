@@ -1816,13 +1816,6 @@ fn remove_with_store_until(
     }
 }
 
-fn remove_with_store_unlocked(
-    options: WorktreeRemoveOptions,
-    store_dir: &Path,
-) -> Result<WorktreeRemoveOutput> {
-    remove_with_store_unlocked_until(options, store_dir, None)
-}
-
 fn remove_with_store_unlocked_until(
     options: WorktreeRemoveOptions,
     store_dir: &Path,
@@ -1982,12 +1975,6 @@ fn workspace_claim_store_for_worktrees(
     ))
 }
 
-pub(super) fn branch_cleanup_report(
-    record: &TaskWorktreeRecord,
-) -> Result<WorktreeBranchCleanupReport> {
-    branch_cleanup_report_until(record, None)
-}
-
 fn branch_cleanup_report_until(
     record: &TaskWorktreeRecord,
     deadline: Option<std::time::Instant>,
@@ -2060,14 +2047,6 @@ fn branch_cleanup_report_until(
         },
         cleanup_command,
     })
-}
-
-fn apply_branch_cleanup(
-    record: &TaskWorktreeRecord,
-    report: WorktreeBranchCleanupReport,
-    allow_unmerged_branch: bool,
-) -> Result<WorktreeBranchCleanupReport> {
-    apply_branch_cleanup_until(record, report, allow_unmerged_branch, None)
 }
 
 fn apply_branch_cleanup_until(
@@ -2215,24 +2194,12 @@ fn safety_report_until(
 
 const LIVE_CWD_REASON: &str = "refuses to remove the caller's live current working directory";
 
-pub(super) fn is_dirty(path: &Path) -> Result<bool> {
-    Ok(
-        !git::run_git(path, &["status", "--porcelain=v1"], "git status")?
-            .trim()
-            .is_empty(),
-    )
-}
-
 fn is_dirty_until(path: &Path, deadline: Option<std::time::Instant>) -> Result<bool> {
     Ok(
         !run_inventory_git_until(path, &["status", "--porcelain=v1"], "git status", deadline)?
             .trim()
             .is_empty(),
     )
-}
-
-pub(super) fn unpushed_commit_count(path: &Path, base_ref: &str) -> Result<u32> {
-    unpushed_commit_count_until(path, base_ref, None)
 }
 
 fn unpushed_commit_count_until(

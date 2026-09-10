@@ -1841,17 +1841,6 @@ fn refresh_execution_route(
     ))
 }
 
-/// Refresh is a mutation path, so it first settles the generation ledger and
-/// then derives route selection from that exact post-reconcile status. The
-/// later pre-rotation job probe remains the fail-closed check for work that
-/// appears while materialization is in progress.
-fn reconciled_refresh_admission(runner_id: &str) -> Result<super::RunnerAdmissionSnapshot> {
-    reconciled_refresh_admission_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-    )
-}
-
 /// [`reconciled_refresh_admission`] against an explicitly injected root.
 fn reconciled_refresh_admission_in_roots(
     roots: &homeboy_core::paths::PathRoots,
