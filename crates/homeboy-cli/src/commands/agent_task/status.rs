@@ -3571,22 +3571,57 @@ mod cancel_exit_code_tests {
 }
 
 pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-        &lifecycle_store,
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
-        &args.reason,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
+            idempotency_key: args
+                .idempotency_key
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: json!({ "reason": args.reason }),
+            },
+            confirmed: true,
+        },
     )?;
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+    let exit = i32::from(
+        acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
+    );
+    Ok((
+        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+        exit,
+    ))
 }
 
 pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record =
-        agent_task_lifecycle::rearm_quarantined_run_in_store(&lifecycle_store, &args.run_id)?;
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        &args.run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Rearm,
+            idempotency_key: args
+                .idempotency_key
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        },
+    )?;
+    let exit = i32::from(
+        acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
+    );
+    Ok((
+        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+        exit,
+    ))
 }
 
 fn hydrated_executor_input_value(

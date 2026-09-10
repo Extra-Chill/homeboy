@@ -8325,39 +8325,6 @@ where
         args.allow_provider_rotation,
         args.provider_rotations,
     );
-    if !route_override.is_empty() {
-        let retry = agent_task_service::retry_with_provider_route_override(
-            &args.run_id,
-            args.new_run_id.as_deref(),
-            args.run,
-            args.force,
-            route_override,
-        )?;
-        if args.run && retry.run && retry.record.metadata["cook_id"].is_string() {
-            return continue_cook_with_queued_execution(
-                CookContinueArgs {
-                    cook_or_attempt_id: retry.record.run_id,
-                    preflight: false,
-                    rearm: false,
-                    artifact_id: None,
-                    timeout_ms: None,
-                    review_form_timeout_ms: None,
-                    backend: None,
-                    selector: None,
-                    model: None,
-                    allow_provider_rotation: false,
-                    provider_rotations: None,
-                    full: false,
-                },
-                executor,
-                reconstruct_dispatcher,
-                true,
-            );
-        }
-        let mut value = serde_json::to_value(retry.record).unwrap_or(Value::Null);
-        value["provider_route_override"] = json!(true);
-        return Ok((value, 0));
-    }
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
@@ -8374,17 +8341,30 @@ where
                 data: serde_json::json!({
                     "new_run_id": args.new_run_id,
                     "force": args.force,
+                    "provider_route": (!route_override.is_empty()).then(|| serde_json::json!({
+                        "backend": route_override.backend,
+                        "selector": route_override.selector,
+                        "model": route_override.model,
+                        "allow_provider_rotation": route_override.allow_provider_rotation,
+                        "provider_rotations": route_override.provider_rotations,
+                    })),
                 }),
             },
             confirmed: true,
         },
     )?;
     let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
-    let execute = args.run && retry.runnable;
+    // Reservation is acknowledged independently from execution. Only the call
+    // that created the successor may dispatch it; a replayed acknowledgement
+    // must be inspected or resumed through the durable lifecycle instead.
+    let execute = args.run && retry.created;
     if execute {
         let record = retry.record;
         if record.metadata["cook_id"].is_string() {
-            return continue_cook_with_queued_execution(
+            // The retry acknowledgement is durable before this optional dispatch.
+            // A crash here is recovered from the reserved successor, never by a
+            // second retry action.
+            let _ = continue_cook_with_queued_execution(
                 CookContinueArgs {
                     cook_or_attempt_id: record.run_id,
                     preflight: false,
@@ -8402,9 +8382,13 @@ where
                 executor,
                 reconstruct_dispatcher,
                 true,
-            );
+            )?;
+            return Ok((
+                serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+                0,
+            ));
         }
-        return run_submitted_with_executor(record.run_id, None, executor);
+        let _ = run_submitted_with_executor(record.run_id, None, executor)?;
     }
     Ok((
         serde_json::to_value(acknowledgement)

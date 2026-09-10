@@ -7,6 +7,10 @@
 //! [`register_orchestration_driver`].
 
 use crate::agent_task_lifecycle;
+use homeboy_control_plane_contract::{
+    ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+    ControlPlaneActionRequest, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+};
 use homeboy_core::{Error, Result};
 use std::collections::HashMap;
 
@@ -111,6 +115,17 @@ fn verified_reconciled_status(
     Ok(record)
 }
 
+#[cfg(test)]
+fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    let now = chrono::Utc::now();
+    record.state.is_terminal()
+        || record.has_fresh_controller_pre_provider_heartbeat()
+        || (record.has_planned_runner_execution() && record.has_fresh_update())
+        || agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now)
+        || record.has_live_pending_local_cook_supervisor(now)
+        || record.owner_process_is_running()
+}
+
 pub(super) fn verify_reconciled_postcondition(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     remains_active: bool,
@@ -132,16 +147,6 @@ pub(super) fn verify_reconciled_postcondition(
             "non-terminal"
         },
     )))
-}
-
-fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    let now = chrono::Utc::now();
-    record.state.is_terminal()
-        || record.has_fresh_controller_pre_provider_heartbeat()
-        || (record.has_planned_runner_execution() && record.has_fresh_update())
-        || agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now)
-        || record.has_live_pending_local_cook_supervisor(now)
-        || record.owner_process_is_running()
 }
 
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
@@ -203,13 +208,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             }
         }
 
-        let expired_handoff = agent_task_lifecycle::has_expired_unaccepted_lab_handoff_in_store(
-            &lifecycle_store,
-            &run.run_id,
-        )?;
         let record = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, &run.run_id)?;
-        let expired_detached_admission =
-            agent_task_lifecycle::has_expired_detached_cook_admission(&record, chrono::Utc::now());
         if dry_run {
             runs.push(AgentTaskReconcileRun {
                 run_id: run.run_id,
@@ -223,93 +222,56 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             });
             continue;
         }
-        if expired_detached_admission {
-            match agent_task_lifecycle::expire_detached_cook_admission_in_store(
-                &lifecycle_store,
-                &run.run_id,
-            ) {
-                Ok(true) => {
-                    reconciled += 1;
-                    runs.push(AgentTaskReconcileRun {
-                        run_id: run.run_id.clone(),
-                        liveness,
-                        source: run.source,
-                        authoritative_state: rooted_status(&lifecycle_store, &run.run_id)?.state,
-                        stale_reason: run.stale_reason,
-                        action: "reconciled",
-                        error: None,
-                    });
-                }
-                Ok(false) => runs.push(AgentTaskReconcileRun {
-                    run_id: run.run_id.clone(),
-                    liveness,
-                    source: run.source,
-                    authoritative_state: rooted_status(&lifecycle_store, &run.run_id)?.state,
-                    stale_reason: run.stale_reason,
-                    action: "no-op",
-                    error: None,
-                }),
-                Err(error) => {
-                    failed += 1;
-                    runs.push(AgentTaskReconcileRun {
-                        run_id: run.run_id,
-                        liveness,
-                        source: run.source,
-                        authoritative_state,
-                        stale_reason: run.stale_reason,
-                        action: "failed",
-                        error: Some(error.message),
-                    });
-                }
-            }
-            continue;
-        }
-
-        let reason = run
-            .stale_reason
-            .clone()
-            .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
-        let result = if expired_handoff {
-            // Handoff expiry answers whether it expired, not what state that
-            // left behind; re-read the record for the post-mutation state.
-            agent_task_lifecycle::expire_unaccepted_lab_handoff_in_store(
-                &lifecycle_store,
-                &run.run_id,
-            )
-            .map(|_| {
-                rooted_status(&lifecycle_store, &run.run_id)
-                    .map(|record| record.state)
-                    .unwrap_or(authoritative_state)
-            })
-        } else {
-            // Discovery is a fleet snapshot. A Lab planner can publish its
-            // run-bound execution after that snapshot but before this cleanup
-            // reaches cancellation. Share the handoff fence with that writer,
-            // then decide from the fenced record so a fresh planned submission
-            // remains alive until normal expiry/acceptance reconciliation.
-            let _lock =
-                agent_task_lifecycle::LabHandoffLock::lock_in_store(&lifecycle_store, &run.run_id)?;
-            let fenced = lifecycle_store.read_record(&run.run_id)?;
-            if fenced_record_is_live(&fenced) {
-                continue;
-            }
-            agent_task_lifecycle::cancel_run_in_store(&lifecycle_store, &run.run_id, Some(&reason))
-                .map(|record| record.state)
+        // Freeze the discovered target identity into a deterministic per-run
+        // action key. The canonical action claim serializes concurrent daemon,
+        // cleanup, and CLI replays, and its immutable acknowledgement is the
+        // audit record for this fleet member.
+        let idempotency_key = format!(
+            "fleet-reconcile:{}:{}",
+            run.run_id,
+            record.updated_at.as_deref().unwrap_or(&record.submitted_at)
+        );
+        let request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: ControlPlaneAction::Reconcile,
+            idempotency_key,
+            actor: "homeboy-fleet-reconciler".to_string(),
+            expected_updated_at: record.updated_at.clone(),
+            parameters: ControlPlaneActionPayload::empty(),
+            confirmed: true,
         };
-        match result {
-            Ok(state) => {
-                reconciled += 1;
+        match crate::orchestration::execute_action_from_current_environment(&run.run_id, &request) {
+            Ok(acknowledgement) if acknowledgement.outcome != ControlPlaneActionOutcome::Failed => {
+                let current = rooted_status(&lifecycle_store, &run.run_id)?;
+                let action =
+                    if acknowledgement.outcome == ControlPlaneActionOutcome::AlreadySatisfied {
+                        "no-op"
+                    } else {
+                        "reconciled"
+                    };
+                if action == "reconciled" {
+                    reconciled += 1;
+                }
                 runs.push(AgentTaskReconcileRun {
                     run_id: run.run_id,
                     liveness,
                     source: run.source,
-                    // The state the reconcile produced — `Cancelled` for a
-                    // cancel, the expiry's terminal state for a handoff — not
-                    // the `Running` it no longer is.
-                    authoritative_state: state,
+                    authoritative_state: current.state,
                     stale_reason: run.stale_reason,
-                    action: "reconciled",
+                    action,
                     error: None,
+                });
+            }
+            Ok(acknowledgement) => {
+                failed += 1;
+                runs.push(AgentTaskReconcileRun {
+                    run_id: run.run_id,
+                    liveness,
+                    source: run.source,
+                    authoritative_state,
+                    stale_reason: run.stale_reason,
+                    action: "failed",
+                    error: acknowledgement.message,
                 });
             }
             Err(error) => {

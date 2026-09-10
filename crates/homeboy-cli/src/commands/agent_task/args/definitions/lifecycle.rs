@@ -637,11 +637,17 @@ pub struct QuarantineArgs {
     /// Explanation recorded with the quarantine action.
     #[arg(long, value_name = "TEXT")]
     pub reason: String,
+    /// Stable caller key for safely replaying this quarantine request.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct RearmArgs {
     /// Exact durable run id. Cook aliases are not accepted for mutations.
     pub run_id: String,
+    /// Stable caller key for safely replaying this rearm request.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct ReviewArgs {

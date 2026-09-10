@@ -15,6 +15,11 @@ pub const CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA: &str =
 pub const CONTROL_PLANE_CANCEL_RESULT_SCHEMA: &str = "homeboy/control-plane-cancel-result/v1";
 pub const CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA: &str = "homeboy/control-plane-retry-parameters/v1";
 pub const CONTROL_PLANE_RETRY_RESULT_SCHEMA: &str = "homeboy/control-plane-retry-result/v1";
+pub const CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA: &str =
+    "homeboy/control-plane-quarantine-parameters/v1";
+pub const CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA: &str =
+    "homeboy/control-plane-quarantine-result/v1";
+pub const CONTROL_PLANE_REARM_RESULT_SCHEMA: &str = "homeboy/control-plane-rearm-result/v1";
 pub const CONTROL_PLANE_RESUME_RESULT_SCHEMA: &str = "homeboy/control-plane-resume-result/v1";
 pub const CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-placement-update-parameters/v1";
@@ -82,6 +87,31 @@ pub struct ControlPlaneRetryParameters {
     pub new_run_id: Option<String>,
     #[serde(default)]
     pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_route: Option<ControlPlaneProviderRouteOverride>,
+}
+
+/// Explicit provider route selected for a retry successor. It is part of the
+/// immutable retry intent rather than an untracked execution-time override.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneProviderRouteOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_provider_rotation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_rotations: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneQuarantineParameters {
+    pub reason: String,
 }
 
 /// A deliberate execution-route change. The control plane accepts only explicit
@@ -138,6 +168,10 @@ impl ControlPlaneActionRequest {
                 CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
             ),
             ControlPlaneAction::Retry => ("retry", CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA),
+            ControlPlaneAction::Quarantine => {
+                ("quarantine", CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA)
+            }
+            ControlPlaneAction::Rearm => ("rearm", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
         };
         if self.parameters.schema != expected_schema {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
@@ -167,6 +201,19 @@ impl ControlPlaneActionRequest {
                     crate::ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
                 })?;
         }
+        if self.action == ControlPlaneAction::Quarantine {
+            let parameters: ControlPlaneQuarantineParameters =
+                serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!(
+                        "quarantine parameters: {error}"
+                    ))
+                })?;
+            if parameters.reason.trim().is_empty() || parameters.reason.len() > REASON_BOUND {
+                return Err(crate::ControlPlaneError::invalid_argument(format!(
+                    "quarantine reason must contain 1 to {REASON_BOUND} bytes"
+                )));
+            }
+        }
         if self.action == ControlPlaneAction::PlacementUpdate {
             let parameters: ControlPlanePlacementUpdateParameters =
                 serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
@@ -186,6 +233,8 @@ impl ControlPlaneActionRequest {
                 | ControlPlaneAction::PlacementUpdate
                 | ControlPlaneAction::Promote
                 | ControlPlaneAction::Retry
+                | ControlPlaneAction::Quarantine
+                | ControlPlaneAction::Rearm
         ) && !self.confirmed
         {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
@@ -310,5 +359,41 @@ mod tests {
         assert!(request.validate().is_ok());
         request.parameters.data = serde_json::json!({ "placement": "auto" });
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn quarantine_and_route_retry_require_typed_payloads() {
+        let mut quarantine = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: ControlPlaneAction::Quarantine,
+            idempotency_key: "quarantine-1".to_string(),
+            actor: "operator".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA.to_string(),
+                data: serde_json::json!({ "reason": "provider unavailable" }),
+            },
+            confirmed: true,
+        };
+        assert!(quarantine.validate().is_ok());
+        quarantine.parameters.data = serde_json::json!({ "reason": "" });
+        assert!(quarantine.validate().is_err());
+
+        let retry = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: ControlPlaneAction::Retry,
+            idempotency_key: "retry-1".to_string(),
+            actor: "operator".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA.to_string(),
+                data: serde_json::json!({
+                    "force": false,
+                    "provider_route": { "backend": "replacement" },
+                }),
+            },
+            confirmed: true,
+        };
+        assert!(retry.validate().is_ok());
     }
 }

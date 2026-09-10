@@ -33,12 +33,14 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
     CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
     CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+    CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA, CONTROL_PLANE_REARM_RESULT_SCHEMA,
     CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
     CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
     CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_control_plane_contract::{
-    ControlPlanePlacementUpdateParameters, ControlPlaneRetryParameters,
+    ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
+    ControlPlaneRetryParameters,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -1892,6 +1894,59 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 ),
                             }
                         }
+                        ControlPlaneAction::Quarantine => {
+                            let parameters: ControlPlaneQuarantineParameters =
+                                serde_json::from_value(request.parameters.data.clone()).map_err(
+                                    |error| {
+                                        ControlPlaneError::invalid_argument(format!(
+                                            "quarantine parameters: {error}"
+                                        ))
+                                    },
+                                )?;
+                            match crate::agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+                                &self.lookup.store,
+                                &resolved,
+                                &parameters.reason,
+                            ) {
+                                Ok(current) => (
+                                    ControlPlaneActionOutcome::Succeeded,
+                                    project_record(&current, None)?,
+                                    ControlPlaneActionPayload {
+                                        schema: CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA.to_string(),
+                                        data: serde_json::json!({ "record": current }),
+                                    },
+                                    None,
+                                ),
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
+                        ControlPlaneAction::Rearm => {
+                            match crate::agent_task_lifecycle::rearm_quarantined_run_in_store(
+                                &self.lookup.store,
+                                &resolved,
+                            ) {
+                                Ok(current) => (
+                                    ControlPlaneActionOutcome::Succeeded,
+                                    project_record(&current, None)?,
+                                    ControlPlaneActionPayload {
+                                        schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
+                                        data: serde_json::json!({ "record": current }),
+                                    },
+                                    None,
+                                ),
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
                         ControlPlaneAction::Promote => {
                             let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
                                 serde_json::from_value(request.parameters.data.clone()).map_err(
@@ -2196,6 +2251,30 @@ fn recover_interrupted_action_acknowledgement(
                 )?
             }
         }
+        ControlPlaneAction::Quarantine if current.metadata.get("queue_quarantine").is_some() => (
+            ControlPlaneActionOutcome::Succeeded,
+            project_record(&current, None)?,
+            ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA.to_string(),
+                data: serde_json::json!({ "record": current, "recovered": true }),
+            },
+            Some("recovered from the durable quarantine marker".to_string()),
+        ),
+        ControlPlaneAction::Quarantine => failed(
+            "quarantine was interrupted after acceptance without a durable quarantine marker; no second mutation was attempted",
+        )?,
+        ControlPlaneAction::Rearm if current.metadata.get("queue_quarantine").is_none() => (
+            ControlPlaneActionOutcome::Succeeded,
+            project_record(&current, None)?,
+            ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
+                data: serde_json::json!({ "record": current, "recovered": true }),
+            },
+            Some("recovered from the durable rearm state".to_string()),
+        ),
+        ControlPlaneAction::Rearm => failed(
+            "rearm was interrupted after acceptance without authoritative completion evidence; no second mutation was attempted",
+        )?,
         ControlPlaneAction::Resume
             if current
                 .metadata
@@ -3074,6 +3153,8 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
+        ControlPlaneAction::Quarantine => "quarantine",
+        ControlPlaneAction::Rearm => "rearm",
         ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
     }
@@ -3317,7 +3398,7 @@ where
             crate::agent_task_service::retry_with_preflight(
                 run_id,
                 parameters.new_run_id.as_deref(),
-                true,
+                false,
                 parameters.force,
                 &preflight,
             )
@@ -3412,11 +3493,21 @@ fn default_retry(
     run_id: &str,
     parameters: &ControlPlaneRetryParameters,
 ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult> {
-    crate::agent_task_service::retry(
+    let route = parameters.provider_route.as_ref().map(|route| {
+        crate::agent_task_service::CookProviderRouteOverride {
+            backend: route.backend.clone(),
+            selector: route.selector.clone(),
+            model: route.model.clone(),
+            allow_provider_rotation: route.allow_provider_rotation,
+            provider_rotations: route.provider_rotations,
+        }
+    });
+    crate::agent_task_service::retry_with_provider_route_override(
         run_id,
         parameters.new_run_id.as_deref(),
-        true,
+        false,
         parameters.force,
+        route.unwrap_or_default(),
     )
 }
 

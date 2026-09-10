@@ -20,6 +20,16 @@ pub fn lifecycle_action_eligibility(
     let resume = resume_availability(record);
     let placement_update = placement_update_availability(record);
     let retry = retry_availability(record, plan);
+    let quarantine = if record.state == AgentTaskRunState::Queued {
+        available("queued run can be quarantined before admission")
+    } else {
+        unavailable("quarantine requires an exact queued run")
+    };
+    let rearm = if record.metadata.get("queue_quarantine").is_some() {
+        available("durable quarantine marker can be removed")
+    } else {
+        unavailable("run is not quarantined")
+    };
     let promotion = if matches!(
         record.state,
         AgentTaskRunState::Succeeded
@@ -69,6 +79,22 @@ pub fn lifecycle_action_eligibility(
             action(
                 ControlPlaneAction::Retry,
                 retry,
+                ControlPlaneActionConfirmation::Required,
+                Vec::new(),
+                true,
+                "agent_task_run",
+            ),
+            action(
+                ControlPlaneAction::Quarantine,
+                quarantine,
+                ControlPlaneActionConfirmation::Required,
+                vec!["reason"],
+                true,
+                "agent_task_run",
+            ),
+            action(
+                ControlPlaneAction::Rearm,
+                rearm,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
                 true,
