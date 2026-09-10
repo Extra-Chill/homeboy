@@ -17,7 +17,8 @@ use homeboy_core::engine::local_files::{
     write_json_file as write_json, write_json_file_owner_only as write_private_json,
 };
 use homeboy_core::observation::{
-    ObservationStore, RunCursor as ObservationRunCursor, RunListFilter, RunRecord, RunStatus,
+    ControlPlaneResourceProjection, ObservationStore, RunCursor as ObservationRunCursor,
+    RunListFilter, RunRecord, RunStatus,
 };
 use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
@@ -1518,12 +1519,20 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         rig_id: None,
         metadata_json,
     };
+    let resource_projection = agent_task_resource_projection(&record)?;
     if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
-        store.upsert_imported_run_with_mission(&projected, mission.as_str(), preserve_terminal)?;
-    } else if preserve_terminal {
-        store.upsert_imported_run_preserving_terminal(&projected)?;
+        store.upsert_imported_run_with_mission_and_resource_projection(
+            &projected,
+            mission.as_str(),
+            &resource_projection,
+            preserve_terminal,
+        )?;
     } else {
-        store.upsert_imported_run(&projected)?;
+        store.upsert_imported_run_with_resource_projection(
+            &projected,
+            &resource_projection,
+            preserve_terminal,
+        )?;
     }
     let committed = store.get_run(&record.run_id)?.ok_or_else(|| {
         Error::internal_unexpected(format!(
@@ -1532,6 +1541,39 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         ))
     })?;
     record_from_run(&committed)
+}
+
+/// Agent-task owns the interpretation of this generic authority payload. The
+/// observation store atomically persists it beside the run projection so action
+/// admission can never observe a lifecycle version from another write.
+fn agent_task_resource_projection(
+    record: &AgentTaskRunRecord,
+) -> Result<ControlPlaneResourceProjection> {
+    Ok(ControlPlaneResourceProjection {
+        resource_type: "agent_task_run".to_string(),
+        resource_id: record.run_id.clone(),
+        version: record
+            .updated_at
+            .clone()
+            .unwrap_or_else(|| record.submitted_at.clone()),
+        state: serde_json::to_value(record.state)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        // A Cook alias is reassigned by its index owner, not by every attempt
+        // write. Concurrent attempts must never contend for an implicit alias.
+        aliases: vec![record.run_id.clone()],
+        eligibility: serde_json::to_value(
+            crate::agent_task_lifecycle::lifecycle_action_eligibility(record, None),
+        )
+        .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        provenance: json!({
+            "source": "agent_task_lifecycle",
+            "record_schema": record.schema,
+            "persisted_data_window": "filesystem-derived-read-compatibility/v1",
+        }),
+    })
 }
 
 pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -1551,7 +1593,27 @@ pub(super) fn read_record_in_store(
             None,
         )
     })?;
-    record_from_run(&run)
+    let record = record_from_run(&run)?;
+    // Existing installations predate the resource table. Import exactly once
+    // from the persisted lifecycle projection; alias conflicts intentionally
+    // fail rather than selecting a non-deterministic action target.
+    if store
+        .control_plane_resource_projection("agent_task_run", &record.run_id)?
+        .is_none()
+    {
+        let projection = agent_task_resource_projection(&record)?;
+        if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
+            store.upsert_imported_run_with_mission_and_resource_projection(
+                &run,
+                mission.as_str(),
+                &projection,
+                true,
+            )?;
+        } else {
+            store.upsert_imported_run_with_resource_projection(&run, &projection, true)?;
+        }
+    }
+    Ok(record)
 }
 
 /// Read one durable record under the observation store's read-only busy budget.
