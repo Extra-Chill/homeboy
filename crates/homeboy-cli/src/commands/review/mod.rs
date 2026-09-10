@@ -214,6 +214,7 @@ impl ReviewArgs {
                 args.audit.profile = profile;
                 self.changed.changed_only = changed_only;
                 args.changed_only = changed_only;
+                reject_conflicting_changed_scopes(&self.changed)?;
                 // A changed-only review audit becomes a HEAD-based audit after
                 // its source checkout is resolved, so its Lab contract must be
                 // local before routing reaches that resolution.
@@ -221,6 +222,7 @@ impl ReviewArgs {
             }
             ReviewCommand::Lint(mut args) => {
                 merge_changed_scope(&mut self.changed, &mut args.changed)?;
+                reject_conflicting_changed_scopes(&self.changed)?;
                 merge_component_args(&mut self.comp, &mut args.comp)?;
                 merge_extension_ids(&mut self.extension_override, &mut args.extension_override);
                 merge_baseline_args(&mut self.baseline_args, &mut args.baseline_args);
@@ -590,6 +592,20 @@ fn merge_changed_scope(
     let changed_only = merge_flag(parent.changed_only, child.changed_only);
     parent.changed_only = changed_only;
     child.changed_only = changed_only;
+    Ok(())
+}
+
+/// Clap only checks conflicts within one argument group. Review accepts scopes
+/// on both sides of its action, so validate their canonical merge here.
+fn reject_conflicting_changed_scopes(changed: &ChangedScopeArgs) -> homeboy::core::Result<()> {
+    if changed.changed_only && changed.changed_since().is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "review option",
+            "--changed-only conflicts with --changed-since",
+            None,
+            None,
+        ));
+    }
     Ok(())
 }
 
@@ -1780,6 +1796,46 @@ mod tests {
                 homeboy::core::ErrorCode::ValidationInvalidArgument
             );
             assert!(error.message.contains("conflicting"), "{error}");
+        }
+    }
+
+    #[test]
+    fn review_action_projection_rejects_cross_position_changed_scopes() {
+        for action in ["audit", "lint"] {
+            for argv in [
+                [
+                    "homeboy",
+                    "review",
+                    "--changed-only",
+                    action,
+                    "fixture",
+                    "--changed-since",
+                    "main",
+                ]
+                .as_slice(),
+                [
+                    "homeboy",
+                    "review",
+                    "--changed-since",
+                    "main",
+                    action,
+                    "fixture",
+                    "--changed-only",
+                ]
+                .as_slice(),
+            ] {
+                let mut cli = Cli::try_parse_from(argv)
+                    .unwrap_or_else(|error| panic!("command should parse: {argv:?}\n{error}"));
+                let Commands::Review(review) = &mut cli.command else {
+                    panic!("expected review command");
+                };
+                let error = review.project_effective_child_args().expect_err(&format!(
+                    "cross-position changed scopes must conflict: {action} {argv:?}"
+                ));
+                assert!(error
+                    .message
+                    .contains("--changed-only conflicts with --changed-since"));
+            }
         }
     }
 

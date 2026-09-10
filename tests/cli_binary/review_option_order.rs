@@ -167,6 +167,75 @@ fn startup_help_applies_the_same_review_option_projection() {
 }
 
 #[test]
+fn review_audit_and_lint_reject_cross_position_changed_scopes_in_help_and_runtime() {
+    let home = tempfile::tempdir().expect("temporary home");
+
+    for action in ["audit", "lint"] {
+        for args in [
+            [
+                "review",
+                "--changed-only",
+                action,
+                "missing-component",
+                "--changed-since",
+                "main",
+            ],
+            [
+                "review",
+                "--changed-since",
+                "main",
+                action,
+                "missing-component",
+                "--changed-only",
+            ],
+        ] {
+            let runtime = Command::new(homeboy_bin())
+                .args(args)
+                .env_clear()
+                .env("HOME", home.path())
+                .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+                .output()
+                .expect("run conflicting review command");
+            assert_eq!(runtime.status.code(), Some(2), "{action}: {args:?}");
+            let runtime_output = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&runtime.stdout),
+                String::from_utf8_lossy(&runtime.stderr)
+            );
+            assert!(
+                runtime_output.contains("validation.invalid_argument"),
+                "{runtime_output}"
+            );
+            assert!(
+                runtime_output.contains("--changed-only conflicts with --changed-since"),
+                "{runtime_output}"
+            );
+            assert!(
+                !runtime_output.contains("missing component"),
+                "scope conflict must precede component resolution: {runtime_output}"
+            );
+
+            let sentinel = home.path().join(format!("{action}-help-initialized"));
+            let help = Command::new(homeboy_bin())
+                .args(args.into_iter().chain(["--help"]))
+                .env_clear()
+                .env("HOME", home.path())
+                .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+                .env("HOMEBOY_TEST_RUNTIME_INITIALIZATION_SENTINEL", &sentinel)
+                .output()
+                .expect("run conflicting review help");
+            assert_eq!(help.status.code(), Some(2), "{action}: {args:?}");
+            let help_output = String::from_utf8_lossy(&help.stderr);
+            assert!(
+                help_output.contains("--changed-only conflicts with --changed-since"),
+                "{help_output}"
+            );
+            assert!(!sentinel.exists(), "help must not initialize the runtime");
+        }
+    }
+}
+
+#[test]
 fn review_rejects_conflicting_parent_and_action_values_before_execution() {
     let home = tempfile::tempdir().expect("temporary home");
 
