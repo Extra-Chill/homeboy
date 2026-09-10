@@ -77,6 +77,26 @@ pub(crate) fn run_command_output(
                         crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) => cook_args,
                         _ => unreachable!("Cook output branch has a Cook command"),
                     };
+                    if let Err(error) =
+                        crate::commands::agent_task::run::preflight_cook_execution_request(
+                            cook_args,
+                            Some(provenance),
+                        )
+                    {
+                        let result = Err(error);
+                        let _ = lease.finish(
+                            &result,
+                            2,
+                            &crate::commands::utils::response::CommandIdentity::with_operation(
+                                "agent-task",
+                                "cook",
+                            ),
+                            None,
+                        );
+                        return CommandRun::from_stdout_result(result, 2)
+                            .with_command(spec.name)
+                            .with_output_file_already_written();
+                    }
                     let cook_id = cook_args
                         .dispatch
                         .run_id

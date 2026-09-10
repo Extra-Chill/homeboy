@@ -66,10 +66,10 @@ use super::cook_promotion::{
     finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
     moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
     moving_base_recovery_report, next_moving_base_recovery, persisted_promotion_for_attempt,
-    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    retryable_provider_discovery_failure, retryable_provider_discovery_failure_with_store,
-    CookReportInput, MovingBaseCookRecovery,
+    persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
+    promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, retryable_provider_discovery_failure,
+    retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
@@ -5307,7 +5307,7 @@ fn run_cook_spine(
         });
     let authenticated_historical_review_continuation =
         if mode.allows_historical_terminal() && !persisted_finalization {
-            authenticated_historical_review_form_workspace(&options)?
+            authenticated_historical_review_form_workspace(lifecycle_store, &options)?
         } else {
             false
         };
@@ -5496,6 +5496,7 @@ fn run_cook_spine(
             "workspace_base_preflight",
             || {
                 validate_cook_workspace_with_adopted_candidate(
+                    lifecycle_store,
                     &options,
                     verification_pending_continuation
                         || (options.workspace.source_worktree_path.is_some()
@@ -5553,6 +5554,7 @@ fn run_cook_spine(
             "workspace_base_convergence",
             || {
                 validate_cook_workspace_with_adopted_candidate(
+                    lifecycle_store,
                     &options,
                     verification_pending_continuation
                         || (options.workspace.source_worktree_path.is_some()
@@ -5965,6 +5967,7 @@ fn run_cook_spine(
                     || options.workspace.source_worktree_path.is_some()
                 {
                     validate_cook_workspace_with_adopted_candidate(
+                        lifecycle_store,
                         &options,
                         options.workspace.source_worktree_path.is_some()
                             && !cook_uses_explicit_cwd_workspace(&options),
@@ -7731,14 +7734,19 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
 /// handle through the existing local/provider path.
 #[cfg(test)]
 fn validate_cook_workspace(options: &CookRequest) -> Result<Option<CookWorkspaceBaseValidation>> {
-    validate_cook_workspace_with_adopted_candidate(options, false)
+    validate_cook_workspace_with_adopted_candidate(
+        &AgentTaskLifecycleStore::from_current_environment()?,
+        options,
+        false,
+    )
 }
 
 fn validate_cook_workspace_with_adopted_candidate(
+    lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
     adopted_dirty_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
-    let continuation = tracked_promotion_continuation(options)?;
+    let continuation = tracked_promotion_continuation_in_store(lifecycle_store, options)?;
     let source = options.workspace.source_worktree_path.as_deref();
     let target = if cook_uses_explicit_cwd_workspace(options) {
         source
@@ -8799,28 +8807,36 @@ fn validate_pending_cook_repository_identity(_plan: &AgentTaskPlan, _target: &Pa
 /// The normal configured-provider preflight rejects every dirty destination. A
 /// terminal review-form retry can retain its candidate only after its copied
 /// promotion lineage and the resolved destination prove an exact match.
-fn authenticated_historical_review_form_workspace(options: &CookRequest) -> Result<bool> {
-    authenticated_historical_review_form_workspace_with_trace(options, true)
+fn authenticated_historical_review_form_workspace(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+) -> Result<bool> {
+    authenticated_historical_review_form_workspace_with_trace(lifecycle_store, options, true)
 }
 
 fn authenticated_historical_review_form_workspace_with_trace(
+    lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
     persist_trace: bool,
 ) -> Result<bool> {
     let mut trace = ContinuationAdmissionTrace::new();
     let record_trace = |trace: &ContinuationAdmissionTrace| {
         if persist_trace {
-            record_continuation_admission_trace(&options.identity.initial_run_id, trace)
+            record_continuation_admission_trace(
+                lifecycle_store,
+                &options.identity.initial_run_id,
+                trace,
+            )
         } else {
             Ok(())
         }
     };
-    if !agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id)? {
+    if !lifecycle_store.record_exists(&options.identity.initial_run_id)? {
         trace.deny("run_record", "unavailable");
         return Ok(false);
     }
     trace.pass("run_record");
-    let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)?;
+    let record = rooted_status(lifecycle_store, &options.identity.initial_run_id)?;
     match terminal_review_form_continuation_is_eligible(&options.identity.initial_plan, &record) {
         Ok(true) => trace.pass("terminal_review_form_eligibility"),
         Ok(false) => {
@@ -8835,7 +8851,8 @@ fn authenticated_historical_review_form_workspace_with_trace(
         }
     }
     let Some(promotion) =
-        persisted_promotion_for_attempt(&options.identity.initial_run_id).unwrap_or(None)
+        persisted_promotion_for_attempt_in_store(lifecycle_store, &options.identity.initial_run_id)
+            .unwrap_or(None)
     else {
         trace.deny("applied_promotion", "unavailable");
         record_trace(&trace)?;
@@ -8847,7 +8864,7 @@ fn authenticated_historical_review_form_workspace_with_trace(
         return Ok(false);
     }
     trace.pass("applied_promotion");
-    let continuation = match tracked_promotion_continuation(options) {
+    let continuation = match tracked_promotion_continuation_in_store(lifecycle_store, options) {
         Ok(Some(continuation)) => continuation,
         Ok(None) => {
             trace.deny("continuation_evidence", "unavailable");
@@ -8900,10 +8917,12 @@ fn authenticated_historical_review_form_workspace_with_trace(
 }
 
 fn record_continuation_admission_trace(
+    lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     trace: &ContinuationAdmissionTrace,
 ) -> Result<()> {
-    agent_task_lifecycle::record_metadata_value(
+    agent_task_lifecycle::record_metadata_value_in_store(
+        lifecycle_store,
         run_id,
         "cook_continuation_admission",
         trace.value(),
@@ -9004,20 +9023,26 @@ fn cook_owned_unpushed_destination(continuation: &TrackedPromotionContinuation) 
 /// A dirty destination is reusable only for the exact post-apply candidate
 /// checkpoint owned by this Cook attempt. Core verifies the supplied baseline
 /// during provider resolution; Cook binds it to this attempt's target identity.
-fn tracked_promotion_continuation(
+fn tracked_promotion_continuation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
 ) -> Result<Option<TrackedPromotionContinuation>> {
-    if !agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id)? {
+    if !lifecycle_store.record_exists(&options.identity.initial_run_id)? {
         return Ok(None);
     }
-    if agent_task_lifecycle::exact_record(&options.identity.initial_run_id)?
+    if lifecycle_store
+        .read_record(&options.identity.initial_run_id)?
         .metadata
         .get("cook_finalization")
         .is_some_and(|finalization| !finalization.is_null())
     {
         return Ok(None);
     }
-    let Some(promotion) = persisted_promotion_for_attempt(&options.identity.initial_run_id)? else {
+    let Some(promotion) = persisted_promotion_for_attempt_in_store(
+        lifecycle_store,
+        &options.identity.initial_run_id,
+    )?
+    else {
         return Ok(None);
     };
     let has_post_apply_checkpoint = ["/post_apply", "/resumed_post_apply_promotion"]
@@ -9025,7 +9050,7 @@ fn tracked_promotion_continuation(
         .any(|pointer| promotion.provenance.pointer(pointer) == Some(&Value::Bool(true)));
     let authenticated_legacy_review =
         if promotion.status == AgentTaskPromotionStatus::Applied && !has_post_apply_checkpoint {
-            let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)?;
+            let record = rooted_status(lifecycle_store, &options.identity.initial_run_id)?;
             terminal_review_form_continuation_is_eligible(&options.identity.initial_plan, &record)?
         } else {
             false
@@ -9038,8 +9063,9 @@ fn tracked_promotion_continuation(
     // indexed attempt, and run record all identify this Cook. This survives a
     // failed controller process without treating caller-controlled route or
     // plan metadata as authorization for dirty-worktree reuse.
-    let route_authorized_gate_failure =
-        promotion.status.gate_failed() && has_post_apply_checkpoint && cook_owns_attempt(options)?;
+    let route_authorized_gate_failure = promotion.status.gate_failed()
+        && has_post_apply_checkpoint
+        && cook_owns_attempt_in_store(lifecycle_store, options)?;
     if !(normal_continuation || route_authorized_gate_failure) {
         return Ok(None);
     }
@@ -9100,8 +9126,11 @@ fn tracked_promotion_continuation(
     }))
 }
 
-fn cook_owns_attempt(options: &CookRequest) -> Result<bool> {
-    let recipe_store = CookRecipeStore::from_current_data_root()?;
+fn cook_owns_attempt_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+) -> Result<bool> {
+    let recipe_store = CookRecipeStore::from_data_root(lifecycle_store.data_root());
     let recipe = match recipe_store.load_recipe(&options.identity.cook_id) {
         Ok(recipe) => recipe,
         Err(_) => return Ok(false),
@@ -9135,7 +9164,7 @@ fn cook_owns_attempt(options: &CookRequest) -> Result<bool> {
     {
         return Ok(false);
     }
-    let record = agent_task_lifecycle::exact_record(&options.identity.initial_run_id)?;
+    let record = lifecycle_store.read_record(&options.identity.initial_run_id)?;
     Ok(record.metadata.get("cook_id").and_then(Value::as_str)
         == Some(options.identity.cook_id.as_str())
         && record.metadata.get("cook_attempt").and_then(Value::as_u64)

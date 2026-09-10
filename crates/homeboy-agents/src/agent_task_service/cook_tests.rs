@@ -15320,29 +15320,45 @@ fn tracked_promotion_continuation_options(
 }
 
 fn record_tracked_promotion_continuation(options: &CookRequest, target: &std::path::Path) {
-    if !CookRecipeStore::from_current_data_root()
-        .unwrap()
-        .recipe_exists(&options.identity.cook_id)
-    {
-        persist_initial_recipe(options).unwrap();
+    let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+    let lifecycle_store = test_lifecycle_store();
+    record_tracked_promotion_continuation_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        options,
+        target,
+    );
+}
+
+fn record_tracked_promotion_continuation_in_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+    target: &std::path::Path,
+) {
+    if !recipe_store.recipe_exists(&options.identity.cook_id) {
+        recipe_store.persist_initial_recipe(options).unwrap();
     }
-    agent_task_lifecycle::submit_plan(
+    submit_plan_in_test_store(
+        lifecycle_store,
         &options.identity.initial_plan,
         Some(&options.identity.initial_run_id),
     )
     .unwrap();
-    agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
-        record.metadata["cook_id"] = serde_json::json!(options.identity.cook_id);
-        record.metadata["cook_attempt"] = serde_json::json!(1);
-    })
-    .unwrap();
-    agent_task_lifecycle::record_cook_attempt_in_store(
-        &test_lifecycle_store(),
-        &options.identity.cook_id,
-        1,
-        &options.identity.initial_run_id,
-    )
-    .unwrap();
+    lifecycle_store
+        .mutate_record(&options.identity.initial_run_id, |record| {
+            record.metadata["cook_id"] = serde_json::json!(options.identity.cook_id);
+            record.metadata["cook_attempt"] = serde_json::json!(1);
+            true
+        })
+        .unwrap();
+    lifecycle_store
+        .record_cook_attempt(
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+        )
+        .unwrap();
     let mut checkpoint = serde_json::to_value(promotion(&options.identity.initial_run_id)).unwrap();
     checkpoint["status"] = serde_json::json!("gate_failed");
     checkpoint["deterministic_gates"][0]["status"] = serde_json::json!("failed");
@@ -15390,7 +15406,9 @@ fn record_tracked_promotion_continuation(options: &CookRequest, target: &std::pa
             "current_diff": patch
         }
     });
-    agent_task_lifecycle::record_promotion(&options.identity.initial_run_id, checkpoint).unwrap();
+    lifecycle_store
+        .record_promotion(&options.identity.initial_run_id, checkpoint)
+        .unwrap();
 }
 
 #[test]
@@ -15406,7 +15424,79 @@ fn fresh_cook_has_no_tracked_promotion_before_lifecycle_materialization() {
         assert!(
             !agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id).unwrap()
         );
-        assert!(tracked_promotion_continuation(&options).unwrap().is_none());
+        assert!(
+            tracked_promotion_continuation_in_store(&test_lifecycle_store(), &options)
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn tracked_promotion_continuation_replays_from_the_injected_installation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_lifecycle = AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right_lifecycle = AgentTaskLifecycleStore::new(right_context.path_roots());
+        let left_recipe = CookRecipeStore::from_data_root(left_lifecycle.data_root());
+        let target = tempfile::tempdir().expect("candidate worktree");
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(target.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(target.path().join("tracked.txt"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["checkout", "--quiet", "-b", "cook-candidate"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(target.path().join("tracked.txt"), "promoted\n").unwrap();
+        let options = tracked_promotion_continuation_options(
+            "cook-injected-continuation",
+            "run-injected-continuation",
+            target.path(),
+        );
+        record_tracked_promotion_continuation_in_stores(
+            &left_recipe,
+            &left_lifecycle,
+            &options,
+            target.path(),
+        );
+
+        let first = tracked_promotion_continuation_in_store(&left_lifecycle, &options)
+            .unwrap()
+            .expect("left installation owns the promotion");
+        let replay = tracked_promotion_continuation_in_store(&left_lifecycle, &options)
+            .unwrap()
+            .expect("left installation replays deterministically");
+        assert_eq!(first.path, replay.path);
+        assert!(
+            tracked_promotion_continuation_in_store(&right_lifecycle, &options)
+                .unwrap()
+                .is_none()
+        );
     });
 }
 
@@ -15628,9 +15718,10 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
             .status()
             .unwrap()
             .success());
-        let continuation = tracked_promotion_continuation(&options)
-            .unwrap()
-            .expect("durable Cook attribution");
+        let continuation =
+            tracked_promotion_continuation_in_store(&test_lifecycle_store(), &options)
+                .unwrap()
+                .expect("durable Cook attribution");
         assert!(cook_owned_unpushed_destination(&continuation).unwrap());
 
         let base = Command::new("git")

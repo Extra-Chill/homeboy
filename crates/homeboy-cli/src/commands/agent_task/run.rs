@@ -32,7 +32,7 @@ use super::args::{
     ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
-use super::gate_contract::validate_gate_contracts;
+use super::gate_contract::{validate_gate_contracts, GateContractValidation};
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Provider evidence is streamed into an immutable, digest-addressed projection.
@@ -5051,9 +5051,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
-    snapshot_cook_prompt(&mut args)?;
-    args.gates.snapshot_file_inputs()?;
-    validate_cook_request_with_provenance(&args, provenance)?;
+    preflight_cook_execution_request(&mut args, provenance)?;
     let args = resolve_cook_destination(args)?;
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
         args.to_worktree
@@ -5082,6 +5080,42 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     // bare rejection.
     let provision = provision_cook_destination(&args)?;
 
+    run_preflight_cook_execution(
+        args,
+        executor,
+        attempt_dispatcher,
+        progress,
+        gate_contract_validation,
+        provision,
+        no_progress,
+        provenance,
+    )
+}
+
+/// Validate the input boundary shared by executable Cook routes. Output-file
+/// callers run this before creating their detached handoff parent.
+pub(crate) fn preflight_cook_execution_request(
+    args: &mut AgentTaskCookArgs,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> homeboy::core::Result<()> {
+    snapshot_cook_prompt(&mut *args)?;
+    args.gates.snapshot_file_inputs()?;
+    validate_cook_request_with_provenance(&args, provenance)?;
+    Ok(())
+}
+
+fn run_preflight_cook_execution(
+    args: AgentTaskCookArgs,
+    executor: SharedAgentTaskExecutor,
+    attempt_dispatcher: Option<
+        Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
+    >,
+    progress: super::CookProgress<'_>,
+    gate_contract_validation: GateContractValidation,
+    provision: Value,
+    no_progress: bool,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> CmdResult<Value> {
     let mut dispatch_args = resolved_dispatch_args_for_cook(&args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
