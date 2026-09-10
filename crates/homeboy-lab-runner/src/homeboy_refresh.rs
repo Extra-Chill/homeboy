@@ -1257,17 +1257,6 @@ pub fn refresh_homeboy_binary_in_roots(
     ))
 }
 
-fn acquire_runner_binary_promotion(
-    runner_id: &str,
-    candidate_commit: &str,
-) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        candidate_commit,
-    )
-}
-
 /// [`acquire_runner_binary_promotion`] against an explicitly injected root.
 ///
 /// The promotion lease store is machine-global by default, so an isolated
@@ -1282,19 +1271,6 @@ fn acquire_runner_binary_promotion_in_roots(
         runner_id,
         candidate_commit,
         super::lab_selection::emit_runtime_promotion_wait,
-    )
-}
-
-fn acquire_runner_binary_promotion_with(
-    runner_id: &str,
-    candidate_commit: &str,
-    progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
-) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_with_in_root(
-        &homeboy_core::paths::runtime_promotion_dir()?,
-        runner_id,
-        candidate_commit,
-        progress,
     )
 }
 
