@@ -884,8 +884,7 @@ pub(crate) fn detach_changed_only_summary(
         .expect("observation is present")
         .transfer_owner_to(child.id())
     {
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
         observation::finish_error(observation, &error);
         return Err(error);
     }
@@ -899,8 +898,7 @@ pub(crate) fn detach_changed_only_summary(
                 DETACHED_OWNERSHIP_TRANSFER_DEADLINE
             );
             launcher_observation.fail_handoff(child.id(), &reason);
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
             return Err(homeboy::core::Error::internal_unexpected(reason));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -945,6 +943,7 @@ fn prepare_local_review_dependencies(
     let run_id = observation
         .as_ref()
         .map(|observation| observation.run_id().to_string());
+    let cancellation_run_id = run_id.clone();
     let dependency_progress = Arc::new(
         move |progress: &homeboy::core::deps::DependencyHydrationProgress| {
             emit_local_review_setup_progress(LocalReviewSetupProgress {
@@ -969,6 +968,9 @@ fn prepare_local_review_dependencies(
     );
     let policy = homeboy::core::deps::DependencyHydrationPolicy {
         on_progress: dependency_progress,
+        is_cancelled: Arc::new(move || {
+            review_dependency_hydration_is_cancelled(cancellation_run_id.as_deref())
+        }),
         ..policy
     };
     let outcomes = homeboy::core::deps::hydrate_declared_dependencies(
@@ -1027,6 +1029,10 @@ fn prepare_local_review_dependencies(
     });
     progress(observation, "dependency_setup", "dependencies", "completed");
     Ok(())
+}
+
+fn review_dependency_hydration_is_cancelled(run_id: Option<&str>) -> bool {
+    run_id.is_some_and(observation::is_cancelled)
 }
 
 fn load_component_with_deadline(
@@ -1600,12 +1606,33 @@ mod tests {
     use super::*;
     use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs};
     use clap::Parser;
+    use homeboy::core::observation::{NewRunRecord, RunStatus};
 
     /// Minimal CLI wrapper to exercise clap parsing of `ReviewArgs`.
     #[derive(Parser)]
     struct TestCli {
         #[command(flatten)]
         review: ReviewArgs,
+    }
+
+    #[test]
+    fn review_dependency_hydration_observes_durable_cancellation() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({}))
+                        .build(),
+                    "cancelled-review-hydration".to_string(),
+                )
+                .expect("review run");
+            assert!(!review_dependency_hydration_is_cancelled(Some(&run.id)));
+            store
+                .finish_running_run(&run.id, RunStatus::Skipped, None)
+                .expect("cancel review");
+            assert!(review_dependency_hydration_is_cancelled(Some(&run.id)));
+        });
     }
 
     #[test]

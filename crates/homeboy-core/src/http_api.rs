@@ -1832,6 +1832,7 @@ fn active_runner_job_run_summary_if_durable(job: ActiveRunnerJobSummary) -> Opti
 
 fn show_run(store: &ObservationStore, run_id: &str, job_store: &JobStore) -> Result<RunDetail> {
     reconcile_stale_running_runs_for_read(store)?;
+    reconcile_stale_running_run_for_read(store, run_id)?;
     if let Some(run) = store.get_run(run_id)? {
         if let Some(job) = active_runner_job_for_durable_run(job_store, run_id) {
             if run.status != RunStatus::Running.as_str() || run_claims_other_runner_job(&run, &job)
@@ -1927,10 +1928,47 @@ fn reconcile_stale_running_runs_for_read(store: &ObservationStore) -> Result<()>
             continue;
         };
         let metadata = api_reconcile_metadata(&run, reason);
-        store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?;
+        let _ = store.finish_running_run_if_metadata(
+            &run.id,
+            RunStatus::Stale,
+            metadata,
+            &run.metadata_json,
+        )?;
     }
 
     Ok(())
+}
+
+/// An exact-id read must reconcile that row even when it falls beyond the
+/// bounded fleet scan used by list reads.
+fn reconcile_stale_running_run_for_read(store: &ObservationStore, run_id: &str) -> Result<()> {
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(());
+    };
+    if run.status != RunStatus::Running.as_str() {
+        return Ok(());
+    }
+    if store.expire_running_run_handoff(run_id)?.is_some() || handoff_is_transferring(&run) {
+        return Ok(());
+    }
+    let Some(reason) = api_stale_running_reason(&run) else {
+        return Ok(());
+    };
+    let metadata = api_reconcile_metadata(&run, reason);
+    let _ = store.finish_running_run_if_metadata(
+        run_id,
+        RunStatus::Stale,
+        metadata,
+        &run.metadata_json,
+    )?;
+    Ok(())
+}
+
+fn handoff_is_transferring(run: &RunRecord) -> bool {
+    run.metadata_json
+        .pointer("/homeboy_ownership_handoff/state")
+        .and_then(Value::as_str)
+        == Some("transferring")
 }
 
 fn api_stale_running_reason(run: &RunRecord) -> Option<&'static str> {

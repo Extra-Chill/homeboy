@@ -1077,18 +1077,59 @@ impl ObservationStore {
             .and_then(|handoff| handoff.get("worker_pid"))
             .and_then(serde_json::Value::as_u64)
             .and_then(|pid| u32::try_from(pid).ok());
-        let expired = handoff
+        let deadline_unix_ms = handoff
             .and_then(|handoff| handoff.get("deadline_unix_ms"))
-            .and_then(serde_json::Value::as_i64)
-            .is_some_and(|deadline| deadline <= chrono::Utc::now().timestamp_millis());
-        if state == Some("transferring") && expired {
-            return self.fail_running_run_handoff(
+            .and_then(serde_json::Value::as_i64);
+        if state == Some("transferring")
+            && deadline_unix_ms
+                .is_some_and(|deadline| deadline <= chrono::Utc::now().timestamp_millis())
+        {
+            return self.fail_expired_running_run_handoff(
                 run_id,
                 worker_pid.unwrap_or_default(),
-                "detached worker did not acknowledge ownership before the handoff deadline",
+                deadline_unix_ms.expect("expired handoff has a deadline"),
             );
         }
         Ok(None)
+    }
+
+    fn fail_expired_running_run_handoff(
+        &self,
+        run_id: &str,
+        worker_pid: u32,
+        deadline_unix_ms: i64,
+    ) -> Result<Option<RunRecord>> {
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(None);
+        };
+        let reason = "detached worker did not acknowledge ownership before the handoff deadline";
+        let mut metadata = run.metadata_json.clone();
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "homeboy_ownership_handoff".to_string(),
+                serde_json::json!({
+                    "state": "failed",
+                    "worker_pid": worker_pid,
+                    "failed_at": chrono::Utc::now().to_rfc3339(),
+                    "reason": reason,
+                }),
+            );
+            object.insert("observation_status".to_string(), serde_json::json!("error"));
+            object.insert("error".to_string(), serde_json::json!(reason));
+        }
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let metadata = serialize_metadata(&metadata)?;
+        let now_unix_ms = chrono::Utc::now().timestamp_millis();
+        let rows = execute_with_retry("expire running run handoff", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = ?5 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?6 AND CAST(json_extract(metadata_json, '$.homeboy_ownership_handoff.deadline_unix_ms') AS INTEGER) = ?7 AND ?7 <= ?8",
+                params![finished_at, RunStatus::Error.as_str(), metadata, run_id, RunStatus::Running.as_str(), worker_pid, deadline_unix_ms, now_unix_ms],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
     }
 
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>> {
@@ -1899,6 +1940,88 @@ mod tests {
             assert_eq!(
                 failed.metadata_json["homeboy_ownership_handoff"]["state"],
                 "failed"
+            );
+        });
+    }
+
+    #[test]
+    fn handoff_renewal_fences_an_expiry_snapshot_with_the_same_worker_pid() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({}))
+                        .build(),
+                    "renewed-handoff-review".to_string(),
+                )
+                .expect("running review");
+            let expired_deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+            store
+                .begin_running_run_handoff(&run.id, 42_426, expired_deadline)
+                .expect("begin expired handoff");
+
+            // A launcher retry can renew the same worker PID between an expiry
+            // reader's snapshot and its terminal write.
+            store
+                .begin_running_run_handoff(
+                    &run.id,
+                    42_426,
+                    chrono::Utc::now() + chrono::Duration::minutes(1),
+                )
+                .expect("renew handoff");
+            assert!(store
+                .fail_expired_running_run_handoff(
+                    &run.id,
+                    42_426,
+                    expired_deadline.timestamp_millis(),
+                )
+                .expect("expire stale handoff snapshot")
+                .is_none());
+            let current = store.get_run(&run.id).expect("read run").expect("run");
+            assert_eq!(current.status, RunStatus::Running.as_str());
+            assert_eq!(
+                current.metadata_json["homeboy_ownership_handoff"]["state"],
+                "transferring"
+            );
+        });
+    }
+
+    #[test]
+    fn handoff_metadata_fences_stale_reconciliation_terminal_writes() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }))
+                        .build(),
+                    "handoff-fenced-reconcile".to_string(),
+                )
+                .expect("running review");
+            let snapshot = run.metadata_json.clone();
+            store
+                .begin_running_run_handoff(
+                    &run.id,
+                    42_427,
+                    chrono::Utc::now() + chrono::Duration::minutes(1),
+                )
+                .expect("begin handoff");
+
+            assert!(store
+                .finish_running_run_if_metadata(
+                    &run.id,
+                    RunStatus::Stale,
+                    serde_json::json!({ "homeboy_reconciled": { "reason": "owner_process_not_running" } }),
+                    &snapshot,
+                )
+                .expect("fenced finish")
+                .is_none());
+            let current = store.get_run(&run.id).expect("read run").expect("run");
+            assert_eq!(current.status, RunStatus::Running.as_str());
+            assert_eq!(
+                current.metadata_json["homeboy_ownership_handoff"]["state"],
+                "transferring"
             );
         });
     }

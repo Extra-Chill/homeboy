@@ -2260,6 +2260,42 @@ fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
 }
 
 #[test]
+fn show_run_reconciles_the_requested_old_row_beyond_the_fleet_read_limit() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut requested = sample_imported_running_run("review", "homeboy", "old-requested");
+        requested.id = "0000-requested-old-run".to_string();
+        requested.metadata_json = serde_json::json!({ "source": "legacy-runner" });
+        store.import_run(&requested).expect("import requested run");
+        for index in 0..1000 {
+            let mut run = sample_imported_running_run("review", "homeboy", "fleet-blocker");
+            run.id = format!("blocker-{index:04}");
+            run.metadata_json =
+                serde_json::json!({ "homeboy_run_owner": { "pid": std::process::id() } });
+            store.import_run(&run).expect("import fleet row");
+        }
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}", requested.id),
+            body: None,
+        })
+        .expect("show requested run");
+
+        assert_eq!(response.body["run"]["status"], RunStatus::Stale.as_str());
+        assert_eq!(
+            store
+                .get_run(&requested.id)
+                .expect("read requested run")
+                .expect("requested run")
+                .status,
+            RunStatus::Stale.as_str()
+        );
+    });
+}
+
+#[test]
 fn runs_list_preserves_a_live_transferring_ownership_handoff() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");

@@ -246,7 +246,7 @@ fn reconcile_orphaned_running_run(
                 .expect("terminal status is present"),
         );
         let refreshed = store
-            .finish_running_run(&run.id, status, Some(metadata))?
+            .finish_running_run_if_metadata(&run.id, status, metadata, &run.metadata_json)?
             .or_else(|| store.get_run(&run.id).ok().flatten());
         (
             refreshed
@@ -261,8 +261,13 @@ fn reconcile_orphaned_running_run(
         (
             RunStatus::Stale,
             store
-                .finish_run(&run.id, RunStatus::Stale, Some(metadata))?
-                .finished_at,
+                .finish_running_run_if_metadata(
+                    &run.id,
+                    RunStatus::Stale,
+                    metadata,
+                    &run.metadata_json,
+                )?
+                .and_then(|run| run.finished_at),
         )
     };
 

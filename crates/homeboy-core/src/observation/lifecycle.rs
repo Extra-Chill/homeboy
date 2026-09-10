@@ -154,6 +154,17 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
         return None;
     }
 
+    if run
+        .metadata_json
+        .pointer("/homeboy_ownership_handoff/state")
+        .and_then(serde_json::Value::as_str)
+        == Some("transferring")
+    {
+        return Some(
+            "detached worker ownership transfer is pending until its handoff deadline".to_string(),
+        );
+    }
+
     let Some(owner_pid) = run_owner_pid(run) else {
         return Some(
             "running status has no owner metadata; run may predate reconciliation support"
@@ -267,6 +278,15 @@ mod tests {
             "lab": { "remote_job_status": "running" }
         }));
         assert!(running_status_note(&active_remote).is_none());
+
+        let transferring = running_run(serde_json::json!({
+            "homeboy_run_owner": { "pid": u32::MAX },
+            "homeboy_ownership_handoff": { "state": "transferring" }
+        }));
+        assert!(running_status_note(&transferring)
+            .as_deref()
+            .expect("transfer status note")
+            .contains("ownership transfer is pending"));
     }
 
     #[test]
