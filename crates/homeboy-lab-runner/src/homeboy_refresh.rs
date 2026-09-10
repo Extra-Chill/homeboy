@@ -3094,10 +3094,7 @@ fn refresh_reconnect_failure_with_message(
 
 fn build_local_homeboy_binary(
     source_path: Option<&Path>,
-) -> Result<(
-    PathBuf,
-    Option<homeboy_core::cleanup::SharedCargoTargetLease>,
-)> {
+) -> Result<(PathBuf, Option<homeboy_core::cleanup::ManagedCargoTarget>)> {
     let source_path = match source_path {
         Some(path) => path.to_path_buf(),
         None => {
@@ -3113,10 +3110,11 @@ fn build_local_homeboy_binary(
             None,
         ));
     }
-    let target = homeboy_core::cleanup::acquire_shared_cargo_target(&format!(
-        "runner-refresh:{}",
-        source_path.display()
-    ))?;
+    let target = homeboy_core::cleanup::acquire_managed_cargo_target(
+        &format!("runner-refresh:{}", source_path.display()),
+        &source_path,
+        None,
+    )?;
     let status = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy", "--manifest-path"])
         .arg(&manifest)
