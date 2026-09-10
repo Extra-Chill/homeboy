@@ -60,7 +60,7 @@ fn diagnose_projects_causal_pre_execution_provider_evidence() {
 }
 
 #[test]
-fn cook_snapshot_failure_projects_one_unavailable_lifecycle_recovery() {
+fn historical_cook_snapshot_failure_projects_lifecycle_admission() {
     with_temp_home(|| {
         let run_id = "run-cli-cook-snapshot-failure";
         let workspace = tempfile::tempdir().expect("workspace");
@@ -89,14 +89,13 @@ fn cook_snapshot_failure_projects_one_unavailable_lifecycle_recovery() {
         )
         .expect("record snapshot failure");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["cook_id"] = serde_json::json!("cook-snapshot-failure");
+            record.metadata["cook_id"] = serde_json::json!("cook-snapshot-parent");
             record.metadata["pre_execution_failure"]["details"] = serde_json::json!({
                 "classification": "snapshot_construction",
                 "recovery": {
-                    "owner": "durable_lifecycle",
-                    "action": "project_lifecycle_recovery",
-                    "reason": "No safe in-place recovery is known until the durable lifecycle owner evaluates this failed snapshot record.",
-                    "remediation": "Correct the controller-side snapshot inputs, then start the replacement lifecycle run selected by its owner.",
+                    "owner": "homeboy_snapshot_staging",
+                    "action": "rebuild_snapshot_staging_and_replay_cook",
+                    "command": "homeboy agent-task retry <run-id> --run",
                 },
             });
         })
@@ -115,7 +114,8 @@ fn cook_snapshot_failure_projects_one_unavailable_lifecycle_recovery() {
 
         let expected = &diagnosis["lab_snapshot_failure"];
         assert_eq!(&status_value["lab_snapshot_failure"], expected);
-        assert_eq!(expected["owner"]["run_id"], run_id);
+        assert_eq!(expected["owner"]["cook_id"], "cook-snapshot-parent");
+        assert_eq!(expected["owner"]["attempt_run_id"], run_id);
         assert_eq!(expected["owner"]["lifecycle"], "cook");
         assert_eq!(expected["readiness"], "unavailable");
         assert_eq!(expected["admission"]["admitted"], false);
@@ -124,15 +124,10 @@ fn cook_snapshot_failure_projects_one_unavailable_lifecycle_recovery() {
         assert!(diagnosis["retry_replay"]["action"].is_null());
         assert!(!diagnosis
             .to_string()
-            .contains("agent-task retry run-cli-cook-snapshot-failure"));
-        let status_retry = status_value["action_eligibility"]["actions"]
-            .as_array()
-            .expect("status action eligibility")
-            .iter()
-            .find(|action| action["action"] == "retry")
-            .expect("retry action");
-        assert_eq!(status_retry["availability"], "unavailable");
-        assert_eq!(status_retry["reason"], expected["reason"]);
+            .contains("homeboy agent-task retry <run-id> --run"));
+        assert!(!status_value
+            .to_string()
+            .contains("homeboy agent-task retry <run-id> --run"));
         assert!(homeboy::agents::agent_task_service::retry(run_id, None, false, false).is_err());
         assert_eq!(
             agent_task_lifecycle::exact_record(run_id)
@@ -140,6 +135,79 @@ fn cook_snapshot_failure_projects_one_unavailable_lifecycle_recovery() {
                 .metadata["provider_executions_consumed"],
             0
         );
+    });
+}
+
+#[test]
+fn current_non_cook_snapshot_failure_keeps_admitted_lab_replay_actionable() {
+    with_temp_home(|| {
+        let run_id = "run-cli-generic-snapshot-failure";
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("workspace.txt"), "recorded")
+            .expect("write workspace");
+        let identity = homeboy::runner::generic_lab_replay_artifact_identity(workspace.path())
+            .expect("record identity");
+        let mut plan = test_plan();
+        plan.metadata["generic_lab_command_replay"] = serde_json::json!({
+            "schema": "homeboy/generic-lab-command-replay/v1",
+            "normalized_args": ["homeboy", "bench"],
+            "materialization": {
+                "canonical_root": workspace.path(),
+                "content_identity": identity,
+            },
+        });
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit generic replay");
+        let error = Error::internal_unexpected("snapshot staging unavailable").with_retryable(true);
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "lab_workspace_stage",
+            &error,
+        )
+        .expect("record snapshot failure");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["pre_execution_failure"]["details"] = serde_json::json!({
+                "classification": "snapshot_construction",
+                "recovery": {
+                    "owner": "durable_lifecycle",
+                    "action": "project_lifecycle_recovery",
+                    "reason": "No safe in-place recovery is known until the durable lifecycle owner evaluates this failed snapshot record.",
+                    "remediation": "Correct the controller-side snapshot inputs, then start the replacement lifecycle run selected by its owner.",
+                },
+            });
+        })
+        .expect("mark current snapshot recovery");
+
+        let (status_value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            ..Default::default()
+        })
+        .expect("status snapshot failure");
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose snapshot failure");
+
+        assert_eq!(
+            status_value["lab_snapshot_failure"],
+            diagnosis["lab_snapshot_failure"]
+        );
+        assert_eq!(status_value["lab_snapshot_failure"]["readiness"], "ready");
+        assert_eq!(
+            diagnosis["lab_snapshot_failure"]["action"]["id"],
+            "agent-task.retry.lab-replay.v1"
+        );
+        let command = diagnosis["retry_replay"]["action"]["args"]
+            .as_array()
+            .expect("admitted retry args");
+        assert_eq!(command[3], "retry");
+        assert_eq!(command[4], run_id);
+        assert!(diagnosis["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("actionable retry")
+            .iter()
+            .any(|action| action["action"]["id"] == "agent-task.retry.lab-replay.v1"));
     });
 }
 
