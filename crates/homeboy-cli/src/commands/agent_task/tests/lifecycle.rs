@@ -5336,6 +5336,41 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
 }
 
 #[test]
+fn durable_run_plan_preserves_materialized_worktree_branch_for_discovery() {
+    with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
+        plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
+        plan.tasks[0].workspace.branch = Some("fix/durable-branch".to_string());
+        plan.tasks[0].workspace.base_ref = Some("origin/main".to_string());
+        plan.tasks[0].workspace.materialization = json!({
+            "root": workspace.path().display().to_string()
+        });
+
+        run_loaded_plan(
+            plan,
+            Some("materialized-branch-run"),
+            Arc::new(CapturingExecutor::default()),
+        )
+        .expect("durable run-plan completed");
+
+        let report = homeboy::agents::agent_task_service::discover_runs_with_options(
+            homeboy::agents::agent_task_service::AgentTaskDiscoveryFilter::All,
+            homeboy::agents::agent_task_service::AgentTaskDiscoveryOptions {
+                branch: Some("fix/durable-branch".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover materialized durable run");
+        assert_eq!(report.runs.len(), 1);
+        assert_eq!(report.runs[0].run_id, "materialized-branch-run");
+        assert_eq!(report.runs[0].branch.as_deref(), Some("fix/durable-branch"));
+    });
+}
+
+#[test]
 fn run_plan_rejects_component_worktree_without_branch() {
     with_temp_home(|| {
         let mut plan = test_plan();

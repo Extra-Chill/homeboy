@@ -2771,6 +2771,61 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
 }
 
 #[test]
+fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
+    with_isolated_home(|_| {
+        for run_id in ["page-a", "page-m-legacy", "page-z"] {
+            persist_discovery_record(run_id, "fix/page-health", AgentTaskRunState::Queued);
+        }
+        let lifecycle =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+        let observation = lifecycle
+            .open_observation_initialized()
+            .expect("observation store");
+        let mut legacy = observation
+            .get_run("page-m-legacy")
+            .expect("read legacy fixture")
+            .expect("legacy fixture exists");
+        legacy.metadata_json["agent_task_run"]["schema"] = json!("homeboy/agent-task-run/v0");
+        observation
+            .upsert_imported_run(&legacy)
+            .expect("persist legacy record");
+
+        let first = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--branch".to_string(),
+            "fix/page-health".to_string(),
+            "--limit".to_string(),
+            "2".to_string(),
+        ]);
+        assert_eq!(first["physical_count"], 2);
+        assert_eq!(first["runs"][0]["run_id"], "page-z");
+        assert_eq!(first["record_health"]["legacy"], 1);
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("continuation after legacy row")
+            .to_string();
+
+        let second = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--branch".to_string(),
+            "fix/page-health".to_string(),
+            "--limit".to_string(),
+            "2".to_string(),
+            "--cursor".to_string(),
+            cursor,
+        ]);
+        assert_eq!(second["runs"][0]["run_id"], "page-a");
+        assert_eq!(second["record_health"]["healthy"], 1);
+        assert_eq!(second["next_cursor"], Value::Null);
+    });
+}
+
+#[test]
 fn list_sparse_scope_requires_the_matching_opaque_continuation() {
     with_isolated_home(|_| {
         persist_discovery_record("sparse-a", "fix/sparse", AgentTaskRunState::Running);

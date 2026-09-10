@@ -2934,6 +2934,12 @@ fn normalize_component_worktree_workspace(request: &mut AgentTaskRequest) -> Res
         return Ok(());
     };
 
+    // Materialization replaces the declarative workspace with an execution
+    // path. Keep the submitted branch as durable logical scope for lifecycle
+    // discovery after that replacement.
+    if let Some(branch) = request.workspace.branch.as_deref() {
+        request.metadata["logical_workspace_branch"] = Value::String(branch.to_string());
+    }
     request.workspace.kind = None;
     request.workspace.mode = AgentTaskWorkspaceMode::Existing;
     request.workspace.root = Some(root);

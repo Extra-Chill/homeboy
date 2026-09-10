@@ -379,8 +379,8 @@ pub fn discover_runs_page(
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let (mut records, truncated, next) = store.read_record_page(after, limit)?;
-    let physical_count = records.len();
+    let (mut records, record_health, physical_count, truncated, next) =
+        store.read_record_page_with_health(after, limit)?;
     records.retain(|record| !is_fixture_runner_record(record));
     let submitted_after = options
         .submitted_after
@@ -425,11 +425,7 @@ pub fn discover_runs_page(
         physical_count,
         truncated,
         next_cursor: next.map(|keyset| encode_page_cursor(keyset, scope)),
-        record_health: AgentTaskRecordHealthSummary {
-            schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
-            healthy: runs.len(),
-            ..Default::default()
-        },
+        record_health,
         runs,
     })
 }
