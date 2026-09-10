@@ -133,6 +133,14 @@ CLI extension inventory and startup command-health discovery consume v1 catalog
 and readiness responses. Their legacy presentation fields remain CLI adapters;
 core no longer maintains a parallel `ExtensionSummary` projection.
 
+### External Storage v1 Upgrades
+
+`ExternalStorageInventory` accepts additive completeness evidence in v1. Install
+the Homeboy core that understands that field before installing an extension that
+emits it: older cores reject unknown inventory fields by design. Older extension
+providers remain compatible with the newer core because the field is optional;
+their inventory is reported as complete unless they supply bounded-scan evidence.
+
 ## Read-Only Invocation
 
 `extension::invoke::invoke_api` synchronously executes one explicitly selected
