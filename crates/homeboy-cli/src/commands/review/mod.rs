@@ -53,7 +53,7 @@ pub struct ReviewArgs {
 
     /// Attach to an already-persisted review run instead of starting another
     /// audit/lint/test execution.
-    #[arg(long, value_name = "RUN_ID")]
+    #[arg(long, global = true, value_name = "RUN_ID")]
     pub run_id: Option<String>,
 
     #[command(flatten)]
@@ -77,23 +77,38 @@ pub struct ReviewArgs {
     pub summary: bool,
 
     /// Run an extension-declared CI profile as an additional review gate.
-    #[arg(long, value_name = "ID")]
+    #[arg(long, global = true, value_name = "ID")]
     pub ci_profile: Option<String>,
 
     /// Audit detector profile for the audit stage. Defaults to `pr` for
     /// changed-file review and `full` for full review.
-    #[arg(long, value_name = "PROFILE", value_parser = ["full", "pr", "architecture"])]
+    #[arg(
+        long,
+        global = true,
+        value_name = "PROFILE",
+        value_parser = ["full", "pr", "architecture"]
+    )]
     pub audit_profile: Option<String>,
 
     /// Output format. Default JSON envelope; `--report=pr-comment` emits a
     /// markdown PR-comment section instead, suitable for piping to
     /// `homeboy git pr comment --body-file`.
-    #[arg(long, value_name = "FORMAT", value_parser = ["pr-comment"])]
+    #[arg(
+        long,
+        global = true,
+        value_name = "FORMAT",
+        value_parser = ["pr-comment"]
+    )]
     pub report: Option<String>,
 
     /// Action-level banner rendered above the PR-comment scope line.
     /// Repeatable as `--banner key=value`.
-    #[arg(long, value_name = "KEY=VALUE", value_parser = parse_key_val)]
+    #[arg(
+        long,
+        global = true,
+        value_name = "KEY=VALUE",
+        value_parser = parse_key_val
+    )]
     pub banner: Vec<(String, String)>,
 
     #[command(flatten)]
