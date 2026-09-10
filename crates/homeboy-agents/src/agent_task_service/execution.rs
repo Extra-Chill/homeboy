@@ -2934,6 +2934,12 @@ fn normalize_component_worktree_workspace(request: &mut AgentTaskRequest) -> Res
         return Ok(());
     };
 
+    // Materialization replaces the declarative workspace with an execution
+    // path. Keep the submitted branch as durable logical scope for lifecycle
+    // discovery after that replacement.
+    if let Some(branch) = request.workspace.branch.as_deref() {
+        request.metadata["logical_workspace_branch"] = Value::String(branch.to_string());
+    }
     request.workspace.kind = None;
     request.workspace.mode = AgentTaskWorkspaceMode::Existing;
     request.workspace.root = Some(root);
@@ -2984,6 +2990,10 @@ fn prepare_component_worktree_workspace(
             None,
         )
     })?;
+    // Worktree materialization replaces the declarative branch with an
+    // execution path. Preserve the submitted logical scope for lifecycle
+    // discovery before that replacement.
+    request.metadata["logical_workspace_branch"] = Value::String(branch.clone());
     let cleanup_policy = cleanup_policy_for_workspace(request.workspace.cleanup.as_deref());
     let task_url = request.workspace.task_url.clone().or_else(|| {
         request

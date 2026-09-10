@@ -31,13 +31,14 @@ pub use types::{
     WorktreeHandoffFreshnessProof, WorktreeImportOptions, WorktreeImportOutput,
     WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization, WorktreeInventoryCrossTab,
     WorktreeInventoryLocalEvidence, WorktreeInventoryOptions, WorktreeInventoryOutput,
-    WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOutput,
-    WorktreeLivenessAuthority, WorktreeOwnershipProbe, WorktreeQueueCreateFailure,
-    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeQueueCreateRequest,
-    WorktreeQueueCreateRow, WorktreeQueueCreateStatus, WorktreeQueueLockHolder,
-    WorktreeReconciliationAction, WorktreeReconciliationAuthority, WorktreeReconciliationResult,
-    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
-    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+    WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOptions,
+    WorktreeListOutput, WorktreeLivenessAuthority, WorktreeOwnershipProbe,
+    WorktreeQueueCreateFailure, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
+    WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
+    WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
+    WorktreeReconciliationResult, WorktreeRemoveOptions, WorktreeRemoveOutput,
+    WorktreeSafetyReport, WorktreeStatusOutput, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
+    TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the
@@ -63,6 +64,11 @@ pub fn import(options: WorktreeImportOptions) -> Result<WorktreeImportOutput> {
 
 pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
+}
+
+/// Read a bounded, stable keyset page for the operator-facing worktree list.
+pub fn list_page(options: WorktreeListOptions) -> Result<WorktreeListOutput> {
+    with_task_worktree_registry_read_lock(|| list_page_with_store(&metadata_dir()?, options))
 }
 
 /// Report the live write holder for a checkout path, including component

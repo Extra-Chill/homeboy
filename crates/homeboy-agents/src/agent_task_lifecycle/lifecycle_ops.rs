@@ -2697,6 +2697,18 @@ where
         metadata["activity_context"] = context.clone();
         metadata["activity_contexts"] = json!(activity_contexts);
     }
+    // Discovery is a read over lifecycle records, so retain the branch scope
+    // carried by the submitted plan instead of depending on later worktree
+    // materialization metadata.
+    if let Some(branch) = plan.tasks.first().and_then(|task| {
+        task.workspace.branch.as_deref().or_else(|| {
+            task.metadata
+                .get("logical_workspace_branch")
+                .and_then(Value::as_str)
+        })
+    }) {
+        metadata["branch"] = json!(branch);
+    }
     let acceptance_requirement = plan
         .metadata
         .get("acceptance")
