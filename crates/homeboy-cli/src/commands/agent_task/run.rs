@@ -2129,6 +2129,58 @@ mod preview_tests {
     }
 
     #[test]
+    fn preview_and_execution_reject_missing_task_url_for_absent_provider_worktree() {
+        crate::test_support::with_isolated_home(|_| {
+            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("workspace repository")
+                .display()
+                .to_string();
+            let handle = "homeboy@feature-missing-task-url";
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement the issue",
+                "--repo",
+                "homeboy",
+                "--workspace",
+                &repository,
+                "--base",
+                "main",
+                "--head",
+                "feature/missing-task-url",
+                "--to-worktree",
+                &handle,
+                "--no-finalize",
+            ]);
+
+            let preview = resolve_cook_preview_destination(args.clone())
+                .expect_err("preview rejects the missing creation requirement");
+            let execution = provision_cook_destination(&args)
+                .expect_err("execution rejects before durable Cook admission");
+
+            assert_eq!(preview.code, execution.code, "preview: {preview:?}");
+            assert_eq!(preview.message, execution.message);
+            let missing = preview.details["args"]
+                .as_array()
+                .expect("missing-argument details");
+            assert!(missing.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|value| value.contains("--task-url") && value.contains(handle))
+            }));
+            assert!(agent_task_lifecycle::list_records()
+                .expect("read lifecycle records")
+                .is_empty());
+        });
+    }
+
+    #[test]
     fn preview_rejects_an_existing_unsafe_path_without_changing_it() {
         crate::test_support::with_isolated_home(|_| {
             let path = tempfile::tempdir().expect("unsafe path");
@@ -3625,6 +3677,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     // Preserve the native provisioning intent until Cook has durably admitted
     // its recipe and exact lifecycle owner. Ensure is forbidden before that
     // point.
+    preflight_missing_cook_provider_workspace(args, to_worktree)?;
     Ok(serde_json::json!({
         "action": "lookup_pending",
         "kind": "native",
@@ -3640,6 +3693,48 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "cleanup_policy": "remove_on_success",
         },
     }))
+}
+
+/// Resolve the native provider identity without creating a worktree. Preview
+/// and execution both use this check, so a field required only for creation is
+/// rejected before either reports a viable deferred destination.
+fn preflight_missing_cook_provider_workspace(
+    args: &AgentTaskCookArgs,
+    handle: &str,
+) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionPlan> {
+    let intent = cook_provider_provision_intent(args, handle)?;
+    if intent.task_url.is_none() {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            format!("--task-url is required to create missing provider worktree `{handle}`"),
+        ]));
+    }
+    homeboy::core::worktree_provider::plan_worktree_provision(&intent)
+}
+
+fn cook_provider_provision_intent(
+    args: &AgentTaskCookArgs,
+    handle: &str,
+) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionIntent> {
+    Ok(homeboy::core::worktree_provider::WorktreeProvisionIntent {
+        handle: handle.to_string(),
+        repo: cook_provision_repository(args).ok_or_else(|| {
+            homeboy::core::Error::validation_missing_argument(vec![
+                "--repo <repo> is required to create a missing --to-worktree destination"
+                    .to_string(),
+            ])
+        })?,
+        base: args
+            .base
+            .clone()
+            .expect("Cook base is resolved before provider preflight"),
+        head: args.head.clone().ok_or_else(|| {
+            homeboy::core::Error::validation_missing_argument(vec![
+                "--head <branch> is required to create a missing --to-worktree destination"
+                    .to_string(),
+            ])
+        })?,
+        task_url: args.dispatch.task_url.clone(),
+    })
 }
 
 /// The exact declaration used both by preview planning and live provider
@@ -3923,27 +4018,8 @@ pub(super) fn resolve_cook_preview_destination(
         validate_cook_destination_identity(&args, &path)?;
         path
     } else {
-        let intent = homeboy::core::worktree_provider::WorktreeProvisionIntent {
-            handle: handle.clone(),
-            repo: cook_provision_repository(&args).ok_or_else(|| {
-                homeboy::core::Error::validation_missing_argument(vec![
-                    "--repo <repo> is required to create a missing --to-worktree destination"
-                        .to_string(),
-                ])
-            })?,
-            base: args
-                .base
-                .clone()
-                .expect("Cook base is resolved before preview"),
-            head: args.head.clone().ok_or_else(|| {
-                homeboy::core::Error::validation_missing_argument(vec![
-                    "--head <branch> is required to create a missing --to-worktree destination"
-                        .to_string(),
-                ])
-            })?,
-            task_url: args.dispatch.task_url.clone(),
-        };
-        let plan = homeboy::core::worktree_provider::plan_worktree_provision(&intent)?;
+        let intent = cook_provider_provision_intent(&args, &handle)?;
+        let plan = preflight_missing_cook_provider_workspace(&args, &handle)?;
         let destination = match plan {
             homeboy::core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
             | homeboy::core::worktree_provider::WorktreeProvisionPlan::Planned(destination) => {
