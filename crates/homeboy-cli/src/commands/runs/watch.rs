@@ -92,7 +92,7 @@ impl WatchPoller for StorePoller<'_> {
 
     fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord> {
         let run = runs_service::require_run(self.store, run_id)?;
-        runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(self.store, &run);
+        runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
         let run = runs_service::require_run(self.store, run_id)?;
         reconcile::reconcile_owned_stale_running_run(self.store, &run)?;
         runs_service::require_run(self.store, run_id)

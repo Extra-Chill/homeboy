@@ -3,7 +3,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod dependency_graph;
@@ -151,6 +151,10 @@ impl Default for DependencyHydrationPolicy {
 
 const DEPENDENCY_HYDRATION_SCHEMA: &str = "homeboy/dependency-hydration-outcome/v1";
 const DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+// Declared dependency commands are not required to emit HOMEBOY_PROGRESS.
+// Give a freshly spawned command a scheduler-safe startup window before the
+// structured-progress watchdog can classify it as stalled.
+const DEPENDENCY_HYDRATION_MIN_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Hydrate dependencies through provider-declared reusable-state, install, and
 /// output contracts. Package manifests, command argv, and freshness semantics
@@ -174,7 +178,7 @@ fn hydrate_declared_dependencies_unlocked(
 ) -> Result<Vec<DependencyHydrationOutcome>> {
     let path_arg = path.display().to_string();
     let component_path_arg = path_arg.clone();
-    let component = match run_with_hydration_deadline(policy, deadline, move || {
+    let component = match run_with_hydration_deadline(policy, deadline, move |_| {
         Ok(component::resolve_effective(None, Some(&component_path_arg), None).ok())
     })? {
         Some(Some(component)) => component,
@@ -198,7 +202,7 @@ fn hydrate_declared_dependencies_unlocked(
     component.local_path = path_arg;
     let component_for_discovery = component.clone();
     let path_for_discovery = path.to_path_buf();
-    let Some(providers) = run_with_hydration_deadline(policy, deadline, move || {
+    let Some(providers) = run_with_hydration_deadline(policy, deadline, move |_| {
         provider::resolve_dependency_providers_optional(
             &component_for_discovery,
             &path_for_discovery,
@@ -220,7 +224,7 @@ fn hydrate_declared_dependencies_unlocked(
         }
         let component_for_plan = component.clone();
         let path_for_plan = path.to_path_buf();
-        let plan = match run_with_hydration_deadline(policy, deadline, move || {
+        let plan = match run_with_hydration_deadline(policy, deadline, move |_| {
             provider.hydration_plan(&component_for_plan, &path_for_plan)
         })? {
             Some(Some(plan)) => plan,
@@ -448,7 +452,11 @@ fn run_hydration_command(
             &mut child,
             DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES,
             deadline,
-            Some(policy.no_progress_timeout.max(Duration::from_millis(1))),
+            Some(
+                policy
+                    .no_progress_timeout
+                    .max(DEPENDENCY_HYDRATION_MIN_NO_PROGRESS_TIMEOUT),
+            ),
             policy.heartbeat_interval.max(Duration::from_millis(1)),
             move || cancellation() || Instant::now() >= deadline,
             |heartbeat| {
@@ -491,39 +499,41 @@ fn hydration_deadline_expired(policy: &DependencyHydrationPolicy, deadline: Inst
     (policy.is_cancelled)() || Instant::now() >= deadline
 }
 
-/// Provider discovery and planning are provider-owned and may perform I/O. They
-/// share the command budget rather than each receiving a fresh timeout.
+/// Provider discovery and planning execute under their caller's ownership.
+///
+/// Providers must use the supplied control point around potentially blocking
+/// work. Keeping the operation on the caller thread prevents provider work from
+/// continuing after hydration returns.
+struct DependencyHydrationControl<'a> {
+    policy: &'a DependencyHydrationPolicy,
+    deadline: Instant,
+}
+
+impl DependencyHydrationControl<'_> {
+    fn is_cancelled(&self) -> bool {
+        hydration_deadline_expired(self.policy, self.deadline)
+    }
+}
+
+/// Provider discovery and planning share the command budget rather than each
+/// receiving a fresh timeout.
 fn run_with_hydration_deadline<T, F>(
     policy: &DependencyHydrationPolicy,
     deadline: Instant,
     operation: F,
 ) -> Result<Option<T>>
 where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
+    F: FnOnce(&DependencyHydrationControl<'_>) -> Result<T>,
 {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if (policy.is_cancelled)() || remaining.is_zero() {
+    let control = DependencyHydrationControl { policy, deadline };
+    if control.is_cancelled() {
         return Ok(None);
     }
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let _ = sender.send(operation());
-    });
-    loop {
-        if (policy.is_cancelled)() || Instant::now() >= deadline {
-            return Ok(None);
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(remaining.min(Duration::from_millis(10))) {
-            Ok(result) => return result.map(Some),
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(Error::internal_unexpected(
-                    "dependency hydration worker stopped before returning a result",
-                ));
-            }
-        }
+    let result = operation(&control)?;
+    if control.is_cancelled() {
+        Ok(None)
+    } else {
+        Ok(Some(result))
     }
 }
 
@@ -1633,10 +1643,18 @@ mod tests {
             .expect("stale state hydration");
 
             assert_eq!(
-                std::fs::read_to_string(root.path().join("invoked-argv")).unwrap(),
+                std::fs::read_to_string(root.path().join("invoked-argv")).unwrap_or_else(
+                    |error| panic!(
+                        "declared command was not invoked: {error}; outcomes: {outcomes:#?}"
+                    )
+                ),
                 "--mode declared"
             );
-            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Succeeded);
+            assert_eq!(
+                outcomes[0].status,
+                DependencyHydrationStatus::Succeeded,
+                "declared command outcome: {outcomes:#?}"
+            );
             assert_eq!(outcomes[0].reason, "fixture_state_differs");
             assert_eq!(
                 outcomes[0].command,
@@ -1739,11 +1757,11 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_provider_discovery_without_waiting_for_its_deadline() {
+    fn cancellation_keeps_provider_discovery_caller_owned() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
-        let release_for_worker = Arc::clone(&release);
+        let release_for_operation = Arc::clone(&release);
         let started = Instant::now();
         let canceller = std::thread::spawn({
             let cancelled = Arc::clone(&cancelled);
@@ -1755,11 +1773,17 @@ mod tests {
         let result = run_with_hydration_deadline(
             &policy,
             Instant::now() + Duration::from_secs(2),
-            move || {
-                let (lock, wake) = &*release_for_worker;
+            move |control| {
+                let (lock, wake) = &*release_for_operation;
                 let mut released = lock.lock().expect("lock release");
                 while !*released {
-                    released = wake.wait(released).expect("wait release");
+                    let (next, _) = wake
+                        .wait_timeout(released, Duration::from_millis(10))
+                        .expect("wait release");
+                    released = next;
+                    if control.is_cancelled() {
+                        return Ok(());
+                    }
                 }
                 Ok(())
             },
@@ -1774,11 +1798,11 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_provider_planning_without_waiting_for_its_deadline() {
+    fn cancellation_keeps_provider_planning_caller_owned() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
-        let release_for_worker = Arc::clone(&release);
+        let release_for_operation = Arc::clone(&release);
         let started = Instant::now();
         let canceller = std::thread::spawn({
             let cancelled = Arc::clone(&cancelled);
@@ -1790,11 +1814,17 @@ mod tests {
         let result = run_with_hydration_deadline(
             &policy,
             Instant::now() + Duration::from_secs(2),
-            move || {
-                let (lock, wake) = &*release_for_worker;
+            move |control| {
+                let (lock, wake) = &*release_for_operation;
                 let mut released = lock.lock().expect("lock release");
                 while !*released {
-                    released = wake.wait(released).expect("wait release");
+                    let (next, _) = wake
+                        .wait_timeout(released, Duration::from_millis(10))
+                        .expect("wait release");
+                    released = next;
+                    if control.is_cancelled() {
+                        return Ok(());
+                    }
                 }
                 Ok(())
             },

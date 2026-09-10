@@ -120,12 +120,23 @@ pub(crate) fn reconcile_owned_stale_running_run(
     if handoff_is_transferring(run) {
         return Ok(None);
     }
+    let remote_status = match runs_service::selected_mirrored_daemon_job_status(run) {
+        Ok(status) => status,
+        Err(_) => return Ok(None),
+    };
+    // A focused read must not turn an unavailable runner probe into stale
+    // evidence. Fleet reconciliation still applies its bounded orphan policy;
+    // this path changes a single selected mirror only on explicit terminal
+    // evidence.
+    if runner_backed_run(run) && remote_status.is_none() {
+        return Ok(None);
+    }
     Ok(reconcile_orphaned_running_runs_with_remote_status(
         store,
         vec![run.clone()],
         false,
         pid_is_running,
-        runs_service::selected_mirrored_daemon_job_status,
+        |_| Ok(remote_status.clone()),
     )?
     .into_iter()
     .next())
@@ -215,7 +226,7 @@ fn reconcile_orphaned_running_run(
     if !dry_run {
         // Candidate selection is entirely local. Refresh only a selected row,
         // never the unrelated running mirrors that happen to share the store.
-        runs_service::refresh_selected_mirrored_daemon_evidence(store, run);
+        runs_service::refresh_selected_mirrored_daemon_evidence(run);
     }
     let artifact_count = if dry_run {
         store.list_artifacts(&run.id)?.len()
@@ -296,9 +307,10 @@ where
         Some("failed") => Some("runner_job_failed"),
         Some("cancelled") => Some("runner_job_cancelled"),
         Some("queued" | "running") => None,
-        Some("not_found") => {
-            stale_running_reason(run, pid_is_alive).map(|_| "daemon_job_not_found")
-        }
+        // A focused runner read can fail over to a generation that no longer
+        // retains the job. Absence from that projection is not terminal
+        // evidence; preserve the local mirror until a terminal status arrives.
+        Some("not_found") => None,
         Some(_) => None,
         None => stale_running_reason(run, pid_is_alive),
     }
@@ -791,6 +803,36 @@ mod tests {
             .expect("unavailable runner remains fail closed");
             let unchanged = store
                 .get_run("unavailable-runner-job")
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, RunStatus::Running.as_str());
+        });
+    }
+
+    #[test]
+    fn missing_runner_job_status_remains_fail_closed() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let store = ObservationStore::open_initialized().expect("store");
+            let mut run = phantom_handoff_run(
+                "missing-runner-job",
+                minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
+            );
+            run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
+            store.import_run(&run).expect("import runner-backed run");
+
+            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                &store,
+                vec![run],
+                false,
+                |_| false,
+                |_| Ok(Some("not_found".to_string())),
+            )
+            .expect("missing runner job remains fail closed");
+            let unchanged = store
+                .get_run("missing-runner-job")
                 .expect("get run")
                 .expect("run exists");
 

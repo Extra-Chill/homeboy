@@ -1972,6 +1972,13 @@ fn handoff_is_transferring(run: &RunRecord) -> bool {
 }
 
 fn api_stale_running_reason(run: &RunRecord) -> Option<&'static str> {
+    // The durable Lab projection explicitly reports live remote work. This is
+    // authoritative liveness, so HTTP reads use the same exemption as CLI
+    // reconciliation rather than terminalizing a runner-backed row from its
+    // local owner PID alone.
+    if crate::observation::run_has_active_remote_job(run) {
+        return None;
+    }
     if let Some(owner_pid) = run_owner_pid(run) {
         return (!crate::process::pid_is_running(owner_pid)).then_some("owner_process_not_running");
     }

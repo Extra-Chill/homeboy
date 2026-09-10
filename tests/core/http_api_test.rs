@@ -2260,6 +2260,38 @@ fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
 }
 
 #[test]
+fn runs_list_preserves_old_runner_backed_records_with_active_remote_status() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut run = sample_imported_running_run("agent-task", "homeboy", "homeboy-lab");
+        run.id = "active-remote-run".to_string();
+        run.metadata_json = serde_json::json!({
+            "homeboy_run_owner": { "pid": u32::MAX },
+            "lab": { "remote_job_status": "running" },
+        });
+        store.import_run(&run).expect("import active runner run");
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/runs?status=running".to_string(),
+            body: None,
+        })
+        .expect("runs list");
+
+        assert_eq!(response.body["runs"].as_array().expect("runs").len(), 1);
+        assert_eq!(
+            store
+                .get_run("active-remote-run")
+                .expect("get run")
+                .expect("run exists")
+                .status,
+            RunStatus::Running.as_str()
+        );
+    });
+}
+
+#[test]
 fn show_run_reconciles_the_requested_old_row_beyond_the_fleet_read_limit() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");

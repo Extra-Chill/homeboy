@@ -678,10 +678,7 @@ mod tests {
                 converge_target: false,
             }));
 
-            assert!(
-                super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
-                    .is_none()
-            );
+            assert!(super::super::refresh_selected_mirrored_daemon_evidence(&selected).is_none());
             assert!(calls.lock().expect("calls").is_empty());
         });
         provider_slot()
@@ -691,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_authoritative_job_absence_becomes_evidence_unavailable() {
+    fn selected_job_absence_remains_an_actionable_refresh_failure() {
         let _lock = provider_lock().lock().expect("provider lock");
         with_isolated_home(|_| {
             let store = ObservationStore::open_initialized().expect("store");
@@ -708,26 +705,12 @@ mod tests {
                 converge_target: false,
             }));
 
-            assert!(
-                super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
-                    .is_none()
-            );
+            let err = super::super::refresh_selected_mirrored_daemon_evidence(&selected)
+                .expect("actionable refresh error");
+            assert_eq!(err.details["http_status"], 404);
             assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
             let refreshed = store.get_run("selected").expect("read").expect("run");
-            assert_eq!(refreshed.status, RunStatus::Stale.as_str());
-            assert_eq!(
-                refreshed.metadata_json["runner_terminal_evidence"]["stale_reason"],
-                "authoritative_generation_did_not_retain_job"
-            );
-            assert_eq!(
-                refreshed.metadata_json["runner_terminal_evidence"]["status"],
-                "evidence_unavailable"
-            );
-            assert_eq!(
-                refreshed.metadata_json["runner_terminal_evidence"]["diagnostic"]["details"]
-                    ["http_status"],
-                404
-            );
+            assert_eq!(refreshed.status, RunStatus::Running.as_str());
         });
         provider_slot()
             .lock()
@@ -749,7 +732,7 @@ mod tests {
                 converge_target: false,
             }));
 
-            let err = super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
+            let err = super::super::refresh_selected_mirrored_daemon_evidence(&selected)
                 .expect("actionable refresh error");
             assert_eq!(err.message, "runner transport unavailable");
             assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
@@ -787,9 +770,7 @@ mod tests {
                 converge_target: true,
             }));
 
-            assert!(
-                super::super::refresh_selected_mirrored_daemon_evidence(&store, &target).is_none()
-            );
+            assert!(super::super::refresh_selected_mirrored_daemon_evidence(&target).is_none());
             assert_eq!(*calls.lock().expect("calls"), vec!["target"]);
             assert_eq!(
                 store
