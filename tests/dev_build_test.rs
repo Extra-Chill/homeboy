@@ -36,9 +36,14 @@ chmod +x "$binary"
 
     let mismatch = run_dev_build(&tools, &target, "different-commit");
     assert!(!mismatch.status.success());
-    assert!(String::from_utf8_lossy(&mismatch.stderr).contains(&format!(
-        "development binary identity mismatch: expected {expected}, got different-commit"
-    )));
+    assert!(
+        String::from_utf8_lossy(&mismatch.stderr).contains(&format!(
+            "development binary identity mismatch: expected {expected}, got different-commit"
+        )),
+        "mismatched identity did not report the expected failure:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&mismatch.stdout),
+        String::from_utf8_lossy(&mismatch.stderr)
+    );
 }
 
 fn run_dev_build(tools: &Path, target: &Path, binary_commit: &str) -> std::process::Output {
@@ -58,6 +63,7 @@ fn run_dev_build(tools: &Path, target: &Path, binary_commit: &str) -> std::proce
 fn git_head() -> String {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("resolve fixture HEAD");
     assert!(output.status.success());
