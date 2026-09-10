@@ -10,16 +10,17 @@ use std::sync::{Arc, OnceLock, RwLock};
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome, ControlPlaneActionPayload,
     ControlPlaneActionRequest, ControlPlaneAttempt, ControlPlaneAttemptListRequest,
-    ControlPlaneAttemptPage, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneEvent,
-    ControlPlaneEventAppendRequest, ControlPlaneEventPage, ControlPlaneEventRetention,
-    ControlPlaneEventSource, ControlPlaneExecution, ControlPlaneExecutionPage, ControlPlaneMission,
-    ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneReference, ControlPlaneReferencePage, ControlPlaneReferenceRegistration,
-    ControlPlaneReferenceType, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
-    ControlPlaneRunReview, ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneAttemptPage, ControlPlaneCapabilities, ControlPlaneEffectStatus, ControlPlaneError,
+    ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventPage,
+    ControlPlaneEventRetention, ControlPlaneEventSource, ControlPlaneExecution,
+    ControlPlaneExecutionPage, ControlPlaneMission, ControlPlaneMissionListRequest,
+    ControlPlaneMissionPage, ControlPlaneOperation, ControlPlaneReference,
+    ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
+    ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneSubmissionAcknowledgement,
     ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
-    ControlPlaneTaskPage, EventCursor, ExecutionId, MissionId, ReferenceId, RunId, TaskId,
-    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    ControlPlaneTaskPage, EffectId, EventCursor, ExecutionId, MissionId, ReferenceId, RunId,
+    TaskId, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
 };
 
 use crate::observation::{ControlPlaneActionClaim, ObservationStore, RunRecord};
@@ -492,6 +493,17 @@ pub trait ControlPlaneProvider: Send + Sync {
             "control-plane run not found: {requested_id}"
         )))
     }
+
+    /// Return the durable status for one caller-owned effect identity.
+    fn effect_status(
+        &self,
+        requested_id: &RunId,
+        _effect_id: &EffectId,
+    ) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane run not found: {requested_id}"
+        )))
+    }
 }
 
 struct NoopProvider;
@@ -657,6 +669,14 @@ pub fn execute_action(
     with_provider(|provider| provider.execute_action(requested_id, request))
 }
 
+/// Read the authoritative durable status of a submitted action effect.
+pub fn effect_status(
+    requested_id: &RunId,
+    effect_id: &EffectId,
+) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
+    with_provider(|provider| provider.effect_status(requested_id, effect_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -665,7 +685,8 @@ mod tests {
     };
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionPayload, ControlPlaneActionRequest,
-        ControlPlaneErrorClass, ControlPlaneOperation, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        ControlPlaneErrorClass, ControlPlaneOperation, EffectId, RunId,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     };
 
     #[test]
@@ -698,6 +719,7 @@ mod tests {
                 &run,
                 &ControlPlaneActionRequest {
                     schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                    effect_id: EffectId(format!("fixture:run-1:{action:?}:same-key")),
                     action,
                     idempotency_key: "same-key".to_string(),
                     actor: "test".to_string(),
@@ -737,6 +759,7 @@ mod tests {
         let run = RunId::new("run-1").unwrap();
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:run-1:resume:same-key".to_string()),
             action: ControlPlaneAction::Resume,
             idempotency_key: "same-key".to_string(),
             actor: "test".to_string(),

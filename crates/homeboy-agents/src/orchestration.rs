@@ -13,7 +13,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionRequest, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
     ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
-    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneEffectExecutionState,
+    ControlPlaneEffectStatus, ControlPlaneError, ControlPlaneErrorClass,
     ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEventSource,
     ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
     ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
@@ -25,18 +26,19 @@ use homeboy_control_plane_contract::{
     ControlPlaneRunPlacementSelected, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
     ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary,
     ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, ExecutionId, MissionCursor,
-    MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor, ExecutionId,
+    MissionCursor, MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
     CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
-    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
-    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-    CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-    CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA, CONTROL_PLANE_REARM_RESULT_SCHEMA,
-    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
-    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_EFFECT_STATUS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
+    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA,
+    CONTROL_PLANE_REARM_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
@@ -51,9 +53,9 @@ use std::time::{Duration, Instant};
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, claim_operation_with_intent_in_store,
     complete_cook_operation_in_store, lifecycle_action_eligibility, now_timestamp,
-    operation_claim_in_store, operation_lease_is_active_in_store, resolve_run_id_in_store,
-    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
-    CanonicalControlPlaneIdentities, ClaimOutcome,
+    operation_claim_for_effect_in_store, operation_claim_in_store,
+    operation_lease_is_active_in_store, resolve_run_id_in_store, AgentTaskLifecycleStore,
+    AgentTaskRunRecord, AgentTaskRunState, CanonicalControlPlaneIdentities, ClaimOutcome,
 };
 use crate::agent_task_schedule::AgentTaskPlan;
 
@@ -1568,10 +1570,70 @@ impl OrchestrationService<LifecycleStoreLookup> {
         self.execute_action_with_delegates(
             requested_id,
             request,
-            |run_id, parameters| default_retry(run_id, parameters),
-            |run_id| default_resume(run_id),
-            default_promote,
+            |run_id, parameters, _intent| default_retry(run_id, parameters),
+            |run_id, _intent| default_resume(run_id),
+            |promotion, _intent| default_promote(promotion),
         )
+    }
+
+    /// Read the durable lifecycle-owned effect record. A missing record is
+    /// `not_started`; malformed terminal evidence is `unknown`, never success.
+    pub fn effect_status(
+        &self,
+        requested_id: &RunId,
+        effect_id: &EffectId,
+    ) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
+        let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
+            .map_err(map_lifecycle_error)?;
+        let claim =
+            operation_claim_for_effect_in_store(&self.lookup.store, &resolved, &effect_id.0)
+                .map_err(map_lifecycle_error)?;
+        let mut status = ControlPlaneEffectStatus {
+            schema: CONTROL_PLANE_EFFECT_STATUS_SCHEMA.to_string(),
+            effect_id: effect_id.clone(),
+            state: ControlPlaneEffectExecutionState::NotStarted,
+            acknowledgement: None,
+            message: None,
+        };
+        let Some(claim) = claim else {
+            return Ok(status);
+        };
+        match claim.state {
+            crate::agent_task_lifecycle::ClaimState::Running => {
+                status.state = ControlPlaneEffectExecutionState::Running;
+            }
+            crate::agent_task_lifecycle::ClaimState::Failed => {
+                status.state = ControlPlaneEffectExecutionState::Failed;
+                status.message = Some("effect executor recorded a terminal failure".to_string());
+            }
+            crate::agent_task_lifecycle::ClaimState::Completed => match claim.result {
+                Some(result) => {
+                    match serde_json::from_value::<ControlPlaneActionAcknowledgement>(result) {
+                        Ok(acknowledgement) => {
+                            status.state =
+                                if acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
+                                    ControlPlaneEffectExecutionState::Failed
+                                } else {
+                                    ControlPlaneEffectExecutionState::Succeeded
+                                };
+                            status.acknowledgement = Some(acknowledgement);
+                        }
+                        Err(error) => {
+                            status.state = ControlPlaneEffectExecutionState::Unknown;
+                            status.message = Some(format!(
+                                "effect has malformed terminal acknowledgement: {error}"
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    status.state = ControlPlaneEffectExecutionState::Unknown;
+                    status.message =
+                        Some("effect completed without an acknowledgement".to_string());
+                }
+            },
+        }
+        Ok(status)
     }
 
     fn execute_action_with_delegates<F, R, P>(
@@ -1586,10 +1648,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
         F: FnOnce(
             &str,
             &ControlPlaneRetryParameters,
+            &ControlPlaneActionRequest,
         )
             -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
         R: FnOnce(
             &str,
+            &ControlPlaneActionRequest,
         ) -> homeboy_core::Result<
             crate::agent_task_service::AgentTaskRunResult<
                 crate::agent_task_schedule::AgentTaskAggregate,
@@ -1597,6 +1661,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
         >,
         P: FnOnce(
             &crate::agent_task_service::AgentTaskPromotionRequest,
+            &ControlPlaneActionRequest,
         )
             -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
     {
@@ -1634,7 +1699,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
         let operation_key = format!(
             "control-plane-action:{}:{}",
             action_name(request.action),
-            request.idempotency_key
+            request.effect_id.0
         );
         let intent = serde_json::to_value(request)
             .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
@@ -1898,7 +1963,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 )?;
                             parameters.new_run_id =
                                 Some(retry_action_run_id(&record, request, &parameters));
-                            match retry(&resolved, &parameters) {
+                            match retry(&resolved, &parameters, request) {
                                 Ok(retry) => {
                                     let outcome = if retry.created {
                                         ControlPlaneActionOutcome::Succeeded
@@ -1989,7 +2054,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                         ))
                                     },
                                 )?;
-                            match promote(&parameters) {
+                            match promote(&parameters, request) {
                                 Ok(report) => {
                                     let current = self
                                         .lookup
@@ -2105,7 +2170,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                         requested_id.as_str(),
                                     )?;
                                 }
-                                let result = resume(&resolved)?;
+                                let result = resume(&resolved, request)?;
                                 if needs_transport_recovery {
                                     crate::agent_task_service::reconcile_terminal_artifact_projection(
                                         requested_id.as_str(),
@@ -3434,9 +3499,9 @@ pub fn execute_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |resolved, parameters| default_retry(resolved, parameters),
-        |resolved| default_resume(resolved),
-        default_promote,
+        |resolved, parameters, _intent| default_retry(resolved, parameters),
+        |resolved, _intent| default_resume(resolved),
+        |promotion, _intent| default_promote(promotion),
     )
 }
 
@@ -3451,7 +3516,7 @@ where
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |resolved, parameters| {
+        |resolved, parameters, _intent| {
             crate::agent_task_service::retry_with_preflight(
                 resolved,
                 parameters.new_run_id.as_deref(),
@@ -3460,8 +3525,8 @@ where
                 &preflight,
             )
         },
-        |resolved| default_resume(resolved),
-        default_promote,
+        |resolved, _intent| default_resume(resolved),
+        |promotion, _intent| default_promote(promotion),
     )
 }
 
@@ -3473,9 +3538,9 @@ pub fn execute_resume_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |resolved, parameters| default_retry(resolved, parameters),
-        |resolved| crate::agent_task_service::resume(resolved.to_string(), executor),
-        default_promote,
+        |resolved, parameters, _intent| default_retry(resolved, parameters),
+        |resolved, _intent| crate::agent_task_service::resume(resolved.to_string(), executor),
+        |promotion, _intent| default_promote(promotion),
     )
 }
 
@@ -3487,9 +3552,9 @@ pub fn execute_promotion_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |resolved, parameters| default_retry(resolved, parameters),
-        |resolved| default_resume(resolved),
-        |promotion| {
+        |resolved, parameters, _intent| default_retry(resolved, parameters),
+        |resolved, _intent| default_resume(resolved),
+        |promotion, _intent| {
             crate::agent_task_service::execute_promotion_with_progress(promotion.clone(), progress)
         },
     )
@@ -3506,9 +3571,11 @@ where
     F: FnOnce(
         &str,
         &ControlPlaneRetryParameters,
+        &ControlPlaneActionRequest,
     ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
     R: FnOnce(
         &str,
+        &ControlPlaneActionRequest,
     ) -> homeboy_core::Result<
         crate::agent_task_service::AgentTaskRunResult<
             crate::agent_task_schedule::AgentTaskAggregate,
@@ -3516,6 +3583,7 @@ where
     >,
     P: FnOnce(
         &crate::agent_task_service::AgentTaskPromotionRequest,
+        &ControlPlaneActionRequest,
     ) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
 {
     let requested_id = RunId::new(run_id).map_err(|error| {
@@ -5208,6 +5276,17 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store))
             .execute_action(requested_id, request)
     }
+
+    fn effect_status(
+        &self,
+        requested_id: &RunId,
+        effect_id: &EffectId,
+    ) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store))
+            .effect_status(requested_id, effect_id)
+    }
 }
 
 /// Register the orchestration service as the HTTP control-plane provider.
@@ -5224,10 +5303,11 @@ mod tests {
         register_reference_in_store, review_failure_reasons, validate_event_scope,
         validate_external_event_append_request, LifecycleStoreLookup, OrchestrationService,
         RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
-        RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
+        RunSnapshotPage, ACTION_LEASE, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
-        claim_operation_with_intent_in_store, operation_claim_in_store, AgentTaskArtifactRef,
+        claim_operation_with_intent_in_store, complete_cook_operation_in_store,
+        fail_cook_operation_in_store, operation_claim_in_store, AgentTaskArtifactRef,
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
         ClaimOutcome, ClaimState,
     };
@@ -5237,13 +5317,13 @@ mod tests {
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
         ControlPlaneActionPayload, ControlPlaneActionRequest,
         ControlPlaneAdmissionRetryDisposition, ControlPlaneAttemptListRequest,
-        ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneErrorClass,
-        ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventSource,
-        ControlPlaneEvidenceRef, ControlPlaneMissionListRequest, ControlPlaneOperation,
-        ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneRunListRequest,
-        ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
-        ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EventCursor, EventId,
-        ExecutionId, MissionId, ReferenceId, RunCursor, RunId, TaskId,
+        ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneEffectExecutionState,
+        ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventAppendRequest,
+        ControlPlaneEventSource, ControlPlaneEvidenceRef, ControlPlaneMissionListRequest,
+        ControlPlaneOperation, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
+        ControlPlaneRunListRequest, ControlPlaneRunReviewRequest, ControlPlaneRunState,
+        ControlPlaneState, ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EffectId,
+        EventCursor, EventId, ExecutionId, MissionId, ReferenceId, RunCursor, RunId, TaskId,
         CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
         CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
         CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
@@ -6594,6 +6674,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-request-1".to_string()),
                 action: ControlPlaneAction::Cancel,
                 idempotency_key: "cancel-request-1".to_string(),
                 actor: "test".to_string(),
@@ -6693,6 +6774,7 @@ mod tests {
 
             let reconcile = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:reconcile-request-1".to_string()),
                 action: ControlPlaneAction::Reconcile,
                 idempotency_key: "reconcile-request-1".to_string(),
                 actor: "test".to_string(),
@@ -6739,6 +6821,120 @@ mod tests {
     }
 
     #[test]
+    fn effect_status_survives_restart_and_preserves_the_immutable_request() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:status-succeeded".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "status-succeeded".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "stop" }),
+                },
+                confirmed: true,
+            };
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            assert_eq!(
+                service
+                    .effect_status(&run, &request.effect_id)
+                    .expect("not started")
+                    .state,
+                ControlPlaneEffectExecutionState::NotStarted
+            );
+            let first = service
+                .execute_action(&run, &request)
+                .expect("first action");
+            drop(service);
+
+            let restarted = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let status = restarted
+                .effect_status(&run, &request.effect_id)
+                .expect("restarted status");
+            assert_eq!(status.state, ControlPlaneEffectExecutionState::Succeeded);
+            assert_eq!(status.acknowledgement, Some(first.clone()));
+            assert_eq!(
+                restarted
+                    .execute_action(&run, &request)
+                    .expect("duplicate replay"),
+                first
+            );
+            let persisted = store.read_record(AGENT_TASK_RUN).expect("persisted record");
+            assert_eq!(
+                persisted.metadata["cook_operation_claims"]
+                    .as_array()
+                    .expect("claim ledger")[0]["intent"],
+                serde_json::to_value(&request).expect("request intent")
+            );
+
+            for (effect_id, terminalizer, expected) in [
+                (
+                    "test:status-running",
+                    None,
+                    ControlPlaneEffectExecutionState::Running,
+                ),
+                (
+                    "test:status-failed",
+                    Some(json!({ "error": "failed" })),
+                    ControlPlaneEffectExecutionState::Failed,
+                ),
+                (
+                    "test:status-unknown",
+                    Some(json!({ "not": "an acknowledgement" })),
+                    ControlPlaneEffectExecutionState::Unknown,
+                ),
+            ] {
+                let mut pending = request.clone();
+                pending.effect_id = EffectId(effect_id.to_string());
+                pending.idempotency_key = effect_id.to_string();
+                let operation_key = format!("control-plane-action:cancel:{effect_id}");
+                assert_eq!(
+                    claim_operation_with_intent_in_store(
+                        &store,
+                        AGENT_TASK_RUN,
+                        &operation_key,
+                        ACTION_LEASE,
+                        &serde_json::to_value(&pending).expect("intent"),
+                    )
+                    .expect("claim"),
+                    ClaimOutcome::Acquired
+                );
+                if let Some(result) = terminalizer {
+                    if expected == ControlPlaneEffectExecutionState::Failed {
+                        fail_cook_operation_in_store(
+                            &store,
+                            AGENT_TASK_RUN,
+                            &operation_key,
+                            result,
+                        )
+                        .expect("failed terminal");
+                    } else {
+                        complete_cook_operation_in_store(
+                            &store,
+                            AGENT_TASK_RUN,
+                            &operation_key,
+                            result,
+                        )
+                        .expect("unknown terminal");
+                    }
+                }
+                assert_eq!(
+                    restarted
+                        .effect_status(&run, &pending.effect_id)
+                        .expect("effect status")
+                        .state,
+                    expected
+                );
+            }
+        });
+    }
+
+    #[test]
     fn accepted_cancel_returns_the_converged_resource_and_replays_without_waiting_again() {
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
@@ -6752,6 +6948,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-converges-1".to_string()),
                 action: ControlPlaneAction::Cancel,
                 idempotency_key: "cancel-converges-1".to_string(),
                 actor: "test".to_string(),
@@ -6793,6 +6990,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-cancel-1".to_string()),
                 action: ControlPlaneAction::Cancel,
                 idempotency_key: "interrupted-cancel-1".to_string(),
                 actor: "test".to_string(),
@@ -6816,9 +7014,9 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_, _| panic!("retry delegate must not run"),
-                    |_| panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted cancel");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
@@ -6861,6 +7059,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-resume-1".to_string()),
                 action: ControlPlaneAction::Resume,
                 idempotency_key: "interrupted-resume-1".to_string(),
                 actor: "test".to_string(),
@@ -6894,12 +7093,12 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_, _| panic!("retry delegate must not run"),
-                    |_| {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| {
                         effect_count.set(effect_count.get() + 1);
                         panic!("resume delegate must not run")
                     },
-                    |_| panic!("promote delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("terminal interrupted resume acknowledgement");
             assert_eq!(effect_count.get(), 1);
@@ -6949,6 +7148,7 @@ mod tests {
             let retry_run_id = "interrupted-retry-successor";
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-retry-1".to_string()),
                 action: ControlPlaneAction::Retry,
                 idempotency_key: "interrupted-retry-1".to_string(),
                 actor: "test".to_string(),
@@ -6972,9 +7172,9 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_, _| panic!("retry delegate must not run"),
-                    |_| panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted retry");
             assert_eq!(
@@ -7007,6 +7207,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-promote-1".to_string()),
                 action: ControlPlaneAction::Promote,
                 idempotency_key: "interrupted-promote-1".to_string(),
                 actor: "test".to_string(),
@@ -7052,9 +7253,9 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_, _| panic!("retry delegate must not run"),
-                    |_| panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted promotion");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
@@ -7093,6 +7294,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:explicit-reconcile-1".to_string()),
                 action: ControlPlaneAction::Reconcile,
                 idempotency_key: "explicit-reconcile-1".to_string(),
                 actor: "test".to_string(),
@@ -7132,6 +7334,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:maximum-idempotency-key".to_string()),
                 action: ControlPlaneAction::Reconcile,
                 idempotency_key: "k".repeat(128),
                 actor: "test".to_string(),
@@ -7174,6 +7377,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:resume-request-1".to_string()),
                 action: ControlPlaneAction::Resume,
                 idempotency_key: "resume-request-1".to_string(),
                 actor: "test".to_string(),
@@ -7185,18 +7389,20 @@ mod tests {
             let execute = || {
                 let executions = std::rc::Rc::clone(&executions);
                 let aggregate = aggregate.clone();
+                let expected_intent = request.clone();
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_, _| panic!("retry delegate must not run"),
-                    move |_| {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    move |_, intent| {
+                        assert_eq!(intent, &expected_intent);
                         executions.set(executions.get() + 1);
                         Ok(crate::agent_task_service::AgentTaskRunResult {
                             value: aggregate,
                             exit_code: 0,
                         })
                     },
-                    |_| panic!("promote delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
             };
 
@@ -7223,6 +7429,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:promote-request-1".to_string()),
                 action: ControlPlaneAction::Promote,
                 idempotency_key: "promote-request-1".to_string(),
                 actor: "test".to_string(),
@@ -7244,9 +7451,9 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &malformed,
-                    |_, _| panic!("retry delegate must not run"),
-                    |_| panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect_err("malformed parameters");
             assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
@@ -7256,9 +7463,9 @@ mod tests {
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_, _| panic!("retry delegate must not run"),
-                    |_| panic!("resume delegate must not run"),
-                    move |_| {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    move |_, _| {
                         executions.set(executions.get() + 1);
                         Err(homeboy_core::Error::internal_unexpected(
                             "promotion fixture failed",
@@ -7285,6 +7492,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:promote-handoff-request-1".to_string()),
                 action: ControlPlaneAction::Promote,
                 idempotency_key: "promote-request-1".to_string(),
                 actor: "test".to_string(),
@@ -7318,9 +7526,9 @@ mod tests {
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_, _| panic!("retry delegate must not run"),
-                    |_| panic!("resume delegate must not run"),
-                    move |_| {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    move |_, _| {
                         executions.set(executions.get() + 1);
                         Ok(report)
                     },

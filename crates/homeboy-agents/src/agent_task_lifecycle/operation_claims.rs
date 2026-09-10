@@ -354,6 +354,27 @@ pub fn operation_claim_in_store(
         .and_then(project_claim))
 }
 
+/// Locate an intent-bound operation by stable effect identity. This scans one
+/// run's bounded metadata ledger; absence is not evidence of success.
+pub fn operation_claim_for_effect_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    effect_id: &str,
+) -> Result<Option<OperationClaim>> {
+    let run_id = sanitize_run_id(run_id);
+    let record = lifecycle_store.read_record(&run_id)?;
+    Ok(record
+        .metadata
+        .get(OPERATION_CLAIMS_KEY)
+        .and_then(Value::as_array)
+        .and_then(|claims| {
+            claims.iter().find(|claim| {
+                claim.pointer("/intent/effect_id").and_then(Value::as_str) == Some(effect_id)
+            })
+        })
+        .and_then(project_claim))
+}
+
 /// Whether the `(run_id, operation_key)` operation has an in-flight owner that
 /// another controller pass must not re-enter. A live owner remains active past
 /// its nominal deadline; ownerless historical claims remain active only until

@@ -582,6 +582,7 @@ mod tests {
             },
             request: ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("effect-1".to_string()),
                 action: ControlPlaneAction::Resume,
                 idempotency_key: "key".to_string(),
                 actor: "test".to_string(),
@@ -679,6 +680,7 @@ mod tests {
             },
             request: ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("effect-race".to_string()),
                 action: ControlPlaneAction::Resume,
                 idempotency_key: "race".to_string(),
                 actor: "test".to_string(),

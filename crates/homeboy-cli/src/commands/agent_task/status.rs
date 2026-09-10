@@ -1288,6 +1288,9 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
                         schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                             .to_string(),
                         action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
+                        effect_id: homeboy_control_plane_contract::EffectId(format!(
+                            "cli:{resolved_run_id}:reconcile:{idempotency_key}"
+                        )),
                         idempotency_key,
                         actor: "homeboy-cli".to_string(),
                         expected_updated_at: None,
@@ -3535,6 +3538,10 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:cancel:{idempotency_key}",
+                args.run_id
+            )),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
@@ -3603,14 +3610,19 @@ mod cancel_exit_code_tests {
 }
 
 pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:quarantine:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
@@ -3632,14 +3644,19 @@ pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Rearm,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:rearm:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),

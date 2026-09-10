@@ -33,6 +33,7 @@ pub const CONTROL_PLANE_ACTION_FENCE_SCHEMA: &str = "homeboy/control-plane-actio
 pub const CONTROL_PLANE_EFFECT_LEASE_SCHEMA: &str = "homeboy/control-plane-effect-lease/v1";
 pub const CONTROL_PLANE_EFFECT_AUDIT_SCHEMA: &str = "homeboy/control-plane-effect-audit/v1";
 pub const CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA: &str = "homeboy/control-plane-effect-terminal/v1";
+pub const CONTROL_PLANE_EFFECT_STATUS_SCHEMA: &str = "homeboy/control-plane-effect-status/v1";
 
 /// Stable, caller-derived identity for one external effect. The same intent
 /// must retain this value across restart and reconciliation.
@@ -112,6 +113,30 @@ pub struct ControlPlaneEffectTerminal {
     pub completed_at: String,
     pub acknowledgement: ControlPlaneActionAcknowledgement,
     pub audit: ControlPlaneEffectAudit,
+}
+
+/// An authoritative effect observation. `Unknown` is intentionally distinct
+/// from success: callers must reconcile an ambiguous external crash window.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneEffectExecutionState {
+    NotStarted,
+    Running,
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectStatus {
+    pub schema: String,
+    pub effect_id: EffectId,
+    pub state: ControlPlaneEffectExecutionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acknowledgement: Option<ControlPlaneActionAcknowledgement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -211,6 +236,10 @@ pub struct ControlPlanePlacementUpdateParameters {
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneActionRequest {
     pub schema: String,
+    /// Stable identity supplied by the caller and retained in the immutable
+    /// intent. It is distinct from an idempotency key: status is addressed by
+    /// this effect identity after a worker restart.
+    pub effect_id: EffectId,
     pub action: ControlPlaneAction,
     pub idempotency_key: String,
     pub actor: String,
@@ -232,6 +261,7 @@ impl ControlPlaneActionRequest {
             ));
         }
         for (name, value) in [
+            ("effect_id", self.effect_id.0.as_str()),
             ("idempotency_key", self.idempotency_key.as_str()),
             ("actor", self.actor.as_str()),
         ] {
@@ -366,6 +396,7 @@ mod tests {
         let run = RunId::new("run-1").expect("run");
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:cancel:request-1".to_string()),
             action: ControlPlaneAction::Cancel,
             idempotency_key: "request-1".to_string(),
             actor: "test".to_string(),
@@ -429,6 +460,7 @@ mod tests {
     fn placement_update_requires_confirmation_and_explicit_local() {
         let mut request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:placement:placement-1".to_string()),
             action: ControlPlaneAction::PlacementUpdate,
             idempotency_key: "placement-1".to_string(),
             actor: "operator".to_string(),
@@ -450,6 +482,7 @@ mod tests {
     fn quarantine_and_route_retry_require_typed_payloads() {
         let mut quarantine = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:quarantine:quarantine-1".to_string()),
             action: ControlPlaneAction::Quarantine,
             idempotency_key: "quarantine-1".to_string(),
             actor: "operator".to_string(),
@@ -466,6 +499,7 @@ mod tests {
 
         let retry = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:retry:retry-1".to_string()),
             action: ControlPlaneAction::Retry,
             idempotency_key: "retry-1".to_string(),
             actor: "operator".to_string(),

@@ -8233,14 +8233,19 @@ pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
             None,
         ));
     }
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::PlacementUpdate,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:placement-update:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
@@ -8265,6 +8270,7 @@ pub(super) fn run_resume_with_executor(
     idempotency_key: Option<String>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
+    let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement =
         homeboy::agents::orchestration::execute_resume_action_from_current_environment(
             &run_id,
@@ -8272,8 +8278,10 @@ pub(super) fn run_resume_with_executor(
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
-                idempotency_key: idempotency_key
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "cli:{run_id}:resume:{idempotency_key}"
+                )),
+                idempotency_key,
                 actor: "homeboy-cli".to_string(),
                 expected_updated_at: None,
                 parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
@@ -8325,14 +8333,20 @@ where
         args.allow_provider_rotation,
         args.provider_rotations,
     );
+    let idempotency_key = args
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:retry:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {

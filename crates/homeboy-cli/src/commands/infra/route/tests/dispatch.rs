@@ -2633,6 +2633,9 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
             &homeboy_control_plane_contract::ControlPlaneActionRequest {
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "fixture:failed-run:retry:recover-terminal-admission".to_string(),
+                ),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
                 idempotency_key: "recover-terminal-admission".to_string(),
                 actor: "homeboy-cli".to_string(),

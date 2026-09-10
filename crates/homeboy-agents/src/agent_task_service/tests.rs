@@ -2274,6 +2274,9 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
         .expect("ownerless runner record");
         let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId(
+                "test:reconcile-runner-claim-1".to_string(),
+            ),
             action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
             idempotency_key: "reconcile-runner-claim-1".to_string(),
             actor: "test".to_string(),
@@ -2294,7 +2297,7 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
                 .state,
             AgentTaskRunState::Cancelled
         );
-        let operation_key = format!("control-plane-action:reconcile:{}", request.idempotency_key);
+        let operation_key = format!("control-plane-action:reconcile:{}", request.effect_id.0);
         assert_eq!(
             agent_task_lifecycle::operation_claim(run_id, &operation_key)
                 .expect("operation claim")
@@ -2317,6 +2320,7 @@ fn control_plane_action_rejects_idempotency_key_intent_mismatch() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("queued run");
         let mut request = homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId("test:same-key".to_string()),
             action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
             idempotency_key: "same-key".to_string(),
             actor: "test".to_string(),
@@ -2346,6 +2350,7 @@ fn exact_quarantine_action_rejects_a_cook_alias_without_mutating_its_attempt() {
         index_cook_attempt(cook_id, &attempt_id);
         let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId("test:alias-rejected".to_string()),
             action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
             idempotency_key: "alias-rejected".to_string(),
             actor: "test".to_string(),

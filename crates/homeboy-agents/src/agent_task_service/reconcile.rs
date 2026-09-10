@@ -233,6 +233,10 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         );
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "reconcile:{}",
+                run.run_id
+            )),
             action: ControlPlaneAction::Reconcile,
             idempotency_key,
             actor: "homeboy-fleet-reconciler".to_string(),
