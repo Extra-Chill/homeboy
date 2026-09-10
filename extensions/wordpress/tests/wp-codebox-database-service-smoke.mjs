@@ -155,6 +155,20 @@ try {
   assert.equal(nativeObservations[1].args.includes('--policy'), false, 'native mode preserves the WP Codebox default network policy');
   assert.equal('externalServices' in nativeObservations[1].recipe.inputs, false, 'native mode adds no external-service boundary');
 
+  const dockerInvocation = invoke({
+    database_type: 'mysql',
+    wp_codebox_database_service: { provider: 'docker', engine: 'mysql' },
+  });
+  assert.equal(dockerInvocation.result.status, 0, dockerInvocation.result.stderr);
+  const dockerObservations = await observations(dockerInvocation.observed);
+  assert.deepEqual(dockerObservations[0].options.services, [{
+    id: 'wordpress-database',
+    kind: 'mysql',
+    configuration: { provider: 'docker', engine: 'mysql' },
+    outputs: { host: 'DB_HOST', port: 'DB_PORT', username: 'DB_USER', password: 'DB_PASSWORD', database: 'DB_NAME' },
+  }]);
+  assert.equal('secretEnv' in dockerObservations[0].options, false, 'Docker provisioning accepts no ambient credentials');
+
   const missingNativeCapability = expectPreflightFailure({
     database_type: 'mysql',
     wp_codebox_database_service: { provider: 'native', engine: 'mariadb' },
@@ -316,14 +330,14 @@ try {
   const missingProvider = expectPreflightFailure({
     database_type: 'mysql',
     wp_codebox_database_service: { secret_env: { host: 'PROVIDER_ADMIN_HOST', username: 'PROVIDER_ADMIN_USER', password: 'PROVIDER_ADMIN_PASSWORD' } },
-  }, /provider must be external or native/, secretValues);
+  }, /provider must be docker, external, or native/, secretValues);
   assert.deepEqual(await observations(missingProvider.observed), [], 'missing provider fails before WP Codebox execution');
 
-  for (const provider of ['docker', 'unregistered', 42]) {
+  for (const provider of ['unregistered', 42]) {
     const rejectedProvider = expectPreflightFailure({
       ...configured,
       wp_codebox_database_service: { ...configured.wp_codebox_database_service, provider },
-    }, /provider must be external or native/, secretValues);
+    }, /provider must be docker, external, or native/, secretValues);
     assert.deepEqual(await observations(rejectedProvider.observed), [], 'unsupported providers fail before recipe build');
     // Check the diagnostic text, not the stack frames. Frames carry source line
     // numbers, and a numeric provider such as 42 is a substring of a line number

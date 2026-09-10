@@ -110,6 +110,28 @@ try {
   const mysqlDatabase = await resolvedOptions({ fixture: 'single-site', settings: { database_type: 'mysql' } });
   assert.equal(mysqlDatabase.databaseType, 'mysql', 'database_type maps to the WP Codebox databaseType contract');
 
+  const nativeCandidate = await resolvedOptions({
+    fixture: 'single-site',
+    settings: {
+      database_type: 'mdi-native',
+      wp_codebox_extra_plugins: [{
+        source: '/tmp/markdown-database-integration',
+        slug: 'markdown-database-integration',
+        sha256: '0123456789abcdef',
+        activate: false,
+        metadata: { revision: '548042c47efac724d13d25744765dbc65a851b20' },
+      }],
+    },
+  });
+  assert.equal(nativeCandidate.databaseType, 'mdi-native', 'native backend remains explicit');
+  assert.deepEqual(nativeCandidate.extra_plugins.at(-1), {
+    source: '/tmp/markdown-database-integration',
+    slug: 'markdown-database-integration',
+    sha256: '0123456789abcdef',
+    activate: false,
+    metadata: { revision: '548042c47efac724d13d25744765dbc65a851b20' },
+  }, 'declared native candidate is forwarded without an ambient source override');
+
   const defaultPhp = singleSite;
   assert.equal('phpVersion' in defaultPhp, false, 'omitted runtime PHP version preserves WP Codebox defaults');
 

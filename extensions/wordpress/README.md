@@ -941,6 +941,31 @@ Configure per-component in the component's homeboy/component config under
 | `fixture_profile` | object | `{}` | Product-agnostic fixture profile mapped to WP Codebox `inputs.siteSeeds` for sandbox setup before fuzz/coverage workloads run |
 | `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |
 
+`wp_codebox_extra_plugins` is also honored by the managed PHPUnit adapter. Each
+entry declares its own `source` and `slug`; the adapter never discovers a
+plugin from ambient paths. For `database_type: "mdi-native"`, one entry with
+slug `markdown-database-integration` selects the native drop-in source. It
+uses the regular plugin mount and records its optional `metadata.revision` in
+the generated recipe. Omitting that entry preserves WP Codebox's pinned native
+archive. Multiple entries with that slug and `loadAs: "mu-plugin"` are rejected
+by WP Codebox before runtime provisioning.
+
+Managed MySQL can use a disposable Docker service without caller credentials:
+
+```json
+{
+  "database_type": "mysql",
+  "wp_codebox_database_service": {
+    "provider": "docker",
+    "engine": "mysql"
+  }
+}
+```
+
+The Docker provider uses WP Codebox's managed service lifecycle; MySQL selects
+the `mysql:8.4` image, uses temporary storage, and emits readiness and teardown
+evidence with the test artifacts.
+
 ## Blueprint Validation
 
 Use `scripts/validation/validate-playground-blueprint.sh` to validate the same

@@ -123,7 +123,10 @@ const options = clean({
   databaseType: discoveryOnly ? 'sqlite' : settings.database_type,
   services: !discoveryOnly && databaseService ? [databaseService.service] : undefined,
   pluginSlug: slug,
-  extra_plugins: activationPlan.map(({ role, ...plugin }) => clean({ ...plugin, activate: true })),
+  extra_plugins: [
+    ...activationPlan.map(({ role, ...plugin }) => clean({ ...plugin, activate: true })),
+    ...canonicalExtraPlugins(settings.wp_codebox_extra_plugins),
+  ],
   dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
   selectedTestFile: discoveryOnly ? '' : selectedTestFile,
   changedTestFiles: discoveryOnly ? [] : changedTestFileScope.sandbox,
@@ -648,6 +651,20 @@ function phpunitChangedTestFiles() {
 function canonicalMounts(value) {
   return Array.isArray(value) ? value : [];
 }
+function canonicalExtraPlugins(value) {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('wp_codebox_extra_plugins must be an array');
+  }
+  return value.map((plugin, index) => {
+    if (!isObject(plugin) || typeof plugin.source !== 'string' || plugin.source.trim() === '' || typeof plugin.slug !== 'string' || plugin.slug.trim() === '') {
+      throw new Error(`wp_codebox_extra_plugins[${index}] requires non-empty source and slug`);
+    }
+    return clean(plugin);
+  });
+}
 function managedPreloadFiles(bootstrapMode, preloadFiles) {
   const configured = Array.isArray(preloadFiles) ? preloadFiles : [];
   return !discoveryOnly && bootstrapMode === 'managed' ? [wpCliBootstrapTarget, ...configured] : configured;
@@ -722,8 +739,8 @@ function resolveDatabaseService(configuration, environment) {
   if (configuration.database_type !== 'mysql') {
     throw new Error('wp_codebox_database_service requires database_type=mysql');
   }
-  if (!['external', 'native'].includes(value.provider)) {
-    throw new Error('wp_codebox_database_service.provider must be external or native');
+  if (!['docker', 'external', 'native'].includes(value.provider)) {
+    throw new Error('wp_codebox_database_service.provider must be docker, external, or native');
   }
   if (value.provider === 'native') {
     const nativeUnknownKeys = Object.keys(value).filter((key) => !['provider', 'engine'].includes(key));
@@ -742,6 +759,24 @@ function resolveDatabaseService(configuration, environment) {
       },
       secretEnv: [],
       requiredCapability: NATIVE_MARIADB_CAPABILITY,
+    };
+  }
+  if (value.provider === 'docker') {
+    const dockerUnknownKeys = Object.keys(value).filter((key) => !['provider', 'engine'].includes(key));
+    if (dockerUnknownKeys.length > 0) {
+      throw new Error(`wp_codebox_database_service docker provider contains unsupported fields: ${dockerUnknownKeys.join(', ')}`);
+    }
+    if (value.engine !== undefined && !['mysql', 'mariadb'].includes(value.engine)) {
+      throw new Error('wp_codebox_database_service docker provider requires engine=mysql or mariadb');
+    }
+    return {
+      service: {
+        id: 'wordpress-database',
+        kind: 'mysql',
+        configuration: { provider: 'docker', ...(value.engine ? { engine: value.engine } : {}) },
+        outputs: { host: 'DB_HOST', port: 'DB_PORT', username: 'DB_USER', password: 'DB_PASSWORD', database: 'DB_NAME' },
+      },
+      secretEnv: [],
     };
   }
   if (value.engine !== undefined && !['mysql', 'mariadb'].includes(value.engine)) {
