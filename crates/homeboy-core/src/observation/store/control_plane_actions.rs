@@ -173,30 +173,9 @@ impl ObservationStore {
                     None,
                 ));
             }
-            {
-                let eligible = projection
-                    .eligibility
-                    .get("actions")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|actions| {
-                        actions.iter().any(|entry| {
-                            entry.get("action")
-                                == serde_json::to_value(intent.request.action).ok().as_ref()
-                                && entry
-                                    .get("availability")
-                                    .and_then(serde_json::Value::as_str)
-                                    == Some("available")
-                        })
-                    });
-                if !eligible {
-                    return Err(Error::validation_invalid_argument(
-                        "action",
-                        "action is not eligible in the canonical resource projection",
-                        None,
-                        None,
-                    ));
-                }
-            }
+            // The domain adapter evaluates the typed eligibility payload while
+            // constructing `fence`. Core persists it but deliberately does not
+            // interpret product-specific action names or availability states.
             if let Some(existing) =
                 self.effect_status_by_idempotency(intent.resource.run.as_str(), idempotency_digest)?
             {

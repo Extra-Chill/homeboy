@@ -9,17 +9,19 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::{
     AttemptCursor, AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement,
-    ControlPlaneActionAvailability, ControlPlaneActionOutcome, ControlPlaneActionPayload,
-    ControlPlaneActionRequest, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
+    ControlPlaneActionAvailability, ControlPlaneActionFence, ControlPlaneActionIntent,
+    ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
+    ControlPlaneActionResource, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
     ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
-    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneEffectExecutionState,
-    ControlPlaneEffectStatus, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneEffectAudit,
+    ControlPlaneEffectExecutionState, ControlPlaneEffectState, ControlPlaneEffectStatus,
+    ControlPlaneEffectTerminal, ControlPlaneError, ControlPlaneErrorClass,
     ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEventSource,
     ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
     ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneRef, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
@@ -28,9 +30,11 @@ use homeboy_control_plane_contract::{
     ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
     ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor, ExecutionId,
     MissionCursor, MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_FENCE_SCHEMA,
+    CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
     CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EFFECT_STATUS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    CONTROL_PLANE_EFFECT_AUDIT_SCHEMA, CONTROL_PLANE_EFFECT_STATUS_SCHEMA,
+    CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
     CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
     CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
@@ -53,9 +57,9 @@ use std::time::{Duration, Instant};
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, claim_operation_with_intent_in_store,
     complete_cook_operation_in_store, lifecycle_action_eligibility, now_timestamp,
-    operation_claim_for_effect_in_store, operation_claim_in_store,
-    operation_lease_is_active_in_store, resolve_run_id_in_store, AgentTaskLifecycleStore,
-    AgentTaskRunRecord, AgentTaskRunState, CanonicalControlPlaneIdentities, ClaimOutcome,
+    operation_claim_in_store, operation_lease_is_active_in_store, resolve_run_id_in_store,
+    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+    CanonicalControlPlaneIdentities, ClaimOutcome,
 };
 use crate::agent_task_schedule::AgentTaskPlan;
 
@@ -1580,14 +1584,17 @@ impl OrchestrationService<LifecycleStoreLookup> {
     /// `not_started`; malformed terminal evidence is `unknown`, never success.
     pub fn effect_status(
         &self,
-        requested_id: &RunId,
+        _requested_id: &RunId,
         effect_id: &EffectId,
     ) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
-        let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
+        let observation = self
+            .lookup
+            .store
+            .open_observation_initialized()
             .map_err(map_lifecycle_error)?;
-        let claim =
-            operation_claim_for_effect_in_store(&self.lookup.store, &resolved, &effect_id.0)
-                .map_err(map_lifecycle_error)?;
+        let effect = observation
+            .control_plane_effect_status(effect_id)
+            .map_err(map_lifecycle_error)?;
         let mut status = ControlPlaneEffectStatus {
             schema: CONTROL_PLANE_EFFECT_STATUS_SCHEMA.to_string(),
             effect_id: effect_id.clone(),
@@ -1595,41 +1602,29 @@ impl OrchestrationService<LifecycleStoreLookup> {
             acknowledgement: None,
             message: None,
         };
-        let Some(claim) = claim else {
+        let Some(effect) = effect else {
             return Ok(status);
         };
-        match claim.state {
-            crate::agent_task_lifecycle::ClaimState::Running => {
+        match effect.state {
+            homeboy_control_plane_contract::ControlPlaneEffectState::Pending
+            | homeboy_control_plane_contract::ControlPlaneEffectState::Leased => {
                 status.state = ControlPlaneEffectExecutionState::Running;
             }
-            crate::agent_task_lifecycle::ClaimState::Failed => {
-                status.state = ControlPlaneEffectExecutionState::Failed;
-                status.message = Some("effect executor recorded a terminal failure".to_string());
-            }
-            crate::agent_task_lifecycle::ClaimState::Completed => match claim.result {
-                Some(result) => {
-                    match serde_json::from_value::<ControlPlaneActionAcknowledgement>(result) {
-                        Ok(acknowledgement) => {
-                            status.state =
-                                if acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
-                                    ControlPlaneEffectExecutionState::Failed
-                                } else {
-                                    ControlPlaneEffectExecutionState::Succeeded
-                                };
-                            status.acknowledgement = Some(acknowledgement);
-                        }
-                        Err(error) => {
-                            status.state = ControlPlaneEffectExecutionState::Unknown;
-                            status.message = Some(format!(
-                                "effect has malformed terminal acknowledgement: {error}"
-                            ));
-                        }
-                    }
+            homeboy_control_plane_contract::ControlPlaneEffectState::Terminal => match effect
+                .terminal
+            {
+                Some(terminal) => {
+                    status.state =
+                        if terminal.acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
+                            ControlPlaneEffectExecutionState::Failed
+                        } else {
+                            ControlPlaneEffectExecutionState::Succeeded
+                        };
+                    status.acknowledgement = Some(terminal.acknowledgement);
                 }
                 None => {
                     status.state = ControlPlaneEffectExecutionState::Unknown;
-                    status.message =
-                        Some("effect completed without an acknowledgement".to_string());
+                    status.message = Some("terminal effect has no acknowledgement".to_string());
                 }
             },
         }
@@ -1696,6 +1691,76 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .store
             .read_record(&resolved)
             .map_err(map_lifecycle_error)?;
+        // Admission is fenced by the projection committed with the lifecycle
+        // record. The filesystem record is now a compatibility read for the
+        // domain effect, never the authority deciding whether it may start.
+        let observation = self
+            .lookup
+            .store
+            .open_observation_initialized()
+            .map_err(map_lifecycle_error)?;
+        let accepted_at = now_timestamp();
+        let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+            serde_json::to_vec(request)
+                .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?
+                .as_slice(),
+        );
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: request.effect_id.clone(),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(
+                    RunId::new(&record.run_id)
+                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+                ),
+                run: RunId::new(&record.run_id)
+                    .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+                original_alias: (requested_id.as_str() != record.run_id)
+                    .then(|| requested_id.as_str().to_string()),
+            },
+            request: request.clone(),
+            request_digest,
+            accepted_at,
+        };
+        let version = record
+            .updated_at
+            .clone()
+            .unwrap_or_else(|| record.submitted_at.clone());
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: version,
+            eligible: action_unavailability(&record, request.action).is_none(),
+            reason: action_unavailability(&record, request.action),
+        };
+        let idempotency_digest =
+            homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
+        let admission = observation
+            .enqueue_control_plane_action_intent(&intent, &fence, &idempotency_digest)
+            .map_err(map_lifecycle_error)?;
+        let effect = match admission {
+            homeboy_core::observation::store::ControlPlaneEffectAdmission::Enqueued(effect)
+            | homeboy_core::observation::store::ControlPlaneEffectAdmission::Duplicate(effect) => {
+                effect
+            }
+        };
+        if effect.state == ControlPlaneEffectState::Terminal {
+            return effect
+                .terminal
+                .map(|terminal| terminal.acknowledgement)
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable("terminal action effect has no acknowledgement")
+                });
+        }
+        let lease = observation
+            .lease_control_plane_effect_by_id(
+                &request.effect_id,
+                &format!("agent-task:{}", std::process::id()),
+                &now_timestamp(),
+                &(Utc::now() + chrono::Duration::seconds(ACTION_LEASE.as_secs() as i64))
+                    .to_rfc3339(),
+            )
+            .map_err(map_lifecycle_error)?
+            .ok_or_else(|| ControlPlaneError::unavailable("action effect is already leased"))?;
         let operation_key = format!(
             "control-plane-action:{}:{}",
             action_name(request.action),
@@ -2230,6 +2295,25 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     })?,
                 )
                 .map_err(map_lifecycle_error)?;
+                observation
+                    .terminalize_control_plane_effect(
+                        &request.effect_id,
+                        lease.lease_fence,
+                        &ControlPlaneEffectTerminal {
+                            schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(),
+                            completed_at: result.completed_at.clone(),
+                            acknowledgement: result.clone(),
+                            audit: ControlPlaneEffectAudit {
+                                schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(),
+                                observed_at: now_timestamp(),
+                                evidence: serde_json::json!({
+                                    "recovery_disposition": "terminal_acknowledgement_persisted",
+                                    "operation_key": operation_key,
+                                }),
+                            },
+                        },
+                    )
+                    .map_err(map_lifecycle_error)?;
                 ensure_action_events_in_store(
                     &self.lookup.store,
                     &record,
