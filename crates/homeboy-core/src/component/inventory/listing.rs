@@ -1,4 +1,8 @@
-use crate::component::{discover_from_portable, portable::read_portable_config, Component};
+use crate::component::{
+    discover_from_portable,
+    portable::{infer_portable_component_id, read_portable_config},
+    Component,
+};
 use crate::error::{Error, Result};
 use crate::project;
 use std::collections::HashSet;
@@ -503,6 +507,10 @@ fn find_sibling_portable_component(parent: &Path, id: &str) -> Option<Component>
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
+            continue;
+        }
+        // Reading the manifest ID avoids Git enrichment for unrelated siblings.
+        if infer_portable_component_id(&path).ok().as_deref() != Some(id) {
             continue;
         }
         let Some(component) = discover_from_portable(&path) else {

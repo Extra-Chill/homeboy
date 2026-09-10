@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use homeboy_core::materialization_currency::{self, Currency};
@@ -887,15 +887,17 @@ fn write_runner_json(runner_id: &str, path: &str, value: &serde_json::Value) -> 
 pub(super) fn sync_lab_offload_rig_component_dependencies(
     runner_id: &str,
     args: &[String],
+    runner_environment: &HashMap<String, String>,
     primary_local_path: &str,
     primary_remote_path: &str,
     runner_workspace_root: Option<&str>,
     allow_dirty_lab_workspace: bool,
 ) -> Result<LabOffloadRigComponentSync> {
-    let dependencies = lab_offload_rig_component_dependencies(
+    let dependencies = lab_offload_rig_component_dependencies_with_runner_env(
         args,
         Some((primary_local_path, primary_remote_path)),
         runner_workspace_root,
+        runner_environment,
     )?;
     let selected_component_path =
         if is_bench_or_fuzz_rig_component_command(args) && !has_path_arg(args) {
@@ -1062,6 +1064,20 @@ pub(super) fn lab_offload_rig_component_dependencies(
     primary_workspace: Option<(&str, &str)>,
     runner_workspace_root: Option<&str>,
 ) -> Result<Vec<RigComponentDependency>> {
+    lab_offload_rig_component_dependencies_with_runner_env(
+        args,
+        primary_workspace,
+        runner_workspace_root,
+        &HashMap::new(),
+    )
+}
+
+fn lab_offload_rig_component_dependencies_with_runner_env(
+    args: &[String],
+    primary_workspace: Option<(&str, &str)>,
+    runner_workspace_root: Option<&str>,
+    runner_environment: &HashMap<String, String>,
+) -> Result<Vec<RigComponentDependency>> {
     let mut dependencies = Vec::new();
     let component_path_override = component_path_override(args);
     for rig_id in lab_offload_rig_ids(args) {
@@ -1089,6 +1105,26 @@ pub(super) fn lab_offload_rig_component_dependencies(
                     component_ref: Some(lab_stack.base.sha.clone()),
                     dependency_cache: None,
                     lab_stack: Some(lab_stack.clone()),
+                });
+                continue;
+            }
+            if let Some(remote_component_path) =
+                runner_component_path_override(runner_environment, &rig_id, component_id)
+            {
+                // Job-scoped paths belong to the selected runner. They are not
+                // controller checkouts and therefore require no materialization.
+                dependencies.push(RigComponentDependency {
+                    rig_id: rig_id.clone(),
+                    component_id: component_id.clone(),
+                    local_checkout_root: String::new(),
+                    declared_checkout_root: remote_component_path.clone(),
+                    remote_checkout_root: remote_component_path,
+                    required_subpath: None,
+                    remote_url: component.remote_url.clone(),
+                    pinned_ref: homeboy_rig::component_ref(component),
+                    component_ref: homeboy_rig::component_ref(component),
+                    dependency_cache: None,
+                    lab_stack: None,
                 });
                 continue;
             }
@@ -1181,6 +1217,19 @@ pub(super) fn lab_offload_rig_component_dependencies(
         }
     }
     Ok(dependencies)
+}
+
+fn runner_component_path_override(
+    environment: &HashMap<String, String>,
+    rig_id: &str,
+    component_id: &str,
+) -> Option<String> {
+    let name = homeboy_rig::expand::rig_component_path_override_env_name(rig_id, component_id);
+    environment
+        .get(&name)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn remote_checkout_root_for_lab_stack(
@@ -1380,7 +1429,8 @@ fn should_materialize_dependency(
     dependency: &RigComponentDependency,
     primary_remote_path: &str,
 ) -> bool {
-    dependency.remote_checkout_root != primary_remote_path
+    !dependency.local_checkout_root.is_empty()
+        && dependency.remote_checkout_root != primary_remote_path
 }
 
 fn required_component_subpath(
@@ -3137,6 +3187,52 @@ mod tests {
                 "/home/runner/Developer/_lab_workspaces/package-proof"
             );
             assert_eq!(dependencies[0].required_subpath, None);
+        });
+    }
+
+    #[test]
+    fn rig_check_keeps_job_scoped_component_paths_on_the_runner() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let rig_dir = home.path().join(".config/homeboy/rigs");
+            std::fs::create_dir_all(&rig_dir).expect("rig directory");
+            std::fs::write(
+                rig_dir.join("stripe-check.json"),
+                serde_json::json!({
+                    "id": "stripe-check",
+                    "components": {
+                        "stripe": { "component_id": "unavailable-registry-component" }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("rig spec");
+            let args = vec![
+                "homeboy".to_string(),
+                "rig".to_string(),
+                "check".to_string(),
+                "stripe-check".to_string(),
+            ];
+            let runner_path = "/home/runner/Developer/wc-stripe";
+            let environment = HashMap::from([(
+                "HOMEBOY_RIG_COMPONENT_PATH__STRIPE_CHECK__STRIPE".to_string(),
+                runner_path.to_string(),
+            )]);
+
+            let dependencies = lab_offload_rig_component_dependencies_with_runner_env(
+                &args,
+                Some(("/controller/source", "/home/runner/workspace")),
+                Some("/home/runner/Developer"),
+                &environment,
+            )
+            .expect("runner-owned component path");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(dependencies[0].remote_checkout_root, runner_path);
+            assert!(dependencies[0].local_checkout_root.is_empty());
+            assert!(!should_materialize_dependency(
+                &dependencies[0],
+                "/home/runner/workspace"
+            ));
         });
     }
 

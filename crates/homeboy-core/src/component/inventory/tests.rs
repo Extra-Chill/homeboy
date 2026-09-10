@@ -379,6 +379,37 @@ fn targeted_lookup_skips_stale_registration_and_finds_matching_sibling() {
 }
 
 #[test]
+fn targeted_stale_lookup_hydrates_only_the_matching_sibling() {
+    let dir = temp_home_dir();
+    let workspace = dir.path().join("workspace");
+    let stale_path = workspace.join("old-plugin");
+    let replacement = workspace.join("replacement");
+    let unrelated = workspace.join("unrelated");
+    fs::create_dir_all(&replacement).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    write_portable_id(&replacement, "old-plugin");
+    // Discovery would enrich this manifest with Git remote detection.
+    write_portable_id(&unrelated, "unrelated-plugin");
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("old-plugin.json"),
+        serde_json::json!({ "local_path": stale_path }).to_string(),
+    )
+    .unwrap();
+    crate::component::portable::take_discovery_paths_for_test();
+
+    let component = registered_by_id("old-plugin")
+        .unwrap()
+        .expect("sibling portable replacement");
+    let discovery_paths = crate::component::portable::take_discovery_paths_for_test();
+
+    assert_eq!(component.local_path, replacement.to_string_lossy());
+    assert_eq!(discovery_paths, vec![replacement]);
+}
+
+#[test]
 fn targeted_lookup_ignores_stale_registration_without_a_matching_sibling() {
     let dir = temp_home_dir();
     let workspace = dir.path().join("workspace");

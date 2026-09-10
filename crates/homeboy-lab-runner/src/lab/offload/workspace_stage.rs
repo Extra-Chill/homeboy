@@ -523,6 +523,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
         &changed_since_preflight.args,
+        &request.job_overrides.env,
         &synced.local_path,
         &remote_cwd,
         runner_workspace_root,
