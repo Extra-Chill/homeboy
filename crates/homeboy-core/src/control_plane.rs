@@ -29,6 +29,21 @@ use homeboy_control_plane_contract::{
 use crate::observation::store::ControlPlaneEffectAdmission;
 use crate::observation::{ControlPlaneResourceProjection, ObservationStore, RunRecord};
 
+/// Canonical public reconciliation service for an ambiguous deployment-provider
+/// effect. Transport adapters call this rather than owning a second recovery
+/// protocol or directly mutating the SQLite outbox.
+pub fn reconcile_deployment_provider_effect(
+    request: &homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest,
+) -> homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileResponse {
+    let api = crate::extension::deployment_api::DeploymentProviderApi::discover(
+        &homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderInventoryRequest {
+            schema: homeboy_extension_contract::api::v1::EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_extension_contract::api::v1::EXTENSION_API_V1,
+        },
+    );
+    api.reconcile_api(request)
+}
+
 /// Runtime-neutral result returned by a domain-owned action implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlPlaneActionDelegateResult {

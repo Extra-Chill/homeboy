@@ -2365,6 +2365,17 @@ where
                 Err(error) => remote_runner::auth_or_bad_request(error),
             }
         }
+        ("POST", "/v1/control-plane/provider-effects/reconcile") => {
+            match authorize_control_plane_write(body, &broker_auth).and_then(|body| {
+                let request = serde_json::from_value::<homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest>(
+                    body.ok_or_else(|| Error::validation_invalid_argument("body", "provider-effect reconciliation requires a JSON request body", None, None))?,
+                ).map_err(|error| Error::validation_invalid_argument("body", error.to_string(), None, None))?;
+                Ok(crate::control_plane::reconcile_deployment_provider_effect(&request))
+            }) {
+                Ok(response) => daemon_endpoint_response("control_plane.provider_effects.reconcile", serde_json::to_value(response).unwrap_or(serde_json::Value::Null)),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
         ("POST", path) if is_control_plane_reference_registration(path) => {
             match authorize_control_plane_write(body, &broker_auth) {
                 Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
