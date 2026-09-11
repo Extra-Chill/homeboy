@@ -103,6 +103,7 @@ pub(super) fn audit_internal(
 
     if !plan.requires_discovery() {
         let detector_started = std::time::Instant::now();
+        let detector_phase_children = timing.spans.len();
         let result = audit_root_only(
             component_id,
             source_path,
@@ -113,6 +114,7 @@ pub(super) fn audit_internal(
             &mut timing,
         );
         timing.push_ok("detectors", detector_started.elapsed());
+        timing.warn_unattributed_phase_time("detectors", detector_phase_children);
         timing.log_detector_summary();
         return Ok(AuditWithAnalysis {
             result,
@@ -244,40 +246,66 @@ pub(super) fn audit_internal(
     // Phase 4: Build findings
     let mut all_findings = findings::build_findings(&check_results);
     let detectors_started = std::time::Instant::now();
+    // Everything recorded from here until the `detectors` span closes is a
+    // child of the phase, which is what lets the attribution self-check at the
+    // phase's end measure the gap without a hand-maintained span-id list
+    // (#14566).
+    let detector_phase_children = timing.spans.len();
 
     // Phase 4c: Duplication detection (identical function bodies across files)
     //
     // `all_fingerprints` is the CONVENTION corpus: index files removed and
     // single-file groups dropped. Convention, duplication, and dead-code
     // detectors need exactly that shape.
+    let corpus_started = std::time::Instant::now();
     let all_fingerprints: Vec<&fingerprint::FileFingerprint> = discovery
         .groups
         .iter()
         .flat_map(|(_, _, fps)| fps.iter())
         .collect();
+    timing.push_ok("corpus.convention", corpus_started.elapsed());
 
     // `policy_fingerprints` is the SOURCE-POLICY corpus: every extension-claimed
     // source file, index files included, no group-size filter (#10558). Path
     // scoping is validated against it too, so a configured `include_path_contains`
     // is checked against the files policies can actually reach.
+    let corpus_started = std::time::Instant::now();
     let policy_fingerprints: Vec<&fingerprint::FileFingerprint> =
         discovery.policy_fingerprints.iter().collect();
+    timing.push_ok("corpus.policy", corpus_started.elapsed());
 
+    let validate_paths_started = std::time::Instant::now();
     source_policy::validate_configured_paths(&policy_fingerprints, &audit_config)?;
+    timing.push_ok(
+        "source_policy.validate_paths",
+        validate_paths_started.elapsed(),
+    );
 
     if plan.detector_enabled("core_boundary_leaks") {
         let rules = audit_config.core_boundary_leaks.to_source_policy_rules();
+        let validate_roots_started = std::time::Instant::now();
         source_policy::validate_source_roots(&policy_fingerprints, &rules)?;
+        timing.push_ok(
+            "source_policy.validate_roots.core_boundary_leaks",
+            validate_roots_started.elapsed(),
+        );
     }
     if plan.detector_enabled("source_policy") {
+        let validate_roots_started = std::time::Instant::now();
         source_policy::validate_source_roots(&policy_fingerprints, &audit_config.source_policies)?;
+        timing.push_ok(
+            "source_policy.validate_roots.source_policy",
+            validate_roots_started.elapsed(),
+        );
     }
 
     // Build convention method set ONCE — used by duplication, near-duplicate, and parallel detectors.
     // Convention-expected methods are excluded from duplication/parallel findings because identical
     // or similar implementations across convention-following files are correct behavior.
+    let method_set_started = std::time::Instant::now();
     let convention_methods =
         build_convention_method_set(&discovered_conventions, &all_fingerprints);
+    timing.push_ok("conventions.method_set", method_set_started.elapsed());
 
     // Phase 4b2: In scoped (--changed-since) mode, compute the touched-file scope
     // ONCE up front so per-file detectors only walk the fingerprints they could
@@ -370,6 +398,7 @@ pub(super) fn audit_internal(
     // Source policies get the same changed-scope narrowing, applied to THEIR
     // corpus. Reusing the already-computed `scope_files` set keeps the two
     // corpora scoped by one identical rule.
+    let scope_policy_started = std::time::Instant::now();
     let scoped_policy_fingerprints: Option<Vec<&fingerprint::FileFingerprint>> =
         scoped_fingerprints.as_ref().map(|(scope_files, _)| {
             policy_fingerprints
@@ -382,17 +411,32 @@ pub(super) fn audit_internal(
                 })
                 .collect()
         });
+    timing.push_ok("scope.policy_fingerprints", scope_policy_started.elapsed());
     let policy_scan_fingerprints: &[&fingerprint::FileFingerprint] = scoped_policy_fingerprints
         .as_deref()
         .unwrap_or(policy_fingerprints.as_slice());
 
+    // Setup work that used to run silently inside the phase (#14566): the
+    // dead-code reference walk fingerprints every external reference tree, and
+    // the test-quality walk classifies the whole repository's test files. Both
+    // are serial, both are potentially expensive, and neither was attributable
+    // before.
     let dead_code_references = dead_code_references.or_else(|| {
-        plan.detector_enabled("dead_code")
-            .then(|| DeadCodeReferenceAnalysis::build(root, reference_paths))
+        plan.detector_enabled("dead_code").then(|| {
+            let references_started = std::time::Instant::now();
+            let analysis = DeadCodeReferenceAnalysis::build(root, reference_paths);
+            timing.push_ok("dead_code.references", references_started.elapsed());
+            analysis
+        })
     });
     let test_quality_findings = (plan.detector_enabled("test_coverage")
         || plan.detector_enabled("test_topology"))
-    .then(|| crate::test_quality::run(root));
+    .then(|| {
+        let test_quality_started = std::time::Instant::now();
+        let findings = crate::test_quality::run(root);
+        timing.push_ok("test_quality.walk", test_quality_started.elapsed());
+        findings
+    });
     let detector_context = DetectorRunContext {
         root,
         component_id,
@@ -519,7 +563,9 @@ pub(super) fn audit_internal(
         all_findings.extend(parallel_findings);
     }
 
+    let merge_started = std::time::Instant::now();
     merge_descriptor_outcomes(&mut timing, &mut all_findings, descriptor_outcomes);
+    timing.push_ok("merge.descriptors", merge_started.elapsed());
 
     // `artifact_portability` stays hand-sequenced: it logs scan statistics (runs,
     // artifacts, metadata fields) even when it produces no findings.
@@ -545,6 +591,7 @@ pub(super) fn audit_internal(
         all_findings.extend(artifact_portability_findings);
     }
     timing.push_ok("detectors", detectors_started.elapsed());
+    timing.warn_unattributed_phase_time("detectors", detector_phase_children);
     timing.log_detector_summary();
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,

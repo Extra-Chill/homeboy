@@ -10,20 +10,22 @@ use super::super::cook_adoption::{
 use super::super::cook_baseline::git_output;
 use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
-    canonical_cook_patch_artifact_id_in_store, canonical_cook_recovery_run_id,
-    cook_candidate_base_sha, cook_finalization_options, cook_finalization_options_with_stores,
-    cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
-    finalize_cook_pr_with_backend_with_stores, finalize_or_load_cook_pr_with_backend,
-    finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
-    moving_base_recovery_for_run, moving_base_recovery_for_run_with_stores,
-    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    persist_manual_finalization_intent, persist_manual_finalization_receipt,
-    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
-    preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    replacement_gate_execution_started, selected_candidate_task_id_in_store,
-    verify_replacement_gates, CookReportInput, MovingBaseCookRecovery,
+    bind_report_to_stores, canonical_cook_patch_artifact_id_in_store,
+    canonical_cook_recovery_run_id, cook_candidate_base_sha, cook_finalization_options,
+    cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
+    finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
+    finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
+    mark_replacement_gate_execution_started, moving_base_recovery_for_run,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
+    moving_base_recovery_from_promotion_in_store, moving_base_recovery_report,
+    next_moving_base_recovery, persist_manual_finalization_intent,
+    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
+    persisted_promotion_for_attempt_in_store, preflight_cook_promotion_in_store,
+    prepare_manual_finalization_identity, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, replacement_gate_execution_started,
+    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -38,6 +40,7 @@ use crate::agent_task_finalization::{
     AgentTaskPrRef, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
     RealAgentTaskPrFinalizationBackend,
 };
+use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
 use crate::agent_task_scheduler::{
     AgentTaskAggregateStatus, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
@@ -802,9 +805,43 @@ fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
 
 #[test]
 fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
-    let mut plan = compile_options("timeout-report").identity.initial_plan;
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let options = compile_options("timeout-report");
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist timeout recipe");
+    let mut plan = options.identity.initial_plan.clone();
     plan.options.timeout_ms = Some(1_200_000);
     plan.tasks[0].limits.timeout_ms = Some(1_200_000);
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "timeout-run", |_| Ok(serde_json::json!({})))
+        .expect("persist timeout run");
+    lifecycle_store
+        .record_cook_attempt("timeout-report", 1, "timeout-run")
+        .expect("index timeout run");
+    lifecycle_store
+        .mutate_record("timeout-run", |record| {
+            let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "fixture".to_string(),
+                workspace: "fixture".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            };
+            record.metadata["execution_placement_decision"] = serde_json::to_value(
+                homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                    "fixture",
+                    "v1",
+                    identity,
+                    homeboy_lab_runner_contract::Placement::Local,
+                ),
+            )
+            .unwrap();
+            true
+        })
+        .expect("persist rooted placement");
     let mut aggregate = review_form_aggregate(&plan);
     aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
@@ -854,11 +891,13 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
                 legal_actions: Vec::new(),
                 next_actions: Vec::new(),
             }),
+            report_stores: None,
         },
         exit_code: 1,
     };
 
     make_provider_timeout_actionable(
+        Some(&lifecycle_store),
         &mut report,
         &aggregate,
         &plan,
@@ -879,12 +918,210 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     let context = report.value.failure_context.expect("failure context");
     assert_eq!(context.reason_code, "provider_timeout");
     assert_eq!(
-        context.diagnostic.unwrap()["data"]["remaining_provider_executions"],
+        context.diagnostic.as_ref().unwrap()["data"]["remaining_provider_executions"],
         1
     );
     assert_eq!(
         context.legal_actions[0].command,
-        "homeboy agent-task cook-continue timeout-run --timeout-ms 2400000"
+        "homeboy --placement local agent-task cook-continue timeout-run --timeout-ms 2400000"
+    );
+
+    report.value.failure_context = Some(context);
+    bind_report_to_stores(&mut report.value, &recipe_store, &lifecycle_store, true);
+    let rebound = report
+        .value
+        .failure_context
+        .expect("rebound failure context");
+    assert_eq!(rebound.reason_code, "provider_timeout");
+    assert_eq!(
+        rebound.diagnostic.expect("timeout diagnostic")["class"],
+        "agent_task.provider_timeout"
+    );
+    assert_eq!(
+        rebound.legal_actions[0].command,
+        "homeboy --placement local agent-task cook-continue timeout-run --timeout-ms 2400000"
+    );
+}
+
+#[test]
+fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
+    let plan = compile_options("startup-without-output-report")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    aggregate.outcomes[0].diagnostics = vec![
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_timeout".to_string(),
+            message: "provider exceeded timeout_ms=1200000".to_string(),
+            data: serde_json::json!({ "timeout_ms": 1_200_000 }),
+        },
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_rotation_exhausted".to_string(),
+            message: "an earlier provider rotation exhausted".to_string(),
+            data: serde_json::json!({}),
+        },
+    ];
+    let mut startup_outcome = aggregate.outcomes[0].clone();
+    startup_outcome.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    startup_outcome.failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    startup_outcome.diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "provider": "generic-provider",
+            "deadline": "liveness",
+            "liveness_timeout_ms": 300_000,
+            "timeout_ms": 1_230_000,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    aggregate.outcomes.push(startup_outcome);
+    let mut report = cook_report(CookReportInput {
+        cook_id: "startup-without-output-report".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: None,
+        exit_code: 1,
+        invocation_latest_run_id: Some("startup-without-output-run"),
+    });
+    report.value.failure_context = Some(AgentTaskCookFailureContext {
+        cook_id: "startup-without-output-report".to_string(),
+        latest_run_id: "startup-without-output-run".to_string(),
+        selected_run_id: None,
+        selected_task_id: None,
+        selected_artifact_id: None,
+        promotion_provenance: None,
+        durable_recipe_ref: "homeboy://agent-task/cooks/startup-without-output-report/recipe"
+            .to_string(),
+        lifecycle_state: "Failed".to_string(),
+        phase: "provider".to_string(),
+        reason_code: "failed".to_string(),
+        diagnostic: None,
+        continuation_admission: None,
+        blocking_claim: None,
+        provider_budget_consumed: true,
+        provider_executions_consumed: 1,
+        recovery_legal: false,
+        recovery_reason: "generic".to_string(),
+        legal_actions: Vec::new(),
+        next_actions: Vec::new(),
+    });
+
+    make_provider_timeout_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        &plan,
+        "startup-without-output-run",
+        Some(AgentTaskExecutionBudget::new(1, 1, 0)),
+        false,
+    );
+    make_provider_rotation_actionable(None, &mut report, &aggregate, "startup-without-output-run");
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "startup-without-output-run",
+    );
+
+    assert_eq!(report.value.status, "provider_failure");
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_startup_without_output")
+    );
+    assert_ne!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_timeout")
+    );
+    let context = report
+        .value
+        .failure_context
+        .expect("startup diagnostic context");
+    assert_eq!(
+        context.diagnostic.expect("diagnostic")["data"]["timeout_ms"],
+        1_230_000
+    );
+    assert_eq!(
+        context
+            .legal_actions
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect::<Vec<_>>(),
+        vec!["status", "diagnose"]
+    );
+    assert!(context
+        .legal_actions
+        .iter()
+        .all(|action| !action.command.contains("--timeout-ms")));
+}
+
+#[test]
+fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure() {
+    let plan = compile_options("later-terminal-failure")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "deadline": "liveness",
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    let mut later_failure = aggregate.outcomes[0].clone();
+    later_failure.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    later_failure.failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
+    later_failure.diagnostics.clear();
+    aggregate.outcomes.push(later_failure);
+    let mut report = cook_report(CookReportInput {
+        cook_id: "later-terminal-failure".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: Some("later provider execution failed".to_string()),
+        exit_code: 1,
+        invocation_latest_run_id: Some("later-terminal-failure-run"),
+    });
+    report.value.terminal_phase = Some("provider".to_string());
+    report.value.terminal_failure_classification = Some("provider_execution_failed".to_string());
+
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "later-terminal-failure-run",
+    );
+
+    assert_eq!(report.value.terminal_phase.as_deref(), Some("provider"));
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_execution_failed")
+    );
+    assert_eq!(
+        report.value.stop_reason.as_deref(),
+        Some("later provider execution failed")
     );
 }
 
@@ -973,11 +1210,12 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
                 next_actions: Vec::new(),
                 legal_actions: Vec::new(),
             }),
+            report_stores: None,
         },
         exit_code: 1,
     };
 
-    make_provider_rotation_actionable(&mut report, &aggregate, "rotation-run");
+    make_provider_rotation_actionable(None, &mut report, &aggregate, "rotation-run");
 
     assert_eq!(
         report.value.terminal_failure_classification.as_deref(),
@@ -1119,11 +1357,13 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
                 legal_actions: Vec::new(),
                 next_actions: Vec::new(),
             }),
+            report_stores: None,
         },
         exit_code: 1,
     };
 
     make_provider_timeout_actionable(
+        None,
         &mut report,
         &aggregate,
         &plan,
@@ -3217,6 +3457,17 @@ fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
         })
         .unwrap();
 
+    let rooted = moving_base_recovery_from_promotion_in_store(
+        &left_lifecycle_store,
+        cook_id,
+        run_id,
+        promotion(run_id),
+    );
+    assert_eq!(
+        rooted.continuation,
+        format!("homeboy --placement local agent-task cook-continue {run_id}")
+    );
+
     let left =
         moving_base_recovery_for_run_with_stores(&left_recipe_store, &left_lifecycle_store, run_id)
             .unwrap()
@@ -4978,11 +5229,10 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
                 .success()
         };
         assert!(!destination_has_observed_base());
-        // Shallow and single-branch checkouts may not retain this local ref. The
-        // admission check must still resolve the authoritative origin base.
-        git(
-            &destination,
-            &["update-ref", "-d", "refs/remotes/origin/main"],
+        let stale_tracking_base = git(&destination, &["rev-parse", "origin/main"]);
+        assert_ne!(
+            stale_tracking_base, observed_base,
+            "the local origin tracking ref remains stale while the remote advances"
         );
 
         let preparation = prepare_cook_workspace_base(&destination, "main")
@@ -5114,6 +5364,18 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             .unwrap_or_default()
             .contains("--ff-only")));
     });
+}
+
+#[test]
+fn retryable_preview_base_resolution_is_deferred_not_admitted() {
+    let error = Error::internal_unexpected("authoritative remote unavailable").with_retryable(true);
+    assert!(tolerate_retryable_cook_base_resolution::<()>(Err(error))
+        .expect("retryable remote probe is deferred")
+        .is_none());
+    let preparation = deferred_cook_base_preparation("main");
+    assert_eq!(preparation.base_sha, None);
+    assert_eq!(preparation.provenance, "base_unresolved");
+    assert_eq!(preparation.remote_freshness, "deferred");
 }
 
 #[test]
@@ -5516,15 +5778,21 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         options.workspace.source_worktree_path = Some(target.clone());
         options.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
             serde_json::json!({ "kind": "explicit_cwd" });
+        let lifecycle_store = test_lifecycle_store();
         validate_cook_workspace(&options).expect("clean explicit CWD has a valid identity");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("clean explicit CWD is admitted before its first provider attempt");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("clean explicit CWD is admitted before its first provider attempt");
 
         std::fs::write(target.join("candidate.txt"), "provider change\n")
             .expect("write candidate change");
         validate_cook_workspace(&options)
             .expect("retry identity validation retains provider candidate changes");
         let error = admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
             &options,
             &options.identity.initial_run_id,
         )
@@ -5543,8 +5811,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
             &options.identity.initial_run_id,
         )
         .expect("index zero-execution attempt");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect_err("a retry after a zero-execution lifecycle failure must reject user drift");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect_err("a retry after a zero-execution lifecycle failure must reject user drift");
 
         std::fs::remove_file(target.join("candidate.txt")).expect("remove pre-provider drift");
         let evidence = target.join(".homeboy/evidence/input/context.txt");
@@ -5554,8 +5826,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         options.identity.initial_plan.tasks[0].executor.config = serde_json::json!({
             "evidence_inputs": [{ "path": evidence }]
         });
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("the durable projected evidence path is not user drift");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("the durable projected evidence path is not user drift");
 
         agent_task_lifecycle::record_metadata_value_in_store(
             &test_lifecycle_store(),
@@ -5566,8 +5842,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         .expect("record provider execution boundary");
         std::fs::write(target.join("candidate.txt"), "provider change\n")
             .expect("write provider candidate");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("candidate changes remain admissible after a durable provider execution");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("candidate changes remain admissible after a durable provider execution");
 
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
             record.metadata["provider_executions_consumed"] = serde_json::Value::Null;
@@ -5576,8 +5856,12 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
             }]);
         })
         .expect("persist a historical provider execution ledger without its counter");
-        admit_explicit_cook_workspace_before_provider(&options, &options.identity.initial_run_id)
-            .expect("historical provider ledger keeps candidate changes admissible");
+        admit_explicit_cook_workspace_before_provider(
+            &lifecycle_store,
+            &options,
+            &options.identity.initial_run_id,
+        )
+        .expect("historical provider ledger keeps candidate changes admissible");
     });
 }
 
@@ -7695,7 +7979,7 @@ fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
             .expect("mark active Cook");
         }
 
-        super::record_active_cook_worktree_warning(&options)
+        super::record_active_cook_worktree_warning(&test_lifecycle_store(), &options)
             .expect("active worktree warning must not block Cook");
 
         let current = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
@@ -9156,6 +9440,11 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                     run_id.to_string()
                 ),
                 (
+                    "workspace_provider_canonicalization".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
                     "workspace_base_capture".to_string(),
                     cook_id.to_string(),
                     run_id.to_string()
@@ -9315,6 +9604,84 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
         assert!(
             agent_task_lifecycle::retry(cook_id, Some("cook-durable-identity-first-retry")).is_ok()
         );
+    });
+}
+
+#[test]
+fn cook_persists_identity_before_fallible_workspace_canonicalization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let cook_id = "cook-canonicalization-admission";
+        let run_id = "cook-canonicalization-admission-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.workspace.source_worktree_path = Some(workspace.path().join("missing"));
+
+        let first = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("canonicalization failure has a durable Cook report");
+        assert_eq!(first.value.status, "pre_execution_failure");
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(cook_id)
+                .expect("Cook alias resolves after canonicalization failure")
+                .run_id,
+            run_id
+        );
+        let record = agent_task_lifecycle::reconcile_status(run_id)
+            .expect("canonicalization failure persists its attempt");
+        assert_eq!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+        assert_eq!(
+            record.metadata["cook_progress"]["phase"],
+            serde_json::json!("workspace_provider_canonicalization")
+        );
+
+        let replay = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("replay returns the same durable Cook failure");
+        assert_eq!(replay.value.status, first.value.status);
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(cook_id)
+                .expect("replay preserves Cook alias")
+                .run_id,
+            run_id
+        );
+    });
+}
+
+#[test]
+fn replayed_materialized_attempt_terminalizes_when_canonicalization_fails() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let cook_id = "cook-replayed-canonicalization-admission";
+        let run_id = "cook-replayed-canonicalization-admission-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.workspace.source_worktree_path = Some(workspace.path().join("missing"));
+
+        // Simulate interruption after materialization but before the startup
+        // canonicalization phase. Replay must not leave this queued forever.
+        persist_initial_recipe(&options).expect("persist recipe before interruption");
+        let recipe_store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        let lifecycle_store = test_lifecycle_store();
+        recover_recipe_attempt_with_stores(&recipe_store, &lifecycle_store, run_id)
+            .expect("materialize interrupted attempt");
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("queued replay record")
+                .state,
+            AgentTaskRunState::Queued
+        );
+
+        let replay = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("replay returns durable canonicalization failure");
+        assert_eq!(replay.value.status, "pre_execution_failure");
+        let record = lifecycle_store
+            .read_record(run_id)
+            .expect("terminal replay record");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert!(record.metadata.get("pre_execution_failure").is_some());
     });
 }
 
@@ -13239,7 +13606,10 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
         let failed_recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
         assert_eq!(failed_recipe.attempts.len(), 2);
         let failed_run_id = failed_recipe.attempts[1].run_id.clone();
-        assert!(retryable_provider_discovery_failure(&failed_run_id));
+        assert!(retryable_provider_discovery_failure_with_store(
+            &test_lifecycle_store(),
+            &failed_run_id,
+        ));
         let continuation_plan = agent_task_lifecycle::load_plan(&failed_run_id)
             .expect("provider replay persists its baseline-bound continuation plan");
         let baseline_root = continuation_plan.tasks[0]
@@ -15278,29 +15648,45 @@ fn tracked_promotion_continuation_options(
 }
 
 fn record_tracked_promotion_continuation(options: &CookRequest, target: &std::path::Path) {
-    if !CookRecipeStore::from_current_data_root()
-        .unwrap()
-        .recipe_exists(&options.identity.cook_id)
-    {
-        persist_initial_recipe(options).unwrap();
+    let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+    let lifecycle_store = test_lifecycle_store();
+    record_tracked_promotion_continuation_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        options,
+        target,
+    );
+}
+
+fn record_tracked_promotion_continuation_in_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+    target: &std::path::Path,
+) {
+    if !recipe_store.recipe_exists(&options.identity.cook_id) {
+        recipe_store.persist_initial_recipe(options).unwrap();
     }
-    agent_task_lifecycle::submit_plan(
+    submit_plan_in_test_store(
+        lifecycle_store,
         &options.identity.initial_plan,
         Some(&options.identity.initial_run_id),
     )
     .unwrap();
-    agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
-        record.metadata["cook_id"] = serde_json::json!(options.identity.cook_id);
-        record.metadata["cook_attempt"] = serde_json::json!(1);
-    })
-    .unwrap();
-    agent_task_lifecycle::record_cook_attempt_in_store(
-        &test_lifecycle_store(),
-        &options.identity.cook_id,
-        1,
-        &options.identity.initial_run_id,
-    )
-    .unwrap();
+    lifecycle_store
+        .mutate_record(&options.identity.initial_run_id, |record| {
+            record.metadata["cook_id"] = serde_json::json!(options.identity.cook_id);
+            record.metadata["cook_attempt"] = serde_json::json!(1);
+            true
+        })
+        .unwrap();
+    lifecycle_store
+        .record_cook_attempt(
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+        )
+        .unwrap();
     let mut checkpoint = serde_json::to_value(promotion(&options.identity.initial_run_id)).unwrap();
     checkpoint["status"] = serde_json::json!("gate_failed");
     checkpoint["deterministic_gates"][0]["status"] = serde_json::json!("failed");
@@ -15348,7 +15734,9 @@ fn record_tracked_promotion_continuation(options: &CookRequest, target: &std::pa
             "current_diff": patch
         }
     });
-    agent_task_lifecycle::record_promotion(&options.identity.initial_run_id, checkpoint).unwrap();
+    lifecycle_store
+        .record_promotion(&options.identity.initial_run_id, checkpoint)
+        .unwrap();
 }
 
 #[test]
@@ -15364,7 +15752,79 @@ fn fresh_cook_has_no_tracked_promotion_before_lifecycle_materialization() {
         assert!(
             !agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id).unwrap()
         );
-        assert!(tracked_promotion_continuation(&options).unwrap().is_none());
+        assert!(
+            tracked_promotion_continuation_in_store(&test_lifecycle_store(), &options)
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn tracked_promotion_continuation_replays_from_the_injected_installation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let left_context = homeboy_core::test_support::HermeticTestContext::new();
+        let right_context = homeboy_core::test_support::HermeticTestContext::new();
+        let left_lifecycle = AgentTaskLifecycleStore::new(left_context.path_roots());
+        let right_lifecycle = AgentTaskLifecycleStore::new(right_context.path_roots());
+        let left_recipe = CookRecipeStore::from_data_root(left_lifecycle.data_root());
+        let target = tempfile::tempdir().expect("candidate worktree");
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(target.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(target.path().join("tracked.txt"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["checkout", "--quiet", "-b", "cook-candidate"])
+            .current_dir(target.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(target.path().join("tracked.txt"), "promoted\n").unwrap();
+        let options = tracked_promotion_continuation_options(
+            "cook-injected-continuation",
+            "run-injected-continuation",
+            target.path(),
+        );
+        record_tracked_promotion_continuation_in_stores(
+            &left_recipe,
+            &left_lifecycle,
+            &options,
+            target.path(),
+        );
+
+        let first = tracked_promotion_continuation_in_store(&left_lifecycle, &options)
+            .unwrap()
+            .expect("left installation owns the promotion");
+        let replay = tracked_promotion_continuation_in_store(&left_lifecycle, &options)
+            .unwrap()
+            .expect("left installation replays deterministically");
+        assert_eq!(first.path, replay.path);
+        assert!(
+            tracked_promotion_continuation_in_store(&right_lifecycle, &options)
+                .unwrap()
+                .is_none()
+        );
     });
 }
 
@@ -15586,9 +16046,10 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
             .status()
             .unwrap()
             .success());
-        let continuation = tracked_promotion_continuation(&options)
-            .unwrap()
-            .expect("durable Cook attribution");
+        let continuation =
+            tracked_promotion_continuation_in_store(&test_lifecycle_store(), &options)
+                .unwrap()
+                .expect("durable Cook attribution");
         assert!(cook_owned_unpushed_destination(&continuation).unwrap());
 
         let base = Command::new("git")
@@ -20326,6 +20787,95 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
             "history_run_ids should still include the full cross-invocation history"
         );
         assert!(!report.value.history_run_ids.contains(&fresh_run_id));
+    });
+}
+
+#[test]
+fn runtime_report_binding_uses_only_its_injected_installation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let injected_context = homeboy_core::test_support::HermeticTestContext::new();
+        let ambient_context = homeboy_core::test_support::HermeticTestContext::new();
+        let injected_lifecycle = AgentTaskLifecycleStore::new(injected_context.path_roots());
+        let ambient_lifecycle = AgentTaskLifecycleStore::new(ambient_context.path_roots());
+        let injected_recipe = CookRecipeStore::from_data_root(injected_lifecycle.data_root());
+        let ambient_recipe = CookRecipeStore::from_data_root(ambient_lifecycle.data_root());
+        let cook_id = "cook-rooted-report";
+        let injected_run = "cook-rooted-report-injected";
+        let ambient_run = "cook-rooted-report-ambient";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+
+        for (recipe, lifecycle, run_id) in [
+            (&injected_recipe, &injected_lifecycle, injected_run),
+            (&ambient_recipe, &ambient_lifecycle, ambient_run),
+        ] {
+            recipe
+                .persist_initial_recipe(&options)
+                .expect("persist recipe");
+            agent_task_lifecycle::submit_plan_in_store(
+                lifecycle,
+                &options.identity.initial_plan,
+                Some(run_id),
+            )
+            .expect("persist run");
+            lifecycle
+                .record_cook_attempt(cook_id, 1, run_id)
+                .expect("persist index");
+            agent_task_lifecycle::record_cook_controller_failure_in_store(
+                lifecycle,
+                run_id,
+                &serde_json::json!({ "code": run_id }),
+            )
+            .expect("persist failure");
+        }
+
+        let mut report = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "durable_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: None,
+        })
+        .value;
+        bind_report_to_stores(&mut report, &injected_recipe, &injected_lifecycle, true);
+        let serialized = serde_json::to_value(&report).expect("serialize rooted report");
+
+        assert_eq!(
+            serialized["history_run_ids"],
+            serde_json::json!([injected_run])
+        );
+        assert_eq!(serialized["latest_run_id"], injected_run);
+        let context = &serialized["failure_context"];
+        assert_eq!(context["latest_run_id"], injected_run);
+        assert_eq!(context["diagnostic"]["code"], injected_run);
+        for action in context["legal_actions"]
+            .as_array()
+            .expect("recovery actions")
+        {
+            assert!(action["command"].as_str().unwrap().contains(injected_run));
+            assert!(!action["command"].as_str().unwrap().contains(ambient_run));
+        }
+
+        let mut successful = cook_report(CookReportInput {
+            cook_id: cook_id.to_string(),
+            status: "intentional_no_change_finalized_existing_candidate",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 0,
+            invocation_latest_run_id: None,
+        })
+        .value;
+        bind_report_to_stores(
+            &mut successful,
+            &injected_recipe,
+            &injected_lifecycle,
+            false,
+        );
+        assert!(successful.failure_context.is_none());
     });
 }
 

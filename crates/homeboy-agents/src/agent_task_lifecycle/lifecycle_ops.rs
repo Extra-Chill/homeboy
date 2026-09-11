@@ -517,6 +517,116 @@ pub fn record_detached_cook_handoff_parent_in_store(
     )
 }
 
+/// Claim a detached Cook handoff parent for one launcher. Generic parent
+/// recording remains idempotent for recovery, but a launcher must never adopt
+/// another launcher's pending parent and gain authority to fail it on drop.
+pub fn claim_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let _ = record_detached_cook_handoff_parent_in_store(lifecycle_store, &cook_id)?;
+    let launcher_id = launcher_id.to_string();
+    let launcher_pid = std::process::id();
+    let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+        .ok()
+        .flatten();
+    let claimed = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        let reclaimable_pre_projection_failure = record.state == AgentTaskRunState::Failed
+            && handoff["state"] == "exited_before_handoff"
+            && handoff["admission_state"] == "failed"
+            && lifecycle_store.read_cook_index(&cook_id).is_err()
+            && !record.metadata["unmaterialized_cook_admission"].is_object()
+            && !handoff["materializing_attempt_run_id"].is_string();
+        if handoff["cook_id"] != cook_id
+            || handoff["cancellation_fence"]["state"] != "open"
+            || (record.state.is_terminal() && !reclaimable_pre_projection_failure)
+            || (!reclaimable_pre_projection_failure
+                && (handoff["state"] != "pending"
+                    || handoff["admission_state"] != "pre_supervisor"
+                    || (handoff.get("launcher_id").is_some()
+                        && detached_cook_launcher_is_live(record, chrono::Utc::now()))))
+        {
+            return false;
+        }
+        if reclaimable_pre_projection_failure {
+            set_run_state(record, AgentTaskRunState::Queued);
+            record.lifecycle.execution.finished_at = None;
+            record.metadata["detached_cook_handoff"]["state"] = json!("pending");
+            record.metadata["detached_cook_handoff"]["admission_state"] = json!("pre_supervisor");
+            record.metadata["detached_cook_handoff"]
+                .as_object_mut()
+                .expect("handoff metadata object")
+                .remove("reason");
+        }
+        record.metadata["detached_cook_handoff"]["launcher_id"] = json!(launcher_id);
+        record.metadata["detached_cook_handoff"]["launcher_pid"] = json!(launcher_pid);
+        record.metadata["detached_cook_handoff"]["launcher_start_identity"] =
+            serde_json::to_value(&launcher_start_identity).unwrap_or(Value::Null);
+        record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+            json!((chrono::Utc::now()
+                + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
+            .to_rfc3339());
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    if let Some(record) = claimed {
+        return Ok(record);
+    }
+    let existing = lifecycle_store.read_record(&cook_id).ok();
+    let mut error = Error::validation_invalid_argument(
+        "cook_id",
+        "detached Cook handoff is already owned or has advanced",
+        Some(cook_id.clone()),
+        None,
+    );
+    if let Some(record) = existing {
+        error.details["handoff_state"] = record.metadata["detached_cook_handoff"]["state"].clone();
+        error.details["admission_state"] =
+            record.metadata["detached_cook_handoff"]["admission_state"].clone();
+        error.details["launcher_id"] =
+            record.metadata["detached_cook_handoff"]["launcher_id"].clone();
+        error.details["launcher_live"] =
+            json!(detached_cook_launcher_is_live(&record, chrono::Utc::now()));
+        error.details["run_state"] = json!(format!("{:?}", record.state));
+    }
+    Err(error)
+}
+
+fn detached_cook_launcher_is_live(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let handoff = &record.metadata["detached_cook_handoff"];
+    let Some(pid) = handoff["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return detached_cook_deadline(record, "admission_deadline_at")
+            .is_some_and(|deadline| deadline > now);
+    };
+    let Ok(Some(identity)) = serde_json::from_value(handoff["launcher_start_identity"].clone())
+    else {
+        return detached_cook_deadline(record, "admission_deadline_at")
+            .is_some_and(|deadline| deadline > now);
+    };
+    match homeboy_core::process::process_identity_state_with_start_identity(
+        pid,
+        None,
+        Some(&identity),
+    ) {
+        homeboy_core::process::ProcessIdentityState::Live => true,
+        homeboy_core::process::ProcessIdentityState::Dead
+        | homeboy_core::process::ProcessIdentityState::IdentityMismatch => false,
+        homeboy_core::process::ProcessIdentityState::Unverifiable => {
+            detached_cook_deadline(record, "admission_deadline_at")
+                .is_some_and(|deadline| deadline > now)
+        }
+    }
+}
+
 /// Create a complete detached parent and immutable admission binding in the
 /// first durable run-record write. Input bytes remain staged and this state is
 /// deliberately invisible to runner selection until publication is recovered.
@@ -1009,6 +1119,7 @@ pub fn consume_unmaterialized_cook_replay_claim(
     let cook_id = sanitize_run_id(cook_id);
     let token = token.to_string();
     let owner = current_replay_worker_owner()?;
+    let now = chrono::Utc::now();
     let consumed = store.mutate_record(&cook_id, |record| {
         if record.state.is_terminal() {
             return false;
@@ -1017,15 +1128,19 @@ pub fn consume_unmaterialized_cook_replay_claim(
         if admission["lease"]["state"] != "claimed"
             || admission["lease"]["fence"].as_u64() != Some(fence)
             || admission["lease"]["token"].as_str() != Some(token.as_str())
+            || admission["lease"]["expires_at"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_none_or(|expires_at| expires_at.with_timezone(&chrono::Utc) <= now)
         {
             return false;
         }
         admission["state"] = json!("replaying");
         admission["lease"]["state"] = json!("consumed");
-        admission["lease"]["consumed_at"] = json!(chrono::Utc::now().to_rfc3339());
+        admission["lease"]["consumed_at"] = json!(now.to_rfc3339());
         admission["lease"]["owner"] = owner.clone();
         admission["lease"]["expires_at"] =
-            json!((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339());
+            json!((now + chrono::Duration::minutes(10)).to_rfc3339());
         record.updated_at = Some(now_timestamp());
         true
     })?;
@@ -1044,6 +1159,7 @@ pub fn renew_unmaterialized_cook_replay_claim(
     let cook_id = sanitize_run_id(cook_id);
     let token = token.to_string();
     let owner = current_replay_worker_owner()?;
+    let now = chrono::Utc::now();
     let renewed = store.mutate_record(&cook_id, |record| {
         if record.state.is_terminal() {
             return false;
@@ -1054,6 +1170,10 @@ pub fn renew_unmaterialized_cook_replay_claim(
             || admission["lease"]["fence"].as_u64() != Some(fence)
             || admission["lease"]["token"].as_str() != Some(token.as_str())
             || admission["lease"]["owner"] != owner
+            || admission["lease"]["expires_at"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_none_or(|expires_at| expires_at.with_timezone(&chrono::Utc) <= now)
         {
             return false;
         }
@@ -1063,7 +1183,7 @@ pub fn renew_unmaterialized_cook_replay_claim(
             .as_object_mut()
             .expect("replay lease object")
             .remove("expires_at");
-        admission["lease"]["materialization_fence_at"] = json!(chrono::Utc::now().to_rfc3339());
+        admission["lease"]["materialization_fence_at"] = json!(now.to_rfc3339());
         record.updated_at = Some(now_timestamp());
         true
     })?;
@@ -1271,7 +1391,7 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
         return Ok(());
     }
     if record.state == AgentTaskRunState::Cancelled
-        || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] == "cancelled"
+        || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
     {
         return Err(Error::validation_invalid_argument(
             "cook_id",
@@ -1302,7 +1422,9 @@ pub fn record_detached_cook_handoff_child_in_store(
         // A concurrent observer may have already terminalized the handoff
         // before this attachment write acquired the record lock. Keep that
         // classification intact for the launcher to report.
-        if record.state.is_terminal() {
+        if record.state.is_terminal()
+            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
+        {
             return false;
         }
         let cancellation_fence =
@@ -1323,6 +1445,69 @@ pub fn record_detached_cook_handoff_child_in_store(
         true
     })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Atomically transfer a claimed handoff parent to its submitted supervisor.
+///
+/// A launcher has a live child after spawn but before the child can materialize
+/// its first attempt. Persisting the child identity and daemon job together
+/// makes cancellation in that interval able to signal the exact process, while
+/// the launcher id prevents a stale launcher from publishing another owner's
+/// child or supervisor.
+pub fn record_claimed_detached_cook_handoff_supervision_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    pid: u32,
+    start_identity: homeboy_core::process::ProcessStartIdentity,
+    job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let launcher_id = launcher_id.to_string();
+    let job_id = job_id.to_string();
+    let updated = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if record.state.is_terminal()
+            || handoff["cook_id"] != cook_id
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff["launcher_id"] != launcher_id
+            || handoff["cancellation_fence"]["state"] != "open"
+        {
+            return false;
+        }
+        let handoff = &mut record.ensure_metadata_object()["detached_cook_handoff"];
+        handoff["child_pid"] = json!(pid);
+        handoff["child_start_identity"] = json!(start_identity);
+        handoff["supervisor_job_id"] = json!(job_id);
+        handoff["admission_state"] = json!("supervising");
+        handoff["reattach_command"] = json!(format!("homeboy agent-task status {cook_id}"));
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    updated.ok_or_else(|| {
+        let existing = lifecycle_store.read_record(&cook_id).ok();
+        let mut error = Error::validation_invalid_argument(
+            "cook_id",
+            "detached Cook handoff is not owned by this launcher or has advanced",
+            Some(cook_id.clone()),
+            None,
+        );
+        if let Some(record) = existing {
+            error.details["run_state"] = json!(format!("{:?}", record.state));
+            error.details["handoff_state"] =
+                record.metadata["detached_cook_handoff"]["state"].clone();
+            error.details["admission_state"] =
+                record.metadata["detached_cook_handoff"]["admission_state"].clone();
+            error.details["expected_launcher_id"] = json!(launcher_id);
+            error.details["actual_launcher_id"] =
+                record.metadata["detached_cook_handoff"]["launcher_id"].clone();
+            error.details["attempt_run_id"] =
+                record.metadata["detached_cook_handoff"]["attempt_run_id"].clone();
+            error.details["reason"] = record.metadata["detached_cook_handoff"]["reason"].clone();
+        }
+        error
+    })
 }
 
 /// Persist the supervising daemon job inside an explicitly rooted store.
@@ -1604,8 +1789,7 @@ pub fn reserve_detached_cook_handoff_materialization_in_store(
             return true;
         }
         if record.state.is_terminal()
-            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
-                == "cancelled"
+            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
         {
             return false;
@@ -1719,6 +1903,72 @@ pub fn fail_detached_cook_handoff_parent_in_store(
     })?;
     // A protected parent is a successful no-op: it is the authoritative result
     // of materialization or a prior terminal transition, not a missing parent.
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Terminalize a pending parent only when the launcher that created its claim
+/// exits before daemon ownership is published.
+pub fn fail_claimed_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if handoff["cook_id"] != cook_id
+            || handoff["launcher_id"] != launcher_id
+            || record.state.is_terminal()
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+        {
+            return false;
+        }
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+        metadata["detached_cook_handoff"]["admission_state"] = json!("failed");
+        metadata["detached_cook_handoff"]["reason"] = json!(reason);
+        set_run_state(record, AgentTaskRunState::Failed);
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Terminalize a supervised handoff only when this daemon owns the exact
+/// launcher generation and child process projected by the launcher.
+pub fn fail_supervised_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    child_pid: u32,
+    child_start_identity: &homeboy_core::process::ProcessStartIdentity,
+    reason: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let child_start_identity = json!(child_start_identity);
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if handoff["cook_id"] != cook_id
+            || handoff["launcher_id"] != launcher_id
+            || handoff["child_pid"] != child_pid
+            || handoff["child_start_identity"] != child_start_identity
+            || handoff["cancellation_fence"]["state"] != "open"
+            || record.state.is_terminal()
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "supervising"
+        {
+            return false;
+        }
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+        metadata["detached_cook_handoff"]["admission_state"] = json!("failed");
+        metadata["detached_cook_handoff"]["reason"] = json!(reason);
+        set_run_state(record, AgentTaskRunState::Failed);
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
 

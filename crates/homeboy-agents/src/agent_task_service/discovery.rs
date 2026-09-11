@@ -807,11 +807,24 @@ pub(crate) fn controller_upgrade_admission_for_records(
             }
         }
     }
+    // A Cook whose own durable state is terminal is authoritative over the
+    // attempts it owns: an attempt cannot still be executing once its parent
+    // recorded a terminal outcome. Runner-generation reconciliation only
+    // retires daemon generations, and the durable reconciler deliberately
+    // leaves a runner-owned record alone, so an attempt stranded in `running`
+    // by a daemon restart is reachable by neither plane and would otherwise
+    // block every controller replacement permanently (#14571).
+    let terminal_run_ids = records
+        .iter()
+        .filter(|record| record.state.is_terminal())
+        .map(|record| record.run_id.as_str())
+        .collect::<BTreeSet<_>>();
     let mut blockers = records
         .iter()
         // Durable terminal state is authoritative even when stale ownership
         // metadata remains from the process that produced it.
         .filter(|record| !record.state.is_terminal())
+        .filter(|record| !owns_terminal_cook_parent(record, &terminal_run_ids))
         // A Cook that has not materialized any task and is blocked only by a
         // stale runner needs this controller replacement to converge runtime.
         // It owns no executable work, so it cannot safely block that upgrade.
@@ -1244,6 +1257,23 @@ fn discovery_run(
             reconcile: format!("{command_prefix} reconcile {run_id} --dry-run"),
         },
     }
+}
+
+/// Whether this record is an attempt owned by a Cook that already reached a
+/// durable terminal state, which disproves the attempt's own live projection.
+///
+/// Only a parent that is present in the same durable record set counts: an
+/// absent parent proves nothing, so ownership stays fail-closed and the
+/// attempt continues to block replacement.
+fn owns_terminal_cook_parent(
+    record: &AgentTaskRunRecord,
+    terminal_run_ids: &BTreeSet<&str>,
+) -> bool {
+    record
+        .metadata
+        .get("cook_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|cook_id| cook_id != record.run_id && terminal_run_ids.contains(cook_id))
 }
 
 /// Explain every stale read projection, including a pure discovery read that
