@@ -164,6 +164,45 @@ impl ObservationStore {
         Ok(())
     }
 
+    /// Canonical lookup that never follows a movable alias. Writers that
+    /// rebuild one record's projection use this so an alias naming the same
+    /// string cannot make them read, and then overwrite, another resource.
+    pub fn control_plane_resource_projection_exact(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<Option<ControlPlaneResourceProjection>> {
+        self.ensure_control_plane_resource_authority()?;
+        let row: Option<(String, String, String, String)> = self.connection.query_row(
+            "SELECT version, state, eligibility_json, provenance_json FROM control_plane_resources WHERE resource_type = ?1 AND resource_id = ?2",
+            params![resource_type, resource_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional().map_err(sqlite_error("read exact control-plane resource projection"))?;
+        let Some((version, state, eligibility, provenance)) = row else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT alias FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2 ORDER BY alias",
+        ).map_err(sqlite_error("prepare exact control-plane resource aliases"))?;
+        let aliases: Vec<String> = statement
+            .query_map(params![resource_type, resource_id], |row| row.get(0))
+            .map_err(sqlite_error("read exact control-plane resource aliases"))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite_error("decode exact control-plane resource aliases"))?;
+        drop(statement);
+        Ok(Some(ControlPlaneResourceProjection {
+            resource_type: resource_type.to_string(),
+            resource_id: resource_id.to_string(),
+            version,
+            state,
+            aliases,
+            eligibility: serde_json::from_str(&eligibility)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?,
+            provenance: serde_json::from_str(&provenance)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?,
+        }))
+    }
+
     pub fn control_plane_resource_projection(
         &self,
         resource_type: &str,
@@ -171,7 +210,12 @@ impl ObservationStore {
     ) -> Result<Option<ControlPlaneResourceProjection>> {
         self.ensure_control_plane_resource_authority()?;
         let row: Option<(String, String, String, String, String)> = self.connection.query_row(
-            "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r LEFT JOIN control_plane_resource_aliases a ON a.resource_type = r.resource_type AND a.resource_id = r.resource_id WHERE r.resource_type = ?1 AND (r.resource_id = ?2 OR a.alias = ?2) LIMIT 1",
+            // A movable alias and a canonical id can name the same string: a
+            // detached Cook publishes its handoff parent under the Cook id and
+            // aliases that id onto the latest attempt. The alias is the Cook
+            // contract, so resolve it first and keep the answer deterministic
+            // instead of returning whichever row the scan reached first.
+            "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r LEFT JOIN control_plane_resource_aliases a ON a.resource_type = r.resource_type AND a.resource_id = r.resource_id WHERE r.resource_type = ?1 AND (r.resource_id = ?2 OR a.alias = ?2) ORDER BY CASE WHEN a.alias = ?2 THEN 0 ELSE 1 END, r.resource_id LIMIT 1",
             params![resource_type, id_or_alias],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).optional().map_err(sqlite_error("read control-plane resource projection"))?;
@@ -288,8 +332,14 @@ impl ObservationStore {
                     None,
                 ));
             }
-            let projection = self
-                .control_plane_resource_projection(resource_type, intent.resource.run.as_str())?;
+            // The intent already names its canonical run, so the fence is
+            // checked against that run's own projection. Following an alias
+            // here would compare one record's precondition against another
+            // record's version and reject a legitimate action.
+            let projection = self.control_plane_resource_projection_exact(
+                resource_type,
+                intent.resource.run.as_str(),
+            )?;
             let Some(projection) = projection else {
                 return Err(Error::validation_invalid_argument(
                     "run_id",

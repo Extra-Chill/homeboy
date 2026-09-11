@@ -1667,11 +1667,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
             -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
     {
         validate_action_request(request)?;
+        // Quarantine and Rearm mutate one exact queued record, so an alias that
+        // moves between attempts cannot name their target. Reconcile is scope
+        // aware by contract and expands a Cook alias to its members, so it
+        // keeps accepting one.
         let exact_mutation = matches!(
             request.action,
-            ControlPlaneAction::Quarantine
-                | ControlPlaneAction::Rearm
-                | ControlPlaneAction::Reconcile
+            ControlPlaneAction::Quarantine | ControlPlaneAction::Rearm
         );
         if matches!(
             request.action,
@@ -1704,6 +1706,23 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 return Err(ControlPlaneError::invalid_argument(
                     "this mutation requires an exact durable run id; Cook aliases are not accepted",
                 ));
+            }
+            // Reconcile is scope aware and its callers expand a Cook group into
+            // exact members before acting. Retargeting an exact member onto the
+            // alias owner would give one attempt every member's claim and leave
+            // the others unreconciled, so an existing record wins here and the
+            // alias is followed only when the id is nothing but an alias.
+            Some(projection)
+                if request.action == ControlPlaneAction::Reconcile
+                    && observation
+                        .control_plane_resource_projection_exact(
+                            "agent_task_run",
+                            requested_id.as_str(),
+                        )
+                        .map_err(map_lifecycle_error)?
+                        .is_some() =>
+            {
+                requested_id.as_str().to_string()
             }
             Some(projection) => projection.resource_id,
             None => requested_id.as_str().to_string(),
@@ -3596,9 +3615,13 @@ pub fn execute_action_from_current_environment(
     )
 }
 
+/// `run` is the caller's execution intent, not part of the immutable retry
+/// intent: the action always reserves the successor, and this decides whether
+/// the acknowledgement reports it as runnable for the caller to dispatch.
 pub fn execute_retry_action_from_current_environment_with_preflight<F>(
     run_id: &str,
     request: &ControlPlaneActionRequest,
+    run: bool,
     preflight: F,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
 where
@@ -3611,7 +3634,7 @@ where
             crate::agent_task_service::retry_with_preflight(
                 resolved,
                 parameters.new_run_id.as_deref(),
-                false,
+                run,
                 parameters.force,
                 &preflight,
             )
@@ -3721,10 +3744,12 @@ fn default_retry(
             provider_rotations: route.provider_rotations,
         }
     });
+    // The default action delegate runs the successor it reserves. A caller that
+    // only wants the reservation supplies its own delegate with `run` false.
     crate::agent_task_service::retry_with_provider_route_override(
         run_id,
         parameters.new_run_id.as_deref(),
-        false,
+        true,
         parameters.force,
         route.unwrap_or_default(),
     )

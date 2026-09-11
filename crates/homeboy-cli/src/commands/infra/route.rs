@@ -3809,6 +3809,7 @@ fn materialize_agent_task_retry_handoff(
                 },
                 confirmed: true,
             },
+            retry.run,
             validate_generic_lab_command_replay_workspace,
         )?;
     let retry_result = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;

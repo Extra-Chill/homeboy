@@ -1612,7 +1612,7 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         rig_id: None,
         metadata_json,
     };
-    let resource_projection = agent_task_resource_projection(lifecycle_store, &record, None)?;
+    let resource_projection = agent_task_record_write_projection(lifecycle_store, &store, &record)?;
     if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
         store.upsert_imported_run_with_mission_and_resource_projection(
             &projected,
@@ -1634,6 +1634,30 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         ))
     })?;
     record_from_run(&committed)
+}
+
+/// Rebuild one record's projection without disturbing Cook alias ownership.
+///
+/// An ordinary record write knows its own lifecycle state but nothing about
+/// which attempt currently owns the Cook alias. Recomputing the projection from
+/// the record alone would therefore publish an empty alias set and silently
+/// retract an alias that [`write_cook_index_attempt_locked_in_store`] owns, so
+/// the current alias and Cook index carry forward unchanged.
+fn agent_task_record_write_projection(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    observations: &ObservationStore,
+    record: &AgentTaskRunRecord,
+) -> Result<ControlPlaneResourceProjection> {
+    let mut projection = agent_task_resource_projection(lifecycle_store, record, None)?;
+    if let Some(existing) =
+        observations.control_plane_resource_projection_exact("agent_task_run", &record.run_id)?
+    {
+        projection.aliases = existing.aliases;
+        if let Some(cook_index) = existing.provenance.get("cook_index") {
+            projection.provenance["cook_index"] = cook_index.clone();
+        }
+    }
+    Ok(projection)
 }
 
 /// Agent-task owns the interpretation of this generic authority payload. The
@@ -1840,24 +1864,44 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
             index.latest_substantive_candidate = Some(candidate);
         }
     }
-    let latest = store.read_record(&index.latest_run_id)?;
-    let latest_projection = agent_task_resource_projection(store, &latest, Some(&index))?;
+    // Publishing an alias is an index operation, not a record read: a root may
+    // legitimately index an attempt whose lifecycle record it does not hold.
+    let latest_projection = match store.read_record(&index.latest_run_id) {
+        Ok(latest) => agent_task_resource_projection(store, &latest, Some(&index))?,
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
+            ControlPlaneResourceProjection {
+                resource_type: "agent_task_run".to_string(),
+                resource_id: index.latest_run_id.clone(),
+                version: index
+                    .attempts
+                    .last()
+                    .map(|entry| entry.recorded_at.clone())
+                    .unwrap_or_default(),
+                state: "unknown".to_string(),
+                aliases: vec![cook_id.clone()],
+                eligibility: json!({}),
+                provenance: json!({
+                    "source": "agent_task_lifecycle_cook_index",
+                    "cook_index": index,
+                }),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     let observations = store.open_observation_initialized()?;
     let previous = observations.control_plane_resource_projection("agent_task_run", &cook_id)?;
     let mut projections = Vec::new();
-    if let Some(previous) = previous.filter(|previous| previous.resource_id != latest.run_id) {
+    if let Some(previous) = previous.filter(|previous| previous.resource_id != index.latest_run_id)
+    {
         let previous_record = store.read_record(&previous.resource_id)?;
+        // The superseded attempt surrenders both the alias and the index. Only
+        // the current alias owner may carry the Cook index, because a reader
+        // that resolves this record must not find an index naming a different
+        // owner.
         projections.push(agent_task_resource_projection(
             store,
             &previous_record,
-            Some(&AgentTaskCookIndex {
-                schema: index.schema.clone(),
-                cook_id: index.cook_id.clone(),
-                latest_run_id: latest.run_id.clone(),
-                latest_substantive_candidate: index.latest_substantive_candidate.clone(),
-                cancellation_fence: index.cancellation_fence.clone(),
-                attempts: index.attempts.clone(),
-            }),
+            None,
         )?);
     }
     projections.push(latest_projection);
@@ -1870,7 +1914,30 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
 
 #[cfg(test)]
 pub(super) fn write_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()> {
-    write_json(&cook_index_path(&sanitize_run_id(&index.cook_id))?, index)
+    let cook_id = sanitize_run_id(&index.cook_id);
+    // SQLite owns Cook alias resolution, so seeding a fixture index has to
+    // publish the canonical projection rather than only its derived file.
+    // Fixture attempts have no lifecycle records, so the alias owner is
+    // declared directly instead of being rebuilt from one.
+    default_store()?
+        .open_observation_initialized()?
+        .upsert_control_plane_resource_projection(&ControlPlaneResourceProjection {
+            resource_type: "agent_task_run".to_string(),
+            resource_id: index.latest_run_id.clone(),
+            version: index
+                .attempts
+                .last()
+                .map(|attempt| attempt.recorded_at.clone())
+                .unwrap_or_else(|| "fixture".to_string()),
+            state: "unknown".to_string(),
+            aliases: vec![cook_id.clone()],
+            eligibility: json!({}),
+            provenance: json!({
+                "source": "agent_task_lifecycle_test_fixture",
+                "cook_index": index,
+            }),
+        })?;
+    write_json(&cook_index_path(&cook_id)?, index)
 }
 
 pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
@@ -1919,7 +1986,13 @@ fn projected_cook_index_in_store(
     }
     let index = serde_json::from_value::<AgentTaskCookIndex>(value.clone())
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    if index.cook_id != cook_id || index.latest_run_id != projection.resource_id {
+    // Resolving an attempt id reaches that attempt's own projection, which
+    // carries the index it owns for a different alias. That is an ordinary
+    // "this id is not a Cook alias" answer, not a corrupt projection.
+    if index.cook_id != cook_id {
+        return Ok(None);
+    }
+    if index.latest_run_id != projection.resource_id {
         return Err(Error::internal_unexpected(
             "control-plane Cook-index projection does not match its alias owner",
         ));

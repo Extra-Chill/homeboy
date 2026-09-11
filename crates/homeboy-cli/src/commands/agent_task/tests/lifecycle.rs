@@ -4914,6 +4914,11 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-retry-source"))
             .expect("submitted");
+        // Retry admission requires a terminal run, which is the only state an
+        // operator actually retries from. Cancelling through the lifecycle is
+        // the fixture's terminal precondition rather than a raw state write.
+        agent_task_lifecycle::cancel_run("run-retry-source", Some("fixture terminalization"))
+            .expect("terminalize the retried source run");
 
         let (value, exit_code) = retry(RetryArgs {
             run_id: "run-retry-source".to_string(),

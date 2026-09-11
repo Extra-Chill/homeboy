@@ -349,7 +349,26 @@ mod tests {
         ] {
             let report = lifecycle_action_eligibility(&record(state, false), None);
             assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
-            assert_eq!(report.actions.len(), 6);
+            // Naming the contract rather than counting it: a bare length made
+            // every legitimate action addition look like a regression without
+            // saying which action changed.
+            assert_eq!(
+                report
+                    .actions
+                    .iter()
+                    .map(|entry| entry.action)
+                    .collect::<Vec<_>>(),
+                vec![
+                    ControlPlaneAction::Cancel,
+                    ControlPlaneAction::Resume,
+                    ControlPlaneAction::PlacementUpdate,
+                    ControlPlaneAction::Retry,
+                    ControlPlaneAction::Quarantine,
+                    ControlPlaneAction::Rearm,
+                    ControlPlaneAction::Promote,
+                    ControlPlaneAction::Reconcile,
+                ]
+            );
             if state.is_terminal() {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Cancel),

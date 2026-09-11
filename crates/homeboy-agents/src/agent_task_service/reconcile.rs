@@ -107,10 +107,14 @@ fn verified_reconciled_status(
         .runs
         .into_iter()
         .any(|run| run.run_id == run_id);
-    let runner_projection_resolved = record.runner_id().is_none_or(|runner_id| {
-        agent_task_lifecycle::runner_live_job_authority(runner_id)
-            == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
-    });
+    // Only an accepted runner job leaves a projection behind. A submission that
+    // never obtained a job identity has nothing for the runner to resolve, so
+    // requiring an Idle report would make it permanently unreconcilable.
+    let runner_projection_resolved = record.runner_job_id().is_none()
+        || record.runner_id().is_none_or(|runner_id| {
+            agent_task_lifecycle::runner_live_job_authority(runner_id)
+                == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
+        });
     verify_reconciled_postcondition(&record, remains_active, runner_projection_resolved)?;
     Ok(record)
 }
@@ -397,8 +401,14 @@ pub(crate) fn reconcile_run_in_store(
                     });
                 } else {
                     if let Some(runner_id) = refreshed.runner_id() {
-                        if agent_task_lifecycle::runner_authority(runner_id)
-                            != agent_task_lifecycle::RunnerAuthority::Removed
+                        // This guard protects work a runner is actually
+                        // executing. A submission that never produced a runner
+                        // job identity has no remote owner to defer to, so
+                        // refusing it would strand the record as permanently
+                        // unreconcilable.
+                        if refreshed.runner_job_id().is_some()
+                            && agent_task_lifecycle::runner_authority(runner_id)
+                                != agent_task_lifecycle::RunnerAuthority::Removed
                             && !locally_reconcilable_after_runner_idle
                         {
                             failed += 1;
