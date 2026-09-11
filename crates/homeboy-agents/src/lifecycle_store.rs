@@ -929,6 +929,24 @@ impl AgentTaskLifecycleStore {
         after: Option<ObservationRunCursor>,
         limit: usize,
     ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
+        let (records, _, _, truncated, next) = self.read_record_page_with_health(after, limit)?;
+        Ok((records, truncated, next))
+    }
+
+    /// Read one immutable-keyset page while retaining health evidence for raw
+    /// rows that older builds cannot decode. The continuation is based on the
+    /// physical observation page, so unreadable rows never stall a walk.
+    pub(crate) fn read_record_page_with_health(
+        &self,
+        after: Option<ObservationRunCursor>,
+        limit: usize,
+    ) -> Result<(
+        Vec<AgentTaskRunRecord>,
+        super::AgentTaskRecordHealthSummary,
+        usize,
+        bool,
+        Option<ObservationRunCursor>,
+    )> {
         let page = self
             .open_observation_readonly()?
             .list_runs_page(RunListFilter {
@@ -937,12 +955,15 @@ impl AgentTaskLifecycleStore {
                 after,
                 ..Default::default()
             })?;
-        let records = page
-            .runs
-            .iter()
-            .map(record_from_run)
-            .collect::<Result<Vec<_>>>()?;
-        Ok((records, page.truncated, page.next_cursor))
+        let physical_count = page.runs.len();
+        let (records, health) = page_records_with_health(page.runs);
+        Ok((
+            records,
+            health,
+            physical_count,
+            page.truncated,
+            page.next_cursor,
+        ))
     }
 
     pub(crate) fn read_mission_record_page(
@@ -2154,6 +2175,34 @@ fn records_with_health(
         }
     }
     Ok((records, health))
+}
+
+/// A discovery page preserves typed rows that normal lifecycle reads accept,
+/// even if record health separately flags an inconsistent projection. Only an
+/// unreadable row is omitted, while its diagnostic remains in the page health.
+fn page_records_with_health(
+    observation_runs: Vec<RunRecord>,
+) -> (Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary) {
+    let mut health = super::AgentTaskRecordHealthSummary::healthy();
+    let mut records = Vec::new();
+    for run in observation_runs {
+        match record_from_run(&run) {
+            Ok(record) => {
+                if let Err(item) = super::health::diagnose_run(&run) {
+                    super::health::record_health_item(&mut health, item);
+                } else {
+                    health.healthy += 1;
+                }
+                records.push(record);
+            }
+            Err(_) => {
+                if let Err(item) = super::health::diagnose_run(&run) {
+                    super::health::record_health_item(&mut health, item);
+                }
+            }
+        }
+    }
+    (records, health)
 }
 
 /// Raw durable rows are read only through a resolved store now. The last

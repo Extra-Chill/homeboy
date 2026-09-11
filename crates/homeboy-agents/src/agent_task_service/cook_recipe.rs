@@ -1605,6 +1605,10 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
         lifecycle_store,
         run_id,
     )? {
+        let continuation = super::cook_recovery_command_with_prefix(
+            &super::cook_recovery_command_prefix_for_record(&record),
+            &["cook-continue", run_id],
+        );
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
             format!(
@@ -1613,8 +1617,7 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
             ),
             Some(run_id.to_string()),
             Some(vec![format!(
-                "Retry `{}` after the runner artifact can be harvested.",
-                super::cook_continue_command(None, run_id, false, None)
+                "Retry `{continuation}` after the runner artifact can be harvested."
             )]),
         )
         .with_retryable(true));
@@ -1651,6 +1654,10 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
             aggregate.as_ref(),
         )?
     {
+        let continuation = super::cook_recovery_command_with_prefix(
+            &super::cook_recovery_command_prefix_for_record(&record),
+            &["cook-continue", run_id],
+        );
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
             format!(
@@ -1659,8 +1666,7 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
             ),
             Some(run_id.to_string()),
             Some(vec![format!(
-                "Retry `{}` after the runner artifact can be harvested.",
-                super::cook_continue_command(None, run_id, false, None)
+                "Retry `{continuation}` after the runner artifact can be harvested."
             )]),
         )
         .with_retryable(true));
@@ -4104,6 +4110,71 @@ mod tests {
             "review_ready"
         );
         assert!(aggregate.is_none());
+    }
+
+    #[test]
+    fn continuation_projection_preflight_renders_the_injected_placement() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let (recipe, plan) = persist_recipe_run(&store, &lifecycle_store);
+        lifecycle_store
+            .mutate_record("run", |record| {
+                let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                    repository: "fixture".to_string(),
+                    workspace: "fixture".to_string(),
+                    task: "task".to_string(),
+                    candidate: None,
+                    base: None,
+                };
+                record.metadata["execution_placement_decision"] = serde_json::to_value(
+                    homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                        "fixture",
+                        "v1",
+                        identity,
+                        homeboy_lab_runner_contract::Placement::Local,
+                    ),
+                )
+                .unwrap();
+                true
+            })
+            .unwrap();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            id: "unprojected-patch".to_string(),
+            kind: "patch".to_string(),
+            ..Default::default()
+        });
+        agent_task_lifecycle::record_run_aggregate_in_store(
+            &lifecycle_store,
+            "run",
+            &plan,
+            &aggregate,
+        )
+        .unwrap();
+
+        let reconciling = reconcile_recipe_attempt_for_continuation_in_stores(
+            &store,
+            &lifecycle_store,
+            &recipe,
+            "run",
+        )
+        .expect_err("unprojected patch blocks continuation reconciliation");
+        let observing =
+            preflight_recipe_attempt_for_continuation_in_store(&lifecycle_store, &recipe, "run")
+                .expect_err("unprojected patch blocks continuation observation");
+
+        for error in [reconciling, observing] {
+            assert!(
+                error.details["tried"]
+                    .as_array()
+                    .is_some_and(|tried| tried.iter().any(|remediation| remediation
+                        .as_str()
+                        .is_some_and(|remediation| remediation
+                            .contains("homeboy --placement local agent-task cook-continue run")))),
+                "{:?}",
+                error.details
+            );
+        }
     }
 
     /// A claim whose owner died is recoverable work. Recovery is decided from

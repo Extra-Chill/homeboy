@@ -13,7 +13,6 @@ use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use homeboy_core::error::{Error, Result};

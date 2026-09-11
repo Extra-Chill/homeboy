@@ -2623,16 +2623,25 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // Preserve the controller's canonical decision across ordinary retry,
         // continuation, and fanout replay. A derived baseline is the declared
         // pre-staging transition where a changed candidate may replace it.
-        let source_path = derived_cook_baseline
-            .map(|capability| capability.canonical_path())
+        let source_path = plan
+            .tasks
+            .first()
+            .and_then(|task| {
+                task.metadata
+                    .pointer("/cook_continuation_workspace/candidate_source_root")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(PathBuf::from)
+            .or_else(|| {
+                derived_cook_baseline.map(|capability| capability.canonical_path().to_path_buf())
+            })
             .or_else(|| {
                 plan.tasks
                     .first()
                     .and_then(|task| task.workspace.root.as_deref())
-                    .map(Path::new)
+                    .map(PathBuf::from)
             })
-            .or(self.source_path.as_deref())
-            .map(PathBuf::from);
+            .or_else(|| self.source_path.clone());
         let task = plan
             .tasks
             .first()

@@ -4,6 +4,49 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.8] - 2026-09-10
+
+### Changed
+- give each wire identifier one definition
+- Accept review options after actions
+
+### Fixed
+- Fix lifecycle-owned snapshot recovery projection
+
+## [0.371.7] - 2026-09-10
+
+### Changed
+- isolate execution provenance from the developer's installation
+
+## [0.371.6] - 2026-09-10
+
+### Changed
+- Make agent-task inspection scoped and bounded
+
+### Fixed
+- preflight deferred worktrees
+
+## [0.371.5] - 2026-09-10
+
+### Changed
+- reap fixture daemons during teardown
+
+### Fixed
+- report partial external storage inventory
+
+## [0.371.4] - 2026-09-10
+
+### Changed
+- build the ssh fixtures once
+- build the trace fixtures once per crate
+- build the runs fixture once
+- declare two copy-pasted helpers once
+
+### Fixed
+- fence retained count disagreement
+- block-comment openers take precedence over doc line prefixes
+- stop authoritative rebound through SSH
+
 ## [0.371.3] - 2026-09-09
 
 ### Changed

@@ -517,7 +517,7 @@ fn read_extension_children(run_dir_path: &Path) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::observation::{NewRunRecord, RunRecord};
+    use homeboy::core::observation::RunRecord;
     use homeboy::test_support::with_isolated_home;
 
     use crate::commands::runs::test_support::sample_run;

@@ -1,4 +1,4 @@
-use clap::{ArgMatches, Command, CommandFactory, Parser};
+use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Write};
 use std::process::Command as ProcessCommand;
@@ -341,7 +341,10 @@ fn startup_fast_path_output(
                 return None;
             };
             if error.kind() == clap::error::ErrorKind::DisplayHelp {
-                StartupFastPathOutput::Help(error.to_string())
+                match project_startup_help_options(args) {
+                    Ok(()) => StartupFastPathOutput::Help(error.to_string()),
+                    Err(error) => StartupFastPathOutput::ArgumentError(format!("error: {error}\n")),
+                }
             } else {
                 // A request containing Homeboy's help flag must never initialize
                 // the runtime just to report invalid arguments.
@@ -1132,6 +1135,15 @@ impl CliRuntime {
         };
         let mut cli = compiled.value;
         let command_provenance = compiled.provenance;
+        if let Err(error) = project_cli_options(&mut cli) {
+            output_runtime::emit_json_result_for_identity(
+                Err(error),
+                output_file.as_deref(),
+                2,
+                &command_identity,
+            );
+            return std::process::ExitCode::from(2);
+        }
         let mut notification_resolution =
             match crate::core::notification_route_resolver::resolve_from_cli_or_env_with_evidence(
                 cli.notification_transport.as_deref(),
@@ -2278,6 +2290,35 @@ fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
         }
         _ => None,
     }
+}
+
+/// Apply command-level option projection before either help is rendered or a
+/// parsed command is routed. Keeping this typed makes the two paths share the
+/// same conflict and action-support rules.
+fn project_cli_options(cli: &mut Cli) -> crate::core::Result<()> {
+    if let Commands::Review(args) = &mut cli.command {
+        args.project_effective_child_args()?;
+    }
+    Ok(())
+}
+
+/// Clap returns its rendered help instead of matches, so validate the same
+/// command after removing Homeboy's help switches. Parse failures are left to
+/// the original help parser so its diagnostics remain authoritative.
+fn project_startup_help_options(args: &[String]) -> Result<(), crate::core::Error> {
+    let args_without_help = args
+        .iter()
+        .filter(|arg| arg.as_str() != "--help" && arg.as_str() != "-h")
+        .cloned()
+        .collect::<Vec<_>>();
+    let Ok(matches) = Cli::command_with_scoped_lab_args().try_get_matches_from(args_without_help)
+    else {
+        return Ok(());
+    };
+    let Ok(mut cli) = Cli::from_arg_matches(&matches) else {
+        return Ok(());
+    };
+    project_cli_options(&mut cli)
 }
 
 impl Default for CliRuntime {
