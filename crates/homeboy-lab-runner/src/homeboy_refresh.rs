@@ -1781,20 +1781,23 @@ fn refresh_execution_options(
     required_commands: Vec<String>,
     disconnected_ssh: bool,
 ) -> RunnerExecOptions {
-    let options = if disconnected_ssh {
-        RunnerExecOptions::diagnostic_raw_shell(plan.script.clone())
-            .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT)
-    } else {
-        RunnerExecOptions::raw_command(vec![
-            "bash".to_string(),
-            "-lc".to_string(),
-            plan.script.clone(),
-        ])
-    };
-    options.with_capability_preflight(RunnerCapabilityPreflight {
+    if disconnected_ssh {
+        // A fresh SSH runner has no configured Homeboy path yet. This refresh
+        // materializes that path, so its script is the bootstrap capability
+        // check rather than the normal configured-binary preflight.
+        return RunnerExecOptions::diagnostic_raw_shell(plan.script.clone())
+            .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT);
+    }
+
+    RunnerExecOptions::raw_command(vec![
+        "bash".to_string(),
+        "-lc".to_string(),
+        plan.script.clone(),
+    ])
+    .with_capability_preflight(RunnerCapabilityPreflight {
         command: "runner.refresh-homeboy".to_string(),
         required_commands,
-        timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+        timeout: None,
         ..Default::default()
     })
 }

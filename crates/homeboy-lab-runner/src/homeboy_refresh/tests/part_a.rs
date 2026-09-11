@@ -1826,13 +1826,7 @@ fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transpor
         options.command,
         vec!["bash", "-lc", "managed clone fetch build select"]
     );
-    assert_eq!(
-        options
-            .capability_preflight
-            .expect("preflight")
-            .required_commands,
-        vec!["bash", "git", "cargo"]
-    );
+    assert!(options.capability_preflight.is_none());
 }
 
 fn stale_daemon_admission_snapshot(
