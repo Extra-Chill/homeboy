@@ -5229,11 +5229,10 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
                 .success()
         };
         assert!(!destination_has_observed_base());
-        // Shallow and single-branch checkouts may not retain this local ref. The
-        // admission check must still resolve the authoritative origin base.
-        git(
-            &destination,
-            &["update-ref", "-d", "refs/remotes/origin/main"],
+        let stale_tracking_base = git(&destination, &["rev-parse", "origin/main"]);
+        assert_ne!(
+            stale_tracking_base, observed_base,
+            "the local origin tracking ref remains stale while the remote advances"
         );
 
         let preparation = prepare_cook_workspace_base(&destination, "main")
@@ -5365,6 +5364,18 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             .unwrap_or_default()
             .contains("--ff-only")));
     });
+}
+
+#[test]
+fn retryable_preview_base_resolution_is_deferred_not_admitted() {
+    let error = Error::internal_unexpected("authoritative remote unavailable").with_retryable(true);
+    assert!(tolerate_retryable_cook_base_resolution::<()>(Err(error))
+        .expect("retryable remote probe is deferred")
+        .is_none());
+    let preparation = deferred_cook_base_preparation("main");
+    assert_eq!(preparation.base_sha, None);
+    assert_eq!(preparation.provenance, "base_unresolved");
+    assert_eq!(preparation.remote_freshness, "deferred");
 }
 
 #[test]

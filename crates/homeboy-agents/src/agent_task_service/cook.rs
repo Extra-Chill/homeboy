@@ -8617,17 +8617,11 @@ pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBase
     std::fs::write(&alternates, format!("{}/objects\n", common_dir.trim())).map_err(|error| {
         Error::internal_io(error.to_string(), Some(alternates.display().to_string()))
     })?;
-    let Some(resolved) =
-        crate::agent_task_promotion::capture_declared_base(graph.path(), Some(base))?
+    let Some(resolved) = tolerate_retryable_cook_base_resolution(
+        crate::agent_task_promotion::capture_declared_base(graph.path(), Some(base)),
+    )?
     else {
-        return Ok(CookBasePreparation {
-            schema: "homeboy/cook-base-preparation/v1",
-            declared_base: base.to_string(),
-            base_sha: None,
-            provenance: "base_unresolved",
-            remote_freshness: "deferred",
-            topology: None,
-        });
+        return Ok(deferred_cook_base_preparation(base));
     };
     let topology = preflight_cook_workspace_resolved_base_ancestry(
         target,
@@ -8646,6 +8640,28 @@ pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBase
         remote_freshness: "checked",
         topology,
     })
+}
+
+fn deferred_cook_base_preparation(base: &str) -> CookBasePreparation {
+    CookBasePreparation {
+        schema: "homeboy/cook-base-preparation/v1",
+        declared_base: base.to_string(),
+        base_sha: None,
+        provenance: "base_unresolved",
+        remote_freshness: "deferred",
+        topology: None,
+    }
+}
+
+/// Preview must not present an unverified fallback as an admitted base. A
+/// retryable authoritative probe instead produces the same deferred contract as
+/// an unavailable declared base, so replay cannot silently claim parity.
+fn tolerate_retryable_cook_base_resolution<T>(result: Result<Option<T>>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if error.retryable == Some(true) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn preflight_cook_workspace_resolved_base_ancestry(
