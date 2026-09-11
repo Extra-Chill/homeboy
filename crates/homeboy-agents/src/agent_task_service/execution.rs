@@ -2299,12 +2299,14 @@ fn retryable_cook_attempt(
             None,
         )
     })?;
-    if !super::recipe_exists(cook_id)? {
+    let recipe_store =
+        super::cook_recipe::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    if !recipe_store.recipe_exists(cook_id) {
         // Legacy runs predate durable recipes. Retain their established generic
         // lifecycle retry behavior rather than inventing Cook ownership.
         return Ok(None);
     }
-    let recipe = super::load_recipe(cook_id)?;
+    let recipe = recipe_store.load_recipe(cook_id)?;
     let source_recipe_attempt = recipe.attempts.iter().find(|recipe_attempt| {
         recipe_attempt.attempt == attempt && recipe_attempt.run_id == source.run_id
     });
@@ -3429,6 +3431,88 @@ mod tests {
         assert_eq!(record.metadata["cook_id"], "local-retry-cook");
         assert!(record
             .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
+    }
+
+    #[test]
+    fn cook_retry_reads_the_recipe_from_the_injected_lifecycle_root() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+            let workspace = tempfile::tempdir().expect("workspace");
+            let cook_id = "rooted-retry-cook";
+            let run_id = "rooted-retry-attempt-1";
+            let plan = one_task_plan("rooted-retry-plan", workspace.path());
+            agent_task_lifecycle::submit_plan_in_store(&store, &plan, Some(run_id))
+                .expect("persist source attempt");
+            store
+                .mutate_record(run_id, |record| {
+                    record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                    record.metadata["cook_id"] = json!(cook_id);
+                    record.metadata["cook_attempt"] = json!(1);
+                    record.metadata["provider_executions_consumed"] = json!(0);
+                    record.metadata["pre_execution_failure"] = json!({
+                        "phase": "runner_preflight",
+                        "retryable": true,
+                    });
+                    true
+                })
+                .expect("mark retryable source attempt");
+            let recipe_store = super::super::cook_recipe::CookRecipeStore::from_data_root(
+                store.data_root().to_path_buf(),
+            );
+            recipe_store
+                .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
+                    schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
+                    cook_id: cook_id.to_string(),
+                    attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
+                        attempt: 1,
+                        run_id: run_id.to_string(),
+                        plan: plan.clone(),
+                    }],
+                    promotion_transport: json!({
+                        "provider_command": null,
+                        "provider_invocation": null,
+                        "attempt_dispatch": { "kind": "local" },
+                    }),
+                    gate_policy: json!({
+                        "verify": [],
+                        "private_verify": [],
+                        "private_gate_reveal": "summary_only",
+                    }),
+                    retry_budget: json!({
+                        "max_attempts": 2,
+                        "execution_budget": plan.options.execution_budget,
+                    }),
+                    finalization: json!({
+                        "no_finalize": true,
+                        "base": "main",
+                        "head": null,
+                        "title": "title",
+                        "commit_message": "message",
+                        "protected_branches": [],
+                        "ai_tool": "test",
+                        "ai_model": null,
+                        "ai_used_for": "test",
+                        "to_worktree": "target",
+                        "source_worktree_path": null,
+                        "task_base_sha": null,
+                    }),
+                    source_refs: Vec::new(),
+                    runtime_generation: homeboy_core::build_identity::current().display,
+                    sensitive_mappings: Vec::new(),
+                    harvest_context: Default::default(),
+                })
+                .expect("persist recipe in injected root");
+            let source = store.read_record(run_id).expect("read source attempt");
+
+            let retry = retryable_cook_attempt(&store, &source)
+                .expect("read rooted recipe")
+                .expect("Cook retry");
+
+            assert_eq!(retry.cook_id, cook_id);
+            assert_eq!(retry.attempt, 1);
+            assert!(retry.replaces_source_attempt);
+        });
     }
 
     /// A supervisor that has begun supervising still owns its run. Admitting

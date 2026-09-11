@@ -934,6 +934,34 @@ fn daemon_terminalization_requires_its_projected_supervision_generation() {
     .expect("a stale daemon is a no-op");
     assert_eq!(stale.state, AgentTaskRunState::Queued);
 
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
+                json!("cancel_requested");
+            true
+        })
+        .expect("request cancellation");
+    let cancelling = fail_supervised_detached_cook_handoff_parent_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        &identity,
+        "owned child exited during cancellation",
+    )
+    .expect("cancellation owns terminalization");
+    assert_eq!(cancelling.state, AgentTaskRunState::Queued);
+    assert_eq!(
+        cancelling.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] = json!("open");
+            true
+        })
+        .expect("reopen fixture fence");
+
     let failed = fail_supervised_detached_cook_handoff_parent_in_store(
         &store,
         cook_id,

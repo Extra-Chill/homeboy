@@ -1954,6 +1954,7 @@ pub fn fail_supervised_detached_cook_handoff_parent_in_store(
             || handoff["launcher_id"] != launcher_id
             || handoff["child_pid"] != child_pid
             || handoff["child_start_identity"] != child_start_identity
+            || handoff["cancellation_fence"]["state"] != "open"
             || record.state.is_terminal()
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "supervising"

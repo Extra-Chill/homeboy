@@ -50,8 +50,8 @@ use super::work_job::{
 use crate::agent_task_lifecycle;
 
 pub const AGENT_TASK_COOK_JOB_TYPE: &str = "agent-task-cook";
-pub const AGENT_TASK_COOK_JOB_VERSION: u32 = 1;
-const AGENT_TASK_COOK_JOB_SCHEMA: &str = "homeboy/agent-task-cook-job/v1";
+pub const AGENT_TASK_COOK_JOB_VERSION: u32 = 2;
+const AGENT_TASK_COOK_JOB_SCHEMA: &str = "homeboy/agent-task-cook-job/v2";
 
 /// How often supervision re-reads durable cook state and child liveness.
 const SUPERVISION_POLL: Duration = Duration::from_millis(250);
@@ -850,6 +850,18 @@ mod tests {
             .remove("launcher_id");
 
         AgentTaskCookJob::parse(checkpoint).expect_err("reject generation-less initial job");
+    }
+
+    #[test]
+    fn launcher_generation_contract_uses_a_new_wire_version() {
+        let checkpoint = request_of("versioned-cook-job", 4242);
+
+        assert_eq!(AGENT_TASK_COOK_JOB_VERSION, 2);
+        assert_eq!(checkpoint["schema"], "homeboy/agent-task-cook-job/v2");
+
+        let mut prior = checkpoint;
+        prior["schema"] = json!("homeboy/agent-task-cook-job/v1");
+        AgentTaskCookJob::parse(prior).expect_err("reject incompatible v1 checkpoint");
     }
 
     #[test]
