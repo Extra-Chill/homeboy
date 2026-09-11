@@ -1659,11 +1659,15 @@ pub(crate) fn remote_path_writable(client: &SshClient, path: &str) -> bool {
 
 pub(crate) fn remote_artifact_store_available(client: &SshClient, path: &str) -> bool {
     client
-        .execute(&format!(
-            "if [ -e {0} ]; then test -w {0}; else test -w $(dirname {0}); fi",
-            common::shell_word(path)
-        ))
+        .execute(&remote_artifact_store_available_command(path))
         .success
+}
+
+pub(super) fn remote_artifact_store_available_command(path: &str) -> String {
+    let path = common::shell_word(path);
+    format!(
+        "if [ -e {path} ]; then test -d {path} && test -w {path}; else parent=$(dirname {path}); test -d \"$parent\" && test -w \"$parent\"; fi"
+    )
 }
 
 pub(crate) fn connected_daemon_exec_checks(
