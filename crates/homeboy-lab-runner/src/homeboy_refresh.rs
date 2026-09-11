@@ -503,14 +503,19 @@ pub fn refresh_homeboy_binary_in_roots(
 
     let runner = load_in_roots(roots, &plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
+    let fresh_ssh_bootstrap = fresh_ssh_bootstrap_eligible_in_roots(roots, &runner)?;
     // Reconciliation settles retained generation counts from the daemon's typed
     // job view. Consume that postcondition rather than immediately replacing it
     // with a new observation that can include this recovery operation's records.
-    let admission = reconciled_refresh_admission_in_roots(roots, &plan.runner_id)?;
-    let connection_status = admission.status.clone();
+    let admission = (!fresh_ssh_bootstrap)
+        .then(|| reconciled_refresh_admission_in_roots(roots, &plan.runner_id))
+        .transpose()?;
+    let connection_status = admission.as_ref().map(|admission| admission.status.clone());
     if plan.mode == "materialize" {
-        let authorities =
-            refresh_promotion_authorities_in_roots(roots, &plan.runner_id, &connection_status)?;
+        let authorities = match connection_status.as_ref() {
+            Some(status) => refresh_promotion_authorities_in_roots(roots, &plan.runner_id, status)?,
+            None => fresh_refresh_promotion_authorities(),
+        };
         plan.script = materialize_script(
             plan.source
                 .as_deref()
@@ -526,15 +531,21 @@ pub fn refresh_homeboy_binary_in_roots(
             &refresh_authority_commits(&authorities),
         );
     }
-    let execution_route = refresh_execution_route(&runner, &admission)?;
-    let diagnostic_ssh_bootstrap = execution_route.uses_diagnostic_ssh();
+    let diagnostic_ssh_bootstrap = fresh_ssh_bootstrap
+        || refresh_execution_route(
+            &runner,
+            admission
+                .as_ref()
+                .expect("non-bootstrap refresh has admission"),
+        )?
+        .uses_diagnostic_ssh();
     let exec_options =
         refresh_execution_options(&plan, required_commands, diagnostic_ssh_bootstrap);
     let (exec_output, exit_code) = exec_with_status_snapshot_in_roots(
         roots,
         &plan.runner_id,
         exec_options,
-        Some(connection_status.clone()),
+        connection_status.clone(),
     )?;
     let execution_phase = refresh_phase(refresh_execution_phase_name(&plan), true, exit_code);
     if exit_code != 0 {
@@ -635,9 +646,13 @@ pub fn refresh_homeboy_binary_in_roots(
     // connect while materialization runs, so reconnect decisions cannot use the
     // pre-materialization status snapshot.
     promotion_lease.assert_generation()?;
-    let post_lease_status = super::connection::status_in_roots(roots, &plan.runner_id)?;
-    let promotion_authorities =
-        refresh_promotion_authorities_in_roots(roots, &plan.runner_id, &post_lease_status)?;
+    let post_lease_status = (!fresh_ssh_bootstrap)
+        .then(|| super::connection::status_in_roots(roots, &plan.runner_id))
+        .transpose()?;
+    let promotion_authorities = match post_lease_status.as_ref() {
+        Some(status) => refresh_promotion_authorities_in_roots(roots, &plan.runner_id, status)?,
+        None => fresh_refresh_promotion_authorities(),
+    };
     // Selection belongs to the controller-owned runner registry. It must be
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
@@ -661,7 +676,7 @@ pub fn refresh_homeboy_binary_in_roots(
                             older,
                             newer,
                             diagnostic_ssh_bootstrap,
-                            &connection_status,
+                            connection_status.as_ref(),
                         );
                         match result {
                             Ok(result) => {
@@ -718,7 +733,7 @@ pub fn refresh_homeboy_binary_in_roots(
                         older,
                         newer,
                         diagnostic_ssh_bootstrap,
-                        &connection_status,
+                        connection_status.as_ref(),
                     );
                     match result {
                         Ok(result) => {
@@ -829,7 +844,12 @@ pub fn refresh_homeboy_binary_in_roots(
     // The status captured under the promotion lease is the reconnect authority:
     // an old daemon that appeared while materializing must be retired, while a
     // stale session for a disconnected runner must not block direct connect.
-    let refresh_session = reconnect_session_after_promotion(options.reconnect, &post_lease_status);
+    let post_promotion_status = match post_lease_status {
+        Some(status) => status,
+        None => super::connection::status_in_roots(roots, &plan.runner_id)?,
+    };
+    let refresh_session =
+        reconnect_session_after_promotion(options.reconnect, &post_promotion_status);
     let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
 
     let mut daemon_refreshed = false;
@@ -1802,6 +1822,32 @@ fn refresh_execution_options(
     })
 }
 
+fn fresh_ssh_bootstrap_eligible_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner: &super::Runner,
+) -> Result<bool> {
+    if runner.kind != RunnerKind::Ssh || runner.settings.homeboy_path.is_some() {
+        return Ok(false);
+    }
+    if super::connection::session_store_read_session_or_live_peer_in_root(
+        roots.config(),
+        &runner.id,
+    )?
+    .is_some()
+    {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_path",
+            format!(
+                "runner `{}` has no configured Homeboy path but retains a daemon session; recover or disconnect that session before bootstrapping",
+                runner.id
+            ),
+            Some(runner.id.clone()),
+            None,
+        ));
+    }
+    Ok(true)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefreshExecutionRoute {
     Daemon,
@@ -1964,6 +2010,14 @@ struct RefreshPromotionAuthorities {
     configured_selected: Option<String>,
 }
 
+fn fresh_refresh_promotion_authorities() -> RefreshPromotionAuthorities {
+    RefreshPromotionAuthorities {
+        controller: homeboy_product_identity::build_identity().git_commit,
+        active_daemon: None,
+        configured_selected: None,
+    }
+}
+
 fn refresh_promotion_authorities_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
@@ -2118,7 +2172,7 @@ fn runner_commits_are_ancestral(
     older: &str,
     newer: &str,
     disconnected_ssh: bool,
-    status_snapshot: &super::RunnerStatusReport,
+    status_snapshot: Option<&super::RunnerStatusReport>,
 ) -> Result<RefreshAncestryExecution> {
     runner_commits_are_ancestral_with(
         plan,
@@ -2127,7 +2181,7 @@ fn runner_commits_are_ancestral(
         newer,
         disconnected_ssh,
         |runner_id, options| {
-            exec_with_status_snapshot(runner_id, options, Some(status_snapshot.clone()))
+            exec_with_status_snapshot(runner_id, options, status_snapshot.cloned())
         },
     )
 }
