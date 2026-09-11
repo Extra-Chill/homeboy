@@ -1,4 +1,45 @@
 use super::*;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+
+const WORKTREE_LIST_CURSOR_SCHEMA: &str = "homeboy/worktree-list-cursor/v1";
+
+/// The filename is the immutable ordering key for a list page. Keep it inside
+/// a versioned envelope so the wire cursor is opaque and independently
+/// evolvable from task-worktree record IDs.
+#[derive(Debug, Serialize, Deserialize)]
+struct WorktreeListCursor {
+    schema: String,
+    manifest_name: String,
+}
+
+fn encode_worktree_list_cursor(manifest_name: String) -> String {
+    let cursor = WorktreeListCursor {
+        schema: WORKTREE_LIST_CURSOR_SCHEMA.to_string(),
+        manifest_name,
+    };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&cursor).expect("worktree list cursor serializes"))
+}
+
+pub(super) fn decode_worktree_list_cursor(value: &str) -> Result<String> {
+    let invalid = || {
+        Error::validation_invalid_argument(
+            "cursor",
+            "must be an opaque worktree-list continuation with schema homeboy/worktree-list-cursor/v1",
+            Some(value.to_string()),
+            None,
+        )
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| invalid())?;
+    let cursor: WorktreeListCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if cursor.schema != WORKTREE_LIST_CURSOR_SCHEMA || cursor.manifest_name.is_empty() {
+        return Err(invalid());
+    }
+    Ok(cursor.manifest_name)
+}
 
 pub(super) fn adopt_with_store(
     options: WorktreeAdoptOptions,
@@ -1026,6 +1067,11 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     if !store_dir.exists() {
         return Ok(WorktreeListOutput {
             worktrees,
+            cursor: None,
+            next_cursor: None,
+            next_command: None,
+            limit: usize::MAX,
+            truncated: false,
             diagnostics,
         });
     }
@@ -1052,6 +1098,91 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     worktrees.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(WorktreeListOutput {
         worktrees,
+        cursor: None,
+        next_cursor: None,
+        next_command: None,
+        limit: usize::MAX,
+        truncated: false,
+        diagnostics,
+    })
+}
+
+pub(super) fn list_page_with_store(
+    store_dir: &Path,
+    options: WorktreeListOptions,
+) -> Result<WorktreeListOutput> {
+    let limit = options.limit.clamp(1, 500);
+    // Decoded input is compared only to names discovered from the directory;
+    // it never forms a filesystem path.
+    let boundary = options
+        .cursor
+        .as_deref()
+        .map(decode_worktree_list_cursor)
+        .transpose()?;
+    let mut entries = if store_dir.exists() {
+        fs::read_dir(store_dir)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(store_dir.display().to_string()))
+            })?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    entries.sort_by_key(|entry| entry.file_name());
+    let start = boundary.as_ref().map_or(0, |boundary| {
+        entries.partition_point(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                <= boundary.as_str()
+        })
+    });
+    let entries = entries
+        .into_iter()
+        .skip(start)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let truncated = entries.len() > limit;
+    let entries = entries.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = truncated
+        .then(|| {
+            entries
+                .last()
+                .expect("a truncated page has a boundary entry")
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                .to_string()
+        })
+        .map(encode_worktree_list_cursor);
+    let next_command = next_cursor
+        .as_ref()
+        .map(|cursor| format!("homeboy worktree list --limit {limit} --cursor {cursor}"));
+    let mut worktrees = Vec::new();
+    let mut diagnostics = Vec::new();
+    for entry in entries {
+        match read_record_path(&entry.path()) {
+            Ok(record) => worktrees.push(record),
+            Err(error) => diagnostics.push(WorktreeListDiagnostic::from_error(
+                error,
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.trim_end_matches(".json").to_string()),
+                Some(entry.path().display().to_string()),
+            )),
+        }
+    }
+    Ok(WorktreeListOutput {
+        worktrees,
+        cursor: options.cursor,
+        next_cursor,
+        next_command,
+        limit,
+        truncated,
         diagnostics,
     })
 }
@@ -1074,21 +1205,62 @@ pub(super) fn inventory_with_store_and_authority(
             .apply_deadline
             .unwrap_or_else(|| std::time::Instant::now() + APPLY_TIMEOUT)
     });
-    let worktrees = list_with_store(store_dir)?.worktrees;
-    let total = worktrees.len();
-    let mut worktrees = worktrees.into_iter().filter(|record| {
-        options
-            .cursor
-            .as_ref()
-            .is_none_or(|cursor| record.id.as_str() > cursor.as_str())
+    // Count and sort manifest names without deserializing the registry. A page
+    // must bound parsing too, not merely trim an already materialized result.
+    let mut manifest_paths = if store_dir.exists() {
+        fs::read_dir(store_dir)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(store_dir.display().to_string()))
+            })?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    manifest_paths.sort();
+    let total = manifest_paths.len();
+    let start = options.cursor.as_ref().map_or(0, |cursor| {
+        let cursor = paths::sanitize_path_segment(cursor);
+        manifest_paths.partition_point(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|id| id <= cursor.as_str())
+        })
     });
-    let records_page: Vec<_> = worktrees.by_ref().take(limit).collect();
-    let mut next_cursor = worktrees.next().map(|_| {
-        records_page
+    // Probe one extra physical manifest. The boundary is the filename, not a
+    // decoded record ID, so deletion or corruption of returned rows is safe.
+    let page_paths = manifest_paths
+        .into_iter()
+        .skip(start)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let has_more = page_paths.len() > limit;
+    let page_paths = page_paths.into_iter().take(limit).collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    let records_page = page_paths
+        .iter()
+        .filter_map(|path| match read_record_path(path) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                diagnostics.push(WorktreeListDiagnostic::from_error(
+                    error,
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string),
+                    Some(path.display().to_string()),
+                ));
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut next_cursor = has_more.then(|| {
+        page_paths
             .last()
-            .expect("a page with a following record is non-empty")
-            .id
-            .clone()
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str())
+            .expect("JSON manifest names are valid cursor boundaries")
+            .to_string()
     });
     let mut truncated = next_cursor.is_some();
     let mut records = Vec::new();
@@ -1313,6 +1485,7 @@ pub(super) fn inventory_with_store_and_authority(
         cross_tab_scope: "task_worktree_page",
         cross_tab,
         records,
+        diagnostics,
         adopted: WorktreeAdoptedInventoryPage {
             cursor: options.adopted_cursor,
             next_cursor: adopted_next_cursor,
@@ -1643,13 +1816,6 @@ fn remove_with_store_until(
     }
 }
 
-fn remove_with_store_unlocked(
-    options: WorktreeRemoveOptions,
-    store_dir: &Path,
-) -> Result<WorktreeRemoveOutput> {
-    remove_with_store_unlocked_until(options, store_dir, None)
-}
-
 fn remove_with_store_unlocked_until(
     options: WorktreeRemoveOptions,
     store_dir: &Path,
@@ -1809,12 +1975,6 @@ fn workspace_claim_store_for_worktrees(
     ))
 }
 
-pub(super) fn branch_cleanup_report(
-    record: &TaskWorktreeRecord,
-) -> Result<WorktreeBranchCleanupReport> {
-    branch_cleanup_report_until(record, None)
-}
-
 fn branch_cleanup_report_until(
     record: &TaskWorktreeRecord,
     deadline: Option<std::time::Instant>,
@@ -1887,14 +2047,6 @@ fn branch_cleanup_report_until(
         },
         cleanup_command,
     })
-}
-
-fn apply_branch_cleanup(
-    record: &TaskWorktreeRecord,
-    report: WorktreeBranchCleanupReport,
-    allow_unmerged_branch: bool,
-) -> Result<WorktreeBranchCleanupReport> {
-    apply_branch_cleanup_until(record, report, allow_unmerged_branch, None)
 }
 
 fn apply_branch_cleanup_until(
@@ -2042,24 +2194,12 @@ fn safety_report_until(
 
 const LIVE_CWD_REASON: &str = "refuses to remove the caller's live current working directory";
 
-pub(super) fn is_dirty(path: &Path) -> Result<bool> {
-    Ok(
-        !git::run_git(path, &["status", "--porcelain=v1"], "git status")?
-            .trim()
-            .is_empty(),
-    )
-}
-
 fn is_dirty_until(path: &Path, deadline: Option<std::time::Instant>) -> Result<bool> {
     Ok(
         !run_inventory_git_until(path, &["status", "--porcelain=v1"], "git status", deadline)?
             .trim()
             .is_empty(),
     )
-}
-
-pub(super) fn unpushed_commit_count(path: &Path, base_ref: &str) -> Result<u32> {
-    unpushed_commit_count_until(path, base_ref, None)
 }
 
 fn unpushed_commit_count_until(

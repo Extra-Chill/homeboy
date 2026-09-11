@@ -281,7 +281,7 @@ mod tests {
         homeboy::core::observation::ObservationStore::open_initialized().expect("observation store")
     }
     use super::*;
-    use homeboy::core::observation::{NewRunRecord, RunStatus};
+    use homeboy::core::observation::RunStatus;
     use homeboy::test_support::with_isolated_home;
 
     use crate::commands::runs::test_support::sample_run;

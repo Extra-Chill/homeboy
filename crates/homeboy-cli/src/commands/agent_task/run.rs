@@ -32,7 +32,7 @@ use super::args::{
     ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
-use super::gate_contract::validate_gate_contracts;
+use super::gate_contract::{validate_gate_contracts, GateContractValidation};
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Provider evidence is streamed into an immutable, digest-addressed projection.
@@ -2129,6 +2129,58 @@ mod preview_tests {
     }
 
     #[test]
+    fn preview_and_execution_reject_missing_task_url_for_absent_provider_worktree() {
+        crate::test_support::with_isolated_home(|_| {
+            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("workspace repository")
+                .display()
+                .to_string();
+            let handle = "homeboy@feature-missing-task-url";
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement the issue",
+                "--repo",
+                "homeboy",
+                "--workspace",
+                &repository,
+                "--base",
+                "main",
+                "--head",
+                "feature/missing-task-url",
+                "--to-worktree",
+                &handle,
+                "--no-finalize",
+            ]);
+
+            let preview = resolve_cook_preview_destination(args.clone())
+                .expect_err("preview rejects the missing creation requirement");
+            let execution = provision_cook_destination(&args)
+                .expect_err("execution rejects before durable Cook admission");
+
+            assert_eq!(preview.code, execution.code, "preview: {preview:?}");
+            assert_eq!(preview.message, execution.message);
+            let missing = preview.details["args"]
+                .as_array()
+                .expect("missing-argument details");
+            assert!(missing.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|value| value.contains("--task-url") && value.contains(handle))
+            }));
+            assert!(agent_task_lifecycle::list_records()
+                .expect("read lifecycle records")
+                .is_empty());
+        });
+    }
+
+    #[test]
     fn preview_rejects_an_existing_unsafe_path_without_changing_it() {
         crate::test_support::with_isolated_home(|_| {
             let path = tempfile::tempdir().expect("unsafe path");
@@ -2731,6 +2783,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         None,
+                        None,
                         args.artifact_id.as_deref(),
                         args.rearm,
                         Value::Null,
@@ -2755,6 +2808,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        None,
                         args.artifact_id.as_deref(),
                         args.rearm,
                         Value::Null,
@@ -2788,6 +2842,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        None,
                         args.artifact_id.as_deref(),
                         args.rearm,
                         candidate_fingerprint,
@@ -2799,6 +2854,14 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ))
             }
         };
+    let continuation_command = || {
+        agent_task_service_direct::cook_continue_command_for_record(
+            &record,
+            &run_id,
+            args.rearm,
+            args.artifact_id.as_deref(),
+        )
+    };
     if let Some(finalization) = record
         .metadata
         .get("cook_finalization")
@@ -2827,6 +2890,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        Some(continuation_command()),
                         args.artifact_id.as_deref(),
                         args.rearm,
                         candidate_fingerprint,
@@ -2858,12 +2922,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     "selected_artifact": { "artifact_id": args.artifact_id },
                     "candidate_fingerprint": candidate_fingerprint,
                     "finalization": finalization,
-                    "continuation_command": agent_task_service_direct::cook_continue_command(
-                        None,
-                        &run_id,
-                        args.rearm,
-                        args.artifact_id.as_deref(),
-                    ),
+                    "continuation_command": continuation_command(),
                     "continuation": {
                         "path": "finalization_receipt_replay",
                         "state": "Absent",
@@ -2897,6 +2956,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        Some(continuation_command()),
                         args.artifact_id.as_deref(),
                         args.rearm,
                         candidate_fingerprint,
@@ -2923,6 +2983,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    Some(continuation_command()),
                     args.artifact_id.as_deref(),
                     args.rearm,
                     candidate_fingerprint,
@@ -2936,6 +2997,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         return Ok(cook_finalization_receipt_preflight_report(
             selected_run_id,
             &run_id,
+            continuation_command(),
             args.artifact_id.as_deref(),
             args.rearm,
             candidate_fingerprint,
@@ -2947,12 +3009,13 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         let error = homeboy::core::Error::validation_invalid_argument(
             "cook_or_attempt_id",
             "selected Cook attempt is not terminal and cannot be admitted to dispatch",
-            Some(run_id),
+            Some(run_id.clone()),
             None,
         );
         return Ok((
             cook_continuation_preflight_report(
                 selected_run_id,
+                Some(continuation_command()),
                 args.artifact_id.as_deref(),
                 args.rearm,
                 candidate_fingerprint,
@@ -2986,6 +3049,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        Some(continuation_command()),
                         args.artifact_id.as_deref(),
                         args.rearm,
                         candidate_fingerprint,
@@ -3009,6 +3073,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    Some(continuation_command()),
                     args.artifact_id.as_deref(),
                     args.rearm,
                     candidate_fingerprint,
@@ -3043,6 +3108,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    Some(continuation_command()),
                     args.artifact_id.as_deref(),
                     args.rearm,
                     candidate_fingerprint,
@@ -3070,6 +3136,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        Some(continuation_command()),
                         args.artifact_id.as_deref(),
                         args.rearm,
                         candidate_fingerprint,
@@ -3100,6 +3167,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    Some(continuation_command()),
                     args.artifact_id.as_deref(),
                     args.rearm,
                     candidate_fingerprint,
@@ -3118,6 +3186,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    Some(continuation_command()),
                     args.artifact_id.as_deref(),
                     args.rearm,
                     candidate_fingerprint,
@@ -3142,6 +3211,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         return Ok(cook_finalization_receipt_preflight_report(
             selected_run_id,
             &run_id,
+            continuation_command(),
             args.artifact_id.as_deref(),
             args.rearm,
             candidate_fingerprint,
@@ -3160,6 +3230,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        Some(continuation_command()),
                         args.artifact_id.as_deref(),
                         args.rearm,
                         candidate_fingerprint,
@@ -3201,6 +3272,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     return Ok((
                         cook_continuation_preflight_report(
                             selected_run_id,
+                            Some(continuation_command()),
                             args.artifact_id.as_deref(),
                             args.rearm,
                             candidate_fingerprint,
@@ -3246,12 +3318,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             "selected_artifact": { "artifact_id": promotion_preflight.get("artifact_id").cloned().unwrap_or_else(|| serde_json::json!(args.artifact_id)) },
             "candidate_fingerprint": candidate_fingerprint,
             "promotion": promotion_preflight,
-            "continuation_command": agent_task_service_direct::cook_continue_command(
-                None,
-                &run_id,
-                args.rearm,
-                args.artifact_id.as_deref(),
-            ),
+            "continuation_command": continuation_command(),
             "evidence_refs": [{
                 "run_id": run_id,
                 "ref": format!("homeboy://agent-task/run/{run_id}/evidence"),
@@ -3278,8 +3345,9 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
 fn cook_finalization_receipt_preflight_report(
     selected_run_id: Option<String>,
     run_id: &str,
+    continuation_command: String,
     artifact_id: Option<&str>,
-    rearm: bool,
+    _rearm: bool,
     candidate_fingerprint: Value,
     phases: Vec<Value>,
     finalization: &Value,
@@ -3304,12 +3372,7 @@ fn cook_finalization_receipt_preflight_report(
                 "execution_only_checks": [],
             },
             "finalization": finalization,
-            "continuation_command": agent_task_service_direct::cook_continue_command(
-                None,
-                run_id,
-                rearm,
-                artifact_id,
-            ),
+            "continuation_command": continuation_command,
             "evidence_refs": [{
                 "run_id": run_id,
                 "ref": format!("homeboy://agent-task/run/{run_id}/evidence"),
@@ -3329,6 +3392,7 @@ fn cook_finalization_receipt_preflight_report(
 
 fn cook_continuation_preflight_report(
     selected_run_id: Option<String>,
+    continuation_command: Option<String>,
     artifact_id: Option<&str>,
     rearm: bool,
     candidate_fingerprint: Value,
@@ -3338,8 +3402,10 @@ fn cook_continuation_preflight_report(
 ) -> Value {
     phases.push(serde_json::json!({ "phase": phase, "status": "blocked", "reason": format!("{:?}", error.code), "message": error.message }));
     let run_id = selected_run_id.clone();
-    let continuation_command = run_id.as_deref().map(|run_id| {
-        agent_task_service_direct::cook_continue_command(None, run_id, rearm, artifact_id)
+    let continuation_command = continuation_command.or_else(|| {
+        run_id.as_deref().map(|run_id| {
+            agent_task_service_direct::cook_continue_command(None, run_id, rearm, artifact_id)
+        })
     });
     let evidence_refs = run_id
         .as_deref()
@@ -3625,6 +3691,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     // Preserve the native provisioning intent until Cook has durably admitted
     // its recipe and exact lifecycle owner. Ensure is forbidden before that
     // point.
+    preflight_missing_cook_provider_workspace(args, to_worktree)?;
     Ok(serde_json::json!({
         "action": "lookup_pending",
         "kind": "native",
@@ -3640,6 +3707,48 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "cleanup_policy": "remove_on_success",
         },
     }))
+}
+
+/// Resolve the native provider identity without creating a worktree. Preview
+/// and execution both use this check, so a field required only for creation is
+/// rejected before either reports a viable deferred destination.
+fn preflight_missing_cook_provider_workspace(
+    args: &AgentTaskCookArgs,
+    handle: &str,
+) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionPlan> {
+    let intent = cook_provider_provision_intent(args, handle)?;
+    if intent.task_url.is_none() {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            format!("--task-url is required to create missing provider worktree `{handle}`"),
+        ]));
+    }
+    homeboy::core::worktree_provider::plan_worktree_provision(&intent)
+}
+
+fn cook_provider_provision_intent(
+    args: &AgentTaskCookArgs,
+    handle: &str,
+) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionIntent> {
+    Ok(homeboy::core::worktree_provider::WorktreeProvisionIntent {
+        handle: handle.to_string(),
+        repo: cook_provision_repository(args).ok_or_else(|| {
+            homeboy::core::Error::validation_missing_argument(vec![
+                "--repo <repo> is required to create a missing --to-worktree destination"
+                    .to_string(),
+            ])
+        })?,
+        base: args
+            .base
+            .clone()
+            .expect("Cook base is resolved before provider preflight"),
+        head: args.head.clone().ok_or_else(|| {
+            homeboy::core::Error::validation_missing_argument(vec![
+                "--head <branch> is required to create a missing --to-worktree destination"
+                    .to_string(),
+            ])
+        })?,
+        task_url: args.dispatch.task_url.clone(),
+    })
 }
 
 /// The exact declaration used both by preview planning and live provider
@@ -3923,27 +4032,8 @@ pub(super) fn resolve_cook_preview_destination(
         validate_cook_destination_identity(&args, &path)?;
         path
     } else {
-        let intent = homeboy::core::worktree_provider::WorktreeProvisionIntent {
-            handle: handle.clone(),
-            repo: cook_provision_repository(&args).ok_or_else(|| {
-                homeboy::core::Error::validation_missing_argument(vec![
-                    "--repo <repo> is required to create a missing --to-worktree destination"
-                        .to_string(),
-                ])
-            })?,
-            base: args
-                .base
-                .clone()
-                .expect("Cook base is resolved before preview"),
-            head: args.head.clone().ok_or_else(|| {
-                homeboy::core::Error::validation_missing_argument(vec![
-                    "--head <branch> is required to create a missing --to-worktree destination"
-                        .to_string(),
-                ])
-            })?,
-            task_url: args.dispatch.task_url.clone(),
-        };
-        let plan = homeboy::core::worktree_provider::plan_worktree_provision(&intent)?;
+        let intent = cook_provider_provision_intent(&args, &handle)?;
+        let plan = preflight_missing_cook_provider_workspace(&args, &handle)?;
         let destination = match plan {
             homeboy::core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
             | homeboy::core::worktree_provider::WorktreeProvisionPlan::Planned(destination) => {
@@ -5051,9 +5141,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
-    snapshot_cook_prompt(&mut args)?;
-    args.gates.snapshot_file_inputs()?;
-    validate_cook_request_with_provenance(&args, provenance)?;
+    preflight_cook_execution_request(&mut args, provenance)?;
     let args = resolve_cook_destination(args)?;
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
         args.to_worktree
@@ -5082,6 +5170,42 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     // bare rejection.
     let provision = provision_cook_destination(&args)?;
 
+    run_preflight_cook_execution(
+        args,
+        executor,
+        attempt_dispatcher,
+        progress,
+        gate_contract_validation,
+        provision,
+        no_progress,
+        provenance,
+    )
+}
+
+/// Validate the input boundary shared by executable Cook routes. Output-file
+/// callers run this before creating their detached handoff parent.
+pub(crate) fn preflight_cook_execution_request(
+    args: &mut AgentTaskCookArgs,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> homeboy::core::Result<()> {
+    snapshot_cook_prompt(&mut *args)?;
+    args.gates.snapshot_file_inputs()?;
+    validate_cook_request_with_provenance(&args, provenance)?;
+    Ok(())
+}
+
+fn run_preflight_cook_execution(
+    args: AgentTaskCookArgs,
+    executor: SharedAgentTaskExecutor,
+    attempt_dispatcher: Option<
+        Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
+    >,
+    progress: super::CookProgress<'_>,
+    gate_contract_validation: GateContractValidation,
+    provision: Value,
+    no_progress: bool,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> CmdResult<Value> {
     let mut dispatch_args = resolved_dispatch_args_for_cook(&args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {

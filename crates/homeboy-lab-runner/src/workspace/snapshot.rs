@@ -2491,9 +2491,10 @@ fn snapshot_construction_failure(
         .unwrap_or(serde_json::Value::Null);
     error.details["reason"] = serde_json::json!(reason);
     error.details["recovery"] = serde_json::json!({
-        "owner": "homeboy_snapshot_staging",
-        "action": "rebuild_snapshot_staging_and_replay_cook",
-        "command": "homeboy agent-task retry <run-id> --run",
+        "owner": "durable_lifecycle",
+        "action": "project_lifecycle_recovery",
+        "reason": "No safe in-place recovery is known until the durable lifecycle owner evaluates this failed snapshot record.",
+        "remediation": "Correct the controller-side snapshot inputs, then start the replacement lifecycle run selected by its owner.",
     });
     error
 }

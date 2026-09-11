@@ -1,6 +1,5 @@
-use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy::core::observation::{ObservationStore, RunStatus};
 use homeboy::test_support::with_isolated_home;
-use serde_json::Value;
 
 use super::types::RunsArtifactsArgs;
 use super::{handlers, list_runs, RunsListArgs, RunsOutput};

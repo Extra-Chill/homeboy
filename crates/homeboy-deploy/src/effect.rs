@@ -100,8 +100,6 @@ mod tests {
     use crate::types::DeployEffect;
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::project::Project;
-    use homeboy_core::server::SshClient;
-    use std::collections::HashMap;
 
     #[test]
     fn post_effect_version_read_uses_applied_remote_tree() {

@@ -6,9 +6,9 @@
 //!
 //! See: https://github.com/Extra-Chill/homeboy/issues/436
 
-use clap::{Arg, ArgAction, Args, Command, CommandFactory};
+use clap::{Arg, ArgAction, Args, Command, CommandFactory, Parser};
 
-use crate::cli_surface::Cli;
+use crate::cli_surface::{Cli, Commands};
 use crate::command_capability::argv_separator_index;
 use homeboy::core::component::{self, Component};
 use homeboy::core::scope::{Scope, ScopeKind};
@@ -103,21 +103,24 @@ pub(crate) fn filter_passthrough_args(command: PassthroughCommand, args: &[Strin
 /// argument — `homeboy bench comp -- sh -c -- inner` — and marking it injected
 /// the sentinel into the argv Homeboy forwards verbatim.
 pub(crate) fn mark_explicit_passthrough(args: Vec<String>) -> Vec<String> {
-    let explicit_passthrough = matches!(args.get(1).map(String::as_str), Some("bench"))
-        || matches!(
-            (
-                args.get(1).map(String::as_str),
-                args.get(2).map(String::as_str)
-            ),
-            (Some("review"), Some("test"))
-        );
-    if !explicit_passthrough {
-        return args;
-    }
-
     let Some(separator) = argv_separator_index(&args) else {
         return args;
     };
+    // Let Clap identify the command path. Scanning tokens for `review test`
+    // mistakes values of root options (for example `--runner test`) for actions.
+    let supports_passthrough = Cli::try_parse_from(&args).is_ok_and(|cli| {
+        matches!(
+            cli.command,
+            Commands::Bench(_)
+                | Commands::Review(crate::commands::review::ReviewArgs {
+                    command: Some(crate::commands::review::ReviewCommand::Test(_)),
+                    ..
+                })
+        )
+    });
+    if !supports_passthrough {
+        return args;
+    }
 
     let mut result = args;
     result.insert(separator + 1, EXPLICIT_PASSTHROUGH_SENTINEL.to_string());
@@ -281,6 +284,74 @@ fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
+#[cfg(test)]
+mod review_option_order_tests {
+    use super::*;
+
+    #[test]
+    fn review_test_passthrough_is_marked_without_reordering() {
+        let command = [
+            "homeboy",
+            "--placement=local",
+            "review",
+            "test",
+            "fixture",
+            "--summary",
+            "--",
+            "--changed-since",
+            "main",
+        ]
+        .map(str::to_string)
+        .to_vec();
+
+        assert_eq!(
+            normalize(command),
+            [
+                "homeboy",
+                "--placement=local",
+                "review",
+                "test",
+                "fixture",
+                "--summary",
+                "--",
+                EXPLICIT_PASSTHROUGH_SENTINEL,
+                "--changed-since",
+                "main",
+            ]
+            .map(str::to_string)
+            .to_vec()
+        );
+    }
+
+    #[test]
+    fn parser_identifies_review_test_passthrough_when_root_global_values_match_actions() {
+        let command = [
+            "homeboy", "--runner", "audit", "review", "test", "fixture", "--", "--filter",
+            "focused",
+        ]
+        .map(str::to_string)
+        .to_vec();
+
+        assert_eq!(
+            normalize(command),
+            [
+                "homeboy",
+                "--runner",
+                "audit",
+                "review",
+                "test",
+                "fixture",
+                "--",
+                EXPLICIT_PASSTHROUGH_SENTINEL,
+                "--filter",
+                "focused",
+            ]
+            .map(str::to_string)
+            .to_vec()
+        );
+    }
+}
+
 // ============================================================================
 // PositionalComponentArgs: positional component + --path
 // ============================================================================
@@ -291,7 +362,7 @@ pub struct PositionalComponentArgs {
     pub component: Option<String>,
 
     /// Override the component checkout path for this invocation
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub path: Option<String>,
 }
 
@@ -1061,7 +1132,7 @@ pub struct BaselineArgs {
 #[derive(Args, Debug, Clone, Default)]
 pub struct ChangedSinceArgs {
     /// Only operate on files changed since this git ref (branch, tag, or SHA).
-    #[arg(long, value_name = "REF")]
+    #[arg(long, value_name = "REF", allow_hyphen_values = true)]
     pub changed_since: Option<String>,
 
     /// Caller-injected changeset. Not a CLI surface — `review` and the Lab

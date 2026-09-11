@@ -9,8 +9,6 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{Runner, RunnerKind};
-
 /// These cases run inside `with_isolated_home`, so reading the environment here
 /// observes that isolated home. Naming the roots keeps the call sites explicit
 /// about which installation the evidence is being mirrored into.
@@ -26,7 +24,6 @@ use homeboy_core::error::{Error, ErrorCode};
 use homeboy_core::observation::{
     runs_service, ArtifactRecord, NewRunRecord, ObservationStore, RunRecord,
 };
-use homeboy_core::server::{RunnerPolicy, RunnerSettings};
 
 use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,

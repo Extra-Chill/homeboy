@@ -336,18 +336,22 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::List(list_args) => {
             if list_args.latest {
                 status::list_filtered_latest_runs(list_args.into())
-            } else {
+            } else if list_args.full {
                 status::list_runs(
                     agent_task_service::AgentTaskDiscoveryFilter::All,
                     list_args.into(),
                 )
+            } else {
+                status::list_runs_page(agent_task_service::AgentTaskDiscoveryFilter::All, list_args)
             }
         }
         AgentTaskCommand::Active(active_args) => {
             if active_args.reconcile {
                 status::reconcile_active(!active_args.apply)
-            } else {
+            } else if active_args.full {
                 status::list_active(active_args.into())
+            } else {
+                status::list_active_page(active_args)
             }
         }
         AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),

@@ -255,8 +255,6 @@ fn scp_file_atomic(
 mod tests {
     use super::{process_output_result, scp_file, upload_directory, upload_file};
     use crate::test_support::local_client;
-    use homeboy_core::server::SshClient;
-    use std::collections::HashMap;
     use std::fs;
     use std::process::Command;
 

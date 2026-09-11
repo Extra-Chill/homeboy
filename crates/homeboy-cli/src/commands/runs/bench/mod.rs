@@ -553,7 +553,6 @@ fn collect_numeric_object(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::observation::NewRunRecord;
     use homeboy::test_support::with_isolated_home;
 
     use crate::commands::runs::test_support::sample_run;

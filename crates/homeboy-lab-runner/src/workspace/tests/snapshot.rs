@@ -1745,6 +1745,7 @@ fn snapshot_install_commands_parse_under_posix_shells() {
 #[test]
 fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
     let source = tempfile::tempdir().expect("snapshot source");
+    let scratch = tempfile::tempdir().expect("snapshot scratch");
     let overlay = source.path().join("runtime-overlays");
     fs::create_dir_all(&overlay).expect("runtime overlay source");
     fs::write(overlay.join("runtime.js"), "runtime").expect("runtime artifact");
@@ -1754,7 +1755,7 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
     // preserves the declaration identity and staging now fails before transport.
     let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
     fs::remove_dir_all(&overlay).expect("remove overlay after manifest creation");
-    let error = materialize_snapshot_stage(source.path(), &[], &manifest, None)
+    let error = materialize_snapshot_stage(source.path(), &[], &manifest, Some(scratch.path()))
         .expect_err("missing declared overlay must fail during local staging");
 
     assert_eq!(error.retryable, Some(false));
@@ -1772,7 +1773,16 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
         .is_some_and(|reason| reason.contains("tar: ./runtime-overlays: Cannot stat")));
     assert_eq!(
         error.details["recovery"]["action"],
-        "rebuild_snapshot_staging_and_replay_cook"
+        "project_lifecycle_recovery"
+    );
+    assert_eq!(error.details["recovery"]["owner"], "durable_lifecycle");
+    assert!(error.details["recovery"]["command"].is_null());
+    assert!(
+        fs::read_dir(scratch.path())
+            .expect("inspect scratch cleanup")
+            .next()
+            .is_none(),
+        "failed staging must not retain its scratch directory"
     );
 }
 
@@ -2157,6 +2167,12 @@ fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift
     )
     .expect_err("construction failure must reject transport");
     assert_eq!(error.details["classification"], "snapshot_construction");
+    assert_eq!(error.details["recovery"]["owner"], "durable_lifecycle");
+    assert_eq!(
+        error.details["recovery"]["action"],
+        "project_lifecycle_recovery"
+    );
+    assert!(error.details["recovery"]["command"].is_null());
     assert!(
         !marker.path().exists(),
         "transport must not start after staging failure"

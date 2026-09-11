@@ -404,6 +404,15 @@ pub struct WorktreeAdoptOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeListOutput {
     pub worktrees: Vec<TaskWorktreeRecord>,
+    /// Opaque continuation supplied for this page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
+    pub limit: usize,
+    pub truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<WorktreeListDiagnostic>,
 }
@@ -458,6 +467,10 @@ pub struct WorktreeInventoryOutput {
     pub cross_tab_scope: &'static str,
     pub cross_tab: WorktreeInventoryCrossTab,
     pub records: Vec<WorktreeInventoryRecord>,
+    /// Malformed manifests encountered within this physical page. Their names
+    /// remain valid keyset boundaries, so a corrupt record cannot stall a walk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<WorktreeListDiagnostic>,
     pub adopted: WorktreeAdoptedInventoryPage,
 }
 
@@ -625,6 +638,12 @@ pub struct WorktreeInventoryOptions {
     /// Testable monotonic deadline for the complete apply page. Production
     /// callers leave this unset and use the bounded default.
     pub apply_deadline: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorktreeListOptions {
+    pub limit: usize,
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

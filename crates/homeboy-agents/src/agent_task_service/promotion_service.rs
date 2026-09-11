@@ -21,6 +21,7 @@ use crate::agent_task_promotion::{
     AgentTaskPromotionReport, AgentTaskPromotionRequest, PromotionProgressCallback,
 };
 
+#[cfg(test)]
 use crate::agent_task_gate::VerifyGateOptions;
 
 pub const AGENT_TASK_PROMOTION_JOB_TYPE: &str = "agent-task-promotion";

@@ -1889,7 +1889,7 @@ fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
 }
 
 #[test]
-fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() {
+fn cook_lab_source_uses_the_recorded_execution_worktree_not_controller_context() {
     crate::test_support::with_isolated_home(|_| {
         let baseline = tempfile::tempdir().expect("derived baseline");
         let ordinary_workspace = tempfile::tempdir().expect("materialized workspace");
@@ -1901,7 +1901,8 @@ fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() 
             "task",
             Some(serde_json::json!({"workspace_snapshot_identity": "snapshot:parent"})),
         );
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let execution_workspace = tempfile::tempdir().expect("managed execution workspace");
+        let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "cook-derived-baseline",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
@@ -1911,6 +1912,9 @@ fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() 
             }))
             .expect("materialized ordinary workspace")],
         );
+        plan.tasks[0].metadata["cook_continuation_workspace"] = serde_json::json!({
+            "candidate_source_root": execution_workspace.path(),
+        });
         let dispatcher = LabCookAttemptDispatcher {
             runner_id: "missing-homeboy-lab".to_string(),
             placement_decision: fixture_preflight_decision(
@@ -1941,8 +1945,8 @@ fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() 
 
         assert_eq!(
             record.metadata["execution_placement_decision"]["identity"]["workspace"],
-            capability.canonical_path().display().to_string(),
-            "derived baseline takes priority over the materialized plan and controller sources"
+            execution_workspace.path().display().to_string(),
+            "the resolved Cook execution worktree takes priority over baseline and controller context"
         );
     });
 }

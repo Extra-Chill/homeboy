@@ -121,7 +121,7 @@ fn run_unisolated(
     mut timer: StatusTimer,
 ) -> CmdResult<StatusResult> {
     if args.global {
-        return global_status(controller);
+        return global_status(controller, &args.global_runners);
     }
 
     // Explicit scope selection. `--path` and `--project` keep their historical
@@ -400,6 +400,9 @@ fn status_probe_argv(args: &StatusArgs) -> Vec<String> {
     if args.scope.workspace {
         argv.push("--workspace".to_string());
     }
+    for runner in &args.global_runners {
+        argv.extend(["--global-runner".to_string(), runner.clone()]);
+    }
     for (enabled, flag) in [
         (args.global, "--global"),
         (args.full, "--full"),
@@ -514,7 +517,10 @@ const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
 /// fetching component remotes, or probing runner daemons. Counts are capped at
 /// their query boundary and runner inspection is capped independently of the
 /// registered inventory size.
-fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
+fn global_status(
+    controller: ControllerStaleness,
+    requested_runners: &[String],
+) -> CmdResult<StatusResult> {
     let daemon_status = daemon::read_status()?;
     let admitting_work = daemon_status.admits_work();
     let blocker = (!admitting_work).then(|| {
@@ -525,25 +531,59 @@ fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
     });
 
     let registered_runners = runner::list()?;
-    let inspected_runners = registered_runners.len().min(GLOBAL_RUNNER_LIMIT);
-    let mut status_unavailable = 0;
-    let runner_reports = registered_runners
+    let selected_runners = if requested_runners.is_empty() {
+        registered_runners
+            .iter()
+            .map(|runner| runner.id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        requested_runners.to_vec()
+    };
+    let inspected_ids = selected_runners
         .iter()
         .take(GLOBAL_RUNNER_LIMIT)
-        .filter_map(
-            |runner_config| match runner::persisted_status(&runner_config.id) {
-                Ok(report) => Some(report),
-                Err(_) => {
-                    status_unavailable += 1;
-                    None
-                }
-            },
-        )
+        .cloned()
         .collect::<Vec<_>>();
-    let disconnected = runner_reports
+    let omitted_ids = selected_runners
         .iter()
-        .filter(|report| !report.connected)
-        .count();
+        .skip(GLOBAL_RUNNER_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    // All probes share one collection deadline. Each runner receives the
+    // remaining budget, rather than a sequential timeout that multiplies with
+    // inventory size.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    for id in &inspected_ids {
+        let sender = sender.clone();
+        let id = id.clone();
+        std::thread::spawn(move || {
+            let result = homeboy::runner::runner_admission_snapshot_until(&id, deadline)
+                .map(|snapshot| snapshot.status.connected);
+            let _ = sender.send(result);
+        });
+    }
+    drop(sender);
+    let mut disconnected = 0;
+    let mut status_unavailable = 0;
+    for _ in &inspected_ids {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok(Ok(connected)) if !connected => disconnected += 1,
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => status_unavailable += 1,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => status_unavailable += 1,
+        }
+    }
+    let continuation = (!omitted_ids.is_empty()).then(|| {
+        format!(
+            "homeboy status --global{}",
+            omitted_ids
+                .iter()
+                .map(|id| format!(" --global-runner {id}"))
+                .collect::<String>()
+        )
+    });
 
     let activity = ObservationStore::open_readonly()
         .ok()
@@ -589,12 +629,13 @@ fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
             },
             runners: GlobalRunnerStatus {
                 registered: registered_runners.len(),
-                inspected: inspected_runners,
-                omitted: registered_runners.len().saturating_sub(inspected_runners),
+                inspected: inspected_ids.len(),
+                omitted: omitted_ids.len(),
                 disconnected,
                 status_unavailable,
-                freshness_unverified: inspected_runners,
+                freshness_unverified: 0,
                 drill_down: "homeboy runner status --full",
+                continuation,
             },
             activity,
             inventory: GlobalInventoryStatus {
@@ -1371,6 +1412,7 @@ mod tests {
             docs_only: false,
             all: false,
             global: false,
+            global_runners: Vec::new(),
             outdated: false,
             unreleased: false,
             timings: false,

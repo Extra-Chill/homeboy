@@ -6,7 +6,9 @@ use homeboy_extension_contract::agent_task_executor_declaration::{
     DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS,
 };
 
-pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
+/// Re-exported from the owning contract so the wire identifier has one
+/// definition rather than two that can drift apart at a version bump.
+pub use homeboy_extension_contract::agent_task_executor_declaration::AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA;
 pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
     "homeboy/agent-task-provider-capability-contract/v1";
 /// Provider accepts `executor.config.workspace_permission_root` as the exact

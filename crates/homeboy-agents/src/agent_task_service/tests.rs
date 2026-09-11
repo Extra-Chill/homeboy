@@ -976,7 +976,7 @@ fn service_normalizes_resolved_component_worktree_plan() {
 }
 
 #[test]
-fn service_materializes_component_worktree_before_provider_dispatch() {
+fn run_plan_record_run_id_preparation_preserves_component_worktree_branch_for_discovery() {
     with_isolated_home(|home| {
         let repo = home.path().join("fixture");
         create_git_repo(&repo);
@@ -1051,6 +1051,21 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             Some("fixture@fix-service-task")
         );
         assert!(Path::new(&record.worktree_path).is_dir());
+
+        // `run-plan --record-run-id` prepares the component worktree before
+        // submitting the lifecycle record, so discovery must retain its
+        // original branch after preparation clears `workspace.branch`.
+        let scoped = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                branch: Some("fix/service-task".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover prepared durable run by branch");
+        assert_eq!(scoped.runs.len(), 1);
+        assert_eq!(scoped.runs[0].run_id, "service-materialized-worktree");
+        assert_eq!(scoped.runs[0].branch.as_deref(), Some("fix/service-task"));
     });
 }
 

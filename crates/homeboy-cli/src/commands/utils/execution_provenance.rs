@@ -275,7 +275,18 @@ mod tests {
     use crate::cli_surface::Cli;
     use clap::Parser;
 
+    /// Build provenance for `args` against an empty installation.
+    ///
+    /// `placement_directive` resolves the lab route contract, which walks the
+    /// component inventory and shells out to `git` once per registered
+    /// component. Against a populated developer machine that turned each of
+    /// these shape assertions into a ~197s discovery run; isolated it is ~3s
+    /// and depends on nothing outside the test.
     fn provenance(args: &[&str]) -> Value {
+        homeboy::core::test_support::with_isolated_home(|_| provenance_in_current_home(args))
+    }
+
+    fn provenance_in_current_home(args: &[&str]) -> Value {
         let argv = args
             .iter()
             .map(|arg| (*arg).to_string())
@@ -365,33 +376,35 @@ mod tests {
 
     #[test]
     fn records_resolved_lab_runner_separately_from_lab_intent() {
-        let args = ["homeboy", "--placement", "lab", "review"];
-        let argv = args
-            .iter()
-            .map(|arg| (*arg).to_string())
-            .collect::<Vec<_>>();
-        let cli = Cli::try_parse_from(&argv).expect("parse CLI");
-        let value = build(
-            &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
-                argv.clone(),
-                crate::commands::utils::resource_policy::parsed_command_preflight_input(
-                    &cli, &argv,
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let args = ["homeboy", "--placement", "lab", "review"];
+            let argv = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            let cli = Cli::try_parse_from(&argv).expect("parse CLI");
+            let value = build(
+                &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                    argv.clone(),
+                    crate::commands::utils::resource_policy::parsed_command_preflight_input(
+                        &cli, &argv,
+                    ),
+                    None,
+                    None,
+                    homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                    homeboy::core::parsed_command_preflight::FallbackDirective::None,
+                    crate::cli_runtime::placement_directive(&cli, Some("runner-a"), false),
+                    Some("runner-a".to_string()),
                 ),
-                None,
-                None,
-                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
-                homeboy::core::parsed_command_preflight::FallbackDirective::None,
-                crate::cli_runtime::placement_directive(&cli, Some("runner-a"), false),
-                Some("runner-a".to_string()),
-            ),
-        );
+            );
 
-        assert_eq!(value["operator_intent"]["placement"], "lab");
-        assert_eq!(value["operator_intent"]["runner_id"], Value::Null);
-        assert_eq!(value["resolved_execution"]["location"], "lab");
-        assert_eq!(value["resolved_execution"]["runner_id"], "runner-a");
-        assert!(value["resource_policy"].get("policy_runner_id").is_none());
-        assert_eq!(value["resource_policy"]["decision_origin"], "explicit");
+            assert_eq!(value["operator_intent"]["placement"], "lab");
+            assert_eq!(value["operator_intent"]["runner_id"], Value::Null);
+            assert_eq!(value["resolved_execution"]["location"], "lab");
+            assert_eq!(value["resolved_execution"]["runner_id"], "runner-a");
+            assert!(value["resource_policy"].get("policy_runner_id").is_none());
+            assert_eq!(value["resource_policy"]["decision_origin"], "explicit");
+        });
     }
 
     #[test]

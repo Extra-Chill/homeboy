@@ -1257,17 +1257,6 @@ pub fn refresh_homeboy_binary_in_roots(
     ))
 }
 
-fn acquire_runner_binary_promotion(
-    runner_id: &str,
-    candidate_commit: &str,
-) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        candidate_commit,
-    )
-}
-
 /// [`acquire_runner_binary_promotion`] against an explicitly injected root.
 ///
 /// The promotion lease store is machine-global by default, so an isolated
@@ -1282,19 +1271,6 @@ fn acquire_runner_binary_promotion_in_roots(
         runner_id,
         candidate_commit,
         super::lab_selection::emit_runtime_promotion_wait,
-    )
-}
-
-fn acquire_runner_binary_promotion_with(
-    runner_id: &str,
-    candidate_commit: &str,
-    progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
-) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_with_in_root(
-        &homeboy_core::paths::runtime_promotion_dir()?,
-        runner_id,
-        candidate_commit,
-        progress,
     )
 }
 
@@ -1839,17 +1815,6 @@ fn refresh_execution_route(
         Some(runner.id.clone()),
         admission.summary.next_action.clone().map(|action| vec![action]),
     ))
-}
-
-/// Refresh is a mutation path, so it first settles the generation ledger and
-/// then derives route selection from that exact post-reconcile status. The
-/// later pre-rotation job probe remains the fail-closed check for work that
-/// appears while materialization is in progress.
-fn reconciled_refresh_admission(runner_id: &str) -> Result<super::RunnerAdmissionSnapshot> {
-    reconciled_refresh_admission_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-    )
 }
 
 /// [`reconciled_refresh_admission`] against an explicitly injected root.

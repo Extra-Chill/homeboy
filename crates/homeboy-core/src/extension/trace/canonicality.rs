@@ -596,11 +596,9 @@ fn parse_ahead_behind(value: &str) -> Option<(Option<u32>, Option<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::trace::run::{run_trace_workflow, TraceRunnerInputs};
+    use crate::extension::trace::run::run_trace_workflow;
     use homeboy_core::engine::run_dir::RunDir;
-    use homeboy_engine_primitives::baseline::BaselineFlags;
     use homeboy_extension_contract::ExtensionCapability;
-    use std::path::Path;
 
     #[test]
     fn trace_canonical_policy_defaults_to_canonical() {

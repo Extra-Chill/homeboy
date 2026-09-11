@@ -2313,17 +2313,6 @@ fn notify_batch_wave_complete(
     homeboy::agents::agent_task_notify::batch_terminal(report, fanout_id, None, None, exit_code);
 }
 
-/// Recipes are the durable restart boundary. Persist blocked dependents before
-/// dispatching any sibling so a later merge can release them through `resume`
-/// without reconstructing mutable operator input or re-planning a branch.
-fn persist_batch_cook_recipes(
-    plan: &BatchCookFanoutPlan,
-    configure: impl Fn(&mut CookRequest),
-) -> Result<()> {
-    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
-    persist_batch_cook_recipes_with_readiness_cache(plan, &mut readiness_cache, configure)
-}
-
 fn persist_batch_cook_recipes_with_readiness_cache(
     plan: &BatchCookFanoutPlan,
     readiness_cache: &mut provider::ProviderRuntimeReadinessCache,
@@ -2357,14 +2346,6 @@ fn batch_harvest_context() -> Result<homeboy::agents::agent_task_scheduler::Harv
     } else {
         Ok(homeboy::agents::agent_task_scheduler::HarvestExecutionContext::default())
     }
-}
-
-fn compile_batch_cooks(
-    plan: &BatchCookFanoutPlan,
-    configure: impl Fn(&mut CookRequest),
-) -> Result<Vec<CookRequest>> {
-    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
-    compile_batch_cooks_with_readiness_cache(plan, &mut readiness_cache, configure)
 }
 
 fn compile_batch_cooks_with_readiness_cache(
@@ -4029,18 +4010,6 @@ fn active_registered_worktree_path(handle: &str) -> Option<String> {
         .ok()
         .flatten()
         .map(|target| target.path.display().to_string())
-}
-
-fn preflight_batch_cook_recipes(
-    plan: &BatchCookFanoutPlan,
-    attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
-) -> Result<()> {
-    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
-    preflight_batch_cook_recipes_with_readiness_cache(
-        plan,
-        attempt_dispatcher,
-        &mut readiness_cache,
-    )
 }
 
 fn preflight_batch_cook_recipes_with_readiness_cache(
@@ -7073,7 +7042,12 @@ mod tests {
             );
             homeboy::core::defaults::save_config(&config).expect("save configured rotation");
             let plan = test_batch_plan();
-            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile child policies");
+            let compiled = compile_batch_cooks_with_readiness_cache(
+                &plan,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |_| {},
+            )
+            .expect("compile child policies");
 
             for (cook, compiled) in plan.cooks.iter().zip(&compiled) {
                 let invocation = cook
@@ -7767,7 +7741,12 @@ fi
                 ("HOMEBOY_LAB_OFFLOAD_JSON", None),
             ]);
             let plan = test_batch_plan();
-            let cooks = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
+            let cooks = compile_batch_cooks_with_readiness_cache(
+                &plan,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |_| {},
+            )
+            .expect("compile batch cooks");
 
             assert_eq!(cooks.len(), 2);
             assert!(cooks
@@ -9458,7 +9437,12 @@ fi
             let mut loaded =
                 BatchCookFanoutPlan::from_value(serialized, &args()).expect("load persisted plan");
             loaded.apply_ai_tool_override(Some("OpenAI GPT-5.6 Terra via OpenCode"));
-            persist_batch_cook_recipes(&loaded, |_| {}).expect("persist child recipes");
+            persist_batch_cook_recipes_with_readiness_cache(
+                &loaded,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |_| {},
+            )
+            .expect("persist child recipes");
             for cook in &loaded.cooks {
                 let invocation = cook.to_cook_invocation(&loaded).expect("cook invocation");
                 assert_eq!(
@@ -9553,7 +9537,12 @@ fi
                 Some(root.as_path())
             );
 
-            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile before provider");
+            let compiled = compile_batch_cooks_with_readiness_cache(
+                &plan,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |_| {},
+            )
+            .expect("compile before provider");
             assert_eq!(
                 compiled[0].identity.initial_plan.tasks[0]
                     .workspace
@@ -9790,7 +9779,12 @@ fi
         with_isolated_home(|home| {
             install_fanout_agent_task_providers(home.path());
             let plan = test_batch_plan();
-            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
+            let compiled = compile_batch_cooks_with_readiness_cache(
+                &plan,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |_| {},
+            )
+            .expect("compile batch cooks");
             let mut invocation = plan.cooks[0]
                 .to_cook_invocation(&plan)
                 .expect("cook invocation");
@@ -9799,14 +9793,22 @@ fi
             agent_task_service::persist_initial_recipe(&invocation.options)
                 .expect("persist initial recipe");
 
-            if let Err(error) = preflight_batch_cook_recipes(&plan, None) {
+            if let Err(error) = preflight_batch_cook_recipes_with_readiness_cache(
+                &plan,
+                None,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+            ) {
                 panic!("exact replay is incompatible: {error:?}");
             }
 
             let mut changed = plan;
             changed.cooks[0].title = Some("changed title".to_string());
-            preflight_batch_cook_recipes(&changed, None)
-                .expect("pre-execution finalization metadata can be corrected safely");
+            preflight_batch_cook_recipes_with_readiness_cache(
+                &changed,
+                None,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+            )
+            .expect("pre-execution finalization metadata can be corrected safely");
         });
     }
 
@@ -9816,8 +9818,18 @@ fi
             install_fanout_agent_task_providers(home.path());
             let plan = test_batch_plan();
 
-            persist_batch_cook_recipes(&plan, |_| {}).expect("persist local child recipes");
-            preflight_batch_cook_recipes(&plan, None).expect("preflight local recipes");
+            persist_batch_cook_recipes_with_readiness_cache(
+                &plan,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |_| {},
+            )
+            .expect("persist local child recipes");
+            preflight_batch_cook_recipes_with_readiness_cache(
+                &plan,
+                None,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+            )
+            .expect("preflight local recipes");
 
             for cook in &plan.cooks {
                 let recipe = agent_task_service::load_recipe(&cook.run_id()).expect("local recipe");
@@ -9848,13 +9860,26 @@ fi
                     >
             };
 
-            persist_batch_cook_recipes(&plan, |options| {
-                options.provider_transport.attempt_dispatcher = Some(dispatcher(options));
-            })
+            persist_batch_cook_recipes_with_readiness_cache(
+                &plan,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |options| {
+                    options.provider_transport.attempt_dispatcher = Some(dispatcher(options));
+                },
+            )
             .expect("persist Lab child recipes");
-            preflight_batch_cook_recipes(&plan, Some(&dispatcher))
-                .expect("preflight Lab recipes with their dispatcher");
-            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile child options");
+            preflight_batch_cook_recipes_with_readiness_cache(
+                &plan,
+                Some(&dispatcher),
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+            )
+            .expect("preflight Lab recipes with their dispatcher");
+            let compiled = compile_batch_cooks_with_readiness_cache(
+                &plan,
+                &mut provider::ProviderRuntimeReadinessCache::default(),
+                |_| {},
+            )
+            .expect("compile child options");
 
             for (cook, options) in plan.cooks.iter().zip(&compiled) {
                 let recipe = agent_task_service::load_recipe(&cook.run_id()).expect("Lab recipe");

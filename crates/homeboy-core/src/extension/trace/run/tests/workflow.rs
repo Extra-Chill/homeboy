@@ -5,16 +5,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::extension::invoke::RunnerOutput;
-use crate::extension::resolve::ExtensionExecutionContext;
 use crate::extension::trace::attach::TraceAttachment;
-use crate::extension::trace::canonicality::TraceCanonicalPolicy;
 use crate::extension::trace::parsing::{TraceGitProvenance, TraceResults, TraceStatus};
 use crate::extension::trace::probes::TraceProbeConfig;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, ErrorCode};
-use homeboy_engine_primitives::baseline::BaselineFlags;
-use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::list::run_trace_list_workflow;
 use super::super::provenance::{
@@ -24,7 +20,7 @@ use super::super::runner::{
     build_trace_runner, failure_from_output, resolve_trace_baseline_root, trace_is_unclaimed,
     trace_probes_with_fswatch_attachments,
 };
-use super::super::types::{TraceListWorkflowArgs, TraceRunWorkflowArgs, TraceRunnerInputs};
+use super::super::types::{TraceListWorkflowArgs, TraceRunnerInputs};
 use super::super::workflow::run_trace_workflow;
 #[test]
 fn test_build_trace_runner() {

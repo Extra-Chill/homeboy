@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use homeboy::core::observation::{
-    ArtifactRecord, FindingListFilter, NewFindingRecord, NewRunRecord, NewTraceSpanRecord,
-    ObservationStore, RecordedHomeboyFinding, RunListFilter, RunRecord, TraceSpanRecord,
+    ArtifactRecord, FindingListFilter, NewFindingRecord, NewTraceSpanRecord, ObservationStore,
+    RecordedHomeboyFinding, RunListFilter, RunRecord, TraceSpanRecord,
 };
 use homeboy::test_support::with_isolated_home;
 use serde::Deserialize;

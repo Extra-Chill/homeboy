@@ -26,5 +26,7 @@ mod promotion_provider_stdin;
 mod refactor_transform_test;
 #[path = "cli_binary/review_dirty_preflight.rs"]
 mod review_dirty_preflight;
+#[path = "cli_binary/review_option_order.rs"]
+mod review_option_order;
 #[path = "cli_binary/rig_local_artifact_registration.rs"]
 mod rig_local_artifact_registration;

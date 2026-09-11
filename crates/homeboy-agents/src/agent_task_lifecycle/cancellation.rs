@@ -96,6 +96,46 @@ pub fn cancel_run_in_store(
     )))
 }
 
+/// Cancel an initial detached Cook only when the requesting controller job owns
+/// the launch generation still recorded on the handoff parent.
+pub fn cancel_claimed_detached_cook_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    reason: Option<&str>,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let cook_id = sanitize_run_id(cook_id);
+    let launcher_id = launcher_id.to_string();
+    let authorized = lifecycle_store.with_config_lock(|| {
+        let parent = lifecycle_store.read_record(&cook_id)?;
+        if parent.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
+            return Ok(false);
+        }
+        if !parent.state.is_terminal() {
+            let _ = lifecycle_store.mutate_record_locked_without_terminal_projection(
+                &cook_id,
+                |record| {
+                    if record.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
+                        return false;
+                    }
+                    record.metadata["detached_cook_handoff"]["cancellation_fence"] = json!({
+                        "state": "cancel_requested",
+                        "cancelled_at": now_timestamp(),
+                        "reason": reason.unwrap_or("cancel requested"),
+                    });
+                    record.updated_at = Some(now_timestamp());
+                    true
+                },
+            )?;
+        }
+        Ok(true)
+    })?;
+    if !authorized {
+        return Ok(None);
+    }
+    cancel_run_in_store(lifecycle_store, &cook_id, reason).map(Some)
+}
+
 // The ambient `cancel_exact_run()` shim that used to sit here is gone; its one
 // remaining caller was a cancellation test, which now cancels inside the store
 // it resolves (#7505).
