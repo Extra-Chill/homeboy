@@ -309,14 +309,15 @@ fn probe_authoritative_daemon_status(runner_id: &str) -> Result<remote_daemon::R
             None,
         ));
     };
-    let mut status = remote_daemon::remote_daemon_status(&client, homeboy).map_err(|error| {
-        Error::validation_invalid_argument(
-            "disconnect",
-            format!("authoritative daemon reconciliation probe failed: {error}"),
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
+    let mut status =
+        remote_daemon::remote_daemon_status(&client, homeboy, runner_id).map_err(|error| {
+            Error::validation_invalid_argument(
+                "disconnect",
+                format!("authoritative daemon reconciliation probe failed: {error}"),
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
     remote_daemon::probe_remote_daemon_endpoint(&client, &mut status, Some(runner_id));
     Ok(status)
 }
@@ -548,19 +549,19 @@ fn verify_remote_daemon_stopped(
     let (_, _, client) = remote_daemon::resolve_ssh_runner(&runner)
         .map_err(|error| format!("re-probe daemon after stop: {}", error.message))?
         .ok_or_else(|| "re-probe daemon after stop: runner is not SSH-backed".to_string())?;
-    let status = remote_daemon::remote_daemon_status(&client, homeboy)
+    let status = remote_daemon::remote_daemon_status(&client, homeboy, &session.runner_id)
         .map_err(|error| format!("authoritative daemon re-probe after stop failed: {error}"))?;
     complete_stop_transport_recovery(
         session,
         &status,
         || execute_remote_lease_bound_daemon_stop(&client, homeboy, lease_id, force),
-        || remote_daemon::remote_daemon_status(&client, homeboy),
+        || remote_daemon::remote_daemon_status(&client, homeboy, &session.runner_id),
     )
     .map_err(|error| {
         // The persisted session identifies the daemon refresh intended to replace,
         // not necessarily the daemon still active after a failed stop. Bind manual
         // recovery only to a final authoritative daemon probe.
-        let recovery = match remote_daemon::remote_daemon_status(&client, homeboy) {
+        let recovery = match remote_daemon::remote_daemon_status(&client, homeboy, &session.runner_id) {
             Ok(status) => remote_lease_bound_stop_recovery_command(
                 session,
                 &status,

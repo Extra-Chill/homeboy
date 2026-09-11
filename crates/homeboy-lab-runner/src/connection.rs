@@ -836,7 +836,7 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     let mut pending_replacement = super::generation_store::pending_replacement(runner_id)?;
     let mut replacement_operation_id = None;
     if let Some(pending) = pending_replacement.as_ref() {
-        if let Ok(mut observed) = remote_daemon_status(&client, homeboy) {
+        if let Ok(mut observed) = remote_daemon_status(&client, homeboy, runner_id) {
             probe_remote_daemon_endpoint(&client, &mut observed, Some(runner_id));
             let exact = observed.daemon.as_ref().is_some_and(|daemon| {
                 daemon.lease_id == pending.remote_daemon_lease_id
@@ -912,8 +912,11 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
                         error,
                     ));
                 }
-                let command =
-                    remote_daemon_ensure_running_command(homeboy, Some(&replacement_operation_id));
+                let command = remote_daemon_ensure_running_command(
+                    homeboy,
+                    runner_id,
+                    Some(&replacement_operation_id),
+                );
                 // Rebind the durable command to the verified selected binary
                 // before crossing the replay mutation boundary.
                 super::generation_store::record_replacement_operation_replay(
@@ -1465,6 +1468,7 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     if let Err(error) = verify_live_lease_adoption(
         &client,
         homeboy,
+        runner_id,
         live_lease_expectation,
         &daemon,
         &expected_identity,
@@ -1671,6 +1675,7 @@ fn pending_replacement_session(
 fn verify_live_lease_adoption(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
     expectation: Option<(&str, u32)>,
     connected_daemon: &RemoteDaemon,
     expected_identity: &str,
@@ -1678,7 +1683,8 @@ fn verify_live_lease_adoption(
     let Some((expected_lease, expected_pid)) = expectation else {
         return Ok(());
     };
-    let mut status = remote_daemon_status(client, homeboy).map_err(Error::internal_unexpected)?;
+    let mut status =
+        remote_daemon_status(client, homeboy, runner_id).map_err(Error::internal_unexpected)?;
     probe_remote_daemon_endpoint(client, &mut status, None);
     let daemon = status.daemon.ok_or_else(|| {
         Error::validation_invalid_argument(
