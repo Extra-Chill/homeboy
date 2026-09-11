@@ -208,11 +208,25 @@ impl DeploymentProviderApi {
         ) {
             return submit_failure(request, failure);
         }
-        if let Some(failure) = self.failure.clone() {
-            return submit_failure(request, failure);
-        }
-        let effect = match admit_provider_effect(request) {
-            Ok(effect) => effect,
+        match existing_provider_effect(request) {
+            Ok(Some(effect)) if effect.recovery_required => {
+                return provider_effect_response(
+                    request,
+                    ExtensionApiDeploymentProviderEffectState::Unknown,
+                    None,
+                )
+            }
+            Ok(Some(effect)) if effect.terminal.is_some() => {
+                return provider_terminal_response(request, effect.terminal.as_ref().unwrap())
+            }
+            Ok(Some(effect)) if effect.lease_owner.is_some() => {
+                return provider_effect_response(
+                    request,
+                    ExtensionApiDeploymentProviderEffectState::Running,
+                    None,
+                )
+            }
+            Ok(_) => {}
             Err(error) if error.message.contains("different action intent") => {
                 return submit_diagnostic(
                     request,
@@ -224,37 +238,10 @@ impl DeploymentProviderApi {
                 )
             }
             Err(error) => return submit_failure(request, internal_failure(error.to_string())),
-        };
-        if effect.recovery_required {
-            return provider_effect_response(
-                request,
-                ExtensionApiDeploymentProviderEffectState::Unknown,
-                None,
-            );
         }
-        if let Some(terminal) = effect.terminal {
-            return provider_terminal_response(request, &terminal);
+        if let Some(failure) = self.failure.clone() {
+            return submit_failure(request, failure);
         }
-        let now = chrono::Utc::now();
-        let lease =
-            match crate::observation::ObservationStore::open_initialized().and_then(|store| {
-                store.lease_control_plane_effect_by_id(
-                    &request.effect_id,
-                    &format!("deployment-provider:{}", std::process::id()),
-                    &now.to_rfc3339(),
-                    &(now + chrono::Duration::seconds(30)).to_rfc3339(),
-                )
-            }) {
-                Ok(Some(lease)) => lease,
-                Ok(None) => {
-                    return provider_effect_response(
-                        request,
-                        ExtensionApiDeploymentProviderEffectState::Running,
-                        None,
-                    )
-                }
-                Err(error) => return submit_failure(request, internal_failure(error.to_string())),
-            };
         let candidate = match self.select(&request.extension_id, &request.provider_id) {
             Ok(candidate) => candidate,
             Err(diagnostic) => return submit_diagnostic(request, diagnostic),
@@ -335,6 +322,50 @@ impl DeploymentProviderApi {
         } else {
             &provider.command
         };
+        let effect = match admit_provider_effect(request) {
+            Ok(effect) => effect,
+            Err(error) if error.message.contains("different action intent") => {
+                return submit_diagnostic(
+                    request,
+                    diagnostic(
+                        request,
+                        ExtensionApiDeploymentProviderDiagnosticKind::Conflict,
+                        "effect id was already submitted with a different immutable request",
+                    ),
+                )
+            }
+            Err(error) => return submit_failure(request, internal_failure(error.to_string())),
+        };
+        if effect.recovery_required {
+            return provider_effect_response(
+                request,
+                ExtensionApiDeploymentProviderEffectState::Unknown,
+                None,
+            );
+        }
+        if let Some(terminal) = effect.terminal {
+            return provider_terminal_response(request, &terminal);
+        }
+        let now = chrono::Utc::now();
+        let lease =
+            match crate::observation::ObservationStore::open_initialized().and_then(|store| {
+                store.lease_control_plane_effect_by_id(
+                    &request.effect_id,
+                    &format!("deployment-provider:{}", std::process::id()),
+                    &now.to_rfc3339(),
+                    &(now + chrono::Duration::seconds(30)).to_rfc3339(),
+                )
+            }) {
+                Ok(Some(lease)) => lease,
+                Ok(None) => {
+                    return provider_effect_response(
+                        request,
+                        ExtensionApiDeploymentProviderEffectState::Running,
+                        None,
+                    )
+                }
+                Err(error) => return submit_failure(request, internal_failure(error.to_string())),
+            };
         let quoted_input = homeboy_engine_primitives::shell::quote_path(input_path);
         let execution = match execute_extension_command(
             command,
@@ -833,10 +864,7 @@ fn admit_provider_effect(
     let run = RunId::new(resource_id.clone()).map_err(|error| {
         crate::Error::validation_invalid_argument("effect_id", error.to_string(), None, None)
     })?;
-    let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
-        &serde_json::to_vec(request)
-            .map_err(|error| crate::Error::internal_json(error.to_string(), None))?,
-    );
+    let request_digest = provider_request_digest(request)?;
     let projection = crate::observation::ControlPlaneResourceProjection {
         resource_type: "deployment_provider_effect".to_string(),
         resource_id: resource_id.clone(),
@@ -848,24 +876,20 @@ fn admit_provider_effect(
     };
     // The action-outbox foreign key binds every effect to an observation run.
     // Provider effects use this SQLite-owned adapter row, not another ledger.
-    store.upsert_imported_run_with_resource_projection(
-        &crate::observation::RunRecord {
-            id: resource_id.clone(),
-            kind: "deployment-provider-effect".to_string(),
-            component_id: Some(request.component_id.clone()),
-            started_at: chrono::Utc::now().to_rfc3339(),
-            finished_at: None,
-            status: "running".to_string(),
-            command: Some("deployment provider".to_string()),
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
-            metadata_json: serde_json::json!({ "request": request }),
-        },
-        &projection,
-        true,
-    )?;
+    store.upsert_imported_run_preserving_terminal(&crate::observation::RunRecord {
+        id: resource_id.clone(),
+        kind: "deployment-provider-effect".to_string(),
+        component_id: Some(request.component_id.clone()),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        finished_at: None,
+        status: "running".to_string(),
+        command: Some("deployment provider".to_string()),
+        cwd: None,
+        homeboy_version: None,
+        git_sha: None,
+        rig_id: None,
+        metadata_json: serde_json::json!({ "request": request }),
+    })?;
     let action_request = ControlPlaneActionRequest {
         schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
         effect_id: request.effect_id.clone(),
@@ -894,15 +918,43 @@ fn admit_provider_effect(
         eligible: true,
         reason: None,
     };
-    match store.enqueue_control_plane_action_intent(
+    match store.enqueue_control_plane_action_intent_with_projection(
         &intent,
         &fence,
-        "deployment_provider_effect",
+        &projection,
         &request_digest,
     )? {
         crate::observation::store::ControlPlaneEffectAdmission::Enqueued(effect)
         | crate::observation::store::ControlPlaneEffectAdmission::Duplicate(effect) => Ok(effect),
     }
+}
+
+fn existing_provider_effect(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
+) -> crate::error::Result<Option<crate::observation::store::ControlPlaneEffectStatus>> {
+    let store = crate::observation::ObservationStore::open_initialized()?;
+    store.expire_control_plane_effect_leases(&chrono::Utc::now().to_rfc3339())?;
+    let Some(effect) = store.control_plane_effect_status(&request.effect_id)? else {
+        return Ok(None);
+    };
+    if effect.intent.request_digest != provider_request_digest(request)? {
+        return Err(crate::Error::validation_invalid_argument(
+            "effect_id",
+            "effect id was already used with different action intent",
+            None,
+            None,
+        ));
+    }
+    Ok(Some(effect))
+}
+
+fn provider_request_digest(
+    request: &ExtensionApiDeploymentProviderSubmitRequest,
+) -> crate::error::Result<String> {
+    Ok(homeboy_engine_primitives::content_hash::sha256_hex(
+        &serde_json::to_vec(request)
+            .map_err(|error| crate::Error::internal_json(error.to_string(), None))?,
+    ))
 }
 
 fn terminalize_provider_effect(
@@ -1180,6 +1232,31 @@ mod tests {
                     .kind,
                 ExtensionApiDeploymentProviderDiagnosticKind::Ambiguous
             );
+            let input = tempfile::NamedTempFile::new().expect("input");
+            let component = tempfile::tempdir().expect("component");
+            let response = submit(
+                &api,
+                "fixture-provider",
+                "fixture.deploy",
+                input.path(),
+                component.path(),
+                false,
+            );
+            assert_eq!(
+                response.diagnostic.expect("submit diagnostic").kind,
+                ExtensionApiDeploymentProviderDiagnosticKind::Ambiguous
+            );
+            assert_eq!(
+                api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
+                    schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
+                    api_version: EXTENSION_API_V1,
+                    effect_id: homeboy_control_plane_contract::EffectId(
+                        "test:fixture-provider:fixture.deploy:false".to_string(),
+                    ),
+                })
+                .state,
+                ExtensionApiDeploymentProviderEffectState::NotStarted
+            );
         });
     }
 
@@ -1301,6 +1378,25 @@ mod tests {
                 ExtensionApiDeploymentProviderEffectState::Succeeded
             );
             assert_eq!(status.result.expect("durable result").exit_code, 0);
+
+            std::fs::remove_dir_all(
+                crate::paths::extensions()
+                    .expect("extensions root")
+                    .join("fixture-provider"),
+            )
+            .expect("remove provider after terminal effect");
+            let replay = discover().submit_api(
+                &request,
+                DeploymentProviderInvocationContext {
+                    component_path: component.path(),
+                    input_path: input.path(),
+                },
+            );
+            assert_eq!(
+                replay.state,
+                ExtensionApiDeploymentProviderEffectState::Succeeded
+            );
+            assert_eq!(replay.result.expect("durable replay result").exit_code, 0);
 
             let mut mismatch = request.clone();
             mismatch.component_id = "other".to_string();

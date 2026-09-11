@@ -1640,11 +1640,13 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
 /// observation store atomically persists it beside the run projection so action
 /// admission can never observe a lifecycle version from another write.
 fn agent_task_resource_projection(
-    lifecycle_store: &AgentTaskLifecycleStore,
+    _lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
     cook_index: Option<&AgentTaskCookIndex>,
 ) -> Result<ControlPlaneResourceProjection> {
-    let mut aliases = vec![record.run_id.clone()];
+    // Canonical resource IDs resolve directly and must not also occupy the
+    // movable alias namespace used by Cook's latest-attempt pointer.
+    let mut aliases = Vec::new();
     let cook_id = record
         .metadata
         .get("cook_id")
@@ -1654,7 +1656,7 @@ fn agent_task_resource_projection(
         // Alias ownership is the SQLite projection committed with the lifecycle
         // record. A historical index is considered only by startup migration.
         if let Some(index) = cook_index {
-            if index.latest_run_id == record.run_id {
+            if index.latest_run_id == record.run_id && cook_id != record.run_id {
                 aliases.push(cook_id.to_string());
             }
         }

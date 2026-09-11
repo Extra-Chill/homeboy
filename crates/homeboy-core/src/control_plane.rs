@@ -109,17 +109,15 @@ pub fn execute_delegated_action(
     let requested_id = RunId::new(&run.id)
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
     let (action, idempotency_digest, request_digest) = delegated_action_digests(request)?;
-    store
-        .upsert_control_plane_resource_projection(&ControlPlaneResourceProjection {
-            resource_type: resource_type.to_string(),
-            resource_id: run.id.clone(),
-            version: resource_version.to_string(),
-            state: run.status.clone(),
-            aliases: vec![run.id.clone()],
-            eligibility: serde_json::json!({ "action": action, "eligible": eligible }),
-            provenance: serde_json::json!({ "source": "observation-run" }),
-        })
-        .map_err(map_store_error)?;
+    let projection = ControlPlaneResourceProjection {
+        resource_type: resource_type.to_string(),
+        resource_id: run.id.clone(),
+        version: resource_version.to_string(),
+        state: run.status.clone(),
+        aliases: vec![run.id.clone()],
+        eligibility: serde_json::json!({ "action": action, "eligible": eligible }),
+        provenance: serde_json::json!({ "source": "observation-run" }),
+    };
     let accepted_at = chrono::Utc::now().to_rfc3339();
     let intent = ControlPlaneActionIntent {
         schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
@@ -149,7 +147,12 @@ pub fn execute_delegated_action(
             .or(reason),
     };
     let effect = match store
-        .enqueue_control_plane_action_intent(&intent, &fence, resource_type, &idempotency_digest)
+        .enqueue_control_plane_action_intent_with_projection(
+            &intent,
+            &fence,
+            &projection,
+            &idempotency_digest,
+        )
         .map_err(map_store_error)?
     {
         ControlPlaneEffectAdmission::Enqueued(effect)
@@ -159,16 +162,42 @@ pub fn execute_delegated_action(
         ensure_delegated_action_events(store, request, &terminal.acknowledgement)?;
         return Ok(Some(terminal.acknowledgement));
     }
-    let lease = store
+    if fence.eligible && effect.lease_fence == 0 {
+        append_delegated_action_event(
+            store,
+            &requested_id,
+            request,
+            "action.accepted",
+            &effect.intent.accepted_at,
+            serde_json::json!({ "action": request.action }),
+        )?;
+    }
+    let owner = format!("control-plane:{}", std::process::id());
+    let now = chrono::Utc::now();
+    let expires_at = (now + chrono::Duration::seconds(30)).to_rfc3339();
+    let (lease, recovered) = match store
         .lease_control_plane_effect_by_id(
             &request.effect_id,
-            &format!("control-plane:{}", std::process::id()),
-            &chrono::Utc::now().to_rfc3339(),
-            &(chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+            &owner,
+            &now.to_rfc3339(),
+            &expires_at,
         )
         .map_err(map_store_error)?
-        .ok_or_else(|| ControlPlaneError::unavailable("action effect is already leased"))?;
-    let recovered = lease.lease_fence > 1;
+    {
+        Some(lease) => (lease, false),
+        None => (
+            store
+                .claim_control_plane_effect_recovery_by_id(
+                    &request.effect_id,
+                    &owner,
+                    &now.to_rfc3339(),
+                    &expires_at,
+                )
+                .map_err(map_store_error)?
+                .ok_or_else(|| ControlPlaneError::unavailable("action effect is already leased"))?,
+            true,
+        ),
+    };
     let domain = if !fence.eligible {
         Ok(ControlPlaneActionDelegateResult {
             outcome: ControlPlaneActionOutcome::Failed,
@@ -178,14 +207,6 @@ pub fn execute_delegated_action(
     } else if recovered {
         delegate.recover(run, request)
     } else {
-        append_delegated_action_event(
-            store,
-            &requested_id,
-            request,
-            "action.accepted",
-            &lease.intent.accepted_at,
-            serde_json::json!({ "action": request.action }),
-        )?;
         delegate.execute(run, request)
     };
     let domain = domain.unwrap_or_else(|error| ControlPlaneActionDelegateResult {
@@ -712,11 +733,56 @@ pub fn effect_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_delegated_action_event, ControlPlaneProvider, NoopProvider};
-    use homeboy_control_plane_contract::{
-        ControlPlaneAction, ControlPlaneActionPayload, ControlPlaneActionRequest,
-        ControlPlaneOperation, EffectId, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::{
+        append_delegated_action_event, execute_delegated_action,
+        register_control_plane_action_delegate, ControlPlaneActionDelegate,
+        ControlPlaneActionDelegateResult, ControlPlaneProvider, NoopProvider,
     };
+    use homeboy_control_plane_contract::{
+        ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+        ControlPlaneActionRequest, ControlPlaneError, ControlPlaneOperation, ControlPlaneRun,
+        EffectId, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    };
+
+    static EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+    static RECOVERIES: AtomicUsize = AtomicUsize::new(0);
+
+    struct ProjectionFailureDelegate;
+
+    impl ControlPlaneActionDelegate for ProjectionFailureDelegate {
+        fn run_kind(&self) -> &'static str {
+            "projection-failure-test"
+        }
+
+        fn execute(
+            &self,
+            _run: &crate::observation::RunRecord,
+            _request: &ControlPlaneActionRequest,
+        ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+            EXECUTIONS.fetch_add(1, Ordering::SeqCst);
+            Ok(ControlPlaneActionDelegateResult {
+                outcome: ControlPlaneActionOutcome::Succeeded,
+                result: ControlPlaneActionPayload::empty(),
+                message: None,
+            })
+        }
+
+        fn recover(
+            &self,
+            _run: &crate::observation::RunRecord,
+            _request: &ControlPlaneActionRequest,
+        ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+            RECOVERIES.fetch_add(1, Ordering::SeqCst);
+            Ok(ControlPlaneActionDelegateResult {
+                outcome: ControlPlaneActionOutcome::Succeeded,
+                result: ControlPlaneActionPayload::empty(),
+                message: Some("recovered from durable evidence".to_string()),
+            })
+        }
+    }
 
     #[test]
     fn noop_provider_advertises_discovery_without_run_reads() {
@@ -770,5 +836,66 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn projection_failure_recovers_without_redispatching_the_domain_effect() {
+        EXECUTIONS.store(0, Ordering::SeqCst);
+        RECOVERIES.store(0, Ordering::SeqCst);
+        register_control_plane_action_delegate(Arc::new(ProjectionFailureDelegate));
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::observation::ObservationStore::open_initialized_at(
+            directory.path().join("store.sqlite"),
+        )
+        .unwrap();
+        let run = store
+            .start_run(crate::observation::NewRunRecord::builder("projection-failure-test").build())
+            .unwrap();
+        let request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("projection-failure-effect".to_string()),
+            action: ControlPlaneAction::Resume,
+            idempotency_key: "projection-failure".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload::empty(),
+            confirmed: false,
+        };
+
+        let error = execute_delegated_action(
+            &store,
+            &run,
+            &request,
+            "test_run",
+            &run.started_at,
+            true,
+            None,
+            || Err(ControlPlaneError::unavailable("projection unavailable")),
+        )
+        .expect_err("projection failure remains recoverable");
+        assert_eq!(error.message, "projection unavailable");
+        assert_eq!(EXECUTIONS.load(Ordering::SeqCst), 1);
+        store
+            .expire_control_plane_effect_leases("9999-01-01T00:00:00Z")
+            .unwrap();
+
+        let acknowledgement = execute_delegated_action(
+            &store,
+            &run,
+            &request,
+            "test_run",
+            &run.started_at,
+            true,
+            None,
+            || Ok(ControlPlaneRun::new(RunId::new(&run.id).unwrap())),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            acknowledgement.outcome,
+            ControlPlaneActionOutcome::Succeeded
+        );
+        assert_eq!(EXECUTIONS.load(Ordering::SeqCst), 1);
+        assert_eq!(RECOVERIES.load(Ordering::SeqCst), 1);
     }
 }

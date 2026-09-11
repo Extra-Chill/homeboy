@@ -1765,11 +1765,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 effect
             }
         };
-        if effect.recovery_required {
-            return Err(ControlPlaneError::unavailable(
-                "action effect requires authoritative recovery before redispatch",
-            ));
-        }
         if effect.state == ControlPlaneEffectState::Terminal {
             return effect
                 .terminal
@@ -1778,23 +1773,66 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     ControlPlaneError::unavailable("terminal action effect has no acknowledgement")
                 });
         }
-        let lease = observation
-            .lease_control_plane_effect_by_id(
-                &request.effect_id,
-                &format!("agent-task:{}", std::process::id()),
-                &now_timestamp(),
-                &(Utc::now() + chrono::Duration::seconds(ACTION_LEASE.as_secs() as i64))
-                    .to_rfc3339(),
-            )
-            .map_err(map_lifecycle_error)?
-            .ok_or_else(|| ControlPlaneError::unavailable("action effect is already leased"))?;
         let operation_key = format!(
             "control-plane-action:{}:{}",
             action_name(request.action),
             request.effect_id.0
         );
+        if effect.lease_fence == 0 {
+            append_action_event_in_store(
+                &self.lookup.store,
+                &record,
+                request,
+                &operation_key,
+                "action.accepted",
+                &effect.intent.accepted_at,
+                serde_json::json!({
+                    "operation_digest": action_operation_digest(&operation_key),
+                    "action": request.action,
+                    "acknowledgement": format!(
+                        "{}:action:{}:{}",
+                        record.run_id,
+                        action_name(request.action),
+                        request.idempotency_key
+                    ),
+                    "actor": request.actor,
+                    "expected_updated_at": request.expected_updated_at,
+                    "confirmed": request.confirmed,
+                    "parameters": request.parameters,
+                }),
+            )?;
+        }
+        let owner = format!("agent-task:{}", std::process::id());
+        let now = Utc::now();
+        let expires_at =
+            (now + chrono::Duration::seconds(ACTION_LEASE.as_secs() as i64)).to_rfc3339();
+        let normal_lease = observation
+            .lease_control_plane_effect_by_id(
+                &request.effect_id,
+                &owner,
+                &now.to_rfc3339(),
+                &expires_at,
+            )
+            .map_err(map_lifecycle_error)?;
+        let (lease, recovering) = match normal_lease {
+            Some(lease) => (lease, false),
+            None => (
+                observation
+                    .claim_control_plane_effect_recovery_by_id(
+                        &request.effect_id,
+                        &owner,
+                        &now.to_rfc3339(),
+                        &expires_at,
+                    )
+                    .map_err(map_lifecycle_error)?
+                    .ok_or_else(|| {
+                        ControlPlaneError::unavailable("action effect is already leased")
+                    })?,
+                true,
+            ),
+        };
         let accepted_at = lease.intent.accepted_at.clone();
-        if lease.lease_fence > 1 {
+        if recovering {
             let recovered = recover_interrupted_action_acknowledgement(
                 &self.lookup.store,
                 &record,
@@ -1835,23 +1873,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
             action_name(request.action),
             request.idempotency_key
         );
-        append_action_event_in_store(
-            &self.lookup.store,
-            &record,
-            request,
-            &operation_key,
-            "action.accepted",
-            &accepted_at,
-            serde_json::json!({
-                "operation_digest": action_operation_digest(&operation_key),
-                "action": request.action,
-                "acknowledgement": acknowledgement,
-                "actor": request.actor,
-                "expected_updated_at": request.expected_updated_at,
-                "confirmed": request.confirmed,
-                "parameters": request.parameters,
-            }),
-        )?;
         let (outcome, resource, result, message) = if request
             .expected_updated_at
             .as_ref()

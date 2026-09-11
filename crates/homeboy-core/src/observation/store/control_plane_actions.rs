@@ -126,27 +126,7 @@ impl ObservationStore {
         self.connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error("begin control-plane resource projection"))?;
-        let result = (|| {
-            let eligibility = serde_json::to_string(&projection.eligibility)
-                .map_err(|e| Error::internal_json(e.to_string(), None))?;
-            let provenance = serde_json::to_string(&projection.provenance)
-                .map_err(|e| Error::internal_json(e.to_string(), None))?;
-            self.connection.execute(
-                "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
-                params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
-            ).map_err(sqlite_error("upsert control-plane resource projection"))?;
-            self.connection.execute(
-                "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
-                params![projection.resource_type, projection.resource_id],
-            ).map_err(sqlite_error("clear control-plane resource aliases"))?;
-            for alias in &projection.aliases {
-                self.connection.execute(
-                    "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
-                    params![projection.resource_type, alias, projection.resource_id],
-                ).map_err(sqlite_error("claim control-plane resource alias"))?;
-            }
-            Ok(())
-        })();
+        let result = self.upsert_control_plane_resource_projection_in_transaction(projection);
         match result {
             Ok(()) => self
                 .connection
@@ -157,6 +137,31 @@ impl ObservationStore {
                 Err(error)
             }
         }
+    }
+
+    fn upsert_control_plane_resource_projection_in_transaction(
+        &self,
+        projection: &ControlPlaneResourceProjection,
+    ) -> Result<()> {
+        let eligibility = serde_json::to_string(&projection.eligibility)
+            .map_err(|e| Error::internal_json(e.to_string(), None))?;
+        let provenance = serde_json::to_string(&projection.provenance)
+            .map_err(|e| Error::internal_json(e.to_string(), None))?;
+        self.connection.execute(
+            "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
+            params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
+        ).map_err(sqlite_error("upsert control-plane resource projection"))?;
+        self.connection.execute(
+            "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
+            params![projection.resource_type, projection.resource_id],
+        ).map_err(sqlite_error("clear control-plane resource aliases"))?;
+        for alias in &projection.aliases {
+            self.connection.execute(
+                "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
+                params![projection.resource_type, alias, projection.resource_id],
+            ).map_err(sqlite_error("claim control-plane resource alias"))?;
+        }
+        Ok(())
     }
 
     pub fn control_plane_resource_projection(
@@ -207,6 +212,43 @@ impl ObservationStore {
         resource_type: &str,
         idempotency_digest: &str,
     ) -> Result<ControlPlaneEffectAdmission> {
+        self.enqueue_control_plane_action_intent_inner(
+            intent,
+            fence,
+            resource_type,
+            idempotency_digest,
+            None,
+        )
+    }
+
+    /// Atomically publish a resource projection with the immutable action
+    /// intent that relies on it. A caller can never expose action eligibility
+    /// without the corresponding outbox effect.
+    pub fn enqueue_control_plane_action_intent_with_projection(
+        &self,
+        intent: &ControlPlaneActionIntent,
+        fence: &ControlPlaneActionFence,
+        projection: &ControlPlaneResourceProjection,
+        idempotency_digest: &str,
+    ) -> Result<ControlPlaneEffectAdmission> {
+        self.enqueue_control_plane_action_intent_inner(
+            intent,
+            fence,
+            &projection.resource_type,
+            idempotency_digest,
+            Some(projection),
+        )
+    }
+
+    fn enqueue_control_plane_action_intent_inner(
+        &self,
+        intent: &ControlPlaneActionIntent,
+        fence: &ControlPlaneActionFence,
+        resource_type: &str,
+        idempotency_digest: &str,
+        projection: Option<&ControlPlaneResourceProjection>,
+    ) -> Result<ControlPlaneEffectAdmission> {
+        self.ensure_control_plane_resource_authority()?;
         self.connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error("begin control-plane action intent admission"))?;
@@ -221,6 +263,19 @@ impl ObservationStore {
                     ));
                 }
                 return Ok(ControlPlaneEffectAdmission::Duplicate(existing));
+            }
+            if let Some(projection) = projection {
+                if projection.resource_id != intent.resource.run.as_str()
+                    || projection.version != fence.resource_updated_at
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "projection",
+                        "action projection does not match its immutable intent fence",
+                        Some(intent.resource.run.to_string()),
+                        None,
+                    ));
+                }
+                self.upsert_control_plane_resource_projection_in_transaction(projection)?;
             }
             if !fence.eligible {
                 return Err(Error::validation_invalid_argument(
@@ -364,6 +419,44 @@ impl ObservationStore {
                 self.connection
                     .execute_batch("COMMIT")
                     .map_err(sqlite_error("commit targeted control-plane effect lease"))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Claim an effect already fenced into recovery without making it normally
+    /// leaseable again. The caller may only reconcile durable evidence; it must
+    /// never redispatch the external operation.
+    pub fn claim_control_plane_effect_recovery_by_id(
+        &self,
+        effect_id: &EffectId,
+        owner: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<Option<ControlPlaneEffectStatus>> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane effect recovery claim"))?;
+        let result = (|| {
+            self.expire_leased_effects_to_recovery_required(now)?;
+            let changed = self.connection.execute(
+                "UPDATE control_plane_action_claims SET outbox_state = 'leased', lease_owner = ?2, lease_fence = lease_fence + 1, lease_expires_at = ?3 WHERE effect_id = ?1 AND outbox_state = 'recovery_required'",
+                params![effect_id.0, owner, expires_at],
+            ).map_err(sqlite_error("claim control-plane effect recovery"))?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            self.effect_status(effect_id)
+        })();
+        match result {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("COMMIT")
+                    .map_err(sqlite_error("commit control-plane effect recovery claim"))?;
                 Ok(value)
             }
             Err(error) => {
@@ -968,10 +1061,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first.state, ControlPlaneEffectState::Leased);
-        let reclaimed = store
+        assert!(store
             .lease_control_plane_effect_by_id(
                 &intent.effect_id,
                 "worker-2",
+                "2026-01-01T00:00:03Z",
+                "2026-01-01T00:00:04Z",
+            )
+            .unwrap()
+            .is_none());
+        let reclaimed = store
+            .claim_control_plane_effect_recovery_by_id(
+                &intent.effect_id,
+                "reconciler-2",
                 "2026-01-01T00:00:03Z",
                 "2026-01-01T00:00:04Z",
             )
@@ -1013,6 +1115,80 @@ mod tests {
             .unwrap();
         assert_eq!(terminalized.state, ControlPlaneEffectState::Terminal);
         assert_eq!(terminalized.terminal, Some(terminal));
+    }
+
+    #[test]
+    fn projection_and_intent_roll_back_together_when_alias_admission_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running'), ('run-2', 'deploy', 'now', 'running')", []).unwrap();
+        store
+            .upsert_control_plane_resource_projection(&ControlPlaneResourceProjection {
+                resource_type: "agent_task_run".to_string(),
+                resource_id: "run-2".to_string(),
+                version: "now".to_string(),
+                state: "queued".to_string(),
+                aliases: vec!["occupied".to_string()],
+                eligibility: serde_json::json!({}),
+                provenance: serde_json::json!({}),
+            })
+            .unwrap();
+        let run = RunId::new("run-1").unwrap();
+        let request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("effect-atomic".to_string()),
+            action: ControlPlaneAction::Resume,
+            idempotency_key: "atomic".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload::empty(),
+            confirmed: false,
+        };
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: request.effect_id.clone(),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(run.clone()),
+                run,
+                original_alias: None,
+            },
+            request,
+            request_digest: "d".repeat(64),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: "v1".to_string(),
+            eligible: true,
+            reason: None,
+        };
+        let projection = ControlPlaneResourceProjection {
+            resource_type: "agent_task_run".to_string(),
+            resource_id: "run-1".to_string(),
+            version: "v1".to_string(),
+            state: "queued".to_string(),
+            aliases: vec!["occupied".to_string()],
+            eligibility: serde_json::json!({}),
+            provenance: serde_json::json!({}),
+        };
+
+        assert!(store
+            .enqueue_control_plane_action_intent_with_projection(
+                &intent,
+                &fence,
+                &projection,
+                &"e".repeat(64),
+            )
+            .is_err());
+        assert!(store
+            .control_plane_resource_projection("agent_task_run", "run-1")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .control_plane_effect_status(&intent.effect_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
