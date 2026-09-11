@@ -2030,6 +2030,23 @@ pub(crate) fn record_job_artifacts(
     })
 }
 
+/// Settle one exact daemon job after the controller has authoritatively read
+/// its terminal snapshot and event log. Unknown or in-flight jobs never reach
+/// this boundary, so their generation ownership remains fail-closed.
+pub(crate) fn settle_observed_terminal_job(runner_id: &str, job_id: &str) -> Result<bool> {
+    with_registry_lock(runner_id, || {
+        let Some(mut generations) = read_locked(runner_id, None)? else {
+            return Ok(false);
+        };
+        if generations.job_owner(job_id).is_none() {
+            return Ok(false);
+        }
+        generations.complete_job(job_id);
+        write(runner_id, &generations)?;
+        Ok(true)
+    })
+}
+
 /// Release a durable run's generation routing claim after terminal retention
 /// removes the run record. Reconciliation remains fail-closed and only stops a
 /// drained, zero-job endpoint after its final owner is gone.

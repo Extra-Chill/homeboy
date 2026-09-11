@@ -944,6 +944,188 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
 }
 
 #[test]
+fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
+    let plan = compile_options("startup-without-output-report")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    aggregate.outcomes[0].diagnostics = vec![
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_timeout".to_string(),
+            message: "provider exceeded timeout_ms=1200000".to_string(),
+            data: serde_json::json!({ "timeout_ms": 1_200_000 }),
+        },
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_rotation_exhausted".to_string(),
+            message: "an earlier provider rotation exhausted".to_string(),
+            data: serde_json::json!({}),
+        },
+    ];
+    let mut startup_outcome = aggregate.outcomes[0].clone();
+    startup_outcome.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    startup_outcome.failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    startup_outcome.diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "provider": "generic-provider",
+            "deadline": "liveness",
+            "liveness_timeout_ms": 300_000,
+            "timeout_ms": 1_230_000,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    aggregate.outcomes.push(startup_outcome);
+    let mut report = cook_report(CookReportInput {
+        cook_id: "startup-without-output-report".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: None,
+        exit_code: 1,
+        invocation_latest_run_id: Some("startup-without-output-run"),
+    });
+    report.value.failure_context = Some(AgentTaskCookFailureContext {
+        cook_id: "startup-without-output-report".to_string(),
+        latest_run_id: "startup-without-output-run".to_string(),
+        selected_run_id: None,
+        selected_task_id: None,
+        selected_artifact_id: None,
+        promotion_provenance: None,
+        durable_recipe_ref: "homeboy://agent-task/cooks/startup-without-output-report/recipe"
+            .to_string(),
+        lifecycle_state: "Failed".to_string(),
+        phase: "provider".to_string(),
+        reason_code: "failed".to_string(),
+        diagnostic: None,
+        continuation_admission: None,
+        blocking_claim: None,
+        provider_budget_consumed: true,
+        provider_executions_consumed: 1,
+        recovery_legal: false,
+        recovery_reason: "generic".to_string(),
+        legal_actions: Vec::new(),
+        next_actions: Vec::new(),
+    });
+
+    make_provider_timeout_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        &plan,
+        "startup-without-output-run",
+        Some(AgentTaskExecutionBudget::new(1, 1, 0)),
+        false,
+    );
+    make_provider_rotation_actionable(None, &mut report, &aggregate, "startup-without-output-run");
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "startup-without-output-run",
+    );
+
+    assert_eq!(report.value.status, "provider_failure");
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_startup_without_output")
+    );
+    assert_ne!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_timeout")
+    );
+    let context = report
+        .value
+        .failure_context
+        .expect("startup diagnostic context");
+    assert_eq!(
+        context.diagnostic.expect("diagnostic")["data"]["timeout_ms"],
+        1_230_000
+    );
+    assert_eq!(
+        context
+            .legal_actions
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect::<Vec<_>>(),
+        vec!["status", "diagnose"]
+    );
+    assert!(context
+        .legal_actions
+        .iter()
+        .all(|action| !action.command.contains("--timeout-ms")));
+}
+
+#[test]
+fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure() {
+    let plan = compile_options("later-terminal-failure")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "deadline": "liveness",
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    let mut later_failure = aggregate.outcomes[0].clone();
+    later_failure.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    later_failure.failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
+    later_failure.diagnostics.clear();
+    aggregate.outcomes.push(later_failure);
+    let mut report = cook_report(CookReportInput {
+        cook_id: "later-terminal-failure".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: Some("later provider execution failed".to_string()),
+        exit_code: 1,
+        invocation_latest_run_id: Some("later-terminal-failure-run"),
+    });
+    report.value.terminal_phase = Some("provider".to_string());
+    report.value.terminal_failure_classification = Some("provider_execution_failed".to_string());
+
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "later-terminal-failure-run",
+    );
+
+    assert_eq!(report.value.terminal_phase.as_deref(), Some("provider"));
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_execution_failed")
+    );
+    assert_eq!(
+        report.value.stop_reason.as_deref(),
+        Some("later provider execution failed")
+    );
+}
+
+#[test]
 fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
     use crate::agent_task::{AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
@@ -5047,11 +5229,10 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
                 .success()
         };
         assert!(!destination_has_observed_base());
-        // Shallow and single-branch checkouts may not retain this local ref. The
-        // admission check must still resolve the authoritative origin base.
-        git(
-            &destination,
-            &["update-ref", "-d", "refs/remotes/origin/main"],
+        let stale_tracking_base = git(&destination, &["rev-parse", "origin/main"]);
+        assert_ne!(
+            stale_tracking_base, observed_base,
+            "the local origin tracking ref remains stale while the remote advances"
         );
 
         let preparation = prepare_cook_workspace_base(&destination, "main")
@@ -5183,6 +5364,18 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             .unwrap_or_default()
             .contains("--ff-only")));
     });
+}
+
+#[test]
+fn retryable_preview_base_resolution_is_deferred_not_admitted() {
+    let error = Error::internal_unexpected("authoritative remote unavailable").with_retryable(true);
+    assert!(tolerate_retryable_cook_base_resolution::<()>(Err(error))
+        .expect("retryable remote probe is deferred")
+        .is_none());
+    let preparation = deferred_cook_base_preparation("main");
+    assert_eq!(preparation.base_sha, None);
+    assert_eq!(preparation.provenance, "base_unresolved");
+    assert_eq!(preparation.remote_freshness, "deferred");
 }
 
 #[test]
