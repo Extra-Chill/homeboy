@@ -4331,6 +4331,99 @@ fn provider_timeout_ms(
         .or(Some(crate::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS))
 }
 
+/// The runner records this only after every observable progress channel stayed
+/// empty. It is not a wall-clock timeout: keep the distinction at Cook's
+/// operator-facing boundary rather than suggesting a larger timeout.
+fn startup_without_output_liveness_diagnostic(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Option<&crate::agent_task::AgentTaskDiagnostic> {
+    aggregate
+        .outcomes
+        .iter()
+        .flat_map(|outcome| &outcome.diagnostics)
+        .find(|diagnostic| {
+            diagnostic.class == "agent_task.provider_liveness_timeout"
+                && diagnostic.data["deadline"] == "liveness"
+                && [
+                    "stdout_bytes",
+                    "stderr_bytes",
+                    "runtime_progress_events",
+                    "workspace_progress_events",
+                ]
+                .iter()
+                .all(|field| diagnostic.data[*field].as_u64() == Some(0))
+        })
+}
+
+/// Project the bounded no-output liveness evidence into Cook's durable result.
+///
+/// The provider's terminal diagnostic remains the authority on the underlying
+/// execution. This projection makes its actionable meaning visible without
+/// reclassifying the attempt as a timeout or manufacturing a retry that could
+/// repeat an opaque startup.
+fn make_startup_without_output_actionable(
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    run_id: &str,
+) {
+    let Some(diagnostic) = startup_without_output_liveness_diagnostic(aggregate) else {
+        return;
+    };
+    let mut diagnostic_value = homeboy_core::redaction::redact_json(&serde_json::json!({
+        "class": diagnostic.class,
+        "message": redact_diagnostic_text(&diagnostic.message),
+        "data": diagnostic.data,
+    }));
+    bound_diagnostic_value(&mut diagnostic_value, 0);
+    let status = AgentTaskCookRecoveryAction {
+        action: "status".to_string(),
+        command: lifecycle_store.map_or_else(
+            || cook_recovery_command(run_id, &["status", run_id]),
+            |store| cook_recovery_command_in_store(store, run_id, &["status", run_id]),
+        ),
+    };
+    let diagnose = AgentTaskCookRecoveryAction {
+        action: "diagnose".to_string(),
+        command: lifecycle_store.map_or_else(
+            || cook_recovery_command(run_id, &["diagnose", run_id]),
+            |store| cook_recovery_command_in_store(store, run_id, &["diagnose", run_id]),
+        ),
+    };
+
+    report.value.terminal_phase = Some("provider_startup".to_string());
+    report.value.terminal_failure_classification =
+        Some("provider_startup_without_output".to_string());
+    report.value.stop_reason = Some(
+        "provider startup produced no stdout, stderr, structured progress, or workspace activity before its bounded liveness diagnostic; this is not a provider timeout. Inspect the durable status and diagnostics before choosing a recovery path.".to_string(),
+    );
+    report.value.primary_failure = Some(AgentTaskCookPrimaryFailure {
+        schema: "homeboy/agent-task-cook-primary-failure/v1",
+        provider_id: diagnostic.data["provider"]
+            .as_str()
+            .unwrap_or("provider")
+            .to_string(),
+        operation: "startup_without_output".to_string(),
+        phase: "provider_startup".to_string(),
+        exit_code: 1,
+        stderr_excerpt: truncate_diagnostic_text(&redact_diagnostic_text(&diagnostic.message)),
+        evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
+        next_action: status.clone(),
+        diagnostic: Some(diagnostic_value.clone()),
+    });
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "provider_startup".to_string();
+        context.reason_code = "provider_startup_without_output".to_string();
+        context.diagnostic = Some(diagnostic_value);
+        context.recovery_legal = true;
+        context.recovery_reason =
+            "read-only status and diagnostic inspection are safe; no timeout increase or retry is implied"
+                .to_string();
+        context.legal_actions = vec![status.clone(), diagnose.clone()];
+        context.next_actions = vec![status, diagnose];
+    }
+}
+
 fn make_provider_timeout_actionable(
     lifecycle_store: Option<&AgentTaskLifecycleStore>,
     report: &mut AgentTaskRunResult<AgentTaskCookReport>,
@@ -7177,6 +7270,12 @@ fn run_cook_spine(
                     &run_id,
                 )
                 .unwrap_or(true),
+            );
+            make_startup_without_output_actionable(
+                Some(lifecycle_store),
+                &mut report,
+                &aggregate,
+                &run_id,
             );
             make_provider_rotation_actionable(
                 Some(lifecycle_store),

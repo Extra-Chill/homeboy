@@ -944,6 +944,102 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
 }
 
 #[test]
+fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
+    let plan = compile_options("startup-without-output-report")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "provider": "generic-provider",
+            "deadline": "liveness",
+            "liveness_timeout_ms": 300_000,
+            "timeout_ms": 1_230_000,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    let mut report = cook_report(CookReportInput {
+        cook_id: "startup-without-output-report".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: None,
+        exit_code: 1,
+        invocation_latest_run_id: Some("startup-without-output-run"),
+    });
+    report.value.failure_context = Some(AgentTaskCookFailureContext {
+        cook_id: "startup-without-output-report".to_string(),
+        latest_run_id: "startup-without-output-run".to_string(),
+        selected_run_id: None,
+        selected_task_id: None,
+        selected_artifact_id: None,
+        promotion_provenance: None,
+        durable_recipe_ref: "homeboy://agent-task/cooks/startup-without-output-report/recipe"
+            .to_string(),
+        lifecycle_state: "Failed".to_string(),
+        phase: "provider".to_string(),
+        reason_code: "failed".to_string(),
+        diagnostic: None,
+        continuation_admission: None,
+        blocking_claim: None,
+        provider_budget_consumed: true,
+        provider_executions_consumed: 1,
+        recovery_legal: false,
+        recovery_reason: "generic".to_string(),
+        legal_actions: Vec::new(),
+        next_actions: Vec::new(),
+    });
+
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "startup-without-output-run",
+    );
+
+    assert_eq!(report.value.status, "provider_failure");
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_startup_without_output")
+    );
+    assert_ne!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_timeout")
+    );
+    let context = report
+        .value
+        .failure_context
+        .expect("startup diagnostic context");
+    assert_eq!(
+        context.diagnostic.expect("diagnostic")["data"]["timeout_ms"],
+        1_230_000
+    );
+    assert_eq!(
+        context
+            .legal_actions
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect::<Vec<_>>(),
+        vec!["status", "diagnose"]
+    );
+    assert!(context
+        .legal_actions
+        .iter()
+        .all(|action| !action.command.contains("--timeout-ms")));
+}
+
+#[test]
 fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
     use crate::agent_task::{AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
