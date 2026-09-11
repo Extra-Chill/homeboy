@@ -3132,6 +3132,71 @@ fn upgrade_admission_ignores_terminal_records_with_stale_owner_metadata() {
 }
 
 #[test]
+fn upgrade_admission_ignores_a_runner_owned_attempt_of_a_terminal_cook() {
+    with_isolated_home(|_| {
+        for run_id in ["terminal-cook", "terminal-cook-attempt-1"] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        }
+        agent_task_lifecycle::rewrite_record_for_test("terminal-cook", |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Succeeded);
+        })
+        .expect("terminal cook stored");
+        // The attempt is stranded in `running` on a runner whose daemon
+        // restarted: runner reconcile retires generations without touching it
+        // and the durable reconciler leaves runner-owned records alone.
+        agent_task_lifecycle::rewrite_record_for_test("terminal-cook-attempt-1", |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+            record.metadata["cook_id"] = serde_json::json!("terminal-cook");
+            record.metadata["runner_id"] = serde_json::json!("lab");
+            record.metadata["runner_job_id"] = serde_json::json!("old-job");
+        })
+        .expect("stranded attempt stored");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert!(
+            admission.allows_controller_replacement(),
+            "a terminal Cook is authoritative over its own attempts: {:?}",
+            admission.blockers
+        );
+        assert!(admission.blockers.is_empty());
+    });
+}
+
+#[test]
+fn upgrade_admission_still_blocks_an_attempt_whose_cook_is_not_terminal() {
+    with_isolated_home(|_| {
+        for run_id in ["live-cook", "live-cook-attempt-1"] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        }
+        agent_task_lifecycle::rewrite_record_for_test("live-cook-attempt-1", |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+            record.metadata["cook_id"] = serde_json::json!("live-cook");
+            record.metadata["runner_id"] = serde_json::json!("lab");
+            record.metadata["runner_job_id"] = serde_json::json!("old-job");
+        })
+        .expect("attempt stored");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert!(
+            admission
+                .blockers
+                .iter()
+                .any(|blocker| blocker.run_id == "live-cook-attempt-1"),
+            "a non-terminal Cook proves nothing about its attempt: {:?}",
+            admission.blockers
+        );
+    });
+}
+
+#[test]
 fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
     with_isolated_home(|_| {
         for run_id in ["stale-local", "live-owner", "unverified-runner"] {
