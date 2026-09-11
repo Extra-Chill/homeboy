@@ -2345,7 +2345,7 @@ fn materialize_snapshot_stage_before(
         stage = shell::quote_arg(&stage_source.display().to_string()),
         root = shell::quote_arg(&local_path.display().to_string()),
         resolve = shell::quote_arg(&format!(
-            "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; staged_target=$(realpath \"$stage_link\" 2>/dev/null || true); case \"$staged_target\" in \"$stage\"|\"$stage\"/*) exit 0 ;; esac; target=$(realpath \"$original\" 2>/dev/null || true); [ -z \"$target\" ] && exit 0; rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf -",
+            "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; staged_target=$(realpath \"$stage_link\" 2>/dev/null || true); case \"$staged_target\" in \"$stage\"|\"$stage\"/*) exit 0 ;; esac; target=$(realpath \"$original\" 2>/dev/null || true); [ -z \"$target\" ] && exit 0; case \"$target\" in \"$root\"|\"$root\"/*) exit 0 ;; esac; rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf -",
             tar_exclude_args(&archive_excludes)
         )),
     );
