@@ -192,6 +192,7 @@ fn repo_local_gate_execution_kind_runs_without_extension_provider() {
             attempt: 1,
             cancellation: AgentTaskCancellationToken::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
 

@@ -400,13 +400,8 @@ pub(crate) fn verified_commands_from_promotion(
         .deterministic_gates
         .iter()
         .filter_map(|gate| {
-            let [shell, flag, command] = gate.command.as_slice() else {
-                return None;
-            };
-            if shell != "sh"
-                || flag != "-lc"
-                || !promotion.has_visible_passed_gate_for_command(command)
-            {
+            let command = gate.invocation().ok()?.reviewer_command();
+            if !promotion.has_visible_passed_gate_for_command(&command) {
                 return None;
             }
             let candidate = gate.candidate_checkout.as_ref()?;
@@ -417,7 +412,7 @@ pub(crate) fn verified_commands_from_promotion(
                 },
             );
             Some(AgentTaskReviewVerifiedCommand {
-                command: command.clone(),
+                command,
                 status: format!("{:?}", gate.status).to_ascii_lowercase(),
                 candidate_commit: candidate.commit.clone(),
                 candidate_tree: candidate.tree.clone(),
@@ -568,8 +563,14 @@ pub fn default_profile() -> AgentTaskReviewProfile {
 
 /// The component's portable config is the only profile source. Invalid portable
 /// config therefore fails finalization instead of being mistaken for profile absence.
-pub fn resolve_review_profile(path: &str) -> Result<AgentTaskReviewProfile> {
-    let component = homeboy_core::component::resolve_effective(None, Some(path), None)?;
+pub fn resolve_review_profile(
+    component_id: Option<&str>,
+    path: &str,
+) -> Result<AgentTaskReviewProfile> {
+    if let Some(component_id) = component_id {
+        homeboy_core::component::load(component_id)?;
+    }
+    let component = homeboy_core::component::resolve_effective(component_id, Some(path), None)?;
     // The component model carries the profile opaquely as JSON; deserialize it
     // here (the agent-task layer owns the profile schema). A present-but-invalid
     // profile fails finalization instead of being mistaken for profile absence.
@@ -2242,6 +2243,26 @@ mod tests {
             r#"{"id":"review-profile-test","review_profile":{"required_sections":["summary"],"hidden_sections":["summary"]}}"#,
         )
         .expect("portable config");
-        assert!(resolve_review_profile(directory.path().to_str().expect("path")).is_err());
+        assert!(resolve_review_profile(None, directory.path().to_str().expect("path")).is_err());
+    }
+
+    #[test]
+    fn explicit_unknown_review_profile_component_fails_before_path_discovery() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let directory = tempfile::tempdir().expect("temporary component");
+            std::fs::write(
+                directory.path().join("homeboy.json"),
+                r#"{"id":"path-owned-component"}"#,
+            )
+            .expect("portable config");
+
+            let error = resolve_review_profile(
+                Some("unknown-component"),
+                directory.path().to_str().expect("path"),
+            )
+            .expect_err("unknown explicit component must fail");
+            assert_eq!(error.code.as_str(), "component.not_found");
+            assert_eq!(error.details["id"], "unknown-component");
+        });
     }
 }

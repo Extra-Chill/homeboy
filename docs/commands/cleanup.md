@@ -8,20 +8,21 @@ Aggregate `--apply` submits a durable asynchronous controller job by default. Fo
 
 ## `homeboy cleanup artifacts`
 
-Scans the current repository and its managed Git worktrees for built-in and declared artifact paths. The command defaults to dry-run output and only removes files when `--apply` is passed.
+Scans the current checkout for built-in and declared artifact paths. The command defaults to dry-run output and only removes files when `--apply` is passed. `--path` always resolves to that exact checkout, including under `--apply`; it cannot select artifacts from sibling worktrees. Use `--all-worktrees` to explicitly discover every Git worktree in the selected repository. The JSON `scope` field reports `exact_checkout` or `repository_worktrees` in both dry-run and apply output.
 
 Homeboy always treats Rust `target` directories as rebuildable artifacts. Projects can add repo-relative cleanup paths with `artifact_cleanup_paths` in `homeboy.json`.
 
 ```bash
 homeboy cleanup artifacts
 homeboy cleanup artifacts --path /path/to/checkout
+homeboy cleanup artifacts --path /path/to/checkout --all-worktrees
 homeboy cleanup artifacts --sort size --limit 10
 homeboy cleanup artifacts --merged-only --sort size --limit 10
 homeboy cleanup artifacts --min-age-days 7
 homeboy cleanup artifacts --apply
 ```
 
-Use `--sort size` to review the largest artifacts first, `--limit N` to bound the reported or removed candidates after sorting, and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream.
+Use `--sort size` to rank the inspected artifacts by size and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream. With `--all-worktrees`, `--limit N` bounds declaration inspections for either sort order and returns a filter-bound cursor when more inventory remains; resume it with `--cursor` and the same eligibility filters. A deadline interrupted while measuring one large directory records an opaque, checksummed reference to its repository-bound durable frontier, so the next pass continues measuring the declaration without putting every pending path in the command line. Size order is therefore largest-first within that bounded page, not a claim about uninspected worktrees. A dry-run continuation remains a dry run; add `--apply` explicitly when ready to remove candidates.
 
 The JSON output includes worktree identity, candidate paths, estimated bytes, skipped reasons, applied rows, a per-worktree `worktrees` roll-up, and a `summary` object. The terminal summary shows bounded candidate rows and points to the JSON output for full large reviews. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe path declarations and skips artifact paths that contain tracked or staged source changes, files Git tracks at all (a repository that commits its generated output keeps it), or untracked work that Git does not ignore.
 
@@ -37,9 +38,9 @@ Installed extensions declare the reconstructable install/build trees they own th
 - Checkouts registered as active task worktrees are protected from extension-declared removal by default, because losing an install tree leaves a live checkout unusable until it is rehydrated. Pass `--include-active-worktrees` to reclaim them anyway. Built-in and `homeboy.json` declarations keep their existing behavior.
 - `--min-age-days N` requires an artifact to be untouched for N days. A declaration can set its own floor; the stricter of the two applies.
 
-Configured worktree-provider previews run independently with a 30-second cancellation boundary. The output records each provider's typed `outcome`, `inventory_completeness`, elapsed time, and heartbeat count, so a timed-out or failed provider yields a partial inventory without blocking healthy providers. Preview commands remain the only provider operation invoked without `--apply`.
+Aggregate cleanup gives every selected category its own isolated process group and 30-second wall-clock deadline, within a 120-second deadline for the complete invocation. A category that reaches its deadline is terminated with its descendants and returns a typed `cleanup.category_timeout` row containing `elapsed_ms`, `timeout_ms`, `last_progress`, `inventory_completeness: "partial"`, and an exact `continuation_command`; later independent categories still run while aggregate time remains. Excluded categories are not spawned, so excluding `task-worktrees` bypasses its registry discovery, locks, and safety probes rather than merely hiding its output. Durable aggregate apply records the active category in `cleanup status`, retains complete partial evidence in `cleanup status <job-id> --full`, and finishes the durable job as failed rather than reporting a category failure as job success.
 
-Aggregate cleanup gives every selected category its own isolated process group and 30-second wall-clock deadline, within a 120-second deadline for the complete invocation. Nested provider and external-process budgets expire five seconds before their category owner, reserving bounded time for the owner to terminate and reap those independent process groups before it returns. A category that reaches its deadline is terminated with its descendants and returns a typed `cleanup.category_timeout` row containing `elapsed_ms`, `timeout_ms`, `last_progress`, `inventory_completeness: "partial"`, and an exact `continuation_command`; later independent categories still run while aggregate time remains. Excluded categories are not spawned, so excluding `worktree-providers` and `task-worktrees` bypasses their discovery, locks, safety probes, and provider commands rather than merely hiding their output. A provider failure marks both the `worktree-providers` category and the top-level command as `partial_failure`. Durable aggregate apply records the active category in `cleanup status`, retains complete partial evidence in `cleanup status <job-id> --full`, and finishes the durable job as failed rather than reporting provider/category failure as job success.
+A category reports `outcome: "no_effect"` when an `--apply` identified candidates and reclaimed none of them. That is a reporting distinction rather than a fault: it carries no `failure`, does not change the exit code, and never counts toward the scheduler's failure total. A dry run applies nothing by definition, so it always reports `completed`. Candidate counts and `estimated_bytes` describe reclaim an apply can actually achieve — a resource the configured retention window, an active reference, or this pass's removal limit still protects is excluded from both, so advertised reclaim never exceeds achievable reclaim.
 
 `homeboy cleanup retained-storage` uses the same 30-second process-group boundary around its read-only source inventories and filesystem reconciliation. Its progress identifies the active source; a deadline returns typed partial evidence and `homeboy cleanup retained-storage --limit <N>` as the safe continuation instead of blocking on a recursive walk.
 
@@ -125,6 +126,72 @@ The byte ceiling (2 GiB retained) relaxes step 3, and only step 3, for the
 oldest entries that already passed step 2. An age window alone cannot bound a
 directory accumulating hundreds of megabytes per kill at an unbounded rate.
 
+## Release Artifacts
+
+`homeboy release` copies every published asset into
+`<artifact-root>/release/<repo>/<version>/` so a retry, a repair command, or a
+deploy reaches the exact published bytes without a rebuild. Nothing removed
+those copies until #14223: the store had no count, byte, or age bound of any
+kind, and on one host reached **6.1 GB** — 6.0 GB of it a single repository
+holding fourteen ~435 MB builds published inside a nine-day window, while
+upstream had already moved several minor versions past every one of them.
+
+```bash
+homeboy cleanup --include release-artifacts
+homeboy cleanup --include release-artifacts --apply
+```
+
+`orphaned-artifact-bytes` cannot reach this store and never will. These
+directories are referenced by durable release records, so that category
+correctly inventories **zero** candidates against them. They are live, not
+orphaned, which is why bounding them needs a policy of its own.
+
+Deleting them is safe because every entry is a local copy of bytes already
+published to a GitHub Release under an immutable tag. The remote copy is the
+source of truth; the local one is a cache that avoids a rebuild. Losing an old
+entry costs a download, not a release.
+
+Two budgets apply, both **per repository**, and the stricter one wins:
+
+- `retention.release_artifact_max_count` — versions retained per repository
+  (default: 5).
+- `retention.release_artifact_max_bytes` — retained bytes per repository
+  (default: 2 GiB).
+
+Both exist because per-release payloads span two orders of magnitude across
+repositories. A count that preserves a small repository's whole history lets a
+large one hold gigabytes; a byte ceiling that bounds the large one would
+needlessly truncate the small one's history. Whichever limit a repository's own
+payload size makes binding is the one that governs it.
+
+Three rules constrain every removal:
+
+1. **The newest release is never pruned.** Rank 0 for a repository always
+   carries a retention reason, whatever the budgets say. A bound cannot empty a
+   repository's directory — not even `--release-max-count 0`.
+2. **A release published within the last hour is never pruned.** The fixed floor
+   covers an in-flight publication. Rank alone does not cover this: two releases
+   cut back to back put the second at rank 1, past a tight count budget, while
+   its publication is still running.
+3. **Retention is monotone in age.** Once a repository's byte budget is
+   exhausted every *older* entry is eligible too, so pruning a newer entry while
+   keeping an older one is unreachable.
+
+Reported bytes are **hardlink-corrected**. Each version directory holds its
+payload under two names — a numbered durable copy and the canonical upload name
+GitHub derives an asset name from — and those are the same inode, because
+staging hardlinks first and only copies if the link fails. Summing `st_size`
+across directory entries reports roughly **twice** the disk a removal returns.
+Each version reports `size_bytes` (what a removal actually frees), the naive
+`logical_bytes`, and the `hardlink_duplicate_bytes` difference, so the
+correction is visible rather than something to trust.
+
+`candidate_count` and `estimated_bytes` count genuinely removable versions only.
+Each version's `eligible` is computed as `retention_reasons.is_empty()` and is
+never assigned any other way, so a populated reason forces `eligible: false`
+structurally and cleanup cannot advertise reclaim the apply path will not
+perform.
+
 ## Automatic Retention
 
 Starting the Homeboy daemon installs the bounded retention pass by default:
@@ -178,7 +245,6 @@ apply.
 | --- | --- | --- | --- | --- |
 | `repo-artifacts` | `homeboy cleanup artifacts` | Declared reconstructable build/install trees in repo worktrees | Built-in path table plus repo/extension declarations, resolved only beside a matching install scope | `--min-age-days` composed with any declaration floor (stricter wins); Git-tracked or dirty trees and active task worktrees preserved |
 | `task-worktrees` | `homeboy worktree cleanup --cleanup-branches` | Registered task worktrees and their branches | Worktree registry membership | Unmerged branches preserved unless explicitly allowed |
-| `worktree-providers` | `homeboy cleanup worktrees --all-providers` | Provider-owned external worktrees | Delegated to each configured provider | Provider-owned; a timed-out provider yields a partial inventory and blocks nothing |
 | `terminal-runs` | — (aggregate only) | Terminal observation records, their artifact bytes, and lifecycle directories | Durable run row in a terminal state | `retention.terminal_run_days`; unsafe local artifact paths keep the run |
 | `persisted-run-artifacts` | `homeboy runs artifact cleanup-persisted` | Persisted artifact files/directories and their DB rows | `artifacts` row joined to a terminal run | `retention.terminal_run_days`; active/unknown run state, non-local bytes, out-of-root paths, and symlinks are skipped |
 | `orphaned-artifact-bytes` | — (aggregate only) | Two crash-residue name families under the artifact root | Name shape from a single private constructor plus a parsed UUID; the database is deliberately **not** consulted | Fixed 24h floor, not operator-overridable; a failed size measurement changes the verdict in neither direction |
@@ -187,6 +253,7 @@ apply.
 | `remote-lab-workspaces` | `homeboy runner workspace prune <runner>` | Orphaned runner-side Lab workspaces | `homeboy/runner-workspace/v1` metadata plus a resolvable `local_path`; never outside `_lab_workspaces`. A workspace is also reachable when its *exact* durable owner run is terminal and its lease is `delete_on_success` — an existing controller-side source path is not evidence the runner copy is live | 24h floor; pending apply-back or an unexpired lifecycle TTL preserves the workspace. Live, unavailable, ambiguous, or malformed run authority all retain |
 | `runtime-tmp` | `homeboy self cleanup-runtime-tmp` | Orphaned Homeboy runtime temp entries | Owner id recorded in the entry | `retention.runtime_tmp_days` plus byte/count budgets; entries whose owner process is running are preserved |
 | `leaked-test-homes` | — (aggregate only) | Isolated test homes abandoned by killed test processes, under `$TMPDIR`, `/tmp`, `/var/tmp`, `/dev/shm` | `hb-test-<pid>-` filename marker directly under a scanned root, plus a liveness probe on that PID; the database is deliberately **not** consulted | Fixed 1h floor, not operator-overridable, plus a 2 GiB retained-byte ceiling that relaxes the floor for the oldest *abandoned* entries only. A running owner, an unrecorded owner, a symlink, and a non-directory are all unreachable |
+| `release-artifacts` | — (aggregate only) | Superseded durable release copies under `<artifact-root>/release/<repo>/<version>/` | Version directory under a repository directory in the release store; the database is deliberately **not** consulted. `orphaned-artifact-bytes` cannot reach these — they are referenced by durable release records and correctly inventory as zero orphans | `retention.release_artifact_max_count` (default 5) and `retention.release_artifact_max_bytes` (default 2 GiB), both per repository, stricter wins. The newest release of every repository is structurally unreachable, a fixed 1h floor covers an in-flight publication, and retention is monotone in age. Sizes are hardlink-corrected, so the numbered and canonical copies of one payload are billed once |
 | `controller-scratch` | — (aggregate only) | Released controller scratch resources, including ephemeral attempt Git worktrees | Scratch index ownership with pid liveness; a linked worktree is proved by Git's own two-way `.git`/`gitdir` pointers, never by a database join | Per-resource retention window (P7D) unless `--older-than-days` is typed. A linked attempt worktree is additionally retained unless every commit reachable from its HEAD is already reachable from a branch, tag, or remote-tracking ref in its source repository. Removal goes through `git worktree remove`; a worktree that cannot be unregistered is reported and retained, never deleted behind Git |
 | `shared-cargo-targets` | — (aggregate only) | Shared Cargo target stores | Store layout below Homeboy's data directory | `retention.shared_store_days` and byte budget; an unexpired lease preserves the store independently |
 | `controller-runtimes` | `homeboy runtime controller-prune` | Unreferenced immutable controller runtime identities | Content-addressed pin path not referenced by a nonterminal durable record or the active generation, under the admission lock | `retention.controller_runtime_days` and byte budget; `--ignore-retention` is the explicit destructive opt-out |
@@ -197,9 +264,8 @@ A specialist survives only when it accepts a *narrowing* argument the aggregate
 cannot express, or when it is the operator escape hatch for a policy the
 aggregate deliberately never applies:
 
-- `cleanup artifacts` — `--path`, `--self`, `--temp-root`, `--sort`,
+- `cleanup artifacts` — `--path`, `--all-worktrees`, `--self`, `--temp-root`, `--sort`,
   `--merged-only`, `--min-age-days`, `--include-active-worktrees`.
-- `cleanup worktrees` — `--provider` selection.
 - `runs artifact cleanup-persisted` — `--run-id`, `--kind`, `--type`,
   `--run-kind`, `--component`.
 - `runs artifact cleanup-downloads` — `--runner`, `--run-id`.

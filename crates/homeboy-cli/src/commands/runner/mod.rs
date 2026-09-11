@@ -39,6 +39,10 @@ pub(crate) fn is_compact_doctor_stdout(args: &RunnerArgs) -> bool {
     args.compact_doctor_stdout()
 }
 
+pub(crate) fn is_compact_job_list_stdout(args: &RunnerArgs) -> bool {
+    args.compact_job_list_stdout()
+}
+
 pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
     matches!(
         &args.command,
@@ -48,12 +52,44 @@ pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
 
 pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::CommandRun {
     match args.command {
+        cli::RunnerCommand::Job {
+            command:
+                cli::RunnerJobCommand::List {
+                    runner_id,
+                    active,
+                    queued,
+                    terminal,
+                    all,
+                    generation,
+                    correlation,
+                    ..
+                },
+        } => {
+            let args = RunnerArgs {
+                command: cli::RunnerCommand::Job {
+                    command: cli::RunnerJobCommand::List {
+                        runner_id,
+                        active,
+                        queued,
+                        terminal,
+                        all,
+                        generation,
+                        correlation,
+                        json: false,
+                    },
+                },
+            };
+            let (stdout_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json(dispatch::run(args));
+            jobs::compact_list_command_run(stdout_result, exit_code)
+        }
         cli::RunnerCommand::Exec {
             id,
             cwd,
             sync_workspace,
             workspace_ref,
             hydrate_deps,
+            workspace_sync_timeout,
             project,
             ssh,
             capture_patch,
@@ -73,29 +109,35 @@ pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::Com
             json: false,
             raw: false,
             command,
-        } => dispatch::run_compact_exec(
-            id,
-            cwd,
-            sync_workspace,
-            workspace_ref,
-            hydrate_deps,
-            project,
-            ssh,
-            capture_patch,
-            require_paths,
-            script_file,
-            env,
-            secret_env,
-            secret_env_plan,
-            secret_env_plan_file,
-            dry_run,
-            run_id,
-            artifact_outputs,
-            artifact_dir_outputs,
-            summary_outputs,
-            read_only_artifact,
-            command,
-            extension_env_providers,
+            ..
+        } => dispatch::run_exec_command(
+            exec::RunnerExecInput {
+                runner_id: id,
+                command,
+                cwd,
+                sync_workspace,
+                workspace_ref,
+                hydrate_deps,
+                workspace_sync_timeout,
+                project_id: project,
+                allow_diagnostic_ssh: ssh,
+                capture_patch,
+                require_paths,
+                script_file,
+                env,
+                secret_env,
+                secret_env_plan,
+                secret_env_plan_file,
+                dry_run,
+                run_id,
+                artifact_outputs,
+                artifact_dir_outputs,
+                summary_outputs,
+                read_only_artifact,
+                raw: false,
+                extension_env_providers,
+            },
+            false,
         ),
         _ => super::output_runtime::CommandRun::from_raw_stdout(
             "runner",

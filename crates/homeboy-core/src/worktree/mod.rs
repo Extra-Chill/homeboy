@@ -25,13 +25,14 @@ pub use types::{
     TerminalWorkspaceAuthorityObservation, TerminalWorkspaceAuthorityProof, WorkspaceRefRecord,
     WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeAdoptedInventoryPage,
     WorktreeBranchCleanupReport, WorktreeCleanupCandidate, WorktreeCleanupCounts,
-    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped, WorktreeCreateAction,
-    WorktreeCreateEvidence, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeCreateReconciliation, WorktreeHandoffFreshness, WorktreeHandoffFreshnessProof,
-    WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryApplyRefusal,
-    WorktreeInventoryAuthorization, WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence,
-    WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeInventoryRecord,
-    WorktreeLeaseActivity, WorktreeListOutput, WorktreeLivenessAuthority, WorktreeOwnershipProbe,
+    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupPageOptions,
+    WorktreeCleanupSkipped, WorktreeCreateAction, WorktreeCreateEvidence, WorktreeCreateOptions,
+    WorktreeCreateOutput, WorktreeCreateReconciliation, WorktreeHandoffFreshness,
+    WorktreeHandoffFreshnessProof, WorktreeImportOptions, WorktreeImportOutput,
+    WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization, WorktreeInventoryCrossTab,
+    WorktreeInventoryLocalEvidence, WorktreeInventoryOptions, WorktreeInventoryOutput,
+    WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOptions,
+    WorktreeListOutput, WorktreeLivenessAuthority, WorktreeOwnershipProbe,
     WorktreeQueueCreateFailure, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
     WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
     WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
@@ -63,6 +64,11 @@ pub fn import(options: WorktreeImportOptions) -> Result<WorktreeImportOutput> {
 
 pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
+}
+
+/// Read a bounded, stable keyset page for the operator-facing worktree list.
+pub fn list_page(options: WorktreeListOptions) -> Result<WorktreeListOutput> {
+    with_task_worktree_registry_read_lock(|| list_page_with_store(&metadata_dir()?, options))
 }
 
 /// Report the live write holder for a checkout path, including component
@@ -253,6 +259,15 @@ pub fn finalize_provider_lifecycle(
     owner_run_ref: &str,
     disposition: crate::worktree_provider::WorktreeTerminalDisposition,
 ) -> Result<TaskWorktreeRecord> {
+    finalize_provider_lifecycle_with_effect_fence(id, owner_run_ref, disposition, || Ok(()))
+}
+
+pub fn finalize_provider_lifecycle_with_effect_fence(
+    id: &str,
+    owner_run_ref: &str,
+    disposition: crate::worktree_provider::WorktreeTerminalDisposition,
+    before_effect: impl FnOnce() -> Result<()>,
+) -> Result<TaskWorktreeRecord> {
     with_task_worktree_registry_write_lock(|| {
         let store = metadata_dir()?;
         let mut record = read_record(&store, id)?;
@@ -291,6 +306,7 @@ pub fn finalize_provider_lifecycle(
             )
         })?;
         record.terminal_workspace_authority = None;
+        before_effect()?;
         store_ops::write_record_unlocked(&store, &record)?;
         Ok(record)
     })
@@ -518,27 +534,7 @@ pub(crate) fn with_task_worktree_registry_read_lock<T>(
         .get_or_init(|| RwLock::new(()))
         .read()
         .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
-    let store = metadata_dir()?;
-    let parent = store.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "task worktree store has no parent: {}",
-            store.display()
-        ))
-    })?;
-    let lock = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(parent.join("task-worktrees.lock"))
-    {
-        Ok(lock) => lock,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some("open task worktree registry lock for read".to_string()),
-            ));
-        }
-    };
+    let lock = open_task_worktree_registry_lock()?;
     lock.lock_shared().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -565,6 +561,57 @@ pub(super) fn with_task_worktree_registry_write_lock<T>(
     operation()
 }
 
+pub(super) fn with_task_worktree_registry_write_lock_until<T>(
+    deadline: std::time::Instant,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::internal_io(
+                "task-worktree registry lease deadline exhausted",
+                Some("lock task worktree registry".into()),
+            ));
+        }
+        if let Ok(gate) = TASK_WORKTREE_REGISTRY_GATE
+            .get_or_init(|| RwLock::new(()))
+            .try_write()
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::internal_io(
+                    "task-worktree registry lease deadline exhausted",
+                    Some("lock task worktree registry".into()),
+                ));
+            }
+            let lock = open_task_worktree_registry_lock()?;
+            while lock.try_lock_exclusive().is_err() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::internal_io(
+                        "task-worktree registry lease deadline exhausted",
+                        Some("lock task worktree registry".into()),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::internal_io(
+                    "task-worktree registry lease deadline exhausted",
+                    Some("lock task worktree registry".into()),
+                ));
+            }
+            let result = operation();
+            drop(gate);
+            return result;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::internal_io(
+                "task-worktree registry lease deadline exhausted",
+                Some("lock task worktree registry".into()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
     let store = metadata_dir()?;
     let parent = store.parent().ok_or_else(|| {
@@ -573,12 +620,7 @@ fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
             store.display()
         ))
     })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
+    crate::engine::local_files::create_dir_all_durably(parent)?;
     OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -650,7 +692,20 @@ pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {
 
 pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput> {
     let store = metadata_dir()?;
-    cleanup_with_store(options, &store)
+    cleanup_with_store_page(
+        WorktreeCleanupPageOptions {
+            cleanup: options,
+            limit: usize::MAX,
+            cursor: None,
+            deadline: None,
+        },
+        &store,
+    )
+}
+
+pub fn cleanup_page(options: WorktreeCleanupPageOptions) -> Result<WorktreeCleanupOutput> {
+    let store = metadata_dir()?;
+    cleanup_with_store_page(options, &store)
 }
 
 /// Register an active task-worktree record against the current test home.
@@ -663,20 +718,6 @@ pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput>
 #[doc(hidden)]
 pub fn record_active_for_test(id: &str, worktree_path: &Path) {
     record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Active);
-}
-
-#[cfg(test)]
-pub(crate) fn record_active_with_source_for_test(
-    id: &str,
-    source_checkout: &Path,
-    worktree_path: &Path,
-) {
-    record_for_test(
-        id,
-        source_checkout,
-        worktree_path,
-        TaskWorktreeState::Active,
-    );
 }
 
 #[cfg(test)]
@@ -768,12 +809,12 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
             let task_url = request.task_url.clone().ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "task_url",
-                    "provider-owned queue worktree requires task_url",
+                    "managed queue worktree requires task_url",
                     Some(handle.clone()),
                     None,
                 )
             })?;
-            crate::worktree_provider::ensure_worktree_provision_from_config(
+            crate::worktree_provider::ensure_worktree_provision(
                 &crate::worktree_provider::WorktreeProvisionIntent {
                     handle: handle.clone(),
                     repo: options.repo.clone(),
@@ -782,8 +823,6 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     task_url: Some(task_url),
                 },
                 lifecycle,
-                None,
-                &crate::defaults::load_config(),
             )
             .map(|provision| provision.destination.ownership.path)
         } else {
@@ -877,8 +916,10 @@ pub fn planned_create_path(repo: &str, branch: &str, from: &str) -> Result<Strin
         path_override: None,
         project: None,
         capability: None,
-        allow_synthetic: false,
-        accept_bare_directory: false,
+        // Preview must resolve repository paths exactly as create does. Otherwise
+        // Cook can provision an unregistered checkout but cannot preview it.
+        allow_synthetic: true,
+        accept_bare_directory: true,
         ..TargetSpec::default()
     })?;
     let source_checkout = queue_ops::source_checkout_for_worktree(&target)?;

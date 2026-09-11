@@ -6,28 +6,54 @@
 
 mod artifact;
 mod capability;
+mod claim;
 mod discovery;
+pub mod env_materialization_plan;
 mod execution_context;
+mod heartbeat;
 mod lifecycle;
+pub mod path_materialization;
 mod resource;
+pub mod secret_env_plan;
 mod session;
+mod submission;
 mod workspace;
+mod workspace_authority;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
     RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
     RunnerToolchainReadinessProbe,
 };
+pub use claim::{
+    RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
+    RunnerApiClaimedExecution, RunnerCredentialDeliveryDescriptor, RUNNER_API_CLAIM_REQUEST_SCHEMA,
+    RUNNER_API_CLAIM_RESPONSE_SCHEMA,
+};
 pub use discovery::{
-    RunnerApiCompatibility, RunnerApiCompatibilityFailure, RunnerApiCompatibilityFailureCode,
-    RunnerApiCompatibilityStatus, RunnerApiHandshakeRequest, RunnerApiHandshakeResponse,
-    RunnerApiVersion, RunnerCapabilities, RunnerDescriptor, RunnerInspection, RunnerKind,
-    RunnerReadiness, RUNNER_API_HANDSHAKE_REQUEST_SCHEMA, RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA,
-    RUNNER_API_V1, RUNNER_CAPABILITIES_SCHEMA, RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA,
-    RUNNER_READINESS_SCHEMA,
+    RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerApiCompatibility,
+    RunnerApiCompatibilityFailure, RunnerApiCompatibilityFailureCode, RunnerApiCompatibilityStatus,
+    RunnerApiHandshakeRequest, RunnerApiHandshakeResponse, RunnerApiInspectRequest,
+    RunnerApiInspectResponse, RunnerApiListRequest, RunnerApiListResponse,
+    RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiReadinessRequest,
+    RunnerApiReadinessResponse, RunnerApiVersion, RunnerCapabilities, RunnerDescriptor,
+    RunnerInspection, RunnerKind, RunnerReadiness, RUNNER_API_CAPABILITIES_REQUEST_SCHEMA,
+    RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA, RUNNER_API_HANDSHAKE_REQUEST_SCHEMA,
+    RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA, RUNNER_API_INSPECT_REQUEST_SCHEMA,
+    RUNNER_API_INSPECT_RESPONSE_SCHEMA, RUNNER_API_LIST_REQUEST_SCHEMA,
+    RUNNER_API_LIST_RESPONSE_SCHEMA, RUNNER_API_READINESS_REQUEST_SCHEMA,
+    RUNNER_API_READINESS_RESPONSE_SCHEMA, RUNNER_API_V1, RUNNER_CAPABILITIES_SCHEMA,
+    RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA, RUNNER_READINESS_SCHEMA,
 };
 pub use execution_context::{
-    is_internal_control_env, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
+    is_internal_control_env, RunnerJobExecutionContextAssertion, RunnerJobExecutionProtocol,
+    RunnerJobExecutionVerification, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
+    RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
+    RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA, RUNNER_PLACEMENT_RESOLVED_ENV,
+};
+pub use heartbeat::{
+    RunnerApiHeartbeatOutcome, RunnerApiHeartbeatRequest, RunnerApiHeartbeatResponse,
+    RUNNER_API_HEARTBEAT_REQUEST_SCHEMA, RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA,
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
@@ -37,17 +63,26 @@ pub use session::{
     RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
     RunnerTunnelProcessStartIdentity,
 };
+pub use submission::{
+    RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse,
+    RunnerCredentialDelivery, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
+};
 pub use workspace::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
 };
+pub use workspace_authority::{
+    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceClaimProtocol, WorkspaceIdentity,
+    WorkspaceOwnerLease, WorkspaceOwnerLeaseProtocol, WORKSPACE_CLAIM_CAPABILITY,
+    WORKSPACE_CLAIM_PROTOCOL_VERSION, WORKSPACE_CLAIM_SCHEMA, WORKSPACE_IDENTITY_SCHEMA,
+    WORKSPACE_OWNER_LEASE_CAPABILITY, WORKSPACE_OWNER_LEASE_SCHEMA,
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use homeboy_lab_contract::env_materialization_plan::EnvMaterializationPlan;
-use homeboy_lab_contract::lab::workload::LabRunnerWorkload;
-use homeboy_lab_contract::secret_env_plan::SecretEnvPlan;
+use crate::env_materialization_plan::EnvMaterializationPlan;
+use crate::secret_env_plan::SecretEnvPlan;
 use homeboy_source_snapshot_contract::SourceSnapshot;
 
 /// The one artifact reference carried by runner execution records,
@@ -56,31 +91,47 @@ use homeboy_source_snapshot_contract::SourceSnapshot;
 /// This module used to define its own `RunnerExecutionArtifactRef` with the
 /// four fields `{id, name, path, url}`, while the same file already imported
 /// `JobArtifactMetadata` for `RunnerExecutionResultRefs.artifacts`. Two names,
-/// one shape, one file. Collapsed onto the leaf-contract type in #10310.
+/// one shape, one file. Collapsed onto this canonical runner type in #10310.
 ///
 /// #11137 then collapsed `LabRunnerWorkloadArtifactRef` -- the last remaining
 /// `{id, name, path, url}` twin, and a strict field-subset of this type -- onto
 /// it as well, which removed the lossy `job_artifact_refs` rebuild that silently
 /// dropped `mime`, `size_bytes` and `sha256`. The serialized shape is unchanged
 /// in both collapses: every extra field is `Option` + `skip_serializing_if`.
-pub use homeboy_lab_contract::lab::workload::JobArtifactMetadata;
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobArtifactMetadata {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
 pub const ORCHESTRATION_TARGET_PROVENANCE_SCHEMA: &str =
     "homeboy/orchestration-target-provenance/v1";
 
-// Path materialization types live in the leaf `core::path_materialization`
-// module so the lab-contract type layer can hold a `PathMaterializationPlan`
-// field without pulling in this envelope's runner machinery. Re-exported here to
-// keep existing `runner_execution_envelope::PathMaterialization*` call sites stable.
-pub use homeboy_lab_contract::path_materialization::{
+// Path materialization belongs to the canonical runner contract. Re-export it
+// here to keep existing `runner_execution_envelope::PathMaterialization*` call
+// sites stable.
+pub use crate::path_materialization::{
     PathMaterializationEntry, PathMaterializationMode, PathMaterializationPathRemap,
     PathMaterializationPlan, PathMaterializationPlanProjection, PathMaterializationProjection,
     PATH_MATERIALIZATION_MODE_EXISTING_REMOTE, PATH_MATERIALIZATION_MODE_GIT,
-    PATH_MATERIALIZATION_MODE_SNAPSHOT, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
-    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
+    PATH_MATERIALIZATION_MODE_SNAPSHOT, PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
     PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT, PATH_MATERIALIZATION_PLAN_SCHEMA,
     PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH,
     PATH_MATERIALIZATION_STATUS_MATERIALIZED, PATH_MATERIALIZATION_STATUS_VALIDATED,
@@ -98,7 +149,7 @@ pub struct RunnerExecutionEnvelope {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub lab_runner_workload: Option<LabRunnerWorkload>,
+    pub runner_workload: Option<Value>,
     /// The originating agent-task request, carried opaquely as JSON so core does
     /// not depend on the agent-task subsystem. The agent-task layer owns
     /// deserialization back into its request type.
@@ -155,7 +206,7 @@ pub struct RunnerExecutionDispatch {
 /// serde attributes on each.
 pub type RunnerExecutionLifecycle = RunnerJobLifecycleMetadata;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerExecutionRecord {
     #[serde(default = "runner_execution_record_schema")]
     pub schema: String,
@@ -167,10 +218,8 @@ pub struct RunnerExecutionRecord {
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_task_run_id: Option<String>,
+    /// The durable Homeboy observation/run identity. Historical
+    /// `remote_run_id` values normalize into this field on deserialization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     /// Flattened runtime view of `path_materialization_plan`, populated only by
@@ -187,6 +236,59 @@ pub struct RunnerExecutionRecord {
     pub artifact_refs: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<RunnerExecutionNextAction>,
+}
+
+#[derive(Deserialize)]
+struct RunnerExecutionRecordWire {
+    #[serde(default = "runner_execution_record_schema")]
+    schema: String,
+    execution_id: String,
+    runner_id: String,
+    transport: String,
+    status: String,
+    #[serde(default)]
+    job_id: Option<String>,
+    #[serde(default)]
+    local_run_id: Option<String>,
+    #[serde(default)]
+    remote_run_id: Option<String>,
+    #[serde(default)]
+    mirror_run_id: Option<String>,
+    #[serde(default)]
+    materialized_paths: Vec<PathMaterializationProjection>,
+    #[serde(default)]
+    path_materialization_plan: Option<PathMaterializationPlan>,
+    #[serde(default)]
+    orchestration_provenance: Option<OrchestrationTargetProvenance>,
+    #[serde(default)]
+    artifact_refs: Vec<JobArtifactMetadata>,
+    #[serde(default)]
+    next_actions: Vec<RunnerExecutionNextAction>,
+}
+
+impl<'de> Deserialize<'de> for RunnerExecutionRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunnerExecutionRecordWire::deserialize(deserializer)?;
+        Ok(Self {
+            schema: wire.schema,
+            execution_id: wire.execution_id,
+            runner_id: wire.runner_id,
+            transport: wire.transport,
+            status: wire.status,
+            job_id: wire.job_id,
+            local_run_id: wire.local_run_id,
+            // The canonical field wins when a historical dual-field record disagrees.
+            mirror_run_id: wire.mirror_run_id.or(wire.remote_run_id),
+            materialized_paths: wire.materialized_paths,
+            path_materialization_plan: wire.path_materialization_plan,
+            orchestration_provenance: wire.orchestration_provenance,
+            artifact_refs: wire.artifact_refs,
+            next_actions: wire.next_actions,
+        })
+    }
 }
 
 /// The inspection view of a runner execution record: the stored
@@ -311,8 +413,6 @@ impl RunnerExecutionRecord {
             status: status.into(),
             job_id: None,
             local_run_id: None,
-            remote_run_id: None,
-            agent_task_run_id: None,
             mirror_run_id: None,
             materialized_paths: Vec::new(),
             path_materialization_plan: None,
@@ -362,13 +462,7 @@ impl RunnerExecutionRecord {
     }
 
     pub fn with_mirror_run_id(mut self, mirror_run_id: Option<String>) -> Self {
-        self.mirror_run_id = mirror_run_id.clone();
-        self.remote_run_id = mirror_run_id;
-        self
-    }
-
-    pub fn with_agent_task_run_id(mut self, agent_task_run_id: impl Into<String>) -> Self {
-        self.agent_task_run_id = Some(agent_task_run_id.into());
+        self.mirror_run_id = mirror_run_id;
         self
     }
 
@@ -517,7 +611,7 @@ impl RunnerExecutionEnvelope {
                 kind: source_kind.into(),
                 ref_id: Some(envelope_id),
             },
-            lab_runner_workload: None,
+            runner_workload: None,
             agent_task: None,
             secret_env: None,
             env_materialization: None,
@@ -578,44 +672,6 @@ impl RunnerExecutionEnvelope {
         self.metadata = metadata;
         self
     }
-
-    pub fn from_lab_runner_workload(workload: LabRunnerWorkload) -> Self {
-        let mutation_policy = RunnerExecutionMutationPolicy {
-            capture_patch: workload.mutation_policy.capture_patch,
-            mutation_flag: workload.mutation_policy.mutation_flag.clone(),
-            allow_dirty_workspace: workload.mutation_policy.allow_dirty_lab_workspace,
-        };
-        let result_refs = RunnerExecutionResultRefs {
-            plan_id: Some(workload.result_refs.plan_id.clone()),
-            job_id: workload.result_refs.job_id.clone(),
-            run_id: workload.result_refs.proof_id.clone(),
-            mirror_run_id: workload.result_refs.mirror_run_id.clone(),
-            artifacts: workload.result_refs.artifacts.clone(),
-            ..RunnerExecutionResultRefs::default()
-        };
-
-        Self {
-            schema: RUNNER_EXECUTION_ENVELOPE_SCHEMA.to_string(),
-            envelope_id: workload.workload_id.clone(),
-            source: RunnerExecutionSource {
-                kind: "runner_workload".to_string(),
-                ref_id: Some(workload.workload_id.clone()),
-            },
-            lab_runner_workload: Some(workload),
-            agent_task: None,
-            secret_env: None,
-            env_materialization: None,
-            dispatch: None,
-            lifecycle: None,
-            lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
-            artifact_declarations: Vec::new(),
-            loop_policy: RunnerExecutionLoopPolicy::default(),
-            mutation_policy,
-            publication_intent: RunnerExecutionPublicationIntent::default(),
-            result_refs,
-            metadata: Value::Null,
-        }
-    }
 }
 
 fn runner_execution_envelope_schema() -> String {
@@ -635,77 +691,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use homeboy_lab_contract::lab::workload::{
-        LabRunnerWorkloadAssignment, LabRunnerWorkloadCommandFamily, LabRunnerWorkloadKind,
-        LabRunnerWorkloadMutationPolicy, LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets,
-        LabRunnerWorkloadState, LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
-    };
-
     #[test]
-    fn lab_runner_workload_compiles_into_versioned_execution_envelope() {
-        let workload = LabRunnerWorkload {
-            schema: LAB_RUNNER_WORKLOAD_SCHEMA.to_string(),
-            workload_id: "plan-1.runner_workload".to_string(),
-            kind: LabRunnerWorkloadKind {
-                command_label: "test".to_string(),
-                command_family: LabRunnerWorkloadCommandFamily::Quality,
-            },
-            agent_task: None,
-            notification_route: None,
-            workspace_mappings: LabRunnerWorkloadWorkspaceMappings {
-                source_path_mode: "cwd_or_path_flag".to_string(),
-                workspace_mode_policy: "git".to_string(),
-                mapping_ref: Some("mapping-1".to_string()),
-            },
-            required_capabilities: Vec::new(),
-            required_secrets: LabRunnerWorkloadSecrets {
-                categories: Vec::new(),
-                secret_env_plan: SecretEnvPlan::default(),
-            },
-            required_extensions: Vec::new(),
-            required_extension_revisions: Vec::new(),
-            mutation_policy: LabRunnerWorkloadMutationPolicy {
-                capture_patch: true,
-                mutation_flag: Some("--apply".to_string()),
-                allow_dirty_lab_workspace: false,
-            },
-            assignment: LabRunnerWorkloadAssignment {
-                runner_id: Some("runner-a".to_string()),
-                runner_mode: Some("ssh".to_string()),
-                source: Some("default".to_string()),
-            },
-            state: LabRunnerWorkloadState {
-                status: "assigned".to_string(),
-                remote_workspace: Some("/workspace/project".to_string()),
-                fallback_reason: None,
-            },
-            result_refs: LabRunnerWorkloadResultRefs {
-                plan_id: "plan-1".to_string(),
-                proof_id: Some("proof-1".to_string()),
-                workspace_mapping_ref: Some("mapping-1".to_string()),
-                job_id: Some("job-1".to_string()),
-                mirror_run_id: None,
-                artifacts: vec![JobArtifactMetadata {
-                    id: "artifact-1".to_string(),
-                    name: Some("report".to_string()),
-                    path: Some("artifacts/report.json".to_string()),
-                    url: None,
-                    ..Default::default()
-                }],
-            },
-        };
+    fn opaque_runner_workload_round_trips_without_interpreting_extension_policy() {
+        let workload = json!({
+            "schema": "homeboy/runner-workload/v1",
+            "workload_id": "plan-1.runner_workload",
+            "lab_policy": { "required_extensions": ["example"] }
+        });
+        let mut envelope = RunnerExecutionEnvelope::planned("plan-1", "runner_workload");
+        envelope.runner_workload = Some(workload.clone());
 
-        let envelope = RunnerExecutionEnvelope::from_lab_runner_workload(workload.clone());
         let encoded = serde_json::to_value(&envelope).expect("serialize envelope");
         let decoded: RunnerExecutionEnvelope =
             serde_json::from_value(encoded).expect("decode envelope");
 
         assert_eq!(decoded.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
-        assert_eq!(decoded.lab_runner_workload, Some(workload));
-        assert!(decoded.mutation_policy.capture_patch);
-        assert_eq!(decoded.result_refs.plan_id.as_deref(), Some("plan-1"));
-        assert_eq!(decoded.result_refs.job_id.as_deref(), Some("job-1"));
-        assert_eq!(decoded.result_refs.artifacts.len(), 1);
+        assert_eq!(decoded.runner_workload, Some(workload));
     }
 
     #[test]
@@ -748,7 +749,8 @@ mod tests {
         assert_eq!(value["transport"], "daemon");
         assert_eq!(value["status"], "succeeded");
         assert_eq!(value["job_id"], "job-1");
-        assert_eq!(value["remote_run_id"], "run-1");
+        assert_eq!(value["mirror_run_id"], "run-1");
+        assert!(value.get("remote_run_id").is_none());
         assert_eq!(
             value["path_materialization_plan"]["schema"],
             PATH_MATERIALIZATION_PLAN_SCHEMA
@@ -772,6 +774,59 @@ mod tests {
         assert_eq!(record.status, "planned");
         assert!(record.job_id.is_none());
         assert!(record.artifact_refs.is_empty());
+    }
+
+    #[test]
+    fn retired_agent_task_run_id_is_accepted_but_not_reemitted() {
+        let record: RunnerExecutionRecord = serde_json::from_value(serde_json::json!({
+            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+            "execution_id": "execution-1",
+            "runner_id": "runner-1",
+            "transport": "daemon",
+            "status": "planned",
+            "agent_task_run_id": "legacy-run"
+        }))
+        .expect("legacy runner record");
+
+        let value = serde_json::to_value(record).expect("runner record");
+        assert!(value.get("agent_task_run_id").is_none());
+    }
+
+    #[test]
+    fn historical_remote_run_id_normalizes_to_mirror_run_id() {
+        let record: RunnerExecutionRecord = serde_json::from_value(json!({
+            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+            "execution_id": "execution-1",
+            "runner_id": "runner-1",
+            "transport": "daemon",
+            "status": "planned",
+            "remote_run_id": "legacy-run"
+        }))
+        .expect("legacy runner record");
+
+        assert_eq!(record.mirror_run_id.as_deref(), Some("legacy-run"));
+        let value = serde_json::to_value(record).expect("runner record");
+        assert_eq!(value["mirror_run_id"], "legacy-run");
+        assert!(value.get("remote_run_id").is_none());
+    }
+
+    #[test]
+    fn historical_dual_run_ids_prefer_mirror_run_id_and_reserialize_canonically() {
+        let record: RunnerExecutionRecord = serde_json::from_value(json!({
+            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+            "execution_id": "execution-1",
+            "runner_id": "runner-1",
+            "transport": "daemon",
+            "status": "planned",
+            "remote_run_id": "legacy-run",
+            "mirror_run_id": "canonical-run"
+        }))
+        .expect("dual-field runner record");
+
+        assert_eq!(record.mirror_run_id.as_deref(), Some("canonical-run"));
+        let value = serde_json::to_value(record).expect("runner record");
+        assert_eq!(value["mirror_run_id"], "canonical-run");
+        assert!(value.get("remote_run_id").is_none());
     }
 
     #[test]
@@ -830,7 +885,7 @@ mod tests {
             ),
             PathMaterializationEntry::required_existing_remote("/runner/cache"),
             PathMaterializationEntry::primary_workspace_materialized(
-                PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+                "test.provider_config",
                 Some("".to_string()),
                 "/runner/empty-local",
                 PathMaterializationMode::Snapshot.to_string(),
@@ -866,7 +921,7 @@ mod tests {
         assert_eq!(projection.execution_id, "job-1");
         assert_eq!(projection.runner_id, "lab-a");
         assert_eq!(projection.job_id.as_deref(), Some("job-1"));
-        assert_eq!(projection.remote_run_id.as_deref(), Some("run-1"));
+        assert_eq!(projection.mirror_run_id.as_deref(), Some("run-1"));
         assert_eq!(projection.materialized_paths.len(), 2);
         assert_eq!(
             projection.materialized_paths[0].remote_path,

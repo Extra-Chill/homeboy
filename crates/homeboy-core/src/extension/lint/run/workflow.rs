@@ -579,6 +579,7 @@ pub fn run_self_check_lint_workflow_with_progress(
         ExtensionCapability::Lint,
         source_path,
         !json_summary,
+        None,
         run_dir,
         observation,
     )?;

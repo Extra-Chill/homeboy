@@ -7,21 +7,25 @@ use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_workload_result;
-use homeboy_core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
+use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleMetadata};
+use homeboy_core::daemon::{DirectDaemonExecSubmitRequest, WorkspaceOwnerRegisterRequest};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::lab_contract::{run_location_index_path, JobArtifactMetadata, LabRunnerWorkload};
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::{
+    RunnerApiSubmitRequest, WorkspaceIdentity, WorkspaceOwnerLease,
+    RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1, WORKSPACE_CLAIM_PROTOCOL_VERSION,
+    WORKSPACE_OWNER_LEASE_CAPABILITY,
+};
 
 use super::super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
 use super::super::daemon_http_get::daemon_get;
 use super::super::evidence::{local_job_run_id, runner_exec_run_label};
-use super::super::evidence::{
-    mirror_daemon_evidence, mirror_daemon_job_progress, terminalize_mirrored_daemon_job,
-};
+use super::super::evidence::{mirror_daemon_evidence, terminalize_mirrored_daemon_job};
 use super::super::resource_metrics::RunnerResourceMetrics;
 use super::super::{Runner, RunnerCapabilityPreflight, RunnerJob, RunnerKind};
 
@@ -106,35 +110,58 @@ pub(super) fn exec_via_daemon(
     if workspace_owner_request.is_some() {
         require_daemon_workspace_owner_lease_v2(&client, local_url)?;
     }
-    let mut payload = json!({
-        "runner_id": runner.id,
-        "runner": runner,
-        "project_id": project_id,
-        "cwd": cwd,
-        "command": command,
-        "env": env,
-        "secret_env_names": secret_env_names,
-        "capture_patch": capture_patch,
-        "source_snapshot": source_snapshot.clone(),
-        "path_materialization_plan": path_materialization_plan.clone(),
-        "require_paths": require_paths.clone(),
-        "extension_env_providers": extension_env_providers.clone(),
-        "runner_workload": lab_runner_workload.clone(),
-        "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
-        "lifecycle": lifecycle,
-        // Explicit, first-class idempotency key the daemon dedupes `/exec` on.
-        // The controller asserts it up front instead of the daemon having to
-        // reconstruct it from nested lifecycle/metadata, so a resubmission after
-        // a transport drop is a safe no-op. Uses the durable run id when present.
-        "idempotency_key": run_id,
-    });
-    if let Some((workspace, owner_id)) = workspace_owner_request.as_ref() {
-        payload["workspace_owner_request"] = json!({
-            "workspace": workspace,
-            "owner_id": owner_id,
-            "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
-        });
-    }
+    let submission_key = run_id
+        .clone()
+        .unwrap_or_else(|| format!("direct-daemon:v1:{}:{}", runner.id, uuid::Uuid::new_v4()));
+    let envelope = runner_api_execution_envelope(RunnerApiExecutionInput {
+        runner_id: runner.id.clone(),
+        project_id,
+        command: command.clone(),
+        cwd: cwd.clone(),
+        env: env.clone(),
+        secret_env_names: secret_env_names.clone(),
+        secret_env_plan: None,
+        capture_patch,
+        source_snapshot: source_snapshot.clone(),
+        path_materialization_plan: path_materialization_plan.clone(),
+        require_paths: require_paths.clone(),
+        extension_env_providers: extension_env_providers.clone(),
+        workload: lab_runner_workload.clone(),
+        lifecycle,
+        metadata: runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
+    })?;
+    let submission = RunnerApiSubmitRequest {
+        schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+        api_version: RUNNER_API_V1,
+        submission_key,
+        envelope,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+        credential_delivery: None,
+    };
+    let payload = serde_json::to_value(DirectDaemonExecSubmitRequest {
+        submission,
+        runner: Some(serde_json::to_value(runner).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize direct runner descriptor".to_string()),
+            )
+        })?),
+        raw_exec: false,
+        workspace_owner_request: workspace_owner_request.map(|(workspace, owner_id)| {
+            WorkspaceOwnerRegisterRequest {
+                workspace,
+                owner_id,
+                ttl_ms: homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+            }
+        }),
+    })
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize direct runner submission".to_string()),
+        )
+    })?;
     let response = submit_daemon_exec_with_session_recovery(
         local_url,
         accepted_session.as_ref(),
@@ -356,7 +383,8 @@ pub(super) fn exec_via_daemon(
             }
             Ok(())
         },
-    );
+    )
+    .map(RunnerExecCompletion::into_output);
 }
 
 pub(super) fn record_and_report_promotion_progress_frames(
@@ -535,11 +563,9 @@ fn require_daemon_workspace_owner_lease_v2(client: &Client, local_url: &str) -> 
         .is_some_and(|capabilities| {
             capabilities.iter().any(|capability| {
                 capability.get("capability").and_then(Value::as_str)
-                    == Some(homeboy_core::workspace_claim::WORKSPACE_OWNER_LEASE_CAPABILITY)
+                    == Some(WORKSPACE_OWNER_LEASE_CAPABILITY)
                     && capability.get("version").and_then(Value::as_u64)
-                        == Some(
-                            homeboy_core::workspace_claim::WORKSPACE_CLAIM_PROTOCOL_VERSION as u64,
-                        )
+                        == Some(WORKSPACE_CLAIM_PROTOCOL_VERSION as u64)
             })
         });
     supported.then_some(()).ok_or_else(|| {
@@ -559,7 +585,7 @@ pub(crate) enum DaemonAdmissionPolicy {
     DurableLeaseRequired,
 }
 
-type WorkspaceOwnerRegistration = (homeboy_core::workspace_claim::WorkspaceIdentity, String);
+type WorkspaceOwnerRegistration = (WorkspaceIdentity, String);
 
 const ADMISSION_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
 const ADMISSION_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -668,7 +694,7 @@ pub(crate) struct DaemonAdmissionReservation {
     local_url: String,
     job_id: String,
     token: Option<String>,
-    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+    workspace_owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
     renewer_stop: Option<Sender<()>>,
     renewer: Option<std::thread::JoinHandle<()>>,
     authority: DaemonAdmissionReservationAuthority,
@@ -1062,7 +1088,7 @@ fn spawn_admission_renewer(
     local_url: String,
     job_id: String,
     token: String,
-    workspace_owner_lease: Arc<Mutex<Option<homeboy_core::workspace_claim::WorkspaceOwnerLease>>>,
+    workspace_owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
     health: Arc<Mutex<AdmissionRenewalHealth>>,
 ) -> (Sender<()>, std::thread::JoinHandle<()>) {
     let (stop, shutdown) = mpsc::channel();
@@ -2157,112 +2183,35 @@ pub(super) fn lab_terminal_result_transport_error(
         ))
 }
 
-pub(super) fn daemon_job_wait_timeout(
-    runner: &Runner,
-    cwd: &str,
-    command: &[String],
-    job: &Job,
-    events: &[JobEvent],
-    label: &str,
-    supports_cancellation: bool,
-) -> Error {
-    let job_id = job.id.to_string();
-    let mirrored = mirror_daemon_job_progress(runner, cwd, command, job, events, None);
-    let mirrored_run_id = mirrored.as_ref().ok().map(|run| run.id.clone());
-    let timeout_hint = format!(
-        "Set controller-side `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` before invoking homeboy to change this wait budget, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`; workload settings are applied inside the remote job and cannot extend the controller wait."
-    );
-    // Opt-in (#6891): when the operator set `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT`,
-    // best-effort cancel the still-running remote job so it stops holding its rig
-    // lock. Off by default — the historical contract is preserved exactly.
-    let cancel_outcome = attempt_wait_timeout_cancel(&runner.id, &job_id);
-    let message_tail = match &cancel_outcome {
-        WaitTimeoutCancelOutcome::Disabled => {
-            "the remote job is still in flight and was not cancelled".to_string()
-        }
-        WaitTimeoutCancelOutcome::Cancelled => format!(
-            "remote cancellation was requested on the runner job (opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}`)"
-        ),
-        WaitTimeoutCancelOutcome::Failed(reason) => format!(
-            "remote cancellation was requested (opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}`) but failed: {reason}; the remote job may still be in flight"
-        ),
-    };
-    let mut error = Error::internal_unexpected(format!(
-        "{label} {job_id} on runner {} did not finish before timeout; {message_tail}",
-        runner.id
-    ));
-    error.details["runner_id"] = Value::String(runner.id.clone());
-    error.details["job_id"] = Value::String(job_id.clone());
-    // The controller stopped waiting, not the daemon job. Preserve this
-    // discriminator so the Lab adapter retains the durable handoff rather than
-    // recording a pre-dispatch failure for an already accepted job.
-    error.details["status"] = Value::String("controller_wait_expired".to_string());
-    error.details["reason"] = Value::String("controller_wait_expired".to_string());
-    error.details["remote_cwd"] = Value::String(cwd.to_string());
-    error.details["command"] = json!(redact_argv(command));
-    error.details["cancel_on_wait_timeout"] = Value::String(
-        match &cancel_outcome {
-            WaitTimeoutCancelOutcome::Disabled => "disabled",
-            WaitTimeoutCancelOutcome::Cancelled => "requested",
-            WaitTimeoutCancelOutcome::Failed(_) => "failed",
-        }
-        .to_string(),
-    );
-    match mirrored {
-        Ok(run) => {
-            error.details["active_run_id"] = Value::String(run.id.clone());
-            error = error
-                .with_hint(format!(
-                    "Mirrored controller timeout state as run `{}`; inspect it with `homeboy runs show {}`.",
-                    run.id, run.id
-                ))
-                .with_hint(format!(
-                    "After the remote job finishes, run `homeboy runs artifacts {}` to refresh and list mirrored Lab artifacts without SSH temp-directory spelunking.",
-                    run.id
-                ));
-        }
-        Err(err) => {
-            error = error.with_hint(format!(
-                "Could not persist a local timeout mirror for remote job `{job_id}`: {}",
-                err.message
-            ));
-        }
-    }
-    for hint in lab_offload_handoff_hints(
-        &runner.id,
-        Some(cwd),
-        &job_id,
-        mirrored_run_id.as_deref(),
-        DaemonJobHandoffState::InFlight,
-        supports_cancellation,
-    ) {
-        error = error.with_hint(hint);
-    }
-    match &cancel_outcome {
-        WaitTimeoutCancelOutcome::Disabled => {}
-        WaitTimeoutCancelOutcome::Cancelled => {
-            error = error.with_hint(format!(
-                "Opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}` is set: requested remote cancellation of job `{job_id}` to release its rig lock. Confirm with `homeboy runner job logs {} {job_id}`.",
-                runner.id
-            ));
-        }
-        WaitTimeoutCancelOutcome::Failed(reason) => {
-            error = error.with_hint(format!(
-                "Opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}` is set but remote cancellation failed: {reason}. Cancel manually with `homeboy runner job cancel {} {job_id}`.",
-                runner.id
-            ));
-        }
-    }
-    error.retryable = Some(true);
-    error.with_hint(timeout_hint)
-}
-
 pub(crate) fn result_event_data(events: &[JobEvent]) -> Option<Value> {
     events
         .iter()
         .rev()
         .find(|event| matches!(event.kind, homeboy_core::api_jobs::JobEventKind::Result))
         .and_then(|event| event.data.clone())
+}
+
+/// Cancellation can terminalize queued work before a worker has emitted its
+/// normal result event. Supply the equivalent non-success result locally so the
+/// shared terminal evidence path can project the authoritative job snapshot.
+pub(super) fn append_cancelled_result_if_absent(job: &Job, events: &mut Vec<JobEvent>) {
+    if job.status != JobStatus::Cancelled || result_event_data(events).is_some() {
+        return;
+    }
+    events.push(JobEvent {
+        sequence: events
+            .last()
+            .map(|event| event.sequence.saturating_add(1))
+            .unwrap_or(1),
+        job_id: job.id,
+        kind: JobEventKind::Result,
+        timestamp_ms: job.updated_at_ms,
+        message: Some("runner job cancelled before producing a result".to_string()),
+        data: Some(json!({
+            "exit_code": 1,
+            "stderr": "runner job cancelled",
+        })),
+    });
 }
 
 pub(super) fn append_agent_task_lifecycle_workload_event(
@@ -2385,17 +2334,24 @@ pub(super) fn runner_job_result_fields(
     let capture = result
         .get("capture")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let exit_code = result
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or_else(|| {
-            if job_status == JobStatus::Succeeded {
-                0
-            } else {
-                1
-            }
-        });
+    // The terminal snapshot is authoritative when cancellation races a worker
+    // result. Keep that result intact for evidence and validation, but never
+    // report a cancelled job as a successful command.
+    let exit_code = if job_status == JobStatus::Cancelled {
+        1
+    } else {
+        result
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or_else(|| {
+                if job_status == JobStatus::Succeeded {
+                    0
+                } else {
+                    1
+                }
+            })
+    };
     RunnerJobResultFields {
         result,
         stdout,

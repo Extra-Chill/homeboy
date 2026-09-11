@@ -136,10 +136,13 @@ pub(crate) fn daemon_api_post_for_session(session: &RunnerSession, path: &str) -
     daemon_post(&client, local_url, path)
 }
 
-pub(crate) fn daemon_api_post_json_for_session(
+/// Post to a direct runner daemon with the paired broker token when the caller
+/// is crossing the same broker-auth trust boundary as a reverse transport.
+pub(crate) fn daemon_api_post_json_for_session_with_broker_token(
     session: &RunnerSession,
     path: &str,
     payload: &Value,
+    broker_token: Option<&str>,
 ) -> Result<Value> {
     let local_url = session.local_url.as_deref().ok_or_else(|| {
         Error::internal_unexpected("known daemon generation has no direct local endpoint")
@@ -149,13 +152,13 @@ pub(crate) fn daemon_api_post_json_for_session(
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
-    let response = daemon_post_json_text(
-        &client,
-        local_url,
-        path,
-        payload,
-        DaemonPostOptions::default(),
-    )?;
+    let request = broker_http::with_broker_token(
+        client
+            .post(format!("{}{}", local_url.trim_end_matches('/'), path))
+            .json(payload),
+        broker_token,
+    );
+    let response = daemon_post_json_request_text(request, path, DaemonPostOptions::default())?;
     let envelope: DaemonEnvelope = parse_daemon_response_json(
         &response.body,
         response.status_code,
@@ -471,6 +474,14 @@ pub(super) fn daemon_post_json_text(
     let request = client
         .post(format!("{}{}", local_url.trim_end_matches('/'), path))
         .json(payload);
+    daemon_post_json_request_text(request, path, options)
+}
+
+fn daemon_post_json_request_text(
+    request: RequestBuilder,
+    path: &str,
+    options: DaemonPostOptions,
+) -> Result<DaemonHttpTextResponse> {
     let response = with_daemon_post_options(request, options)
         .send()
         .map_err(|err| {

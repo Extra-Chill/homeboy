@@ -14,6 +14,7 @@ use homeboy_core::extension::test::{
     run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
+use homeboy_engine_primitives::test_execution::suite_timeout_from_env;
 #[cfg(test)]
 use homeboy_extension_contract::test_results::TestInventoryRejection;
 use homeboy_extension_contract::ExtensionCapability;
@@ -210,6 +211,9 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 
 pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     validate_differential_args(&args)?;
+    // Resolve inherited policy once so every execution path and its report use
+    // the same validated deadline.
+    let test_execution_plan = suite_timeout_from_env();
     let source_ctx = resolve_source_context(
         &args.comp,
         &args.setting_args,
@@ -241,6 +245,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             &source_ctx.source_path,
             source_ctx.component_id.clone(),
             args.json_summary,
+            test_execution_plan.clone(),
             Some(runner.run_dir()),
             observation.as_ref().map(|observation| &observation.active),
         );
@@ -256,7 +261,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             |observation, error| finish_test_observation_error(Some(observation), error),
         )?;
 
-        let (mut output, exit_code) = report::from_main_workflow(workflow);
+        let (mut output, exit_code) = report::from_main_workflow(workflow, &test_execution_plan);
         attach_test_actionable(&mut output, run_id);
         return Ok((output, exit_code));
     }
@@ -342,6 +347,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
                 .chain(extension_test::portable_env(&ctx.component)?.public_env)
                 .collect(),
             passthrough_args: passthrough_args.clone(),
+            test_execution_plan: test_execution_plan.clone(),
         },
         runner.run_dir(),
     );
@@ -380,6 +386,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     let (mut output, exit_code) = report::from_main_workflow_with_ci_context(
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
+        &test_execution_plan,
     );
     let exit_code = apply_differential_verdict(
         &mut output,
@@ -392,6 +399,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
         ci_job.as_ref(),
         &settings,
         &settings_json,
+        &test_execution_plan,
     )?;
     attach_test_actionable(&mut output, run_id);
     Ok((output, exit_code))
@@ -455,6 +463,7 @@ fn apply_differential_verdict(
     ci_job: Option<&CiResolvedJob>,
     settings: &[(String, String)],
     settings_json: &[(String, Value)],
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy::core::Result<i32> {
     if !args.differential {
         return Ok(candidate_exit_code);
@@ -529,6 +538,7 @@ fn apply_differential_verdict(
             ci_job,
             settings,
             settings_json,
+            test_execution_plan,
         )?;
         cache.store(&key, &measurement, chrono::Utc::now().to_rfc3339())?;
         cache.prune_superseded(&key)?;
@@ -625,6 +635,7 @@ fn run_differential_baseline(
     ci_job: Option<&CiResolvedJob>,
     settings: &[(String, String)],
     settings_json: &[(String, Value)],
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy::core::Result<extension_test::TestMeasurement> {
     let source_root = PathBuf::from(git::get_git_root(&source_path.to_string_lossy())?);
     let component_prefix = git::get_component_path_prefix(&source_path.to_string_lossy());
@@ -663,10 +674,11 @@ fn run_differential_baseline(
                 .chain(extension_test::portable_env(&baseline_component)?.public_env)
                 .collect(),
             passthrough_args: passthrough_args.to_vec(),
+            test_execution_plan: test_execution_plan.clone(),
         },
         &run_dir,
     );
-    let (output, _) = report::from_main_workflow(workflow?);
+    let (output, _) = report::from_main_workflow(workflow?, test_execution_plan);
     run_dir.cleanup();
     Ok(extension_test::measurement_from_test_output(&output))
 }
@@ -751,7 +763,6 @@ fn test_runner_ci_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
 
     for key in [
         "GITHUB_ACTIONS",
-        "RELEASE_BLOCKING_COMMANDS",
         "HOMEBOY_TEST_INVENTORY_ONLY",
         "HOMEBOY_TEST_INVENTORY_FILE",
         "HOMEBOY_TEST_SHARD_MANIFEST",
@@ -1531,36 +1542,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    struct XdgGuard {
-        prior: Option<String>,
-    }
-
     struct EnvVarGuard {
         name: &'static str,
         prior: Option<String>,
-    }
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self { prior }
-        }
-
-        fn set(value: &std::path::Path) -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::set_var("XDG_DATA_HOME", value);
-            Self { prior }
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
     }
 
     impl EnvVarGuard {
@@ -1933,7 +1917,7 @@ mod tests {
     #[test]
     fn test_observation_start_persists_run_record() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
 
             let observation = start_test_observation("homeboy", home.path(), &args, "test", None)
@@ -1975,7 +1959,7 @@ mod tests {
     #[test]
     fn test_observation_keeps_run_dir_out_of_initial_metadata() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
 
@@ -1997,7 +1981,7 @@ mod tests {
     #[test]
     fn injected_artifact_store_failure_terminalizes_collection_and_cleans_scratch() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let runner = ObservedWorkflowRunner::create("test homeboy").expect("runner");
             let scratch_path = runner.run_dir().path().to_path_buf();
@@ -2096,7 +2080,7 @@ mod tests {
     #[test]
     fn test_observation_persists_test_failures_and_analysis_clusters() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let observation = start_test_observation("homeboy", home.path(), &args, "test", None)
                 .expect("observation should start");
@@ -2183,7 +2167,7 @@ mod tests {
     #[test]
     fn test_observation_attaches_validation_command_output() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
             let stdout = homeboy::core::validation_progress::write_command_artifact(
@@ -2258,7 +2242,7 @@ mod tests {
     #[test]
     fn failing_test_persists_declared_artifacts_and_records_missing_provenance() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
             let files = run_dir.path().join("files");
@@ -2426,7 +2410,7 @@ mod tests {
     #[test]
     fn delayed_passing_counts_only_pass_when_the_runner_succeeded() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
 
             for (runner_exit_code, expected_status, expected_exit_code) in
@@ -2581,7 +2565,7 @@ mod tests {
     #[test]
     fn interrupted_test_observation_persists_parseable_partial_child_evidence() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
             std::fs::write(
@@ -2656,7 +2640,8 @@ mod tests {
         with_isolated_home(|home| {
             let bad_data_home = home.path().join("not-a-dir");
             fs::write(&bad_data_home, "file blocks observation dir").expect("write marker");
-            let _xdg = XdgGuard::set(&bad_data_home);
+            let _xdg =
+                homeboy_core::test_support::EnvVarGuard::set("XDG_DATA_HOME", &bad_data_home);
             let _data_dir =
                 EnvVarGuard::set(homeboy::core::paths::HOMEBOY_DATA_DIR_ENV, &bad_data_home);
 

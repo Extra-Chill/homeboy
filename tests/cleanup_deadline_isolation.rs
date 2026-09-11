@@ -15,7 +15,7 @@ fn hanging_category_returns_typed_partial_evidence_and_later_category_completes(
     assert!(started.elapsed() < Duration::from_secs(15), "{output:#}");
     assert_eq!(output["success"], false, "{output:#}");
     assert_eq!(output["data"]["status"], "partial_failure", "{output:#}");
-    assert_eq!(output["data"]["failed_category_count"], 1, "{output:#}");
+    assert_eq!(output["data"]["failed_category_count"], 0, "{output:#}");
     let categories = output["data"]["categories"]
         .as_array()
         .expect("cleanup categories");
@@ -49,16 +49,15 @@ fn excluded_worktree_categories_never_enter_their_internals() {
     let output = fixture.run(&[
         "cleanup",
         "--include",
-        "repo-artifacts,task-worktrees,worktree-providers",
+        "repo-artifacts,task-worktrees",
         "--exclude",
-        "task-worktrees,worktree-providers",
+        "task-worktrees",
     ]);
 
     assert_eq!(output["data"]["category_count"], 1, "{output:#}");
     let invoked = std::fs::read_to_string(&fixture.invoked).expect("fixture invocation log");
     assert_eq!(invoked.lines().collect::<Vec<_>>(), ["repo_artifacts"]);
     assert!(!invoked.contains("task_worktrees"));
-    assert!(!invoked.contains("worktree_providers"));
 }
 
 #[test]
@@ -85,112 +84,6 @@ fn retained_storage_hang_returns_a_bounded_typed_continuation() {
 
     fixture.release_descendant();
     assert!(!fixture.survivor.exists());
-}
-
-#[test]
-fn provider_failure_fails_both_specialist_and_aggregate_status() {
-    let fixture = CleanupHangFixture::new();
-    let provider = fixture.root.path().join("failing-provider.sh");
-    std::fs::write(
-        &provider,
-        "#!/bin/sh\nprintf 'provider failed\\n' >&2\nexit 23\n",
-    )
-    .expect("write failing provider");
-    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
-        .expect("make provider executable");
-    let config_dir = fixture.root.path().join(".config/homeboy");
-    std::fs::create_dir_all(&config_dir).expect("config directory");
-    std::fs::write(
-        config_dir.join("homeboy.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "worktree_providers": {
-                "fixture": {
-                    "enabled": true,
-                    "kind": "command",
-                    "apply_enabled": false,
-                    "commands": {
-                        "cleanup_preview": [provider],
-                        "cleanup_preview_timeout_ms": 1000
-                    }
-                }
-            }
-        }))
-        .expect("provider config JSON"),
-    )
-    .expect("write provider config");
-
-    let specialist = fixture.run(&["cleanup", "worktrees", "--all-providers"]);
-    assert_eq!(specialist["success"], false, "{specialist:#}");
-    assert_eq!(specialist["data"]["failure_count"], 1, "{specialist:#}");
-    assert_eq!(
-        specialist["data"]["worktree_providers"]["providers"][0]["outcome"], "failed",
-        "{specialist:#}"
-    );
-
-    let aggregate = fixture.run(&["cleanup", "--include", "worktree-providers"]);
-    assert_eq!(aggregate["success"], false, "{aggregate:#}");
-    assert_eq!(aggregate["data"]["status"], "partial_failure");
-    assert_eq!(aggregate["data"]["failed_category_count"], 1);
-    assert_eq!(
-        aggregate["data"]["categories"][0]["failure"]["code"],
-        "cleanup.provider_failure"
-    );
-    assert_eq!(
-        aggregate["data"]["categories"][0]["inventory_completeness"],
-        "partial"
-    );
-}
-
-#[test]
-fn aggregate_provider_deadline_reaps_the_nested_provider_process_group() {
-    let fixture = CleanupHangFixture::new();
-    let provider = fixture.root.path().join("hanging-provider.sh");
-    std::fs::write(
-        &provider,
-        format!(
-            "#!/bin/sh\nset -eu\n(while [ ! -f '{}' ]; do sleep 0.01; done; touch '{}') &\nwhile :; do sleep 1; done\n",
-            fixture.release.display(),
-            fixture.survivor.display(),
-        ),
-    )
-    .expect("write hanging provider");
-    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
-        .expect("make provider executable");
-    let config_dir = fixture.root.path().join(".config/homeboy");
-    std::fs::create_dir_all(&config_dir).expect("config directory");
-    std::fs::write(
-        config_dir.join("homeboy.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "worktree_providers": {
-                "fixture": {
-                    "enabled": true,
-                    "kind": "command",
-                    "apply_enabled": false,
-                    "commands": {
-                        "cleanup_preview": [provider],
-                        "cleanup_preview_timeout_ms": 30000
-                    }
-                }
-            }
-        }))
-        .expect("provider config JSON"),
-    )
-    .expect("write provider config");
-
-    let output = fixture.run_with_timeout(&["cleanup", "--include", "worktree-providers"], 12_000);
-    assert_eq!(output["data"]["status"], "partial_failure", "{output:#}");
-    let category = &output["data"]["categories"][0];
-    assert_eq!(category["outcome"], "failed", "{output:#}");
-    assert_eq!(
-        category["output"]["worktree_providers"]["providers"][0]["outcome"], "timed_out",
-        "{output:#}"
-    );
-
-    fixture.release_descendant();
-    assert!(
-        !fixture.survivor.exists(),
-        "nested provider descendant survived the aggregate provider deadline"
-    );
 }
 
 struct CleanupHangFixture {

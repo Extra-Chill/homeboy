@@ -310,8 +310,6 @@ fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> 
             None,
         )
     })?;
-    homeboy::core::worktree_provider::validate_configured_worktree_creation_contracts(&config)?;
-
     // Save the config
     defaults::save_config(&config)?;
     let redacted_config = redacted_config_value(&config)?;
@@ -408,8 +406,6 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
             None,
         )
     })?;
-    homeboy::core::worktree_provider::validate_configured_worktree_creation_contracts(&config)?;
-
     // Save the config
     defaults::save_config(&config)?;
     let redacted_config = redacted_config_value(&config)?;
@@ -555,7 +551,7 @@ mod tests {
             "homeboy",
             "config",
             "get",
-            "/worktree_providers/dmc",
+            "/agent_task/default_backend",
         ])
         .expect("config get parses");
         let crate::cli_surface::Commands::Config(args) = cli.command else {
@@ -728,127 +724,6 @@ mod tests {
             assert!(
                 value.len() > INSTALL_SCRIPT_ELISION_THRESHOLD,
                 "an explicit pointer read must not be elided"
-            );
-        });
-    }
-
-    #[test]
-    fn config_set_rejects_an_incomplete_active_worktree_provider() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let error = set(
-                "/worktree_providers/dmc",
-                r#"{"enabled":true,"apply_enabled":true,"commands":{"ensure":["provider","ensure","{handle}"]}}"#,
-                false,
-            )
-            .expect_err("an active provider needs a postcondition lookup");
-
-            assert!(error.message.contains("worktree provider `dmc`"));
-            assert_eq!(
-                error.details["worktree_provider_missing_required_capabilities"],
-                serde_json::json!(["resolve_or_list"])
-            );
-            assert!(error.hints.iter().any(|hint| hint.message.contains(
-                "/worktree_providers/dmc/commands/resolve or /worktree_providers/dmc/commands/list"
-            )));
-            assert!(
-                !defaults::config_exists(),
-                "invalid config must not persist"
-            );
-        });
-    }
-
-    #[test]
-    fn config_set_allows_a_staged_inactive_worktree_provider() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let (output, status) = set(
-                "/worktree_providers/dmc",
-                r#"{"enabled":true,"apply_enabled":false,"commands":{"ensure":["provider","ensure","{handle}"]}}"#,
-                false,
-            )
-            .expect("an inactive provider can be configured in stages");
-
-            assert_eq!(status, 0);
-            assert_eq!(
-                output
-                    .config
-                    .as_ref()
-                    .and_then(|config| config.pointer("/worktree_providers/dmc/apply_enabled")),
-                Some(&serde_json::json!(false))
-            );
-            assert!(defaults::config_exists(), "staged config must persist");
-        });
-    }
-
-    #[test]
-    fn config_set_rejects_an_active_worktree_provider_missing_ensure() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let error = set(
-                "/worktree_providers/dmc",
-                r#"{"enabled":true,"apply_enabled":true,"commands":{"resolve":["provider","resolve","{handle}"]}}"#,
-                false,
-            )
-            .expect_err("an active provider needs ensure");
-
-            assert_eq!(
-                error.details["worktree_provider_missing_required_capabilities"],
-                serde_json::json!(["ensure"])
-            );
-            assert!(error.hints.iter().any(|hint| {
-                hint.message
-                    .contains("/worktree_providers/dmc/commands/ensure")
-            }));
-            assert!(
-                !defaults::config_exists(),
-                "invalid config must not persist"
-            );
-        });
-    }
-
-    #[test]
-    fn config_remove_rejects_removing_an_active_provider_lookup() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            set(
-                "/worktree_providers/dmc",
-                r#"{"enabled":true,"apply_enabled":true,"commands":{"ensure":["provider","ensure","{handle}"],"resolve":["provider","resolve","{handle}"]}}"#,
-                false,
-            )
-            .expect("complete active provider");
-
-            let error = remove("/worktree_providers/dmc/commands/resolve")
-                .expect_err("removing the active provider lookup must fail");
-
-            assert_eq!(
-                error.details["worktree_provider_missing_required_capabilities"],
-                serde_json::json!(["resolve_or_list"])
-            );
-            assert!(
-                defaults::config_file_value("/worktree_providers/dmc/commands/resolve").is_some(),
-                "the rejected removal must not persist"
-            );
-        });
-    }
-
-    #[test]
-    fn config_set_rejects_activating_a_staged_incomplete_worktree_provider() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            set(
-                "/worktree_providers/dmc",
-                r#"{"enabled":true,"apply_enabled":false,"commands":{"ensure":["provider","ensure","{handle}"]}}"#,
-                false,
-            )
-            .expect("staged incomplete provider");
-
-            let error = set("/worktree_providers/dmc/apply_enabled", "true", false)
-                .expect_err("activating an incomplete staged provider must fail");
-
-            assert_eq!(
-                error.details["worktree_provider_missing_required_capabilities"],
-                serde_json::json!(["resolve_or_list"])
-            );
-            assert_eq!(
-                defaults::config_file_value("/worktree_providers/dmc/apply_enabled"),
-                Some(serde_json::json!(false)),
-                "the rejected activation must not persist"
             );
         });
     }

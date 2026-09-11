@@ -92,7 +92,7 @@ fn providers_output_declares_the_scope_it_observed() {
 
         // Additive only: the pre-existing `scope` object keeps its meaning for
         // callers that already parse this output.
-        assert_eq!(value["schema"], "homeboy/agent-task-providers/v1");
+        assert_eq!(value["schema"], "homeboy/agent-task-providers/v2");
         assert_eq!(value["scope"]["filtered"], false);
         assert!(value["providers"].is_array());
     });

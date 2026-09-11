@@ -98,6 +98,18 @@ pub const LEAKED_TEST_HOME_MIN_AGE_HOURS: u64 = 1;
 /// It never relaxes the liveness proof.
 pub const LEAKED_TEST_HOME_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// Age floor before a published release artifact directory is eligible.
+///
+/// A fixed floor for the same reason as [`RUNNER_MIN_AGE_HOURS`] and
+/// [`LEAKED_TEST_HOME_MIN_AGE_HOURS`]: it covers the window in which a release
+/// is mid-publication and its durable directory is still being written. That
+/// window is a property of how long a publish takes, not of an operator's
+/// retention taste.
+///
+/// Re-exported from [`crate::cleanup::release_artifacts`] so the manifest and
+/// the category cannot name two different floors.
+pub use crate::cleanup::release_artifacts::RELEASE_ARTIFACT_MIN_AGE_HOURS;
+
 /// Stable schema identifier for the serialized policy snapshot.
 pub const CLEANUP_POLICY_SCHEMA: &str = "homeboy/retention-manifest/v1";
 
@@ -120,6 +132,10 @@ pub struct CleanupPolicyOverrides {
     pub runtime_run_max_bytes: Option<u64>,
     /// Operator `--run-max-count` for retained failed runtime-run directories.
     pub runtime_run_max_count: Option<usize>,
+    /// Operator `--release-max-count` for retained release versions per repo.
+    pub release_artifact_max_count: Option<usize>,
+    /// Operator `--release-max-bytes` for retained release bytes per repo.
+    pub release_artifact_max_bytes: Option<u64>,
 }
 
 /// The effective retention policy for one cleanup invocation.
@@ -142,6 +158,9 @@ pub struct CleanupPolicy {
     pub shared_store_reserve_inodes: u64,
     pub controller_runtime_days: u64,
     pub controller_runtime_max_bytes: u64,
+    pub release_artifact_max_count: usize,
+    pub release_artifact_max_bytes: u64,
+    pub release_artifact_min_age_hours: u64,
     pub runner_min_age_hours: u64,
     pub runner_workspace_page_limit: usize,
     pub leaked_test_home_min_age_hours: u64,
@@ -185,6 +204,15 @@ impl CleanupPolicy {
     #[must_use]
     pub fn controller_runtime_min_age(self) -> Duration {
         Duration::from_secs(self.controller_runtime_days.saturating_mul(SECONDS_PER_DAY))
+    }
+
+    /// Age floor covering an in-flight release publication.
+    #[must_use]
+    pub fn release_artifact_min_age(self) -> Duration {
+        Duration::from_secs(
+            self.release_artifact_min_age_hours
+                .saturating_mul(SECONDS_PER_HOUR),
+        )
     }
 
     /// Age floor for runner-side workspaces and managed binary slots.
@@ -278,6 +306,13 @@ pub fn cleanup_policy_from_retention(
         shared_store_reserve_inodes: retention.shared_store_reserve_inodes,
         controller_runtime_days: retention.controller_runtime_days,
         controller_runtime_max_bytes: retention.controller_runtime_max_bytes,
+        release_artifact_max_count: overrides
+            .release_artifact_max_count
+            .unwrap_or(retention.release_artifact_max_count),
+        release_artifact_max_bytes: overrides
+            .release_artifact_max_bytes
+            .unwrap_or(retention.release_artifact_max_bytes),
+        release_artifact_min_age_hours: RELEASE_ARTIFACT_MIN_AGE_HOURS,
         runner_min_age_hours: RUNNER_MIN_AGE_HOURS,
         runner_workspace_page_limit: RUNNER_WORKSPACE_PAGE_LIMIT,
         leaked_test_home_min_age_hours: LEAKED_TEST_HOME_MIN_AGE_HOURS,
@@ -499,6 +534,50 @@ mod tests {
             LEAKED_TEST_HOME_MAX_TOTAL_BYTES
         );
         assert!(policy.leaked_test_home_max_total_bytes < u64::MAX);
+    }
+
+    /// #14223: the release artifact store had no count, byte, or age bound of
+    /// any kind, and grew to 6.1 GB. Both budgets must be finite by default and
+    /// both must be resolvable from configuration.
+    #[test]
+    fn the_release_artifact_bound_is_a_finite_count_and_a_finite_byte_ceiling() {
+        let policy = cleanup_policy_from_retention(&retention(), CleanupPolicyOverrides::default())
+            .expect("resolve policy");
+
+        assert!(policy.release_artifact_max_count < usize::MAX);
+        assert!(policy.release_artifact_max_bytes < u64::MAX);
+        assert_eq!(
+            policy.release_artifact_min_age_hours,
+            RELEASE_ARTIFACT_MIN_AGE_HOURS
+        );
+        assert_eq!(
+            policy.release_artifact_min_age(),
+            Duration::from_secs(RELEASE_ARTIFACT_MIN_AGE_HOURS * SECONDS_PER_HOUR)
+        );
+
+        // The regression this module exists to prevent: a widened configuration
+        // window honored by one entry point and ignored by another.
+        let configured = RetentionConfig {
+            release_artifact_max_count: 3,
+            release_artifact_max_bytes: 4096,
+            ..retention()
+        };
+        let policy = cleanup_policy_from_retention(&configured, CleanupPolicyOverrides::default())
+            .expect("resolve policy");
+        assert_eq!(policy.release_artifact_max_count, 3);
+        assert_eq!(policy.release_artifact_max_bytes, 4096);
+
+        let policy = cleanup_policy_from_retention(
+            &configured,
+            CleanupPolicyOverrides {
+                release_artifact_max_count: Some(1),
+                release_artifact_max_bytes: Some(2048),
+                ..CleanupPolicyOverrides::default()
+            },
+        )
+        .expect("resolve policy");
+        assert_eq!(policy.release_artifact_max_count, 1);
+        assert_eq!(policy.release_artifact_max_bytes, 2048);
     }
 
     #[test]

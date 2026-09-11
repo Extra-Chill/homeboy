@@ -11,13 +11,13 @@ homeboy extension <COMMAND>
 ### `list`
 
 ```sh
-homeboy extension list [-p|--project <project_id>] [--skip-ready-check]
+homeboy extension list [-p|--project <project_id>] [--live-readiness]
 ```
 
 ### `show`
 
 ```sh
-homeboy extension show <extension_id> [--skip-ready-check]
+homeboy extension show <extension_id> [--live-readiness]
 ```
 
 Print detailed manifest, runtime, capability, and readiness information for one installed extension.
@@ -33,33 +33,24 @@ Use the discovered ID as the route-less default or pair it with an explicit
 route for a schedule:
 
 ```sh
-homeboy extension list --skip-ready-check
+homeboy extension list
 homeboy config set /notifications/default_transport '"<transport-id>"'
 homeboy schedule add --notification-transport <transport-id> --notification-route '<transport-route>' ...
 ```
 
-### Readiness is the expensive part of inventory
+### Live readiness is explicit
 
-Everything `list`/`show` report except `ready`, `ready_reason`, and
-`ready_detail` is read from the installed manifest. `ready` comes from running
-the extension's `ready_check`, an arbitrary operator-authored shell command —
-a WordPress doctor, an npm probe, a Codebox health script. Both commands still
-probe by default, so their output is unchanged; two things bound the cost:
+`list` and `show` read installed manifests and cached readiness without spawning
+extension processes. Pass `--live-readiness` to run each extension's
+operator-authored `ready_check`, such as a WordPress doctor, npm probe, or
+Codebox health script, and refresh the cached result.
 
-- **`--skip-ready-check`** answers "what is installed, from where, at which
-  revision" without spawning anything. `ready_reason` is then
-  `ready_check_skipped` and `ready` carries no live signal — the same shape the
-  re-entrancy guard has always used, so the JSON contract does not change.
-- **Every `ready_check` is bounded** at 30s, overridable with
-  `HOMEBOY_EXTENSION_READY_CHECK_TIMEOUT_SECONDS`. A probe that hits the bound
-  has its process group terminated and reports
-  `ready_reason: "ready_check_timeout"`; the surrounding metadata is still
-  returned. Before this, a slow doctor could hang inventory indefinitely
-  (#10517).
-
-The bound is per extension, not aggregate: `list` over *n* extensions is bounded
-by *n* × the per-check budget. Use `--skip-ready-check` when only metadata is
-wanted.
+Every live `ready_check` is bounded at 30s, overridable with
+`HOMEBOY_EXTENSION_READY_CHECK_TIMEOUT_SECONDS`. A probe that hits the bound
+has its process group terminated and reports `ready_reason:
+"ready_check_timeout"`; the surrounding metadata is still returned. The bound
+is per extension, not aggregate: live inventory over *n* extensions is bounded
+by *n* times the per-check budget (#10517).
 
 ### Invalid installed manifests
 

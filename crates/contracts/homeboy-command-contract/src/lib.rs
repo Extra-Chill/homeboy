@@ -6,7 +6,6 @@
 //! depend on without pulling in core.
 
 pub mod cleanup;
-pub mod cli_reference;
 pub mod command_invocation;
 
 pub use command_invocation::{

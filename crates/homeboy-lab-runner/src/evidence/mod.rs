@@ -21,9 +21,8 @@ pub use download::{
 
 pub use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 pub use mirror::{
-    controller_artifact_metadata, mirror_connected_runner_run, mirror_daemon_job_progress,
-    mirrored_runner_job_identity, refresh_mirrored_daemon_evidence, runner_job_log_snapshot,
-    terminalize_mirrored_daemon_job,
+    controller_artifact_metadata, mirror_connected_runner_run, mirrored_runner_job_identity,
+    refresh_mirrored_daemon_evidence, runner_job_log_snapshot, terminalize_mirrored_daemon_job,
 };
 pub(crate) use mirror::{
     mirror_daemon_evidence, mirror_daemon_job_progress_with_ownership,

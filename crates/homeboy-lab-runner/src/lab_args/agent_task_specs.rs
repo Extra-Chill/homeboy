@@ -495,11 +495,12 @@ fn rewrite_fanout_cook_workspaces(
                 continue;
             };
             let resolved_controller_path =
-                homeboy_core::worktree_provider::observe_worktree_provider_workspace(
+                homeboy_core::worktree_provider::resolve_worktree_ownership_if_present(
                     &controller_value,
                 )
                 .ok()
-                .map(|workspace| workspace.ownership.path)
+                .flatten()
+                .map(|workspace| workspace.path)
                 .unwrap_or_else(|| controller_value.clone());
             let Some(runner_path) = rewrite_path_with_mappings(&resolved_controller_path, mappings)
             else {
@@ -647,7 +648,9 @@ fn read_agent_task_text_spec_to_inline(
 
     Err(Error::validation_invalid_argument(
         field.trim_start_matches("--"),
-        format!("Lab offload cannot materialize agent-task {field} @file because the controller-side file does not exist"),
+        format!(
+            "Lab offload cannot materialize agent-task {field} @file because the controller-side file does not exist"
+        ),
         Some(spec.to_string()),
         Some(tried),
     ))

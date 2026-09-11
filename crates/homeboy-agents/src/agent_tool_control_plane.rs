@@ -12,7 +12,7 @@ use crate::agent_task::{
     AGENT_TOOL_RESULT_SCHEMA,
 };
 use homeboy_core::stream_capture::StreamCaptureMetadata;
-use homeboy_core::{git, worktree, worktree_provider};
+use homeboy_core::{git, worktree};
 
 pub const AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA: &str = "homeboy/agent-tool-dispatch-evidence/v1";
 
@@ -55,31 +55,6 @@ mod capture {
 mod dispatch {
     use super::*;
 
-    pub trait AgentToolControlPlaneDispatcher {
-        fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult;
-    }
-
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct UnsupportedAgentToolControlPlaneDispatcher;
-
-    impl AgentToolControlPlaneDispatcher for UnsupportedAgentToolControlPlaneDispatcher {
-        fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult {
-            unsupported_control_plane_result(request)
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct HomeboyAgentToolControlPlaneDispatcher;
-
-    impl AgentToolControlPlaneDispatcher for HomeboyAgentToolControlPlaneDispatcher {
-        fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult {
-            match dispatch_homeboy_control_plane_tool(request) {
-                Ok(output) => succeeded_tool_result(request, output),
-                Err(diagnostic) => failed_tool_result(request, diagnostic),
-            }
-        }
-    }
-
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct AgentToolDispatchOutcome {
         pub location: AgentToolExecutionLocation,
@@ -104,7 +79,19 @@ mod dispatch {
     pub fn dispatch_agent_tool_request(
         policy: &AgentToolPolicy,
         request: &AgentToolRequest,
-        dispatcher: &impl AgentToolControlPlaneDispatcher,
+    ) -> AgentToolDispatchOutcome {
+        dispatch_agent_tool_request_with(policy, request, |request| {
+            match dispatch_homeboy_control_plane_tool(request) {
+                Ok(output) => succeeded_tool_result(request, output),
+                Err(diagnostic) => failed_tool_result(request, diagnostic),
+            }
+        })
+    }
+
+    pub(super) fn dispatch_agent_tool_request_with(
+        policy: &AgentToolPolicy,
+        request: &AgentToolRequest,
+        dispatch_control_plane: impl FnOnce(&AgentToolRequest) -> AgentToolResult,
     ) -> AgentToolDispatchOutcome {
         let location = policy.execution_location_for(&request.tool);
 
@@ -123,7 +110,7 @@ mod dispatch {
             Some(denial) => command_denied_tool_result(request, denial, location),
             None => match location {
                 AgentToolExecutionLocation::Disabled => disabled_tool_result(request),
-                AgentToolExecutionLocation::ControlPlane => dispatcher.dispatch(request),
+                AgentToolExecutionLocation::ControlPlane => dispatch_control_plane(request),
                 AgentToolExecutionLocation::Runner => runner_owned_tool_result(request),
             },
         };
@@ -154,7 +141,7 @@ mod dispatch {
         for key in ["command", "cmd", "script", "command_line", "commandLine"] {
             match input.get(key) {
                 Some(Value::String(command)) if !command.trim().is_empty() => {
-                    return Some(command.clone())
+                    return Some(command.clone());
                 }
                 Some(Value::Array(parts)) => {
                     let joined = parts
@@ -243,23 +230,6 @@ mod results {
                 data: json!({ "tool": request.tool }),
             }],
             metadata: json!({ "execution_location": "runner" }),
-        }
-    }
-
-    pub(crate) fn unsupported_control_plane_result(request: &AgentToolRequest) -> AgentToolResult {
-        AgentToolResult {
-            schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
-            request_id: request.request_id.clone(),
-            task_id: request.task_id.clone(),
-            tool: request.tool.clone(),
-            status: AgentToolResultStatus::Failed,
-            output: Value::Null,
-            diagnostics: vec![AgentTaskDiagnostic {
-                class: "agent_tool.control_plane_dispatch_unsupported".to_string(),
-                message: "control-plane tool dispatch is selected by policy, but no dispatcher is registered for this provider execution".to_string(),
-                data: json!({ "tool": request.tool }),
-            }],
-            metadata: json!({ "execution_location": "control_plane" }),
         }
     }
 
@@ -532,7 +502,7 @@ mod tools {
     ) -> Result<Value, AgentTaskDiagnostic> {
         let repo = required_string(input, &["repo", "component_id", "name"])?;
         let branch = required_string(input, &["branch"])?;
-        let created = worktree_provider::create_worktree(worktree::WorktreeCreateOptions {
+        let created = worktree::create(worktree::WorktreeCreateOptions {
             component_id: component_slug(repo).to_string(),
             branch: branch.to_string(),
             from: optional_string(input, &["from", "base_ref"]).map(str::to_string),
@@ -546,12 +516,7 @@ mod tools {
             message: error.to_string(),
             data: Value::Null,
         })?;
-        match created {
-            worktree_provider::WorktreeProviderCreateOutput::Native(output) => to_value(Ok(output)),
-            worktree_provider::WorktreeProviderCreateOutput::Configured(output) => to_value(Ok(
-                worktree_provider::ConfiguredWorktreeCreateEvidence::from(output),
-            )),
-        }
+        to_value(Ok(created))
     }
 
     pub(crate) fn github_issue_get(
@@ -732,14 +697,16 @@ mod workspace_paths {
     }
 
     pub(crate) fn latest_active_worktree_path(component_id: &str) -> Option<String> {
-        worktree_provider::list_worktree_provider_inventory()
+        worktree::list()
             .ok()?
+            .worktrees
             .into_iter()
             .filter(|workspace| {
-                workspace.repository.as_deref() == Some(component_id) && !workspace.safety.missing
+                workspace.component_id == component_id
+                    && workspace.state == worktree::TaskWorktreeState::Active
             })
             .max_by(|left, right| left.created_at.cmp(&right.created_at))
-            .map(|workspace| workspace.ownership.path)
+            .map(|workspace| workspace.worktree_path)
     }
 
     pub(crate) fn workspace_file_path(
@@ -1001,22 +968,24 @@ mod tests {
         assert_eq!(data["stderr_capture"]["truncated"], json!(true));
     }
 
-    #[derive(Debug, Clone, Copy)]
-    struct EchoDispatcher;
-
-    impl AgentToolControlPlaneDispatcher for EchoDispatcher {
-        fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult {
-            AgentToolResult {
-                schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
-                request_id: request.request_id.clone(),
-                task_id: request.task_id.clone(),
-                tool: request.tool.clone(),
-                status: AgentToolResultStatus::Succeeded,
-                output: json!({ "token": "secret-output", "safe": true }),
-                diagnostics: Vec::new(),
-                metadata: json!({ "authorization": "Bearer result-secret" }),
-            }
+    fn echo_dispatch(request: &AgentToolRequest) -> AgentToolResult {
+        AgentToolResult {
+            schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            tool: request.tool.clone(),
+            status: AgentToolResultStatus::Succeeded,
+            output: json!({ "token": "secret-output", "safe": true }),
+            diagnostics: Vec::new(),
+            metadata: json!({ "authorization": "Bearer result-secret" }),
         }
+    }
+
+    fn dispatch_with_echo(
+        policy: &AgentToolPolicy,
+        request: &AgentToolRequest,
+    ) -> AgentToolDispatchOutcome {
+        dispatch::dispatch_agent_tool_request_with(policy, request, echo_dispatch)
     }
 
     fn request(tool: &str) -> AgentToolRequest {
@@ -1069,10 +1038,9 @@ mod tests {
     fn denied_command_is_refused_before_the_dispatcher_runs() {
         let policy = build_denying_policy(&["cargo test", "cargo build"], "builds run in CI here");
 
-        let outcome = dispatch_agent_tool_request(
+        let outcome = dispatch_with_echo(
             &policy,
             &shell_request("timeout 1200 cargo test -q -p homeboy-agents"),
-            &EchoDispatcher,
         );
 
         assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
@@ -1088,8 +1056,7 @@ mod tests {
     fn denial_tells_the_agent_why_and_what_to_do_instead() {
         let policy = build_denying_policy(&["cargo build"], "this host routes builds to CI");
 
-        let outcome =
-            dispatch_agent_tool_request(&policy, &shell_request("cargo build"), &EchoDispatcher);
+        let outcome = dispatch_with_echo(&policy, &shell_request("cargo build"));
 
         let data = &outcome.result.diagnostics[0].data;
         assert_eq!(data["reason"], "this host routes builds to CI");
@@ -1108,8 +1075,7 @@ mod tests {
     fn command_denial_is_recorded_in_dispatch_evidence() {
         let policy = build_denying_policy(&["cargo test"], "shared host");
 
-        let outcome =
-            dispatch_agent_tool_request(&policy, &shell_request("cargo test"), &EchoDispatcher);
+        let outcome = dispatch_with_echo(&policy, &shell_request("cargo test"));
 
         let evidence = outcome.evidence;
         assert_eq!(evidence.result.status, AgentToolResultStatus::Denied);
@@ -1122,8 +1088,7 @@ mod tests {
     fn permitted_command_still_reaches_the_dispatcher() {
         let policy = build_denying_policy(&["cargo test"], "shared host");
 
-        let outcome =
-            dispatch_agent_tool_request(&policy, &shell_request("cargo fmt"), &EchoDispatcher);
+        let outcome = dispatch_with_echo(&policy, &shell_request("cargo fmt"));
 
         assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
         assert!(outcome.evidence.command_denial.is_none());
@@ -1134,8 +1099,7 @@ mod tests {
         let mut policy = build_denying_policy(&["cargo build"], "shared host");
         policy.default_location = AgentToolExecutionLocation::Runner;
 
-        let outcome =
-            dispatch_agent_tool_request(&policy, &shell_request("cargo build"), &EchoDispatcher);
+        let outcome = dispatch_with_echo(&policy, &shell_request("cargo build"));
 
         assert_eq!(outcome.location, AgentToolExecutionLocation::Runner);
         assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
@@ -1170,7 +1134,7 @@ mod tests {
     fn requests_without_a_command_payload_are_unaffected_by_the_command_policy() {
         let policy = build_denying_policy(&["cargo *"], "shared host");
 
-        let outcome = dispatch_agent_tool_request(&policy, &request("lookup"), &EchoDispatcher);
+        let outcome = dispatch_with_echo(&policy, &request("lookup"));
 
         assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
     }
@@ -1187,7 +1151,7 @@ mod tests {
             },
         );
 
-        let outcome = dispatch_agent_tool_request(&policy, &request("lookup"), &EchoDispatcher);
+        let outcome = dispatch_with_echo(&policy, &request("lookup"));
 
         assert_eq!(outcome.location, AgentToolExecutionLocation::ControlPlane);
         assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
@@ -1195,11 +1159,7 @@ mod tests {
 
     #[test]
     fn tool_policy_is_disabled_by_default() {
-        let outcome = dispatch_agent_tool_request(
-            &AgentToolPolicy::default(),
-            &request("lookup"),
-            &EchoDispatcher,
-        );
+        let outcome = dispatch_with_echo(&AgentToolPolicy::default(), &request("lookup"));
 
         assert_eq!(outcome.location, AgentToolExecutionLocation::Disabled);
         assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
@@ -1208,10 +1168,9 @@ mod tests {
 
     #[test]
     fn tool_dispatch_evidence_redacts_request_and_result() {
-        let outcome = dispatch_agent_tool_request(
+        let outcome = dispatch_with_echo(
             &policy(AgentToolExecutionLocation::ControlPlane),
             &request("lookup"),
-            &EchoDispatcher,
         );
 
         assert_eq!(outcome.evidence.schema, AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA);
@@ -1222,26 +1181,6 @@ mod tests {
         assert_eq!(
             outcome.evidence.result.metadata["authorization"],
             "[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn unsupported_control_plane_dispatch_returns_explicit_diagnostic() {
-        let outcome = dispatch_agent_tool_request(
-            &policy(AgentToolExecutionLocation::ControlPlane),
-            &request("lookup"),
-            &UnsupportedAgentToolControlPlaneDispatcher,
-        );
-
-        assert_eq!(outcome.location, AgentToolExecutionLocation::ControlPlane);
-        assert_eq!(outcome.result.status, AgentToolResultStatus::Failed);
-        assert_eq!(
-            outcome.result.diagnostics[0].class,
-            "agent_tool.control_plane_dispatch_unsupported"
-        );
-        assert_eq!(
-            outcome.evidence.result.diagnostics[0].class,
-            "agent_tool.control_plane_dispatch_unsupported"
         );
     }
 }

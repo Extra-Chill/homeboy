@@ -1,0 +1,19 @@
+{
+  "schema": "homeboy/control-plane-run-page/v1",
+  "runs": [
+    {
+      "schema": "homeboy/control-plane-run/v1",
+      "run": "run-placement-fixture-1",
+      "state": "succeeded",
+      "placement": {
+        "decision_id": "epd-fixture-1",
+        "requested": "runner",
+        "selected": "runner",
+        "effective": "controller",
+        "runner_id": "runner-fixture-1"
+      },
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "has_more": false
+}

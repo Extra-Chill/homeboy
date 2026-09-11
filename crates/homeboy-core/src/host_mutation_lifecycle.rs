@@ -1,3 +1,4 @@
+use crate::validation::validate_required_field;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
@@ -239,19 +240,6 @@ fn validate_revert_plan(
         None,
         None,
     ))
-}
-
-fn validate_required_field(field: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            field,
-            "must not be blank",
-            None,
-            None,
-        ));
-    }
-
-    Ok(())
 }
 
 fn validate_optional_field(field: &str, value: &Option<String>) -> Result<()> {

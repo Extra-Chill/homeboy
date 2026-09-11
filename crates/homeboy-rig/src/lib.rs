@@ -61,8 +61,10 @@ pub use artifact_index::{RigRunArtifactRef, RigRunFailedStepRef};
 pub(crate) use artifact_index::for_run as artifact_index_for_run;
 
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
+pub use homeboy_rig_contract::{MaterializedRigResource, MATERIALIZED_RIG_RESOURCE_SCHEMA};
 pub use install::{
-    default_materialize_source_root, discover_rigs, install, materialize_rig_spec,
+    default_materialize_source_root, discover_rigs, install, materialize_rig_resource,
+    materialize_rig_resource_with_default_source_root, materialize_rig_spec,
     materialize_rig_spec_with_default_source_root, read_source_metadata,
     read_source_metadata_in_root,
 };
@@ -269,8 +271,8 @@ fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigP
     let refresh_command = (!freshness_verified).then(|| {
         format!(
             "homeboy rig install {} --id {} --reinstall",
-            shell_arg(&metadata.source),
-            shell_arg(id)
+            homeboy_engine_primitives::shell::shell_arg(&metadata.source),
+            homeboy_engine_primitives::shell::shell_arg(id)
         )
     });
 
@@ -293,16 +295,6 @@ fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigP
         freshness_message,
         refresh_command,
     }
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Byte-compare the contents of two files.

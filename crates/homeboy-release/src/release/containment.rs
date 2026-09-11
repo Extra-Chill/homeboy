@@ -37,7 +37,6 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use homeboy_core::build_identity;
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
@@ -439,7 +438,7 @@ pub struct ContainsQuery {
     pub commit: Option<String>,
     /// Issue number to resolve through the pull request that closed it.
     pub issue: Option<u64>,
-    /// Version to treat as installed. Defaults to the running binary's version.
+    /// Version to treat as installed. Defaults to the component checkout's version.
     pub installed_version: Option<String>,
 }
 
@@ -513,10 +512,8 @@ pub fn contains(query: &ContainsQuery) -> Result<ReleaseContainsReport> {
 
     let known_tags = list_tags(&scope.git_root)?;
     let containing_tags = tags_containing(&scope.git_root, &resolved.commit)?;
-    let installed_version = query
-        .installed_version
-        .clone()
-        .unwrap_or_else(|| build_identity::current().version);
+    let installed_version =
+        resolve_installed_version(&component, query.installed_version.as_deref())?;
     let installed_tag = scope.tag_name(&installed_version);
 
     let containment = assess(
@@ -550,9 +547,7 @@ pub fn gap(
     let tag_prefix = scope.tag_prefix().map(str::to_string);
 
     let known_tags = list_tags(&scope.git_root)?;
-    let installed_version = installed_override
-        .map(str::to_string)
-        .unwrap_or_else(|| build_identity::current().version);
+    let installed_version = resolve_installed_version(&component, installed_override)?;
     let installed_tag = scope.tag_name(&installed_version);
 
     let mut assessment = assess_gap(
@@ -588,6 +583,16 @@ pub fn gap(
         gap: assessment,
         summary,
     })
+}
+
+fn resolve_installed_version(
+    component: &Component,
+    installed_override: Option<&str>,
+) -> Result<String> {
+    match installed_override {
+        Some(version) => Ok(version.to_string()),
+        None => Ok(crate::release::version::read_component_version(component)?.version),
+    }
 }
 
 /// Human-readable lines mirroring the shape the issue asked for.
@@ -861,6 +866,7 @@ pub(crate) fn parse_issue_resolution(raw: &str, issue: u64) -> Result<IssueResol
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::component::VersionTarget;
 
     fn tags(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -1140,6 +1146,32 @@ mod tests {
     }
 
     // -- gap ----------------------------------------------------------------
+
+    #[test]
+    fn installed_version_defaults_to_the_resolved_component() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("plugin.php"), "Version: 1.2.3\n")
+            .expect("write component version");
+        let component = Component {
+            id: "not-homeboy".to_string(),
+            local_path: temp.path().to_string_lossy().into_owned(),
+            version_targets: Some(vec![VersionTarget {
+                file: "plugin.php".to_string(),
+                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: None,
+            }]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_installed_version(&component, None).expect("component version"),
+            "1.2.3"
+        );
+        assert_eq!(
+            resolve_installed_version(&component, Some("9.8.7")).expect("override"),
+            "9.8.7"
+        );
+    }
 
     #[test]
     fn gap_counts_releases_published_after_the_installed_one() {

@@ -14,10 +14,11 @@ use homeboy_engine_primitives::command::{
     terminate_process_tree_and_reap, wait_with_bounded_output_supervised, ControllerChildGuard,
     SupervisedCommandTermination,
 };
+use homeboy_engine_primitives::template;
 use homeboy_extension_contract::{
-    ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
-    ExternalStorageReclaimResult, ExternalStorageReclaimTarget, ExternalStorageRequest,
-    ExternalStorageResourceClass, ExternalStorageRetentionProviderConfig,
+    ExternalStorageIncompleteRoot, ExternalStorageInventory, ExternalStorageItem,
+    ExternalStorageOperation, ExternalStorageReclaimResult, ExternalStorageReclaimTarget,
+    ExternalStorageRequest, ExternalStorageResourceClass, ExternalStorageRetentionProviderConfig,
     EXTERNAL_STORAGE_RETENTION_SCHEMA, MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS,
     MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
 };
@@ -47,6 +48,10 @@ pub struct ExternalStorageCleanupOutput {
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub unknown_bytes: u64,
+    /// `unknown_bytes` is a lower bound when any provider inventory is partial.
+    pub unknown_bytes_is_lower_bound: bool,
+    pub inventory_complete: bool,
+    pub incomplete_roots: Vec<ExternalStorageIncompleteRoot>,
     pub providers: Vec<ExternalStorageProviderOutput>,
 }
 
@@ -59,6 +64,9 @@ pub struct ExternalStorageProviderOutput {
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub unknown_bytes: u64,
+    pub unknown_bytes_is_lower_bound: bool,
+    pub inventory_complete: bool,
+    pub incomplete_roots: Vec<ExternalStorageIncompleteRoot>,
     pub candidates: Vec<ExternalStorageEvidence>,
     pub applied: Vec<ExternalStorageEvidence>,
 }
@@ -77,7 +85,26 @@ pub fn cleanup_external_storage_from_extensions(
 ) -> Result<ExternalStorageCleanupOutput> {
     let providers = crate::extension::catalog::load_all_extensions()?
         .into_iter()
-        .flat_map(|extension| extension.external_storage_retention.providers)
+        .flat_map(|extension| {
+            let extension_path = extension.extension_path.unwrap_or_default();
+            extension
+                .external_storage_retention
+                .providers
+                .into_iter()
+                .map(move |mut provider| {
+                    provider.command = provider
+                        .command
+                        .iter()
+                        .map(|argument| {
+                            template::render(
+                                argument,
+                                &[(template::TemplateVars::EXTENSION_PATH, &extension_path)],
+                            )
+                        })
+                        .collect();
+                    provider
+                })
+        })
         .collect::<Vec<_>>();
     cleanup_external_storage_with_providers(&providers, options)
 }
@@ -97,6 +124,9 @@ pub fn cleanup_external_storage_with_providers(
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         unknown_bytes: 0,
+        unknown_bytes_is_lower_bound: false,
+        inventory_complete: true,
+        incomplete_roots: Vec::new(),
         providers: Vec::new(),
     };
     let mut remaining_count = options.limit;
@@ -192,6 +222,18 @@ pub fn cleanup_external_storage_with_providers(
             estimated_bytes,
             reclaimed_bytes,
             unknown_bytes: inventory.unknown_bytes,
+            unknown_bytes_is_lower_bound: inventory
+                .completeness
+                .as_ref()
+                .is_some_and(|value| !value.complete),
+            inventory_complete: inventory
+                .completeness
+                .as_ref()
+                .is_none_or(|value| value.complete),
+            incomplete_roots: inventory
+                .completeness
+                .as_ref()
+                .map_or_else(Vec::new, |value| value.incomplete_roots.clone()),
             candidates: candidate_evidence,
             applied: applied_evidence,
         };
@@ -213,6 +255,11 @@ pub fn cleanup_external_storage_with_providers(
             provider_output.unknown_bytes,
             "external storage unknown bytes",
         )?;
+        output.inventory_complete &= provider_output.inventory_complete;
+        output.unknown_bytes_is_lower_bound |= provider_output.unknown_bytes_is_lower_bound;
+        output
+            .incomplete_roots
+            .extend(provider_output.incomplete_roots.clone());
         output.providers.push(provider_output);
     }
     Ok(output)
@@ -758,7 +805,9 @@ mod tests {
         let pressured = HashSet::from(["root".to_string()]);
         assert_eq!(
             plan(&inventory, &pressured, 7, 20, 10, "generation")
-                .iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["old", "young"],
             "reserve pressure bypasses age only; live, referenced, credential, and pinned resources remain protected",
         );
@@ -834,6 +883,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn installed_provider_inventory_executes_rendered_program_with_literal_argv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            let extension = crate::paths::extensions().unwrap().join("fixture");
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(
+                extension.join("fixture.json"),
+                r#"{
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "external_storage_retention": {
+                        "providers": [{
+                            "id": "fixture.external-storage",
+                            "command": [
+                                "{{extension_path}}/provider with spaces;no-shell.sh",
+                                "fixed argument;not a shell command"
+                            ],
+                            "timeout_seconds": 1
+                        }]
+                    }
+                }"#,
+            )
+            .unwrap();
+            let provider = extension.join("provider with spaces;no-shell.sh");
+            std::fs::write(
+                &provider,
+                "#!/bin/sh\n[ \"$1\" = \"fixed argument;not a shell command\" ] || exit 1\ncat >/dev/null\nprintf '%s' '{\"schema\":\"homeboy/external-storage-retention/v1\",\"provider_id\":\"fixture.external-storage\",\"generation\":\"g1\",\"items\":[]}'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let output = cleanup_external_storage_from_extensions(ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: 1,
+                reserve_bytes: 0,
+                limit: 1,
+                evidence_limit: 1,
+                deadline: None,
+            })
+            .expect("installed provider command");
+            assert_eq!(output.provider_count, 1);
+            assert_eq!(output.providers[0].provider_id, "fixture.external-storage");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn successful_inventory_early_close_uses_terminal_output() {
         // This fixture closes stdin before emitting JSON. A successful terminal
         // response remains authoritative for this read-only operation.
@@ -904,6 +1002,44 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_inventory_metadata_propagates_to_cleanup_output() {
+        let inventory = serde_json::json!({
+            "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA, "provider_id": "partial", "generation": "g1",
+            "completeness": { "complete": false, "incomplete_roots": [{
+                "root_id": "temp", "reason": "entry_limit", "observed_entries": 10_000, "observed_bytes": 42
+            }] }
+        });
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "partial".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("printf '%s' '{}'", inventory),
+                "fixture".to_string(),
+            ],
+            timeout_seconds: 1,
+        };
+        let output = cleanup_external_storage_with_providers(
+            &[provider],
+            ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: 0,
+                reserve_bytes: 0,
+                limit: 1,
+                evidence_limit: 1,
+                deadline: None,
+            },
+        )
+        .expect("partial inventory");
+        assert!(!output.inventory_complete);
+        assert!(output.unknown_bytes_is_lower_bound);
+        assert_eq!(output.incomplete_roots[0].reason, "entry_limit");
+        assert!(!output.providers[0].inventory_complete);
     }
 
     #[cfg(unix)]

@@ -310,7 +310,7 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     }))
     .expect("register controller driver once");
     let request = serde_json::json!({
-        "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "request": { "schema": "test/v1", "private_input": "not-public" }
+        "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
     });
 
     // Admission is phase one: it is durable but cannot execute until start.
@@ -355,9 +355,20 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
         "not-public"
     ));
 
-    // No submitting-client state is retained: replay returns one daemon job and never executes twice.
-    let duplicate = route_with_body("POST", "/controller/jobs", Some(request), &store);
+    // A retry has a new one-shot key but coalesces with matching active work.
+    let duplicate = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-retry", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
+        })),
+        &store,
+    );
     assert_eq!(duplicate.body["body"]["job"]["id"], job_id.to_string());
+    assert_eq!(
+        duplicate.body["body"]["submission"]["disposition"],
+        "reused"
+    );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     let conflict = route_with_body(
         "POST",
@@ -382,6 +393,19 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     wait_for(
         "store.get(job_id).expect( first job ).status.is_terminal()",
         || store.get(job_id).expect("first job").status.is_terminal(),
+    );
+    let successor = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-successor", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
+        })),
+        &store,
+    );
+    assert_ne!(successor.body["body"]["job"]["id"], job_id.to_string());
+    assert_eq!(
+        successor.body["body"]["submission"]["disposition"],
+        "created"
     );
 
     let cancelled = route_with_body(
@@ -1293,7 +1317,7 @@ fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
     assert_eq!(evidence.operation, "runner.exec");
     assert_eq!(
         evidence.disposition,
-        crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+        crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
     );
 }
 
@@ -1315,8 +1339,47 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     assert_eq!(status.active_job_recovery_evidence.len(), 1);
     assert_eq!(
         status.active_job_recovery_evidence[0].disposition,
-        crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+        crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
     );
+}
+
+#[test]
+fn stale_binary_candidate_owns_only_the_matching_live_lease_coordinates() {
+    let mut state = daemon_state_for_test(4242, "127.0.0.1:49152");
+    state.startup_token = "recorded-token".to_string();
+    let jobs_path = std::path::PathBuf::from("/tmp/homeboy-daemon/jobs.json");
+    let candidate = DaemonProcessCandidate {
+        pid: state.pid,
+        process_start_identity: None,
+        executable: "/opt/homeboy-previous".to_string(),
+        executable_digest: None,
+        cmdline: "daemon serve".to_string(),
+        bind_endpoint: Some(state.address.clone()),
+        durable_store_path: Some(jobs_path.display().to_string()),
+        build_identity: None,
+        startup_token: Some(state.startup_token.clone()),
+        ownership: DaemonProcessOwnership::Ambiguous,
+    };
+
+    assert!(candidate_matches_live_lease(&candidate, &state, &jobs_path));
+    for candidate in [
+        DaemonProcessCandidate {
+            pid: 4243,
+            ..candidate.clone()
+        },
+        DaemonProcessCandidate {
+            bind_endpoint: Some("127.0.0.1:49153".to_string()),
+            ..candidate.clone()
+        },
+        DaemonProcessCandidate {
+            startup_token: Some("other-token".to_string()),
+            ..candidate
+        },
+    ] {
+        assert!(!candidate_matches_live_lease(
+            &candidate, &state, &jobs_path
+        ));
+    }
 }
 
 fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::PathBuf, String) {
@@ -2788,7 +2851,9 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
             "cwd": cwd.display().to_string(),
             "command": [
                 "__homeboy_test_process_tree__",
-                format!("sleep 30 & echo $! > {child_pid_path}; wait; touch {marker_path}"),
+                format!(
+                    "trap '' TERM; sleep 30 & echo $! > {child_pid_path}; while :; do :; done; touch {marker_path}"
+                ),
             ],
         })),
         &store,
@@ -2820,6 +2885,27 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         !marker.exists(),
         "cancelled daemon runner exec left a child process running"
     );
+
+    let follow_up = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": cwd.display().to_string(),
+            "command": ["__homeboy_test_process_tree__", "sleep 0.1"],
+        })),
+        &store,
+    );
+    assert_eq!(follow_up.status_code, 200);
+    let follow_up_id = uuid::Uuid::parse_str(
+        follow_up.body["body"]["job"]["id"]
+            .as_str()
+            .expect("follow-up job id"),
+    )
+    .expect("parse follow-up job id");
+    wait_for("follow-up daemon exec job to complete", || {
+        store.get(follow_up_id).expect("follow-up job").status == JobStatus::Succeeded
+    });
 }
 
 #[cfg(unix)]
@@ -3124,7 +3210,6 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission_fence() {
     let _home = HomeGuard::new();
@@ -3164,6 +3249,75 @@ fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission
         .expect("submission resumes after reconciliation");
     assert_eq!(response.status_code, 200);
     assert_eq!(store.list().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admission() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let (started_tx, _started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.parallel-build-admission",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: release_tx,
+        executions: Arc::new(AtomicUsize::new(0)),
+        cancellations: Arc::new(AtomicUsize::new(0)),
+    }))
+    .expect("register parallel-build controller driver");
+
+    // This is the guard retained by LocalControllerJobClient after it has
+    // verified the resident build but before it posts the Cook job.
+    let preflight_guard =
+        super::acquire_daemon_admission_lock(super::DaemonAdmissionLockMode::Shared)
+            .expect("Cook preflight acquires shared generation guard");
+    let (recovery_attempt_tx, recovery_attempt_rx) = mpsc::channel();
+    let (recovery_acquired_tx, recovery_acquired_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        recovery_attempt_tx
+            .send(())
+            .expect("report recovery attempt");
+        let fence = super::acquire_daemon_job_admission_fence()
+            .expect("parallel build acquires recovery fence");
+        recovery_acquired_tx
+            .send(())
+            .expect("report recovery fence");
+        drop(fence);
+    });
+    recovery_attempt_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("parallel build attempts recovery");
+    assert!(
+        recovery_acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "a sibling build must not replace the preflighted generation"
+    );
+
+    let admitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.parallel-build-admission",
+            "version": 1,
+            "idempotency_key": "parallel-cook",
+            "request": {}
+        })),
+        &store,
+    );
+    assert_eq!(admitted.status_code, 200);
+    assert_eq!(
+        store.list().len(),
+        1,
+        "Cook admission is durable before recovery"
+    );
+
+    drop(preflight_guard);
+    recovery_acquired_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("recovery can proceed after Cook admission");
 }
 
 #[test]

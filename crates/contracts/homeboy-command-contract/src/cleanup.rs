@@ -69,7 +69,6 @@ pub struct CleanupArgs {
 pub enum CleanupCategoryArg {
     RepoArtifacts,
     TaskWorktrees,
-    WorktreeProviders,
     TerminalRuns,
     PersistedRunArtifacts,
     OrphanedArtifactBytes,
@@ -84,6 +83,11 @@ pub enum CleanupCategoryArg {
     /// filename marker plus the liveness of the PID stamped into it, so it can
     /// plan and apply with the observation store shut (#11073).
     LeakedTestHomes,
+    /// Superseded copies in the durable release artifact store. These are
+    /// referenced by durable release records, so `orphaned-artifact-bytes`
+    /// correctly finds zero candidates against them and they need their own
+    /// per-repository count and byte bounds (#14223).
+    ReleaseArtifacts,
     /// Installed runtime providers own discovery and native reclaim for roots
     /// outside Homeboy worktrees.
     ExternalStorage,
@@ -93,8 +97,6 @@ pub enum CleanupCategoryArg {
 pub enum CleanupCommand {
     /// Inspect or remove declared reconstructable artifacts across repo worktrees
     Artifacts(CleanupArtifactsArgs),
-    /// Aggregate cleanup across configured external worktree providers
-    Worktrees(CleanupWorktreesArgs),
     /// Explain retained Homeboy storage without deleting or reconciling resources.
     ///
     /// Reports lifecycle aggregates alongside root filesystem accounting, top-level
@@ -135,9 +137,12 @@ pub struct CleanupArtifactsArgs {
     /// Clean artifacts from the Homeboy source checkout that built this binary.
     #[arg(long = "self", conflicts_with = "path")]
     pub self_artifacts: bool,
-    /// Resolve managed worktrees from this checkout instead of the current directory.
+    /// Clean only this checkout instead of the current directory.
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
+    /// Discover artifacts across every Git worktree in the selected repository.
+    #[arg(long)]
+    pub all_worktrees: bool,
     /// Also scan this temp root for detached Homeboy build artifacts. Repeatable.
     #[arg(long, value_name = "PATH")]
     pub temp_root: Vec<PathBuf>,
@@ -152,6 +157,10 @@ pub struct CleanupArtifactsArgs {
         value_parser = parse_positive_usize
     )]
     pub limit: Option<usize>,
+    /// Resume repository-worktree artifact inventory at the cursor returned by
+    /// an earlier bounded pass.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
     /// Only reclaim artifacts from worktrees whose branch is already merged
     /// into its upstream. Preserves in-progress cooks' build dirs.
     #[arg(long)]
@@ -181,25 +190,6 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     } else {
         Ok(limit)
     }
-}
-
-#[derive(Args, Debug, PartialEq, Eq)]
-pub struct CleanupWorktreesArgs {
-    /// Cleanup a specific configured provider. Repeatable.
-    #[arg(long = "provider", value_name = "ID", conflicts_with = "all_providers")]
-    pub provider: Vec<String>,
-    /// Cleanup every enabled configured provider.
-    #[arg(long)]
-    pub all_providers: bool,
-    /// Apply cleanup. Omit for provider preview/dry-run output.
-    #[arg(long)]
-    pub apply: bool,
-    /// Reviewed provider run identity. Must be paired with `--provider-plan-id` and exactly one provider. Omit both to plan then apply.
-    #[arg(long = "provider-run-id", value_name = "ID")]
-    pub provider_run_id: Option<String>,
-    /// Reviewed provider plan identity. Must be paired with `--provider-run-id` and exactly one provider. Omit both to plan then apply.
-    #[arg(long = "provider-plan-id", value_name = "ID")]
-    pub provider_plan_id: Option<String>,
 }
 
 /// Naming for one cleanup category plus its specialist command.
@@ -247,6 +237,17 @@ pub const LEAKED_TEST_HOMES_METADATA: CleanupInventoryCategoryMetadata =
         include_arg: "leaked-test-homes",
         dry_run_command: "homeboy cleanup --include leaked-test-homes",
         apply_command: "homeboy cleanup --include leaked-test-homes --apply",
+    };
+
+/// Superseded durable release artifact copies. There is no specialist command:
+/// the retention decision is per-repository rank plus two budgets, and a second
+/// spelling of that would be a second place for it to drift.
+pub const RELEASE_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "release_artifacts",
+        include_arg: "release-artifacts",
+        dry_run_command: "homeboy cleanup --include release-artifacts",
+        apply_command: "homeboy cleanup --include release-artifacts --apply",
     };
 
 /// Renders the aggregate cleanup command for the managed runtime-temp override.
@@ -384,6 +385,33 @@ mod tests {
 
         let parsed = CleanupParserTest::parse_from([
             "cleanup",
+            "artifacts",
+            "--all-worktrees",
+            "--cursor",
+            "{\"root\":\"/repo\",\"worktree\":\"/repo/next\"}",
+        ]);
+        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
+            panic!("expected cleanup artifacts command");
+        };
+        assert_eq!(
+            args.cursor.as_deref(),
+            Some("{\"root\":\"/repo\",\"worktree\":\"/repo/next\"}")
+        );
+
+        let parsed = CleanupParserTest::parse_from([
+            "cleanup",
+            "artifacts",
+            "--path",
+            "/repo/checkout",
+            "--all-worktrees",
+        ]);
+        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
+            panic!("expected cleanup artifacts command");
+        };
+        assert!(args.all_worktrees);
+
+        let parsed = CleanupParserTest::parse_from([
+            "cleanup",
             "retained-storage",
             "--limit",
             "3",
@@ -427,6 +455,16 @@ mod tests {
         assert_eq!(
             LEAKED_TEST_HOMES_METADATA.canonical_cleanup_command(false),
             "homeboy cleanup --include leaked-test-homes"
+        );
+        assert_eq!(
+            RELEASE_ARTIFACTS_METADATA.canonical_cleanup_command(true),
+            "homeboy cleanup --include release-artifacts --apply"
+        );
+        assert!(
+            CleanupParserTest::parse_from(["cleanup", "--include", "release-artifacts"])
+                .cleanup
+                .include
+                .contains(&CleanupCategoryArg::ReleaseArtifacts)
         );
         assert!(
             CleanupParserTest::parse_from(["cleanup", "--include", "leaked-test-homes"])

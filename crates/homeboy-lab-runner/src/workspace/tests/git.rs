@@ -10,6 +10,7 @@ use crate::workspace::git::{
 use crate::workspace::sync::{list_workspaces, sync_workspace};
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::workspace::util::git_output;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 
 #[test]
 fn changed_since_private_origin_without_controller_closure_falls_back_to_snapshot() {
@@ -767,6 +768,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
         let install = homeboy_core::extension::lifecycle::install(
             &remote.join("wordpress").display().to_string(),
             Some("wordpress"),
+            ExtensionLifecycleValidation::declaration_only(),
         )
         .expect("install extension from synced detached workspace");
 

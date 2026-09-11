@@ -93,19 +93,6 @@ pub(super) fn prefer_installed_binary(build_artifact: &Path) -> Option<std::path
     }
 }
 
-/// Fetch versions from remote server for components.
-#[allow(
-    dead_code,
-    reason = "No production caller: every deploy path calls `fetch_remote_versions_for_project` directly; this project-less wrapper is reached only by this module's tests."
-)]
-pub(crate) fn fetch_remote_versions(
-    components: &[Component],
-    base_path: &str,
-    client: &SshClient,
-) -> HashMap<String, String> {
-    fetch_remote_versions_for_project(components, None, base_path, client).versions
-}
-
 pub(crate) fn fetch_remote_versions_for_project(
     components: &[Component],
     project: Option<&Project>,
@@ -840,27 +827,14 @@ pub(super) fn run_post_deploy_hooks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::local_client;
     use homeboy_core::component::VersionTarget;
-    use homeboy_core::server::SshClient;
     use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
     use homeboy_extension_contract::{
         DeployArchiveInstallPolicy, DeployRequiredHeader, DeployVerification, ExtensionManifest,
     };
-    use std::collections::HashMap;
     use std::fs;
     use std::io::Write;
-
-    fn local_client() -> SshClient {
-        SshClient {
-            host: "localhost".to_string(),
-            user: "test".to_string(),
-            port: 22,
-            identity_file: None,
-            auth: None,
-            is_local: true,
-            env: HashMap::new(),
-        }
-    }
 
     fn extension() -> ExtensionManifest {
         serde_json::from_value(serde_json::json!({
@@ -926,17 +900,21 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_remote_versions() {
+    fn test_fetch_remote_versions_without_project() {
         let temp = tempfile::tempdir().expect("temp dir");
         fs::write(temp.path().join("fixture.php"), "Version: 1.2.3").expect("version file");
 
-        let versions = fetch_remote_versions(
+        let versions = fetch_remote_versions_for_project(
             &[versioned_component(".")],
+            None,
             temp.path().to_str().expect("base path"),
             &local_client(),
         );
 
-        assert_eq!(versions.get("fixture").map(String::as_str), Some("1.2.3"));
+        assert_eq!(
+            versions.versions.get("fixture").map(String::as_str),
+            Some("1.2.3")
+        );
     }
 
     #[test]

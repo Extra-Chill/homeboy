@@ -251,6 +251,7 @@ pub(super) fn materialize_git_snapshot_from_controller_bundle(
     local_path: &Path,
     remote_path: &str,
     excludes: &[String],
+    git_fetch_refs: &[String],
 ) -> Result<Option<ControllerGitBundleProvenance>> {
     let head = git_output(local_path, &["rev-parse", "HEAD"])?;
     let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -269,7 +270,7 @@ pub(super) fn materialize_git_snapshot_from_controller_bundle(
             branch: branch.as_deref(),
             remote_url: &remote_url,
             changed_since_base: None,
-            git_fetch_refs: &[],
+            git_fetch_refs,
             allow_dirty_lab_workspace: false,
         },
     )?;

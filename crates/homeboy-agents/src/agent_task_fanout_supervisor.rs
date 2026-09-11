@@ -5,10 +5,11 @@
 //! consumes its answer while reconciling otherwise independent children.
 
 use chrono::Utc;
+use fs4::fs_std::FileExt;
 use homeboy_core::{paths, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
 
 pub const AGENT_TASK_FANOUT_PORTFOLIO_SCHEMA: &str = "homeboy/agent-task-fanout-portfolio/v1";
 pub const AGENT_TASK_FANOUT_PORTFOLIO_STATUS_SCHEMA: &str =
@@ -319,12 +320,34 @@ impl AgentTaskFanoutPortfolio {
                 CHILD_INACTIVE_FINDING_FINGERPRINT_LIMIT,
             );
             portfolio_findings.extend(findings);
-            let (blocker, action) = reconcile_child(
+            let previous_blocker = child.blocker.clone();
+            let previous_action = child.next_action.clone();
+            let (mut blocker, mut action) = reconcile_child(
                 child,
                 observation,
                 dependencies.readiness(child_id),
                 changed_base,
             );
+            if blocker.is_none()
+                && previous_blocker
+                    .as_ref()
+                    .is_some_and(|blocker| blocker.code == "adapter_action_failed")
+                && previous_action.as_ref().is_some_and(|previous| {
+                    previous == &action
+                        || matches!(
+                            action,
+                            AgentTaskFanoutPortfolioAction::AwaitAcceptance
+                                | AgentTaskFanoutPortfolioAction::None
+                        )
+                })
+            {
+                // Observation alone cannot prove that an adapter mutation whose
+                // result was an error completed. Keep its exact action as retry
+                // ownership until that call succeeds or reconciliation selects
+                // a different concrete mutation.
+                blocker = previous_blocker;
+                action = previous_action.expect("failed adapter action is retained");
+            }
             child.blocker = blocker;
             child.next_action = Some(action);
         }
@@ -494,15 +517,25 @@ impl AgentTaskFanoutPortfolio {
     ) -> Result<AgentTaskFanoutPortfolioRunReport> {
         let mut observations = Vec::new();
         let mut blocked = Vec::new();
+        let mut observation_failed = BTreeSet::new();
         let children = self.children.values().cloned().collect::<Vec<_>>();
         for child in &children {
             match adapter.observe(child) {
                 Ok(observation) => observations.push(observation),
                 Err(error) => {
-                    self.children
+                    let durable_child = self
+                        .children
                         .get_mut(&child.child_id)
-                        .expect("child exists")
-                        .blocker = Some(adapter_blocker(child, "adapter_observe_failed", &error));
+                        .expect("child exists");
+                    if !durable_child
+                        .blocker
+                        .as_ref()
+                        .is_some_and(|blocker| blocker.code == "adapter_action_failed")
+                    {
+                        durable_child.blocker =
+                            Some(adapter_blocker(child, "adapter_observe_failed", &error));
+                    }
+                    observation_failed.insert(child.child_id.clone());
                     blocked.push(child.child_id.clone());
                 }
             }
@@ -515,7 +548,14 @@ impl AgentTaskFanoutPortfolio {
             let Some(action) = child.next_action.clone() else {
                 continue;
             };
-            if child.blocker.is_some() {
+            if observation_failed.contains(&child_id) {
+                continue;
+            }
+            if child
+                .blocker
+                .as_ref()
+                .is_some_and(|blocker| blocker.code != "adapter_action_failed")
+            {
                 blocked.push(child.child_id.clone());
                 continue;
             }
@@ -549,6 +589,16 @@ impl AgentTaskFanoutPortfolio {
                 blocked.push(child_id);
                 continue;
             }
+            if self.children[&child_id]
+                .blocker
+                .as_ref()
+                .is_some_and(|blocker| blocker.code == "adapter_action_failed")
+            {
+                self.children
+                    .get_mut(&child_id)
+                    .expect("child exists")
+                    .blocker = None;
+            }
             advanced.push(child_id);
         }
         // Re-observe after every mutation batch, then persist one convergent
@@ -560,10 +610,18 @@ impl AgentTaskFanoutPortfolio {
             match adapter.observe(child) {
                 Ok(observation) => observations.push(observation),
                 Err(error) => {
-                    self.children
+                    let durable_child = self
+                        .children
                         .get_mut(&child.child_id)
-                        .expect("child exists")
-                        .blocker = Some(adapter_blocker(child, "adapter_observe_failed", &error));
+                        .expect("child exists");
+                    if !durable_child
+                        .blocker
+                        .as_ref()
+                        .is_some_and(|blocker| blocker.code == "adapter_action_failed")
+                    {
+                        durable_child.blocker =
+                            Some(adapter_blocker(child, "adapter_observe_failed", &error));
+                    }
                     if !blocked.contains(&child.child_id) {
                         blocked.push(child.child_id.clone());
                     }
@@ -600,14 +658,54 @@ fn adapter_blocker(
 pub fn write_portfolio(portfolio: &AgentTaskFanoutPortfolio) -> Result<()> {
     let path = portfolio_path(&portfolio.fanout_id)?;
     let parent = path.parent().expect("portfolio path has parent");
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-    })?;
+    homeboy_core::engine::local_files::create_dir_all_durably(parent)?;
     let raw = serde_json::to_string_pretty(portfolio).map_err(|error| {
         Error::internal_json(error.to_string(), Some(portfolio.fanout_id.clone()))
     })?;
-    fs::write(&path, raw)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+    homeboy_core::io::write_output_file_atomically(
+        &path,
+        raw,
+        homeboy_core::io::OutputWriteOptions::file(),
+    )
+    .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+/// Durable outer ownership for every live coordinator and mutating resume of a
+/// fanout. Receipt paths may take narrower locks while this guard is held, but
+/// no receipt path acquires this fence in reverse.
+pub struct FanoutOwnershipFence {
+    lock: std::fs::File,
+}
+
+impl Drop for FanoutOwnershipFence {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock);
+    }
+}
+
+pub fn acquire_fanout_ownership_fence(fanout_id: &str) -> Result<FanoutOwnershipFence> {
+    // Preserve the original path so coordinators also contend with resumes from
+    // binaries that predate the shared ownership name.
+    let path = portfolio_path(fanout_id)?.with_extension("resume.lock");
+    let parent = path.parent().expect("fanout ownership lock has parent");
+    homeboy_core::engine::local_files::create_dir_all_durably(parent)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    lock.lock_exclusive()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    Ok(FanoutOwnershipFence { lock })
+}
+
+pub fn with_portfolio_resume_lock<T>(
+    fanout_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _fence = acquire_fanout_ownership_fence(fanout_id)?;
+    operation()
 }
 
 pub fn read_portfolio(fanout_id: &str) -> Result<AgentTaskFanoutPortfolio> {
@@ -800,6 +898,8 @@ fn portfolio_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
     fn child(id: &str) -> AgentTaskFanoutPortfolioChild {
         AgentTaskFanoutPortfolioChild {
             child_id: id.into(),
@@ -954,6 +1054,7 @@ mod tests {
         observations: BTreeMap<String, AgentTaskFanoutPortfolioObservation>,
         actions: Vec<String>,
         fail_observe: BTreeSet<String>,
+        fail_action: BTreeSet<String>,
     }
 
     impl FanoutPortfolioAdapter for FixtureAdapter {
@@ -998,6 +1099,9 @@ mod tests {
                 if force_with_lease { "-lease" } else { "" },
                 child.child_id
             ));
+            if self.fail_action.contains(&child.child_id) {
+                return Err(Error::internal_unexpected("fixture action failed"));
+            }
             self.observations.get_mut(&child.child_id).unwrap().pr = AgentTaskFanoutPrState::Merged;
             Ok(())
         }
@@ -1039,6 +1143,195 @@ mod tests {
             assert_eq!(second.advanced, vec!["stale"]);
             assert_eq!(second.blocked, vec!["dirty"]);
             assert_eq!(adapter.actions.last(), Some(&"pr:stale".to_string()));
+        });
+    }
+
+    #[test]
+    fn failed_action_retains_exact_retry_ownership_through_reobservation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut portfolio = AgentTaskFanoutPortfolio::new("failed-action", [child("child")]);
+            let mut adapter = FixtureAdapter::default();
+            adapter
+                .observations
+                .insert("child".into(), observation("child"));
+            adapter.fail_action.insert("child".into());
+
+            let report = portfolio
+                .run(&mut adapter, &IndependentFanoutDependencies)
+                .expect("failed action is persisted as portfolio state");
+
+            assert_eq!(report.blocked, vec!["child"]);
+            let durable = read_portfolio("failed-action").unwrap();
+            assert_eq!(
+                durable.children["child"].blocker.as_ref().unwrap().code,
+                "adapter_action_failed"
+            );
+            assert_eq!(
+                durable.children["child"].next_action,
+                Some(AgentTaskFanoutPortfolioAction::ResumeFinalization)
+            );
+
+            adapter.fail_action.clear();
+            adapter.fail_observe.insert("child".into());
+            let mut unavailable = durable;
+            unavailable
+                .run(&mut adapter, &IndependentFanoutDependencies)
+                .expect("observation outage retains the exact failed action");
+            assert_eq!(adapter.actions, vec!["pr:child"]);
+            let retained = read_portfolio("failed-action").unwrap();
+            assert_eq!(
+                retained.children["child"].blocker.as_ref().unwrap().code,
+                "adapter_action_failed"
+            );
+            assert_eq!(
+                retained.children["child"].next_action,
+                Some(AgentTaskFanoutPortfolioAction::ResumeFinalization)
+            );
+
+            adapter.fail_observe.clear();
+            let mut resumed = retained;
+            resumed
+                .run(&mut adapter, &IndependentFanoutDependencies)
+                .expect("the exact failed action remains retryable");
+            let converged = read_portfolio("failed-action").unwrap();
+            assert!(converged.children["child"].blocker.is_none());
+            assert_eq!(
+                converged.children["child"].next_action,
+                Some(AgentTaskFanoutPortfolioAction::None)
+            );
+        });
+    }
+
+    #[test]
+    fn live_coordinator_and_resume_share_one_ownership_fence() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (coordinator_entered_tx, coordinator_entered_rx) = mpsc::channel();
+            let (resume_attempted_tx, resume_attempted_rx) = mpsc::channel();
+            let (resume_entered_tx, resume_entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+
+            let coordinator = std::thread::spawn(move || -> Result<()> {
+                let _fence = acquire_fanout_ownership_fence("coordinator-resume-race")?;
+                coordinator_entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            });
+            coordinator_entered_rx.recv().unwrap();
+
+            let resume = std::thread::spawn(move || -> Result<()> {
+                resume_attempted_tx.send(()).unwrap();
+                let _fence = acquire_fanout_ownership_fence("coordinator-resume-race")?;
+                resume_entered_tx.send(()).unwrap();
+                Ok(())
+            });
+            resume_attempted_rx.recv().unwrap();
+            assert!(resume_entered_rx.try_recv().is_err());
+
+            release_tx.send(()).unwrap();
+            coordinator.join().unwrap().unwrap();
+            resume_entered_rx.recv().unwrap();
+            resume.join().unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn concurrent_resumes_serialize_mutation_persistence_and_cleanup() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            write_portfolio(&AgentTaskFanoutPortfolio::new(
+                "concurrent-resumes",
+                [child("child")],
+            ))
+            .unwrap();
+            let observation = Arc::new(Mutex::new(observation("child")));
+            let mutations = Arc::new(Mutex::new(0_u8));
+            let cleanups = Arc::new(Mutex::new(0_u8));
+            let cleanup_receipt = Arc::new(Mutex::new(false));
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let release_rx = Arc::new(Mutex::new(release_rx));
+
+            struct SharedAdapter {
+                observation: Arc<Mutex<AgentTaskFanoutPortfolioObservation>>,
+                mutations: Arc<Mutex<u8>>,
+            }
+            impl FanoutPortfolioAdapter for SharedAdapter {
+                fn observe(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<AgentTaskFanoutPortfolioObservation> {
+                    Ok(self.observation.lock().unwrap().clone())
+                }
+                fn rebase_candidate(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn recreate_candidate(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn rerun_gates_and_review(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn finalize_or_update_pr(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                    _force_with_lease: bool,
+                ) -> Result<()> {
+                    *self.mutations.lock().unwrap() += 1;
+                    self.observation.lock().unwrap().pr = AgentTaskFanoutPrState::Merged;
+                    Ok(())
+                }
+            }
+
+            let spawn_resume = |index: u8, wait_for_release: bool| {
+                let observation = Arc::clone(&observation);
+                let mutations = Arc::clone(&mutations);
+                let cleanups = Arc::clone(&cleanups);
+                let cleanup_receipt = Arc::clone(&cleanup_receipt);
+                let entered_tx = entered_tx.clone();
+                let release_rx = Arc::clone(&release_rx);
+                std::thread::spawn(move || {
+                    with_portfolio_resume_lock("concurrent-resumes", || {
+                        entered_tx.send(index).unwrap();
+                        if wait_for_release {
+                            release_rx.lock().unwrap().recv().unwrap();
+                        }
+                        let mut portfolio = read_portfolio("concurrent-resumes")?;
+                        portfolio.run(
+                            &mut SharedAdapter {
+                                observation,
+                                mutations,
+                            },
+                            &IndependentFanoutDependencies,
+                        )?;
+                        let mut receipt = cleanup_receipt.lock().unwrap();
+                        if !*receipt {
+                            *cleanups.lock().unwrap() += 1;
+                            *receipt = true;
+                        }
+                        Ok(())
+                    })
+                })
+            };
+            let first = spawn_resume(0, true);
+            assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+            let second = spawn_resume(1, false);
+            assert!(entered_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            release_tx.send(()).unwrap();
+            assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+            for thread in [first, second] {
+                thread.join().unwrap().unwrap();
+            }
+            assert_eq!(*mutations.lock().unwrap(), 1);
+            assert_eq!(*cleanups.lock().unwrap(), 1);
+            assert_eq!(read_portfolio("concurrent-resumes").unwrap().revision, 4);
         });
     }
 
@@ -1097,6 +1390,7 @@ mod tests {
                 observations: [("child".to_string(), state)].into_iter().collect(),
                 actions: Vec::new(),
                 fail_observe: BTreeSet::new(),
+                fail_action: BTreeSet::new(),
             };
 
             portfolio
@@ -1121,6 +1415,7 @@ mod tests {
                 .collect(),
                 actions: Vec::new(),
                 fail_observe: BTreeSet::new(),
+                fail_action: BTreeSet::new(),
             };
             adapter.observations.get_mut("bad").unwrap().worktree =
                 AgentTaskFanoutWorktreeState::Dirty;

@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::agent_task::candidate::{
     changed_files_for_artifact, classify_candidates, CandidateState,
@@ -260,33 +260,43 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
     if let Some(next_action) = summary.get("next_action").and_then(Value::as_str) {
         lines.push(format!("Next: {next_action}"));
     }
+    if let Some(refresh_action) = summary.get("refresh_action").and_then(Value::as_str) {
+        lines.push(format!("Refresh: {refresh_action}"));
+    }
     Some(lines.join("\n"))
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
+    if payload.get("schema").and_then(Value::as_str) == Some("homeboy/agent-task-cook-preview/v1") {
+        return render_cook_preview_summary(payload);
+    }
     let run_id =
         string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["latest_run_id"]))?;
     let raw_state = string_value(payload, &["state"])
         .or_else(|| string_value(payload, &["record", "state"]))
+        .or_else(|| string_value(payload, &["status"]))
         .unwrap_or("unknown");
+    let durable_unavailable =
+        string_value(payload, &["durable_candidate", "status"]) == Some("unavailable");
     let tasks_planned = usize_value(payload, &["task_count"])
-        .or_else(|| array_len(payload, &["record", "tasks"]))
-        .unwrap_or(0);
+        .or_else(|| usize_value(payload, &["durable_candidate", "task_count"]))
+        .or_else(|| array_len(payload, &["record", "tasks"]));
     let canonical = classify_candidates(payload);
-    let tasks_attempted = canonical
-        .provider_executions
-        .or_else(|| aggregate_outcome_count(payload))
-        .unwrap_or(0);
+    let tasks_attempted = usize_value(payload, &["durable_candidate", "provider_execution_count"])
+        .or(canonical.provider_executions)
+        .or_else(|| aggregate_outcome_count(payload));
     let aggregate_path = string_value(payload, &["aggregate_path"])
+        .or_else(|| string_value(payload, &["durable_candidate", "aggregate_path"]))
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
     let metrics = code_production_metrics(payload);
     let state = effective_run_state(
         raw_state,
-        tasks_attempted,
+        tasks_attempted.unwrap_or(0),
         metrics.candidate_state,
         metrics.candidate_scan_degraded,
     );
-    let artifact_count = aggregate_artifact_count(payload);
+    let artifact_count = usize_value(payload, &["durable_candidate", "artifact_count"])
+        .or_else(|| Some(aggregate_artifact_count(payload)).filter(|_| !durable_unavailable));
     let first_artifact = string_value(
         payload,
         &["aggregate", "outcomes", "0", "artifacts", "0", "path"],
@@ -323,19 +333,56 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
             lines.push(format!("Next: {command}"));
         }
     }
+    let unavailable_or_zero = || {
+        if durable_unavailable {
+            "unavailable".to_string()
+        } else {
+            "0".to_string()
+        }
+    };
     lines.extend([
         format!("Run: {run_id}"),
         format!("Status: {state}"),
-        format!("Tasks planned: {tasks_planned}"),
-        format!("Tasks attempted: {tasks_attempted}"),
+        format!(
+            "Tasks planned: {}",
+            tasks_planned
+                .map(|count| count.to_string())
+                .unwrap_or_else(unavailable_or_zero)
+        ),
+        format!(
+            "Tasks attempted: {}",
+            tasks_attempted
+                .map(|count| count.to_string())
+                .unwrap_or_else(unavailable_or_zero)
+        ),
     ]);
-    lines.extend(code_production_lines(&metrics));
+    if durable_unavailable {
+        let reason = string_value(payload, &["durable_candidate", "reason"])
+            .unwrap_or("authoritative candidate evidence could not be read");
+        lines.push(format!("Candidate evidence: unavailable ({reason})"));
+    } else {
+        lines.extend(code_production_lines(&metrics));
+    }
     if let Some(path) = aggregate_path {
         lines.push(format!("Aggregate: {path}"));
     }
-    lines.push(format!("Artifacts: {artifact_count}"));
+    lines.push(format!(
+        "Artifacts: {}",
+        artifact_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(unavailable_or_zero)
+    ));
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
+    }
+    if matches!(raw_state, "candidate_recoverable" | "partial_recoverable") {
+        if let Some(task) = string_value(payload, &["selected_candidate", "selected_task_id"]) {
+            let artifact = string_value(payload, &["selected_candidate", "selected_artifact_id"])
+                .unwrap_or("unknown");
+            lines.push(format!(
+                "Retained candidate: task {task}, artifact {artifact}"
+            ));
+        }
     }
     if primary_failure.is_some() {
         // Its exact action already leads the report.
@@ -347,282 +394,157 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     Some(finish(lines))
 }
 
-fn render_status_summary(payload: &Value) -> Option<String> {
-    let run_id = string_value(payload, &["run_id"])?;
-    let raw_state = string_value(payload, &["state"]).unwrap_or("unknown");
-    let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
-    let canonical = classify_candidates(payload);
-    let tasks_attempted = canonical
-        .provider_executions
-        .unwrap_or_else(|| status_attempted_task_count(payload));
-    let metrics = code_production_metrics(payload);
-    let candidate_state = status_scope_candidate(payload).unwrap_or(metrics.candidate_state);
-    let state = string_value(payload, &["cook", "state"])
-        .or_else(|| string_value(payload, &["status_scope", "cook", "finalization", "status"]))
-        .or_else(|| string_value(payload, &["status_scope", "cook", "completion", "state"]))
-        .unwrap_or_else(|| {
-            effective_run_state(
-                raw_state,
-                tasks_attempted,
-                candidate_state,
-                metrics.candidate_scan_degraded,
-            )
-        });
-    let completion = cook_completion_summary(payload);
-    let cook = cook_outcome_summary(payload, state, candidate_state, completion.as_ref());
-    let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
-    let aggregate_path = string_value(payload, &["aggregate_path"]);
-
-    let mut lines = vec!["Agent task status".to_string()];
-    if let Some(cook) = cook.as_ref() {
-        lines.extend(cook.lines());
-        if let Some(scope) = payload.get("status_scope") {
-            let queried_state = string_value(scope, &["queried_attempt", "candidate", "state"])
-                .unwrap_or("unknown");
-            let queried_run = string_value(scope, &["queried_attempt", "run_id"]).unwrap_or(run_id);
-            lines.push(format!(
-                "Queried attempt candidate: {queried_state} (run {queried_run})"
-            ));
-        }
-        lines.push(format!("Run: {run_id}"));
-        lines.push("Provider/task evidence:".to_string());
-    } else {
-        lines.push(format!("Status: {state}"));
-        lines.push(format!("Run: {run_id}"));
-    }
-    lines.extend([
-        format!("Tasks planned: {tasks_planned}"),
-        format!("Tasks attempted: {tasks_attempted}"),
-    ]);
-    let mut production_lines = code_production_lines(&metrics);
-    if let Some(candidate) = string_value(payload, &["execution_states", "candidate", "state"]) {
-        production_lines[1] = format!("Candidate state: {candidate}");
-    }
-    lines.extend(production_lines);
-    if let Some(diagnostic) = first_actionable_diagnostic(payload) {
-        lines.push(format!("Diagnostic: {diagnostic}"));
-    }
-    lines.push(format!("Artifacts: {artifact_count}"));
-    if let Some(cook) = cook {
-        lines.push(format!("Next: {}", cook.next_action(run_id)));
-    } else if metrics.candidate_state.is_available() {
-        if let Some(path) = aggregate_path {
-            lines.push(format!("Aggregate: {path}"));
-        }
-        lines.push(format!("Next: homeboy agent-task review {run_id}"));
-    } else if is_unmaterialized_cook_admission(payload) {
-        lines.push(format!("Next: homeboy agent-task resume {run_id}"));
-    } else if state == "queued" && !is_transport_proxy(payload) {
-        lines.push(format!("Next: homeboy agent-task run {run_id}"));
-    } else if let Some(action) = transport_proxy_next_action(payload) {
-        lines.push(format!("Next: {action}"));
-    } else {
-        lines.push(format!("Next: homeboy agent-task logs {run_id}"));
+fn render_cook_preview_summary(payload: &Value) -> Option<String> {
+    let resolved = payload.get("resolved")?;
+    let placement = resolved
+        .pointer("/placement/requested")
+        .and_then(Value::as_str)?;
+    let provider = resolved
+        .get("provider")
+        .and_then(Value::as_object)
+        .and_then(|provider| {
+            provider.get("backend").and_then(|backend| {
+                backend
+                    .as_str()
+                    .or_else(|| backend.get("state").and_then(Value::as_str))
+            })
+        })
+        .unwrap_or("unresolved");
+    let model = resolved
+        .pointer("/provider/model")
+        .and_then(Value::as_str)
+        .unwrap_or("unresolved");
+    let destination = resolved
+        .pointer("/workspace/path")
+        .and_then(Value::as_str)
+        .or_else(|| resolved.get("worktree").and_then(Value::as_str))
+        .or_else(|| {
+            resolved
+                .pointer("/workspace/action")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("unresolved");
+    let public_gates = resolved
+        .pointer("/gates/public")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let private_gates = resolved
+        .pointer("/gates/private")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let replay = payload
+        .get("replay_argv")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        "Cook preview".to_string(),
+        format!("Placement: {placement}"),
+        format!("Provider: {provider}"),
+        format!("Model: {model}"),
+        format!("Destination: {destination}"),
+        format!("Gates: {public_gates} public, {private_gates} private"),
+        format!(
+            "Replay: {}",
+            homeboy::core::engine::shell::quote_args(&replay)
+        ),
+    ];
+    if let Some(failure) = payload.pointer("/failure/message").and_then(Value::as_str) {
+        lines.push(format!("Blocked: {failure}"));
     }
     Some(finish(lines))
 }
 
-/// The compact Cook outcome uses the existing lifecycle and completion
-/// projections. Provider success remains evidence below it, never the headline.
-struct CookOutcomeSummary<'a> {
-    state: &'a str,
-    publication: Option<&'a str>,
-    candidate_state: CandidateState,
-    gate_state: Option<&'a str>,
-    completion: Option<&'a CookCompletionSummary<'a>>,
-    candidate_context: String,
-}
-
-impl CookOutcomeSummary<'_> {
-    fn lines(&self) -> Vec<String> {
-        let candidate = if self.candidate_state.is_available() {
-            "yes"
-        } else {
-            "no"
-        };
-        let finalization = self
-            .completion
-            .map(|completion| completion.finalization_state())
-            .unwrap_or("unknown");
-        let mut lines = vec![
-            format!("Cook outcome: {}", self.state),
-            format!(
-                "Candidate: {candidate} ({}; {})",
-                self.candidate_state.as_str(),
-                self.candidate_context
-            ),
-            format!("Gates: {}", self.gate_state.unwrap_or("not_run")),
-            format!("PR finalization: {finalization}"),
-        ];
-        if let Some(pr_url) = self.completion.and_then(|completion| completion.pr_url) {
-            lines.push(format!("Pull request: {pr_url}"));
-        }
-        if let Some(publication) = self.publication {
-            lines.push(format!("Publication: {publication}"));
-        }
-        lines
-    }
-
-    fn next_action(&self, run_id: &str) -> String {
-        self.completion
-            .and_then(|completion| completion.next_action)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                if self.publication == Some("completed") && self.candidate_state.is_available() {
-                    format!("homeboy agent-task review {run_id}")
-                } else {
-                    format!("homeboy agent-task diagnose {run_id} --full")
-                }
-            })
-    }
-}
-
-fn cook_outcome_summary<'a>(
-    payload: &'a Value,
-    state: &'a str,
-    candidate_state: CandidateState,
-    completion: Option<&'a CookCompletionSummary<'a>>,
-) -> Option<CookOutcomeSummary<'a>> {
-    let cook = value_at(payload, &["cook"]).filter(|cook| !cook.is_null());
-    let scoped_cook = value_at(payload, &["status_scope", "cook"]).filter(|cook| !cook.is_null());
-    if cook.is_none() && scoped_cook.is_none() && completion.is_none() {
+fn render_status_summary(payload: &Value) -> Option<String> {
+    if string_value(payload, &["schema"])? != "homeboy/control-plane-run/v1" {
         return None;
     }
-    Some(CookOutcomeSummary {
-        // Older durable records may have completion evidence but predate the
-        // Cook-state projection. A legal finalization continuation is the
-        // canonical `candidate_recoverable` Cook lifecycle state, not provider
-        // success.
-        state: if cook.is_none()
-            && completion
-                .is_some_and(|completion| completion.state == "candidate_awaiting_finalization")
-        {
-            "candidate_recoverable"
-        } else {
-            state
-        },
-        publication: string_value(payload, &["cook", "publication"]),
-        candidate_state,
-        gate_state: string_value(payload, &["execution_states", "gate", "state"]),
-        completion,
-        candidate_context: status_scope_candidate_context(payload),
-    })
+    let run_id = string_value(payload, &["run"])?;
+    let state = string_value(payload, &["state"]).unwrap_or("unknown");
+    let mut lines = vec![
+        "Agent task status".to_string(),
+        format!("Status: {state}"),
+        format!("Run: {run_id}"),
+    ];
+    if let Some(mission) = string_value(payload, &["mission"]) {
+        lines.push(format!("Mission: {mission}"));
+    }
+    if let Some(candidate) = string_value(payload, &["candidate", "state"]) {
+        lines.push(format!("Candidate: {candidate}"));
+    }
+    if let Some(gates) = payload.get("gates").and_then(Value::as_array) {
+        let rendered = gates
+            .iter()
+            .filter_map(|gate| string_value(gate, &["state"]))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !rendered.is_empty() {
+            lines.push(format!("Gates: {rendered}"));
+        }
+    }
+    if let Some(publication) = string_value(payload, &["publication", "state"]) {
+        lines.push(format!("Publication: {publication}"));
+    }
+    if let Some(blocker) = string_value(payload, &["blocker", "message"]) {
+        lines.push(format!("Blocker: {blocker}"));
+    }
+    if string_value(payload, &["blocker", "retry", "disposition"])
+        == Some("automatic_reconciliation_scheduled")
+    {
+        let next_attempt_at = string_value(payload, &["blocker", "retry", "next_attempt_at"])
+            .unwrap_or("the recorded retry time");
+        lines.push(format!(
+            "Retry: automatic reconciliation scheduled for {next_attempt_at}; waiting is recommended"
+        ));
+    }
+    lines.push(format!(
+        "Artifacts: {}",
+        array_len(payload, &["artifacts"]).unwrap_or(0)
+    ));
+    lines.push(format!(
+        "Next: {}",
+        control_plane_next_action(payload, run_id)
+    ));
+    Some(finish(lines))
 }
 
-fn status_scope_candidate(payload: &Value) -> Option<CandidateState> {
-    let scope = payload.get("status_scope")?;
-    (string_value(scope, &["cook", "selection", "status"]) == Some("selected")).then(|| {
-        classify_candidates(&json!({
-            "canonical_candidate": scope.pointer("/cook/selection/candidate").unwrap_or(&Value::Null),
-        }))
-        .state()
-    })
-}
-
-fn status_scope_candidate_context(payload: &Value) -> String {
-    let Some(scope) = payload.get("status_scope") else {
-        return "legacy canonical".to_string();
+fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
+    if string_value(payload, &["blocker", "retry", "disposition"])
+        == Some("automatic_reconciliation_scheduled")
+    {
+        return format!("homeboy agent-task status {run_id} --watch");
+    }
+    if string_value(payload, &["blocker", "code"]) == Some("controller_failure")
+        && string_value(payload, &["candidate", "state"]) == Some("verification_pending")
+    {
+        let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
+        return format!("homeboy agent-task cook-continue {cook_id}");
+    }
+    const PREFERRED: [&str; 5] = ["reconcile", "resume", "retry", "review", "promote"];
+    let Some(actions) = payload
+        .pointer("/action_eligibility/actions")
+        .and_then(Value::as_array)
+    else {
+        return format!("homeboy agent-task logs {run_id}");
     };
-    match string_value(scope, &["cook", "selection", "status"]).unwrap_or("unavailable") {
-        "selected" => format!(
-            "Cook-wide selected candidate run {}",
-            string_value(scope, &["cook", "selection", "run_id"]).unwrap_or("unknown")
-        ),
-        "none" => "Cook-wide selection: none".to_string(),
-        _ => "Cook-wide selection: unavailable".to_string(),
-    }
-}
-
-/// The Cook-level publication facts, projected from the `cook_completion`
-/// record `agent-task diagnose` already reads. The record is attached only to
-/// Cook attempts, so non-Cook agent-task runs render exactly as before (#12571).
-struct CookCompletionSummary<'a> {
-    state: &'a str,
-    finalization_state: Option<&'a str>,
-    finalization_requested: bool,
-    pr_finalized: bool,
-    pr_url: Option<&'a str>,
-    next_action: Option<&'a str>,
-}
-
-impl CookCompletionSummary<'_> {
-    fn finalization_state(&self) -> &str {
-        if self.pr_finalized {
-            "finalized"
-        } else if !self.finalization_requested {
-            "not_requested"
-        } else {
-            self.finalization_state.unwrap_or("not_finalized")
+    for name in PREFERRED {
+        if actions.iter().any(|action| {
+            action.get("action").and_then(Value::as_str) == Some(name)
+                && action.get("availability").and_then(Value::as_str) == Some("available")
+        }) {
+            return format!("homeboy agent-task {name} {run_id}");
         }
     }
-}
-
-fn cook_completion_summary(payload: &Value) -> Option<CookCompletionSummary<'_>> {
-    let completion = value_at(payload, &["cook_completion"])
-        .or_else(|| value_at(payload, &["status_scope", "cook", "completion"]))?;
-    Some(CookCompletionSummary {
-        state: string_value(completion, &["state"]).unwrap_or("unknown"),
-        finalization_state: string_value(payload, &["execution_states", "finalization", "state"])
-            .or_else(|| string_value(payload, &["cook_finalization", "status"]))
-            .or_else(|| string_value(payload, &["metadata", "cook_finalization", "status"]))
-            .or_else(|| string_value(payload, &["status_scope", "cook", "finalization", "status"])),
-        finalization_requested: value_at(completion, &["finalization_requested"])
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        pr_finalized: value_at(completion, &["pr_finalized"])
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        pr_url: cook_pr_url(payload),
-        next_action: string_value(completion, &["next_action", "command"]),
-    })
-}
-
-/// The pull request this Cook published, read from the projected `pr_url` the
-/// status payload carries and, failing that, from the same durable finalization
-/// receipts that make a candidate `finalized`.
-fn cook_pr_url(payload: &Value) -> Option<&str> {
-    let url = string_value(payload, &["pr_url"])
-        .or_else(|| receipt_pr_url(payload, &["cook_finalization"]))
-        .or_else(|| receipt_pr_url(payload, &["metadata", "cook_finalization"]))
-        .or_else(|| receipt_pr_url(payload, &["finalization"]))
-        .or_else(|| receipt_pr_url(payload, &["status_scope", "cook", "finalization"]))?
-        .trim();
-    (!url.is_empty()).then_some(url)
-}
-
-fn receipt_pr_url<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
-    let receipt = value_at(payload, path)?;
-    string_value(receipt, &["pr_url"]).or_else(|| string_value(receipt, &["pull_request_url"]))
-}
-
-fn is_unmaterialized_cook_admission(payload: &Value) -> bool {
-    payload["metadata"]["unmaterialized_cook_admission"].is_object()
-}
-
-fn is_transport_proxy(payload: &Value) -> bool {
-    payload.get("transport_recovery").is_some()
-        || string_value(payload, &["metadata", "kind"])
-            .is_some_and(|kind| kind.ends_with("_controller_proxy"))
-}
-
-fn transport_proxy_next_action(payload: &Value) -> Option<String> {
-    if let Some(command) = string_value(payload, &["transport_recovery", "command"]) {
-        return Some(command.to_string());
-    }
-    if !is_transport_proxy(payload) {
-        return None;
-    }
-    let runner_id = string_value(payload, &["metadata", "runner_id"])?;
-    let job_id = string_value(payload, &["metadata", "runner_job_id"])
-        .or_else(|| string_value(payload, &["metadata", "runner_execution_record", "job_id"]));
-    Some(match job_id {
-        Some(job_id) => format!("homeboy runner job logs {runner_id} {job_id} --follow"),
-        None => format!("homeboy runner connect {runner_id}"),
-    })
+    format!("homeboy agent-task logs {run_id}")
 }
 
 fn render_logs_summary(payload: &Value) -> Option<String> {
-    let run_id = string_value(payload, &["run_id"])?;
+    if string_value(payload, &["schema"])? != "homeboy/control-plane-event-page/v1" {
+        return None;
+    }
+    let run_id = string_value(payload, &["run"])?;
     let event_count = array_len(payload, &["events"]).unwrap_or(0);
     let mut lines = vec![
         "Agent task logs".to_string(),
@@ -651,7 +573,10 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .and_then(|_| usize_value(payload, &["aggregate_review", "summary", "failed"]))
         .unwrap_or(0);
     let metrics = code_production_metrics(payload);
-    let promotable = metrics.candidate_state == CandidateState::PatchAvailable;
+    let promotable = matches!(
+        metrics.candidate_state,
+        CandidateState::ApplyReady | CandidateState::PatchAvailable
+    );
     let patch = promotable
         .then(|| string_value(payload, &["promotion_candidates", "0", "artifact_id"]))
         .flatten();
@@ -661,11 +586,21 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .then(|| command_line(payload, &["promotion_candidates", "0", "command"]))
         .flatten();
 
+    let target_applied = payload
+        .pointer("/execution_states/promotion/patch_promoted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let verified = payload
+        .pointer("/execution_states/promotion/verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let outcome = if metrics.candidate_state == CandidateState::Finalized {
         "pull request finalized"
-    } else if metrics.candidate_state == CandidateState::Promoted {
+    } else if target_applied && verified {
+        "patch promoted and verified"
+    } else if target_applied {
         "patch promoted"
-    } else if promotable {
+    } else if promotable || metrics.non_empty_patches > 0 {
         "patch produced, not promoted"
     } else if raw_apply_candidates > 0 {
         "no-op: patch artifacts produced but empty"
@@ -682,6 +617,9 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         format!("Outcome: {outcome}"),
     ];
     lines.extend(code_production_lines(&metrics));
+    if let Some(line) = target_application_line(payload) {
+        lines.push(line);
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -696,6 +634,28 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: {next}"));
     }
     Some(finish(lines))
+}
+
+fn target_application_line(payload: &Value) -> Option<String> {
+    let promotion = value_at(payload, &["execution_states", "promotion"])?;
+    let target = string_value(promotion, &["target", "worktree"]).unwrap_or("not declared");
+    let target_state = string_value(promotion, &["target", "state"]).unwrap_or("not_applied");
+    let fingerprint = promotion
+        .pointer("/target/candidate_fingerprint_matches")
+        .and_then(Value::as_bool)
+        .map(|matches| if matches { "matches" } else { "does not match" })
+        .unwrap_or("unknown");
+    let verification = promotion
+        .get("verified")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            (string_value(promotion, &["verification_phase"]) == Some("pre_apply")).then_some(false)
+        })
+        .map(|verified| if verified { "verified" } else { "not verified" })
+        .unwrap_or("unknown");
+    Some(format!(
+        "Target application: {target_state} (worktree: {target}; candidate fingerprint: {fingerprint}; verification: {verification})"
+    ))
 }
 
 fn first_actionable_diagnostic(payload: &Value) -> Option<&str> {
@@ -718,6 +678,7 @@ fn first_diagnostic_message<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a
 
 fn aggregate_outcome_count(payload: &Value) -> Option<usize> {
     array_len(payload, &["aggregate", "outcomes"])
+        .or_else(|| usize_value(payload, &["durable_candidate", "outcome_count"]))
 }
 
 fn aggregate_artifact_count(payload: &Value) -> usize {
@@ -871,23 +832,6 @@ fn effective_run_state(
     }
 }
 
-fn status_attempted_task_count(payload: &Value) -> usize {
-    value_at(payload, &["tasks"])
-        .and_then(Value::as_array)
-        .map(|tasks| {
-            tasks
-                .iter()
-                .filter(|task| {
-                    matches!(
-                        string_value(task, &["state"]),
-                        Some("running" | "succeeded" | "failed" | "cancelled" | "timed_out")
-                    )
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 fn first_string<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
     value_at(payload, path)?.as_array()?.first()?.as_str()
 }
@@ -916,6 +860,25 @@ fn finish(lines: Vec<String>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cook_preview_summary_renders_the_terminal_preview_payload() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": { "requested": "local" },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 2 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        assert_eq!(
+            render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
+            Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+        );
+    }
 
     #[test]
     fn providers_summary_presents_selection_without_calling_it_blocked() {
@@ -965,6 +928,58 @@ mod tests {
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn cook_summary_marks_authoritative_candidate_counts_unavailable() {
+        let payload = json!({
+            "run_id": "candidate-read-unavailable",
+            "status": "candidate_recoverable",
+            "durable_candidate": {
+                "status": "unavailable",
+                "reason": "the authoritative observation has no aggregate"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(
+            summary.contains("Tasks planned: unavailable\n"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Tasks attempted: unavailable\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("Artifacts: unavailable\n"), "{summary}");
+        assert!(summary.contains(
+            "Candidate evidence: unavailable (the authoritative observation has no aggregate)\n"
+        ));
+        assert!(!summary.contains("Candidate state: unknown"), "{summary}");
+    }
+
+    #[test]
+    fn cook_summary_prefers_durable_provider_executions_over_outcomes() {
+        let payload = json!({
+            "run_id": "candidate-after-retries",
+            "status": "candidate_recoverable",
+            "durable_candidate": {
+                "status": "available",
+                "outcome_count": 1,
+                "provider_execution_count": 3,
+                "canonical_candidate": {
+                    "schema": "homeboy/agent-task-candidate/v1",
+                    "state": "patch_available",
+                    "provider_executions": 3,
+                    "counts": { "patch_available": 1 },
+                    "scan": {}
+                }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Tasks attempted: 3\n"), "{summary}");
     }
 
     #[test]
@@ -1243,15 +1258,14 @@ mod tests {
     }
 
     #[test]
-    fn review_summary_uses_the_promoted_candidate_fingerprint() {
-        // A promoted candidate is no longer an apply candidate, but its durable
-        // promotion fingerprint remains the authoritative review summary source.
+    fn review_summary_uses_a_target_applied_candidate_fingerprint() {
+        // Target application is independent from retained candidate selection.
         let payload = json!({
             "run_id": "agent-task-11805",
             "state": "succeeded",
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
+                "state": "apply_ready",
                 "diff_bytes": 0,
                 "counts": { "patch_available": 1 },
                 "scan": { "degraded": false }
@@ -1262,15 +1276,61 @@ mod tests {
                 "size_bytes": 7635,
                 "changed_files": ["a.rs", "b.rs", "c.rs"]
             },
+            "execution_states": {
+                "promotion": {
+                    "patch_promoted": true,
+                    "verified": true,
+                    "target": { "state": "applied", "worktree": "fixture@target", "candidate_fingerprint_matches": true }
+                }
+            },
             "aggregate_review": { "summary": { "apply_candidates": 0, "failed": 0 } },
             "next_actions": ["finalize the pull request"]
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
 
-        assert!(summary.contains("Outcome: patch promoted\n"));
+        assert!(summary.contains("Outcome: patch promoted and verified\n"));
+        assert!(summary.contains("Target application: applied (worktree: fixture@target; candidate fingerprint: matches; verification: verified)\n"));
         assert!(summary.contains("Changed files: 3\n"));
         assert!(summary.contains("Diff bytes: 7635\n"));
+    }
+
+    #[test]
+    fn review_summary_keeps_a_pre_apply_candidate_out_of_the_promoted_outcome() {
+        let payload = json!({
+            "run_id": "retained-candidate",
+            "state": "partial_recoverable",
+            "canonical_candidate": {
+                "schema": "homeboy/agent-task-candidate/v1",
+                "state": "apply_ready",
+                "counts": { "patch_available": 1 }, "scan": { "degraded": false }
+            },
+            "selected_candidate": {
+                "status": "verification_pending",
+                "artifact": { "id": "candidate", "kind": "patch" },
+                "size_bytes": 7635,
+                "changed_files": ["a.rs", "b.rs", "c.rs"]
+            },
+            "execution_states": {
+                "promotion": {
+                    "state": "verification_pending",
+                    "patch_promoted": false,
+                    "verified": false,
+                    "verification_phase": "pre_apply",
+                    "target": { "state": "not_applied", "worktree": "fixture@clean-target", "candidate_fingerprint_matches": false }
+                }
+            },
+            "aggregate_review": { "summary": { "apply_candidates": 1, "failed": 0 } }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(
+            summary.contains("Outcome: patch produced, not promoted\n"),
+            "{summary}"
+        );
+        assert!(!summary.contains("Outcome: patch promoted\n"), "{summary}");
+        assert!(summary.contains("Target application: not_applied (worktree: fixture@clean-target; candidate fingerprint: does not match; verification: not verified)\n"), "{summary}");
     }
 
     #[test]
@@ -1298,11 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_required_timeout_recovery_has_matching_status_and_review_inventory() {
-        // Three providers timed out from the scheduler's perspective but each
-        // deferred cleanup harvested a distinct durable patch. There are no
-        // normalized task entries, which previously made status say zero tasks
-        // while review discarded all three candidates.
+    fn selection_required_timeout_recovery_keeps_review_inventory() {
         let candidates = [
             ("timeout-recovered-1", 32_318, 2),
             ("timeout-recovered-2", 32_318, 3),
@@ -1323,44 +1379,31 @@ mod tests {
             })
         })
         .collect::<Vec<_>>();
-        let aggregate = json!({
-            "outcomes": [{ "task_id": "cook", "artifacts": candidates }],
-        });
-        let status = json!({
-            "run_id": "selection-required",
-            "state": "selection_required",
-            "tasks": [],
-            "metadata": { "provider_executions_consumed": 3 },
-            "aggregate": aggregate,
-        });
         let review = json!({
             "run_id": "selection-required",
             "state": "partial_recoverable",
             "record": { "metadata": { "provider_executions_consumed": 3 } },
-            "aggregate": status["aggregate"].clone(),
+            "aggregate": { "outcomes": [{ "task_id": "cook", "artifacts": candidates }] },
             "aggregate_review": { "summary": { "apply_candidates": 3, "failed": 0 } },
         });
 
-        let status_summary =
-            render_agent_task_summary(AgentTaskSummaryKind::Status, &status).expect("status");
         let review_summary =
             render_agent_task_summary(AgentTaskSummaryKind::Review, &review).expect("review");
-
-        for summary in [&status_summary, &review_summary] {
-            assert!(
-                summary.contains("Patch candidates: 3 non-empty / 0 empty\n"),
-                "{summary}"
-            );
-            assert!(
-                summary.contains("Candidate state: patch_available\n"),
-                "{summary}"
-            );
-            assert!(summary.contains("Changed files: 9\n"), "{summary}");
-            assert!(summary.contains("Diff bytes: 97048\n"), "{summary}");
-        }
         assert!(
-            status_summary.contains("Tasks attempted: 3\n"),
-            "{status_summary}"
+            review_summary.contains("Patch candidates: 3 non-empty / 0 empty\n"),
+            "{review_summary}"
+        );
+        assert!(
+            review_summary.contains("Candidate state: patch_available\n"),
+            "{review_summary}"
+        );
+        assert!(
+            review_summary.contains("Changed files: 9\n"),
+            "{review_summary}"
+        );
+        assert!(
+            review_summary.contains("Diff bytes: 97048\n"),
+            "{review_summary}"
         );
     }
 
@@ -1643,13 +1686,13 @@ mod tests {
     }
 
     #[test]
-    fn status_summary_labels_the_subject_lifecycle_state() {
+    fn status_summary_reads_control_plane_run() {
         for state in ["queued", "running", "failed", "succeeded"] {
             let payload = json!({
-                "run_id": "homeboy-4345",
+                "schema": "homeboy/control-plane-run/v1",
+                "run": "homeboy-4345",
                 "state": state,
-                "tasks": [{ "task_id": "homeboy-4345" }],
-                "artifact_refs": []
+                "artifacts": []
             });
 
             let summary =
@@ -1661,490 +1704,212 @@ mod tests {
                 )),
                 "{summary}"
             );
-            assert!(summary.contains("Tasks planned: 1\n"));
-            assert!(summary.contains("Tasks attempted: 0\n"));
-            assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty\n"));
-            assert!(summary.contains("Artifacts: 0\n"));
-            if state == "queued" {
-                assert!(summary.contains("Next: homeboy agent-task run homeboy-4345\n"));
-            }
-            // A run with no Cook completion record is not a Cook, so the
-            // publication lines never appear for it (#12571).
-            assert!(!summary.contains("Cook completion:"), "{summary}");
-            assert!(!summary.contains("PR finalized:"), "{summary}");
+            assert!(summary.contains("Artifacts: 0\n"), "{summary}");
+            assert!(
+                summary.contains("Next: homeboy agent-task logs homeboy-4345\n"),
+                "{summary}"
+            );
+            assert!(!summary.contains("status_scope"), "{summary}");
+            assert!(!summary.contains("Cook outcome:"), "{summary}");
         }
     }
 
     #[test]
-    fn unmaterialized_admission_status_prescribes_resume_not_run() {
+    fn status_summary_uses_control_plane_action_eligibility() {
         let payload = json!({
-            "run_id": "unmaterialized-cook",
-            "state": "blocked_runner_unavailable",
-            "tasks": [],
-            "artifact_refs": [],
-            "metadata": {
-                "unmaterialized_cook_admission": {
-                    "commands": {
-                        "status": "homeboy agent-task status unmaterialized-cook",
-                        "watch": "homeboy agent-task status unmaterialized-cook --watch",
-                        "cancel": "homeboy agent-task cancel unmaterialized-cook",
-                        "resume": "homeboy agent-task resume unmaterialized-cook"
-                    }
-                }
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "unmaterialized-cook",
+            "state": "queued",
+            "artifacts": [],
+            "action_eligibility": {
+                "schema": "homeboy/control-plane-action-eligibility/v1",
+                "run": "unmaterialized-cook",
+                "actions": [{
+                    "action": "resume",
+                    "availability": "available",
+                    "reason": "queued run can re-enter execution",
+                    "confirmation": "none",
+                    "idempotent": true,
+                    "requires_revalidation": true,
+                    "result_resource_type": "agent_task_run"
+                }]
             }
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
         assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
         assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
     }
 
     #[test]
-    fn status_summary_leads_with_a_gated_candidate_whose_finalization_failed() {
-        // A provider success is subordinate evidence when a promoted, gated
-        // candidate fails publication. This matches the durable shape from
-        // agent-task-25f..., where recovery finalization remains legal.
+    fn status_summary_waits_for_a_scheduled_unmaterialized_admission_retry() {
         let payload = json!({
-            "run_id": "agent-task-25f-fixture",
-            "state": "finalization_failed",
-            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
-            "artifact_refs": [{ "task_id": "cook", "kind": "patch", "uri": "artifact://cook/patch.diff", "size_bytes": 32318 }],
-            "cook": { "state": "finalization_failed", "publication": "blocked" },
-            "canonical_candidate": {
-                "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
-                "counts": {}, "scan": {}
-            },
-            "execution_states": {
-                "candidate": { "state": "promoted_finalization_failed" },
-                "gate": { "state": "passed" },
-                "finalization": { "state": "finalization_failed" },
-                "provider": [{ "task_id": "cook", "state": "succeeded" }]
-            },
-            "cook_completion": {
-                "schema": "homeboy/agent-task-cook-completion/v1",
-                "candidate_produced": true,
-                "finalization_requested": true,
-                "pr_finalized": false,
-                "state": "candidate_awaiting_finalization",
-                "next_action": {
-                    "action": "finalize_pr",
-                    "command": "homeboy agent-task finalize-pr --recover agent-task-25f-fixture"
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "unmaterialized-cook",
+            "state": "queued",
+            "blocker": {
+                "code": "queued",
+                "state": "queued",
+                "message": "Lab admission is waiting for runner reconciliation",
+                "reason": "Lab admission is waiting for runner reconciliation",
+                "retry": {
+                    "policy": "bounded_exponential",
+                    "attempts": 3,
+                    "max_attempts": 20,
+                    "next_attempt_at": "2099-01-01T00:00:00+00:00",
+                    "disposition": "automatic_reconciliation_scheduled"
                 }
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(
-            summary.starts_with(
-                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (promoted; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
-            ),
-            "{summary}"
-        );
-        assert!(!summary.contains("Status: succeeded"), "{summary}");
-        assert!(summary.contains("Candidate state: promoted_finalization_failed\n"));
-        assert!(summary.contains("Publication: blocked\n"));
-        assert!(summary.contains("Provider/task evidence:\n"));
-        assert!(summary.contains("Tasks attempted: 1\n"));
-        assert!(summary
-            .contains("Next: homeboy agent-task finalize-pr --recover agent-task-25f-fixture\n"));
-        assert!(!summary.contains("Pull request:"), "{summary}");
-    }
-
-    #[test]
-    fn status_summary_surfaces_the_finalized_pull_request() {
-        let payload = json!({
-            "run_id": "agent-task-finalized",
-            "state": "succeeded",
-            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
-            "artifact_refs": [{ "task_id": "cook", "kind": "patch", "uri": "artifact://cook/patch.diff", "size_bytes": 32318 }],
-            "cook": { "state": "review_ready", "publication": "completed" },
-            "canonical_candidate": {
-                "schema": "homeboy/agent-task-candidate/v1",
-                "state": "finalized",
-                "counts": {}, "scan": {}
             },
-            "execution_states": {
-                "candidate": { "state": "finalized" },
-                "gate": { "state": "passed" },
-                "finalization": { "state": "review_ready" }
-            },
-            "cook_completion": {
-                "schema": "homeboy/agent-task-cook-completion/v1",
-                "candidate_produced": true,
-                "finalization_requested": true,
-                "pr_finalized": true,
-                "state": "pr_finalized"
-            },
-            "pr_url": "https://example.test/pull/1"
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.starts_with(
-            "Agent task status\nCook outcome: review_ready\nCandidate: yes (finalized; legacy canonical)\nGates: passed\nPR finalization: finalized\nPull request: https://example.test/pull/1"
-        ));
-        assert!(summary.contains("Pull request: https://example.test/pull/1\n"));
-        assert!(summary.contains("Next: homeboy agent-task review agent-task-finalized\n"));
-    }
-
-    #[test]
-    fn status_summary_separates_selected_cook_candidate_from_cancelled_retry() {
-        let payload = json!({
-            "run_id": "retry-run",
-            "state": "cancelled",
-            "tasks": [],
-            "artifact_refs": [],
-            "cook": { "state": "review_ready", "publication": "completed" },
-            "canonical_candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {}, "scan": {} },
-            "cook_completion": { "candidate_produced": true, "finalization_requested": true, "pr_finalized": true, "state": "pr_finalized" },
-            "status_scope": {
-                "schema": "homeboy/agent-task-status-scope/v1",
-                "queried_attempt": { "run_id": "retry-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {}, "scan": {} } },
-                "cook": { "selection": { "status": "selected", "run_id": "historical-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "finalized", "counts": {}, "scan": {} } } }
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains(
-            "Candidate: yes (finalized; Cook-wide selected candidate run historical-run)"
-        ));
-        assert!(summary.contains("Queried attempt candidate: unknown (run retry-run)"));
-    }
-
-    #[test]
-    fn status_command_payload_without_cook_evidence_keeps_the_ordinary_summary() {
-        let payload = json!({
-            "run_id": "ordinary-run",
-            "state": "queued",
-            "tasks": [],
-            "artifact_refs": []
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.starts_with("Agent task status\nStatus: queued\nRun: ordinary-run\n"));
-        assert!(!summary.contains("Cook outcome:"), "{summary}");
-        assert!(!summary.contains("Queried attempt candidate:"), "{summary}");
-    }
-
-    #[test]
-    fn bridge_status_summary_uses_scope_without_legacy_cook_fields() {
-        let payload = json!({
-            "run_id": "retry-run",
-            "state": "cancelled",
-            "tasks": [],
-            "artifact_refs": [],
-            "status_scope": {
-                "schema": "homeboy/agent-task-status-scope/v1",
-                "queried_attempt": { "run_id": "retry-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {}, "scan": {} } },
-                "cook": {
-                    "selection": { "status": "selected", "run_id": "historical-run", "candidate": { "schema": "homeboy/agent-task-candidate/v1", "state": "finalized", "counts": {}, "scan": {} } },
-                    "completion": { "scope": "cook", "candidate_produced": true, "finalization_requested": true, "pr_finalized": true, "state": "pr_finalized" },
-                    "finalization": { "status": "review_ready", "pr_url": "https://example.test/pull/12971" }
-                }
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(
-            summary.contains("Cook outcome: review_ready\n"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains(
-                "Candidate: yes (finalized; Cook-wide selected candidate run historical-run)"
-            ),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("Queried attempt candidate: unknown (run retry-run)"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("Pull request: https://example.test/pull/12971\n"),
-            "{summary}"
-        );
-    }
-
-    #[test]
-    fn status_summary_reads_the_pull_request_from_the_durable_finalization_receipt() {
-        let payload = json!({
-            "run_id": "agent-task-receipt",
-            "state": "succeeded",
-            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
-            "artifact_refs": [],
-            "cook_completion": {
-                "schema": "homeboy/agent-task-cook-completion/v1",
-                "candidate_produced": true,
-                "finalization_requested": true,
-                "pr_finalized": true,
-                "state": "pr_finalized"
-            },
-            "metadata": {
-                "cook_finalization": { "status": "review_ready", "pr_url": "https://example.test/pull/2" }
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains("PR finalization: finalized\n"));
-        assert!(summary.contains("Pull request: https://example.test/pull/2\n"));
-    }
-
-    #[test]
-    fn status_summary_keeps_a_no_finalize_cook_reported_as_succeeded() {
-        // `--no-finalize` remains a successful Cook outcome without claiming a
-        // pull request was finalized.
-        let payload = json!({
-            "run_id": "agent-task-no-finalize",
-            "state": "succeeded",
-            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
-            "artifact_refs": [{ "task_id": "cook", "kind": "patch", "uri": "artifact://cook/patch.diff", "size_bytes": 32318 }],
-            "cook_completion": {
-                "schema": "homeboy/agent-task-cook-completion/v1",
-                "candidate_produced": true,
-                "finalization_requested": false,
-                "pr_finalized": false,
-                "state": "candidate_produced"
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains("Cook outcome: succeeded\n"), "{summary}");
-        assert!(summary.contains("PR finalization: not_requested\n"));
-    }
-
-    #[test]
-    fn status_summary_never_advertises_provider_run_for_transport_proxy() {
-        let payload = json!({
-            "run_id": "homeboy-transport",
-            "state": "queued",
-            "tasks": [{ "task_id": "homeboy-transport" }],
-            "artifact_refs": [],
-            "metadata": {
-                "kind": "remote_controller_proxy",
-                "runner_id": "runner-transport-42"
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(!summary.contains("homeboy agent-task run homeboy-transport"));
-        assert!(summary.contains("Next: homeboy runner connect runner-transport-42"));
-    }
-
-    #[test]
-    fn status_summary_uses_authoritative_transport_recovery_guidance() {
-        let payload = json!({
-            "run_id": "homeboy-transport",
-            "state": "queued",
-            "tasks": [{ "task_id": "homeboy-transport" }],
-            "artifact_refs": [],
-            "transport_recovery": {
-                "condition": "runner_busy_waiting_for_capacity",
-                "command": "homeboy runner status runner-transport-42"
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains("Next: homeboy runner status runner-transport-42"));
-        assert!(!summary.contains("homeboy runner connect runner-transport-42"));
-    }
-
-    #[test]
-    fn status_summary_agrees_no_patch_candidates_means_logs_next_step() {
-        let payload = json!({
-            "run_id": "agent-task-22bb7835",
-            "state": "failed",
-            "aggregate_path": "/tmp/aggregate.json",
-            "tasks": [
-                { "task_id": "cell-1", "state": "failed" },
-                { "task_id": "cell-2", "state": "failed" },
-                { "task_id": "cell-3", "state": "failed" },
-                { "task_id": "cell-4", "state": "failed" }
-            ],
-            "artifact_refs": []
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains("Tasks planned: 4\n"));
-        assert!(summary.contains("Tasks attempted: 4\n"));
-        assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty\n"));
-        assert!(summary.contains("Next: homeboy agent-task logs agent-task-22bb7835\n"));
-        assert!(!summary.contains("Next: homeboy agent-task review"));
-    }
-
-    #[test]
-    fn status_summary_surfaces_code_production_breakdown_alongside_raw_artifact_count() {
-        let mut artifact_refs = vec![
-            json!({ "task_id": "cell-1", "kind": "patch", "uri": "artifact://cell-1/patch.diff", "size_bytes": 512 }),
-            json!({ "task_id": "cell-2", "kind": "patch", "uri": "artifact://cell-2/patch.diff", "size_bytes": 0 }),
-        ];
-        for index in 0..40 {
-            artifact_refs.push(json!({
-                "task_id": "cell-1",
-                "kind": "provider-transcript",
-                "uri": format!("artifact://cell-1/transcript-{index}.log"),
-                "size_bytes": 1024
-            }));
-        }
-
-        let payload = json!({
-            "run_id": "agent-task-deadbeef",
-            "state": "succeeded",
-            "tasks": [{ "task_id": "cell-1", "state": "succeeded" }],
-            "artifact_refs": artifact_refs
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains("Artifacts: 42\n"));
-        assert!(summary.contains("Patch candidates: 1 non-empty / 1 empty\n"));
-        assert!(summary.contains("Diff bytes: 512\n"));
-    }
-
-    #[test]
-    fn status_summary_classifies_recovered_finalized_patch_refs_like_review() {
-        let patch = json!({
-            "id": "patch",
-            "kind": "patch",
-            "url": "homeboy://agent-task/run/recovered/artifacts#task=cook&artifact=patch",
-            "size_bytes": 683500,
-            "sha256": "fe060d978ff0d4ad0705a759308728ae29250c1b07587fc5ba8d0223262d9deb",
-            "metadata": {
-                "executor_artifact_finalized": true,
-                "source_provenance": { "runner_id": "homeboy-lab" }
-            }
-        });
-        let payload = json!({
-            "run_id": "recovered",
-            "state": "succeeded",
-            "aggregate_path": "/tmp/recovered-aggregate.json",
-            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
-            "artifact_refs": [
-                { "task_id": "cook", "kind": "patch", "uri": patch["url"], "size_bytes": 683500 },
-                { "task_id": "cook", "kind": "transcript", "uri": "file:///tmp/transcript", "size_bytes": 12 },
-                { "task_id": "cook", "kind": "json", "uri": "file:///tmp/result", "size_bytes": 4 },
-                { "task_id": "cook", "kind": "runtime_log", "uri": "file:///tmp/runtime", "size_bytes": 20 }
-            ],
-            "aggregate": {
-                "outcomes": [{
-                    "artifacts": [patch],
-                    "typed_artifacts": [{
-                        "name": "patch",
-                        "type": "file",
-                        "artifact": { "id": "patch", "kind": "patch", "path": "/tmp/finalized-patch", "size_bytes": 683500 }
-                    }]
+            "action_eligibility": {
+                "actions": [{
+                    "action": "resume",
+                    "availability": "available",
+                    "reason": "resume is legal but explicitly re-arms this admission",
+                    "confirmation": "none",
+                    "idempotent": true,
+                    "requires_revalidation": true,
+                    "result_resource_type": "agent_task_run"
                 }]
             }
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
 
-        assert!(summary.contains("Status: succeeded\n"));
-        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
-        assert!(summary.contains("Diff bytes: 683500\n"));
-        assert!(summary.contains("Artifacts: 4\n"));
-        assert!(summary.contains("Next: homeboy agent-task review recovered\n"));
+        assert!(summary.contains("Retry: automatic reconciliation scheduled"));
+        assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
+        assert!(!summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
     }
 
     #[test]
-    fn lab_restart_summary_uses_the_32318_byte_canonical_mirror_not_a_stale_alias() {
+    fn status_summary_prioritizes_reconciliation_over_read_only_review() {
         let payload = json!({
-            "run_id": "lab-restarted",
-            "state": "succeeded",
-            "tasks": [{ "task_id": "cook-intelligence", "state": "succeeded" }],
-            "artifact_refs": [{ "task_id": "cook-intelligence", "kind": "patch", "uri": "runner-artifact://stale-alias" }],
-            "aggregate": { "outcomes": [{ "task_id": "cook-intelligence", "artifacts": [{
-                "id": "patch", "kind": "patch", "size_bytes": 32318,
-                "url": "homeboy://agent-task/run/lab-restarted/artifacts#task=cook-intelligence&artifact=patch",
-                "metadata": { "executor_artifact_finalized": true, "source_provenance": { "runner_id": "homeboy-lab" } }
-            }] }] }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains("Status: succeeded\n"));
-        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
-        assert!(summary.contains("Diff bytes: 32318\n"));
-        assert!(summary.contains("Next: homeboy agent-task review lab-restarted\n"));
-    }
-
-    #[test]
-    fn status_summary_flags_no_op_when_all_patch_artifacts_are_empty() {
-        let payload = json!({
-            "run_id": "agent-task-deadbeef",
-            "state": "succeeded",
-            "tasks": [{ "task_id": "cell-1", "state": "succeeded" }],
-            "artifact_refs": [
-                { "task_id": "cell-1", "kind": "patch", "uri": "artifact://cell-1/patch-1.diff", "size_bytes": 0 },
-                { "task_id": "cell-2", "kind": "patch", "uri": "artifact://cell-2/patch-2.diff", "size_bytes": 0 },
-                { "task_id": "cell-3", "kind": "patch", "uri": "artifact://cell-3/patch-3.diff", "size_bytes": 0 },
-                { "task_id": "cell-1", "kind": "provider-transcript", "uri": "artifact://cell-1/transcript.log", "size_bytes": 4096 }
-            ]
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains("Artifacts: 4\n"));
-        assert!(summary.contains("Patch candidates: 0 non-empty / 3 empty\n"));
-        assert!(summary.contains("Diff bytes: 0\n"));
-        assert!(summary.contains("Next: homeboy agent-task logs agent-task-deadbeef\n"));
-        assert!(!summary.contains("Next: homeboy agent-task review"));
-    }
-
-    #[test]
-    fn status_summary_surfaces_diagnostic_summary() {
-        let payload = json!({
-            "run_id": "agent-task-d1622a44",
-            "state": "failed",
-            "tasks": [{ "task_id": "agent-task-d1622a44", "state": "failed" }],
-            "artifact_refs": [],
-            "diagnostic_summary": {
-                "task_id": "agent-task-d1622a44",
-                "class": "provider_discovery",
-                "message": "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "stale-run",
+            "state": "running",
+            "action_eligibility": {
+                "actions": [
+                    { "action": "review", "availability": "available" },
+                    { "action": "reconcile", "availability": "available" }
+                ]
             }
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-
-        assert!(summary.contains(
-            "Diagnostic: Requested provider \"example-oauth\" is not registered. Registered provider plugins: []\n"
-        ));
+        assert!(summary.contains("Next: homeboy agent-task reconcile stale-run\n"));
     }
 
     #[test]
-    fn logs_summary_surfaces_diagnostic_summary() {
+    fn status_summary_projects_control_plane_candidate_gates_and_publication() {
         let payload = json!({
-            "run_id": "agent-task-d1622a44",
+            "schema": "homeboy/control-plane-run/v1",
+            "mission": "agent-task-cook",
+            "run": "agent-task-cook-attempt-1",
+            "state": "candidate_recoverable",
+            "candidate": { "state": "apply_ready" },
+            "gates": [{ "id": "acceptance", "state": "passed" }],
+            "publication": { "state": "blocked" },
+            "blocker": { "message": "finalization failed" },
+            "artifacts": [{ "id": "patch", "kind": "patch", "uri": "homeboy://agent-task/run/agent-task-cook-attempt-1/artifacts#patch" }],
+            "action_eligibility": {
+                "schema": "homeboy/control-plane-action-eligibility/v1",
+                "run": "agent-task-cook-attempt-1",
+                "actions": [{
+                    "action": "review",
+                    "availability": "available",
+                    "reason": "review is a non-mutating read available for every durable run",
+                    "confirmation": "none",
+                    "idempotent": true,
+                    "requires_revalidation": true,
+                    "result_resource_type": "agent_task_review"
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(summary.contains("Mission: agent-task-cook\n"), "{summary}");
+        assert!(summary.contains("Candidate: apply_ready\n"), "{summary}");
+        assert!(summary.contains("Gates: passed\n"), "{summary}");
+        assert!(summary.contains("Publication: blocked\n"), "{summary}");
+        assert!(
+            summary.contains("Blocker: finalization failed\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("Artifacts: 1\n"), "{summary}");
+        assert!(
+            summary.contains("Next: homeboy agent-task review agent-task-cook-attempt-1\n"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn status_summary_routes_pending_cook_controller_failure_to_continuation() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "mission": "cook-14357",
+            "run": "cook-14357-attempt-1",
+            "state": "succeeded",
+            "candidate": { "state": "verification_pending" },
+            "blocker": {
+                "code": "controller_failure",
+                "message": "dependency hydration failed"
+            },
+            "artifacts": [],
+            "action_eligibility": {
+                "actions": [{
+                    "action": "review",
+                    "availability": "available"
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(
+            summary.contains("Next: homeboy agent-task cook-continue cook-14357\n"),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains("Next: homeboy agent-task review"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn status_summary_rejects_superseded_status_scope_payload() {
+        let payload = json!({
+            "run_id": "retry-run",
+            "state": "cancelled",
+            "status_scope": {
+                "schema": "homeboy/agent-task-status-scope/v1",
+                "queried_attempt": { "run_id": "retry-run" }
+            }
+        });
+        assert!(render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).is_none());
+    }
+
+    #[test]
+    fn logs_summary_reads_control_plane_event_page() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-event-page/v1",
+            "run": "agent-task-d1622a44",
             "events": [{
-                "task_id": "agent-task-d1622a44",
-                "state": "failed",
-                "attempt": 1,
-                "message": "Embedded agent runtime failed."
+                "schema": "homeboy/control-plane-event/v1",
+                "event": "agent-task-d1622a44:event:1",
+                "sequence": 1,
+                "run": "agent-task-d1622a44",
+                "kind": "task.state_changed",
+                "source": { "component": "agent-task" },
+                "data": { "state": "failed", "message": "Embedded agent runtime failed." }
             }],
-            "diagnostic_summary": {
-                "task_id": "agent-task-d1622a44",
-                "class": "provider_discovery",
-                "message": "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
-            }
+            "has_more": false
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Logs, &payload).unwrap();
-
         assert!(summary.starts_with("Agent task logs\nRun: agent-task-d1622a44\nEvents: 1\n"));
-        assert!(summary.contains(
-            "Diagnostic: Requested provider \"example-oauth\" is not registered. Registered provider plugins: []\n"
-        ));
+        assert!(render_agent_task_summary(
+            AgentTaskSummaryKind::Logs,
+            &json!({ "run_id": "agent-task-d1622a44", "events": [] })
+        )
+        .is_none());
     }
 
     #[test]

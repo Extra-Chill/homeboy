@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use homeboy_core::{Error, Result};
 
-use super::types::AgentTaskPromotionOptions;
+use super::types::AgentTaskPromotionRequest;
 
 pub(crate) struct CommittedChangesPatch {
     pub(crate) base_ref: String,
@@ -31,7 +31,7 @@ pub(crate) struct AdoptionMergeProof {
 }
 
 pub(crate) fn committed_changes_patch(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
 ) -> Result<Option<CommittedChangesPatch>> {
     let Some(worktree_path) = options.source_worktree_path.as_deref() else {
         return Ok(None);
@@ -317,7 +317,7 @@ fn resolve_candidate(cwd: &Path, requested: Option<&str>) -> Result<String> {
 }
 
 fn committed_changes_patch_path(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     sha256: &str,
 ) -> Result<PathBuf> {
     if let Some(parent) = options.source_path.as_deref().and_then(Path::parent) {

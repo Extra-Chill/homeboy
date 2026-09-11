@@ -342,6 +342,10 @@ fn reconcile_outcome(
                 | AgentTaskFailureClassification::Timeout
                 | AgentTaskFailureClassification::Stalled
                 | AgentTaskFailureClassification::RateLimited
+                | AgentTaskFailureClassification::ProviderAccountBlocked
+                | AgentTaskFailureClassification::ProviderQuotaExhausted
+                | AgentTaskFailureClassification::ProviderBillingBlocked
+                | AgentTaskFailureClassification::ProviderCredentialsExhausted
         )
     ) {
         return (
@@ -614,6 +618,28 @@ mod tests {
         assert_eq!(report.retry_plan[0].task_id, "retry");
         assert_eq!(report.issue_report_candidates[0].task_id, "issue");
         assert_eq!(report.review_candidates[0].task_id, "review");
+    }
+
+    #[test]
+    fn aggregate_treats_every_permanent_provider_account_rejection_as_retryable_elsewhere() {
+        for classification in [
+            AgentTaskFailureClassification::ProviderAccountBlocked,
+            AgentTaskFailureClassification::ProviderQuotaExhausted,
+            AgentTaskFailureClassification::ProviderBillingBlocked,
+            AgentTaskFailureClassification::ProviderCredentialsExhausted,
+        ] {
+            let report = aggregate_agent_task_outcomes(&[AgentTaskOutcome {
+                failure_classification: Some(classification),
+                ..outcome(
+                    "provider-rejection",
+                    AgentTaskOutcomeStatus::Failed,
+                    Vec::new(),
+                )
+            }]);
+
+            assert_eq!(report.summary.retry_candidates, 1, "{classification:?}");
+            assert_eq!(report.summary.review_candidates, 0, "{classification:?}");
+        }
     }
 
     #[test]

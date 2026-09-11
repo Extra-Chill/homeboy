@@ -6,19 +6,19 @@
 //! execution, and evidence functions.
 
 use homeboy_agents::agent_task_lifecycle::{
-    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
+    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationSubmission,
+    RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
-use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::workspace_claim::{
-    WorkspaceAuthorityStatus, WorkspaceClaim, WorkspaceClaimProtocol, WorkspaceIdentity,
-    WORKSPACE_CLAIM_CAPABILITY,
+use homeboy_core::workspace_claim::WorkspaceAuthorityStatus;
+use homeboy_runner_contract::{
+    WorkspaceClaim, WorkspaceClaimProtocol, WorkspaceIdentity, WORKSPACE_CLAIM_CAPABILITY,
 };
 
 /// The runner layer's `RunnerContinuationProvider`. Registered with core at startup.
@@ -46,6 +46,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
         runner_id: &str,
         workspace: WorkspaceIdentity,
         lifecycle_revision: u64,
+        deadline: std::time::Instant,
     ) -> Result<WorkspaceClaim> {
         let body = workspace_claim_post(
             runner_id,
@@ -55,6 +56,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
                 "lifecycle_revision": lifecycle_revision,
                 "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
             }),
+            deadline,
         )?;
         let claim: WorkspaceClaim = serde_json::from_value(
             body.get("claim").cloned().unwrap_or(Value::Null),
@@ -72,11 +74,17 @@ impl RunnerContinuationProvider for RunnerContinuation {
         Ok(claim)
     }
 
-    fn validate_workspace_claim(&self, runner_id: &str, claim: &WorkspaceClaim) -> Result<bool> {
+    fn validate_workspace_claim(
+        &self,
+        runner_id: &str,
+        claim: &WorkspaceClaim,
+        deadline: std::time::Instant,
+    ) -> Result<bool> {
         let body = workspace_claim_post(
             runner_id,
             "/workspace-claims/validate",
             json!({ "claim": claim }),
+            deadline,
         )?;
         body.get("valid").and_then(Value::as_bool).ok_or_else(|| {
             workspace_claim_error(
@@ -86,11 +94,17 @@ impl RunnerContinuationProvider for RunnerContinuation {
         })
     }
 
-    fn release_workspace_claim(&self, runner_id: &str, claim: &WorkspaceClaim) -> Result<()> {
+    fn release_workspace_claim(
+        &self,
+        runner_id: &str,
+        claim: &WorkspaceClaim,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
         let body = workspace_claim_post(
             runner_id,
             "/workspace-claims/release",
             json!({ "claim": claim }),
+            deadline,
         )?;
         if body.get("released").and_then(Value::as_bool) != Some(true) {
             return Err(workspace_claim_error(
@@ -113,6 +127,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
             runner_id,
             "/workspace-claims/authority",
             json!({ "workspace": workspace }),
+            std::time::Instant::now() + Duration::from_secs(30),
         )?;
         let status: WorkspaceAuthorityStatus = serde_json::from_value(
             body.get("status").cloned().unwrap_or(Value::Null),
@@ -186,6 +201,17 @@ impl RunnerContinuationProvider for RunnerContinuation {
         }
     }
 
+    fn runner_job_id_for_durable_run(
+        &self,
+        runner_id: &str,
+        durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(
+            super::lab::offload::accepted_runner_job_id(runner_id, durable_run_id)
+                .map(|job| job.id),
+        )
+    }
+
     fn is_runner_connected(&self, runner_id: &str) -> bool {
         // Preserve the original lifecycle semantics: only an affirmative
         // `connected == false` should be treated as disconnected. A status
@@ -232,12 +258,12 @@ impl RunnerContinuationProvider for RunnerContinuation {
         Ok(exit_code)
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        request: RemoteRunnerJobRequest,
+        submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
-        super::connection::submit_reverse_broker_job(runner_id, request)
+        super::connection::submit_runner_api_request(runner_id, submission)
     }
 
     fn lookup_reverse_broker_submission(
@@ -280,14 +306,13 @@ fn runner_authority_from_inventory(
     }
 }
 
-#[derive(Deserialize)]
-struct DaemonEnvelope {
-    success: bool,
-    data: Option<Value>,
-}
-
-fn workspace_claim_post(runner_id: &str, path: &str, payload: Value) -> Result<Value> {
-    let report = super::connection::status(runner_id)?;
+fn workspace_claim_post(
+    runner_id: &str,
+    path: &str,
+    payload: Value,
+    deadline: std::time::Instant,
+) -> Result<Value> {
+    let report = super::connection::status_until(runner_id, deadline)?;
     let session = report
         .session
         .filter(|_| report.connected)
@@ -296,7 +321,7 @@ fn workspace_claim_post(runner_id: &str, path: &str, payload: Value) -> Result<V
         let broker_url = session.broker_url.ok_or_else(|| {
             workspace_claim_error(runner_id, "reverse runner session has no broker endpoint")
         })?;
-        return reverse_workspace_claim_post(runner_id, &broker_url, path, payload);
+        return reverse_workspace_claim_post(runner_id, &broker_url, path, payload, deadline);
     }
     if session.mode != super::RunnerTunnelMode::DirectSsh {
         return Err(workspace_claim_error(
@@ -307,14 +332,7 @@ fn workspace_claim_post(runner_id: &str, path: &str, payload: Value) -> Result<V
     let local_url = session.local_url.ok_or_else(|| {
         workspace_claim_error(runner_id, "direct daemon session has no local endpoint")
     })?;
-    let client = Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| {
-            workspace_claim_error(runner_id, format!("build daemon client: {error}"))
-        })?;
-    let capabilities = daemon_get_json(&client, &local_url, "/capabilities", runner_id)?;
+    let capabilities = daemon_get_json(&local_url, "/capabilities", runner_id, deadline)?;
     let protocols: Vec<WorkspaceClaimProtocol> = serde_json::from_value(
         capabilities
             .get("capabilities")
@@ -332,7 +350,7 @@ fn workspace_claim_post(runner_id: &str, path: &str, payload: Value) -> Result<V
             "daemon does not advertise workspace claim capability v1",
         ));
     }
-    daemon_post_json(&client, &local_url, path, payload, runner_id)
+    daemon_post_json(&local_url, path, payload, runner_id, deadline)
 }
 
 fn reverse_workspace_claim_post(
@@ -340,14 +358,10 @@ fn reverse_workspace_claim_post(
     broker_url: &str,
     daemon_path: &str,
     payload: Value,
+    deadline: std::time::Instant,
 ) -> Result<Value> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| {
-            workspace_claim_error(runner_id, format!("build broker client: {error}"))
-        })?;
     let token = homeboy_core::broker_auth::broker_submit_token_for_runner(runner_id)?;
+    let client = workspace_claim_client(deadline, runner_id, false)?;
     let capabilities = client
         .get(format!(
             "{}/runner/workspace-claims/capabilities",
@@ -385,6 +399,7 @@ fn reverse_workspace_claim_post(
         ));
     }
     let operation = daemon_path.trim_start_matches("/workspace-claims/");
+    let client = workspace_claim_client(deadline, runner_id, false)?;
     let response = client
         .post(format!(
             "{}/runner/workspace-claims/{operation}",
@@ -404,7 +419,13 @@ fn reverse_workspace_claim_post(
     )
 }
 
-fn daemon_get_json(client: &Client, url: &str, path: &str, runner_id: &str) -> Result<Value> {
+fn daemon_get_json(
+    url: &str,
+    path: &str,
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<Value> {
+    let client = workspace_claim_client(deadline, runner_id, true)?;
     let response = client
         .get(format!("{}{}", url.trim_end_matches('/'), path))
         .send()
@@ -418,12 +439,13 @@ fn daemon_get_json(client: &Client, url: &str, path: &str, runner_id: &str) -> R
 }
 
 fn daemon_post_json(
-    client: &Client,
     url: &str,
     path: &str,
     payload: Value,
     runner_id: &str,
+    deadline: std::time::Instant,
 ) -> Result<Value> {
+    let client = workspace_claim_client(deadline, runner_id, true)?;
     let response = client
         .post(format!("{}{}", url.trim_end_matches('/'), path))
         .json(&payload)
@@ -432,6 +454,36 @@ fn daemon_post_json(
             workspace_claim_error(runner_id, format!("daemon claim request failed: {error}"))
         })?;
     daemon_response(response.status().as_u16(), response.text(), path, runner_id)
+}
+
+fn workspace_claim_client(
+    deadline: std::time::Instant,
+    runner_id: &str,
+    no_proxy: bool,
+) -> Result<Client> {
+    let timeout = remaining_workspace_claim_budget(deadline, runner_id)?;
+    let builder = if no_proxy {
+        Client::builder().no_proxy().timeout(timeout)
+    } else {
+        Client::builder().timeout(timeout)
+    };
+    builder.build().map_err(|error| {
+        workspace_claim_error(runner_id, format!("build workspace claim client: {error}"))
+    })
+}
+
+fn remaining_workspace_claim_budget(
+    deadline: std::time::Instant,
+    runner_id: &str,
+) -> Result<Duration> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .ok_or_else(|| {
+            workspace_claim_error(
+                runner_id,
+                "worktree inventory apply authority deadline exhausted",
+            )
+        })
 }
 
 fn daemon_response(
@@ -443,12 +495,13 @@ fn daemon_response(
     let body = body.map_err(|error| {
         workspace_claim_error(runner_id, format!("read daemon {path} response: {error}"))
     })?;
-    let envelope: DaemonEnvelope = serde_json::from_str(&body).map_err(|error| {
-        workspace_claim_error(
-            runner_id,
-            format!("malformed daemon {path} response: {error}"),
-        )
-    })?;
+    let envelope: crate::execution::DaemonEnvelope =
+        serde_json::from_str(&body).map_err(|error| {
+            workspace_claim_error(
+                runner_id,
+                format!("malformed daemon {path} response: {error}"),
+            )
+        })?;
     if status != 200 || !envelope.success {
         return Err(workspace_claim_error(
             runner_id,

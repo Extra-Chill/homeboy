@@ -17,8 +17,7 @@ use catalog_resolution::CapabilityCatalog;
 
 pub use requirements::{validate_extension_requirements, validate_required_extensions};
 pub use surface::{
-    find_installed_file_extension, find_installed_file_extension_in_root, resolve_file_extension,
-    resolve_file_extension_in_root, FileExtensionCapability, FILE_EXTENSIONS_SURFACE,
+    find_installed_capability_provider, resolve_file_capability_provider, FILE_EXTENSIONS_SURFACE,
     REMOTE_PATH_SURFACE, SINCE_TAG_SURFACE,
 };
 
@@ -295,7 +294,7 @@ fn resolve_extension_for_capability_if_available(
         }
 
         let entry = catalog.resolvable_entry(extension_id)?;
-        if !catalog.provides(entry, capability) {
+        if !catalog.provides(entry, capability.label()) {
             return Err(Error::validation_invalid_argument(
                 format!("capability_extensions.{}", capability.label()),
                 format!(
@@ -312,7 +311,8 @@ fn resolve_extension_for_capability_if_available(
         return Ok(Some(extension_id.to_string()));
     }
 
-    let (mut matching, catalog_failures) = catalog.candidates(extensions.keys(), capability);
+    let (mut matching, catalog_failures) =
+        catalog.candidates(extensions.keys(), capability.label());
 
     match matching.len() {
         // Nothing advertises the capability. Invalid catalog entries keep the
@@ -574,7 +574,7 @@ pub fn has_linked_extension_for_capability(
     // for an optional capability — the caller that goes on to actually run it
     // gets the named load failure from `resolve_extension_for_capability`.
     let catalog = CapabilityCatalog::load()?;
-    let (matching, _) = catalog.candidates(extensions.keys(), capability);
+    let (matching, _) = catalog.candidates(extensions.keys(), capability.label());
     Ok(!matching.is_empty())
 }
 
@@ -634,7 +634,7 @@ pub fn resolve_execution_context_for_extension(
 
     let catalog = CapabilityCatalog::load()?;
     let entry = catalog.resolvable_entry(extension_id)?;
-    if !catalog.provides(entry, capability) {
+    if !catalog.provides(entry, capability.label()) {
         return Err(Error::validation_invalid_argument(
             "extension",
             format!(
@@ -801,6 +801,13 @@ mod tests {
         .expect("extension manifest");
     }
 
+    fn fingerprint_capability(file_extension: &str) -> String {
+        format!(
+            "{}{file_extension}",
+            homeboy_extension_contract::api::v1::FINGERPRINT_FILE_CAPABILITY_PREFIX
+        )
+    }
+
     #[test]
     fn component_file_resolution_considers_only_linked_extensions() {
         crate::test_support::with_isolated_home(|home| {
@@ -809,11 +816,11 @@ mod tests {
 
             let component = component_with_extensions(&["zulu"]);
             let resolved =
-                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
+                resolve_file_capability_provider(&component, &fingerprint_capability("js"))
                     .expect("linked provider resolution")
                     .expect("linked provider");
 
-            assert_eq!(resolved.id, "zulu");
+            assert_eq!(resolved, "zulu");
         });
     }
 
@@ -825,19 +832,19 @@ mod tests {
 
             let mut component = component_with_extensions(&["wordpress", "nodejs"]);
             let composed =
-                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
+                resolve_file_capability_provider(&component, &fingerprint_capability("js"))
                     .expect("composition resolution")
                     .expect("composition owner");
-            assert_eq!(composed.id, "wordpress");
+            assert_eq!(composed, "wordpress");
 
             component
                 .capability_extensions
                 .insert(FILE_EXTENSIONS_SURFACE.to_string(), "nodejs".to_string());
             let explicit =
-                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
+                resolve_file_capability_provider(&component, &fingerprint_capability("js"))
                     .expect("explicit resolution")
                     .expect("explicit owner");
-            assert_eq!(explicit.id, "nodejs");
+            assert_eq!(explicit, "nodejs");
         });
     }
 
@@ -848,9 +855,8 @@ mod tests {
             write_file_extension_manifest(home.path(), "zulu", &[]);
 
             let component = component_with_extensions(&["zulu", "alpha"]);
-            let error =
-                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
-                    .expect_err("unowned providers must remain ambiguous");
+            let error = resolve_file_capability_provider(&component, &fingerprint_capability("js"))
+                .expect_err("unowned providers must remain ambiguous");
 
             assert!(error
                 .message
@@ -864,11 +870,10 @@ mod tests {
             write_file_extension_manifest(home.path(), "zulu", &[]);
             write_file_extension_manifest(home.path(), "alpha", &[]);
 
-            let resolved =
-                find_installed_file_extension("js", FileExtensionCapability::Fingerprint)
-                    .expect("installed fallback");
+            let resolved = find_installed_capability_provider(&fingerprint_capability("js"))
+                .expect("installed fallback");
 
-            assert_eq!(resolved.id, "alpha");
+            assert_eq!(resolved, "alpha");
         });
     }
 
@@ -906,37 +911,6 @@ mod tests {
                 &extension,
                 Some(&missing_component)
             ));
-        });
-    }
-
-    #[test]
-    fn rooted_file_resolution_stays_within_the_injected_config_root() {
-        crate::test_support::with_isolated_home(|home| {
-            let injected_home = home.path().join("injected");
-            let config_root = injected_home.join(".config/homeboy");
-            write_file_extension_manifest(&injected_home, "zulu", &[]);
-
-            let component = component_with_extensions(&["zulu"]);
-            let resolved = resolve_file_extension_in_root(
-                &config_root,
-                &component,
-                "js",
-                FileExtensionCapability::Fingerprint,
-            )
-            .expect("rooted provider resolution")
-            .expect("rooted provider");
-            assert_eq!(resolved.id, "zulu");
-
-            let installed = find_installed_file_extension_in_root(
-                &config_root,
-                "js",
-                FileExtensionCapability::Fingerprint,
-            )
-            .expect("rooted installed fallback");
-            assert_eq!(installed.id, "zulu");
-            assert!(
-                find_installed_file_extension("js", FileExtensionCapability::Fingerprint).is_none()
-            );
         });
     }
 
@@ -1130,7 +1104,8 @@ mod tests {
                 .map(|id| (*id).to_string())
                 .collect();
             let catalog = CapabilityCatalog::load().expect("v1 catalog");
-            let (matching, failures) = catalog.candidates(ids.iter(), ExtensionCapability::Deps);
+            let (matching, failures) =
+                catalog.candidates(ids.iter(), ExtensionCapability::Deps.label());
 
             assert_eq!(matching, vec!["alpha", "mike", "zulu"]);
             assert_eq!(

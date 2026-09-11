@@ -83,8 +83,7 @@ homeboy worktree list
 homeboy worktree status <worktree-id>
 ```
 
-These commands use the configured worktree provider when it declares the
-required capability and otherwise use Homeboy's built-in local provider.
+These commands use Homeboy's native task-worktree lifecycle and registry.
 
 Remove only when the worktree is safe to discard:
 

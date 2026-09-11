@@ -81,6 +81,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     let target_inventory = build_target_inventory(
         &ctx.component_id,
         &workloads,
+        selected_workload,
         args.run.run_id.clone(),
         args.run.inventory.as_deref(),
     )?;
@@ -1214,10 +1215,18 @@ fn operation_skip_reason(
     filters: &BTreeSet<String>,
     workload_operations: &BTreeSet<String>,
 ) -> Option<&'static str> {
+    let explicitly_scoped = workload_operations.contains(&operation.id)
+        || workload_operations.contains(&operation.kind);
     if matches!(safety_class, FuzzSafetyClass::Destructive) && !destructive_allowed {
         return Some("destructive");
     }
-    if family.is_none() {
+    if family.is_none()
+        && !(explicitly_scoped
+            && matches!(
+                strategy,
+                FuzzPlanStrategy::All | FuzzPlanStrategy::CoverageGaps
+            ))
+    {
         return Some("unsupported");
     }
     if !workload_operations.is_empty()
@@ -1232,7 +1241,7 @@ fn operation_skip_reason(
     if !filters.is_empty() && !operation_matches_filters(operation, family, filters) {
         return Some("unsupported");
     }
-    if !strategy_matches_operation(strategy, family.expect("family checked above")) {
+    if family.is_some_and(|family| !strategy_matches_operation(strategy, family)) {
         return Some("unsupported");
     }
     if requires_isolated_mutation(family, safety_class) && !isolation_requested {

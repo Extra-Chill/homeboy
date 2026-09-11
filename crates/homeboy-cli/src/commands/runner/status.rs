@@ -1966,7 +1966,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
         .iter()
         .chain(report.stale_runner_jobs.iter())
     {
-        if job.lifecycle_state.as_deref() == Some("unknown_owner") {
+        if job.job_id.starts_with("unknown-daemon-owner-") {
             if !commands
                 .iter()
                 .any(|command| command.scope == "unknown_owner_reconcile")
@@ -1981,7 +1981,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
             }
             continue;
         }
-        if job.lifecycle_state.as_deref() == Some("recoverable_orphan") {
+        if job.stale_reason.as_deref() == Some("child_run_running_without_active_runner_job") {
             if let Some(run_id) = job.durable_run_id.as_deref() {
                 commands.push(RunnerOperatorCommand {
                     scope: "agent_task_status",
@@ -2013,7 +2013,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
             ),
             description: "Follow the active runner job event stream.".to_string(),
         });
-        if matches!(job.lifecycle_state.as_deref(), None | Some("active")) {
+        if !job.status.is_terminal() {
             commands.push(RunnerOperatorCommand {
                 scope: "job_cancel",
                 runner_id: report.runner_id.clone(),

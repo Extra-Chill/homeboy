@@ -2,7 +2,7 @@
 
 use crate::stack::push::{local_branch_ref, push, remote_branch_ref, PushStatus};
 use crate::stack::spec::{GitRef, StackSpec};
-use std::process::Command;
+use homeboy_core::test_support::GitFixture;
 use tempfile::TempDir;
 
 mod support;
@@ -10,11 +10,7 @@ use support::{commit_file, git, init_repo, rev_parse};
 
 fn init_bare_remote() -> TempDir {
     let remote = TempDir::new().expect("remote tempdir");
-    let out = Command::new("git")
-        .args(["init", "--bare", "-q"])
-        .current_dir(remote.path())
-        .output()
-        .expect("git init --bare");
+    let out = GitFixture::new(remote.path()).execute(&["init", "--bare", "-q"]);
     assert!(
         out.status.success(),
         "git init --bare failed: {}",

@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::thread;
 
@@ -19,7 +19,10 @@ use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
     PositionalComponentArgs, PresentationArgs, SettingArgs,
 };
-use super::utils::response::actionable_metadata_value_for_run_ref;
+use super::utils::response::{
+    actionable_metadata_for_run_ref, actionable_metadata_value_for_run_ref,
+    CommandActionableMetadata, CommandArtifactRef, CommandNextAction, CommandNextActionKind,
+};
 use super::CmdResult;
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
@@ -484,15 +487,104 @@ pub(crate) fn run_rig_profile(options: RigRunBenchOptions) -> CmdResult<BenchOut
 }
 
 fn attach_bench_actionable(output: &mut BenchOutput) {
-    if let BenchOutput::Single(output) = output {
-        if let Some(persisted_run) = &output.persisted_run {
-            output.actionable = Some(actionable_metadata_value_for_run_ref(
-                persisted_run.run_id.clone(),
-                "bench",
-                "homeboy-bench",
-            ));
+    match output {
+        BenchOutput::Single(output) => {
+            if let Some(persisted_run) = &output.persisted_run {
+                output.actionable = Some(actionable_metadata_value_for_run_ref(
+                    persisted_run.run_id.clone(),
+                    "bench",
+                    "homeboy-bench",
+                ));
+            }
+        }
+        BenchOutput::Comparison(output) => {
+            output.actionable = Some(comparison_actionable_metadata(output.rigs.iter().map(
+                |rig| {
+                    (
+                        rig.rig_id.as_str(),
+                        rig.persisted_run.as_ref(),
+                        rig.artifacts.as_slice(),
+                    )
+                },
+            )));
+        }
+        _ => {}
+    }
+}
+
+fn comparison_actionable_metadata<'a>(
+    rigs: impl IntoIterator<
+        Item = (
+            &'a str,
+            Option<&'a homeboy_core::extension::bench::BenchPersistedRun>,
+            &'a [homeboy_core::extension::bench::BenchArtifactRef],
+        ),
+    >,
+) -> serde_json::Value {
+    let mut actionable = CommandActionableMetadata::default();
+    let mut artifact_ids = BTreeSet::new();
+
+    for (rig_id, persisted_run, artifacts) in rigs {
+        let Some(persisted_run) = persisted_run else {
+            continue;
+        };
+        let run_metadata =
+            actionable_metadata_for_run_ref(persisted_run.run_id.clone(), "bench", "homeboy-bench");
+        if actionable.run.is_none() {
+            actionable.run = run_metadata.run;
+            actionable.next_actions = run_metadata.next_actions;
+        }
+        actionable.refs.runs.extend(run_metadata.refs.runs);
+
+        for artifact in artifacts {
+            let Some(artifact_id) = artifact.observation_artifact_id.as_deref() else {
+                continue;
+            };
+            if !artifact_ids.insert((persisted_run.run_id.clone(), artifact_id.to_string())) {
+                continue;
+            }
+            let semantic_key = format!("{rig_id}/{}/{}", artifact.scenario_id, artifact.name);
+            actionable.artifacts.push(CommandArtifactRef {
+                id: artifact_id.to_string(),
+                kind: artifact
+                    .kind
+                    .clone()
+                    .or_else(|| artifact.artifact_type.clone())
+                    .unwrap_or_else(|| "bench_artifact".to_string()),
+                uri: format!(
+                    "homeboy://run/{}/artifact/{artifact_id}",
+                    persisted_run.run_id
+                ),
+                semantic_key: Some(semantic_key.clone()),
+            });
+            let action = match artifact.artifact_type.as_deref() {
+                Some("directory") => Some(CommandNextAction::new(
+                    format!("preview artifact {semantic_key}"),
+                    format!(
+                        "homeboy runs artifact preview {} {}",
+                        persisted_run.run_id, artifact_id
+                    ),
+                )),
+                // Persisted artifact records default an omitted type to file;
+                // URL records use the same retrieval command.
+                None | Some("file" | "url") => Some(CommandNextAction::new(
+                    format!("get artifact {semantic_key}"),
+                    format!(
+                        "homeboy runs artifact get {} {} -o <path>",
+                        persisted_run.run_id, artifact_id
+                    ),
+                )),
+                _ => None,
+            };
+            if let Some(action) = action {
+                actionable
+                    .next_actions
+                    .push(action.with_kind(CommandNextActionKind::Artifacts));
+            }
         }
     }
+
+    serde_json::to_value(actionable).unwrap_or(serde_json::Value::Null)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -724,6 +816,7 @@ pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
             rig_state: single_output.rig_state,
             failure: single_output.failure,
             diagnostics: single_output.diagnostics,
+            persisted_run: single_output.persisted_run,
         });
     }
 
@@ -738,9 +831,16 @@ pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
         output.default_baseline_expansion = Some(metadata);
     }
     if run_args.json_summary {
+        let mut output = BenchOutput::Comparison(output);
+        attach_bench_actionable(&mut output);
+        let BenchOutput::Comparison(output) = output else {
+            unreachable!("comparison output remains a comparison after metadata attachment");
+        };
         return Ok((BenchOutput::ComparisonSummary(output.into()), exit));
     }
-    Ok((BenchOutput::Comparison(output), exit))
+    let mut output = BenchOutput::Comparison(output);
+    attach_bench_actionable(&mut output);
+    Ok((output, exit))
 }
 
 struct CrossRigBenchOutput {

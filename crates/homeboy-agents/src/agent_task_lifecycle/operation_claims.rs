@@ -70,8 +70,11 @@ pub struct OperationClaim {
     pub operation_key: String,
     pub state: ClaimState,
     pub leased_at: String,
+    pub accepted_at: Option<String>,
     pub lease_deadline: Option<String>,
     pub owner_pid: Option<u32>,
+    pub owner_host_digest: Option<String>,
+    pub owner_process_start_identity: Option<homeboy_core::process::ProcessStartIdentity>,
     pub result: Option<Value>,
 }
 
@@ -142,12 +145,20 @@ fn claim_operation_in_store(
                 outcome = ClaimOutcome::LeaseHeld;
                 return false;
             }
-            // A dead owner is recoverable immediately. Ownerless historical
-            // claims retain their compatibility lease until it expires.
+            // A dead owner is recoverable immediately for generic operations.
+            // Ownerless historical claims retain their compatibility lease
+            // until it expires; intent-bound actions recover below.
             if existing["state"] != json!("failed")
                 && existing.get("owner_pid").is_none()
                 && !lease_is_expired(existing, &now)
             {
+                outcome = ClaimOutcome::LeaseHeld;
+                return false;
+            }
+            // An intent-bound action may already have crossed an external
+            // side-effect boundary. Its caller must recover from authoritative
+            // action evidence rather than receiving a fresh execution lease.
+            if intent.is_some() && existing["state"] != json!("failed") {
                 outcome = ClaimOutcome::LeaseHeld;
                 return false;
             }
@@ -160,6 +171,9 @@ fn claim_operation_in_store(
             "leased_at": now,
             "lease_deadline": lease_deadline,
             "owner_pid": std::process::id(),
+            "owner_host_digest": current_host_digest(),
+            "owner_process_start_identity": homeboy_core::process::process_start_identity(std::process::id()).ok().flatten(),
+            "accepted_at": intent.map(|_| now.clone()),
             "intent": intent,
         });
         // Replace an expired lease in place, or append a new one.
@@ -346,12 +360,40 @@ pub fn operation_claim_in_store(
 /// that deadline. Callers use this to decide between waiting and reconciling an
 /// interrupted effect via Git/PR lookup.
 pub fn operation_lease_is_active(run_id: &str, operation_key: &str) -> Result<bool> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    operation_lease_is_active_in_store(&lifecycle_store, run_id, operation_key)
+}
+
+pub fn operation_lease_is_active_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+) -> Result<bool> {
     let now = now_timestamp();
     Ok(
-        operation_claim(run_id, operation_key)?.is_some_and(|claim| {
+        operation_claim_in_store(lifecycle_store, run_id, operation_key)?.is_some_and(|claim| {
             claim.state == ClaimState::Running
                 && match claim.owner_pid {
-                    Some(pid) => owner_pid_is_valid(pid as u64) && process_is_live(pid),
+                    Some(pid) => {
+                        if claim
+                            .owner_host_digest
+                            .as_deref()
+                            .zip(current_host_digest().as_deref())
+                            .is_some_and(|(owner, current)| owner != current)
+                        {
+                            true
+                        } else if !owner_pid_is_valid(pid as u64) {
+                            false
+                        } else if let Some(expected) = claim.owner_process_start_identity.as_ref() {
+                            match homeboy_core::process::process_start_identity(pid) {
+                                Ok(Some(actual)) => &actual == expected,
+                                Ok(None) => false,
+                                Err(_) => true,
+                            }
+                        } else {
+                            owner_pid_is_valid(pid as u64) && process_is_live(pid)
+                        }
+                    }
                     None => claim
                         .lease_deadline
                         .as_deref()
@@ -376,6 +418,10 @@ fn project_claim(claim: &Value) -> Option<OperationClaim> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        accepted_at: claim
+            .get("accepted_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         lease_deadline: claim
             .get("lease_deadline")
             .and_then(Value::as_str)
@@ -384,6 +430,14 @@ fn project_claim(claim: &Value) -> Option<OperationClaim> {
             .get("owner_pid")
             .and_then(Value::as_u64)
             .and_then(|pid| pid.try_into().ok()),
+        owner_host_digest: claim
+            .get("owner_host_digest")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        owner_process_start_identity: claim
+            .get("owner_process_start_identity")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
         result: claim.get("result").cloned(),
     })
 }
@@ -404,10 +458,37 @@ fn claim_owner_is_live(claim: &Value) -> bool {
         // conservative compatibility boundary until it expires.
         return true;
     };
+    if let Some(owner_host) = claim.get("owner_host_digest").and_then(Value::as_str) {
+        let Some(current_host) = current_host_digest() else {
+            return true;
+        };
+        if owner_host != current_host {
+            return true;
+        }
+        if !owner_pid_is_valid(pid) {
+            return false;
+        }
+        if let Some(expected) = claim
+            .get("owner_process_start_identity")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+        {
+            return match homeboy_core::process::process_start_identity(pid as u32) {
+                Ok(Some(actual)) => actual == expected,
+                Ok(None) => false,
+                Err(_) => true,
+            };
+        }
+    }
     if !owner_pid_is_valid(pid) {
         return false;
     }
     process_is_live(pid as u32)
+}
+
+fn current_host_digest() -> Option<String> {
+    homeboy_core::process::host_identity()
+        .map(|host| homeboy_engine_primitives::content_hash::sha256_hex(host.as_bytes()))
 }
 
 fn owner_pid_is_valid(pid: u64) -> bool {

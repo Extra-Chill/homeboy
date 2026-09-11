@@ -76,12 +76,11 @@ impl RunOutcomeEnvelope {
         self
     }
 
-    pub fn from_runner_execution_record(record: &RunnerExecutionRecord) -> Self {
-        let run_id = runner_execution_record_run_id(record);
+    pub fn from_runner_execution_record(run_id: &str, record: &RunnerExecutionRecord) -> Self {
         let mut envelope = Self::new(record.status.clone())
-            .with_run_id(Some(run_id.clone()))
+            .with_run_id(Some(run_id.to_string()))
             .with_runner_id(Some(record.runner_id.clone()));
-        envelope.add_runner_execution_artifact_refs(&run_id, record.artifact_refs.clone());
+        envelope.add_runner_execution_artifact_refs(run_id, record.artifact_refs.clone());
         envelope
     }
 
@@ -261,17 +260,6 @@ fn metadata_string(metadata: Option<&Value>, key: &str) -> Option<String> {
     metadata?.get(key)?.as_str().map(ToString::to_string)
 }
 
-fn runner_execution_record_run_id(record: &RunnerExecutionRecord) -> String {
-    record
-        .remote_run_id
-        .clone()
-        .or_else(|| record.mirror_run_id.clone())
-        .or_else(|| record.agent_task_run_id.clone())
-        .or_else(|| record.local_run_id.clone())
-        .or_else(|| record.job_id.clone())
-        .unwrap_or_else(|| record.execution_id.clone())
-}
-
 fn artifact_type(path: Option<&str>, url: Option<&str>) -> String {
     if path.is_some() || url.is_some() {
         "file".to_string()
@@ -371,8 +359,10 @@ mod tests {
                 ..Default::default()
             }]);
 
-        let value = serde_json::to_value(RunOutcomeEnvelope::from_runner_execution_record(&record))
-            .expect("outcome json");
+        let value = serde_json::to_value(RunOutcomeEnvelope::from_runner_execution_record(
+            "run-1", &record,
+        ))
+        .expect("outcome json");
 
         assert_eq!(value["schema"], RUN_OUTCOME_ENVELOPE_SCHEMA);
         assert_eq!(value["status"], "succeeded");

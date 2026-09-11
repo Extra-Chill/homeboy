@@ -9,17 +9,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use homeboy_extension_contract::agent_task_executor_declaration::parse_agent_task_executor_declaration;
-
 use homeboy_core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, runtime_materialization_plan, AgentRuntimeDiscoveryDiagnostic,
     AgentRuntimeManifest, AgentRuntimeSelectedIdentity, AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT,
     AGENT_RUNTIME_REVISION_PROBE_TIMEOUT,
 };
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
-use homeboy_core::extension::catalog::load_extension;
 use homeboy_core::{Error, Result};
-use homeboy_extension_contract::ExtensionManifest;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiAgentTaskExecutorInventoryRequest,
+    EXTENSION_API_AGENT_TASK_EXECUTOR_INVENTORY_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
 
 use super::AgentTaskExecutorProvider;
 
@@ -88,11 +88,22 @@ pub(super) fn agent_task_executor_providers_from_runtime_manifests(
         // it declares, so the partial is reported once per runtime.
         let mut reported_revision_probe_timeout = false;
         for provider_value in runtime_manifest.agent_task_executors.clone() {
-            let Ok(mut provider) =
-                serde_json::from_value::<AgentTaskExecutorProvider>(provider_value)
-            else {
-                continue;
-            };
+            let mut provider =
+                match serde_json::from_value::<AgentTaskExecutorProvider>(provider_value) {
+                    Ok(provider) => provider,
+                    Err(error) => {
+                        diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
+                            class: "agent_task_executor_provider.invalid_declaration".to_string(),
+                            message: format!(
+                            "agent-task provider declaration is invalid and was not loaded: {error}"
+                        ),
+                            runtime_id: Some(runtime_manifest.id.clone()),
+                            extension_id: runtime_manifest.extension_id.clone(),
+                            path: runtime_manifest.runtime_path.clone(),
+                        });
+                        continue;
+                    }
+                };
             normalize_agent_task_executor_provider_invocation(&mut provider);
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
@@ -186,8 +197,7 @@ fn normalize_agent_task_executor_provider_invocation(provider: &mut AgentTaskExe
 pub(crate) fn validate_installed_extension_agent_runtime_provider_discovery(
     extension_id: &str,
 ) -> Result<()> {
-    let extension = load_extension(extension_id)?;
-    let expected = expected_agent_runtime_provider_refs(&extension)?;
+    let expected = expected_agent_runtime_provider_refs(extension_id)?;
     if expected.is_empty() {
         return Ok(());
     }
@@ -239,47 +249,60 @@ struct ExpectedAgentRuntimeProviderRef {
     backend: String,
 }
 
+/// Registration identities the extension advertises, read from the typed
+/// Extension API inventory.
+///
+/// The inventory is the single place declarations are turned into identities, so
+/// the install-time gate and ordinary discovery cannot disagree about what an
+/// extension registers. A declaration that cannot be parsed is surfaced by the
+/// inventory as an unusable entry, and is rejected here rather than silently
+/// installed (#12206).
 fn expected_agent_runtime_provider_refs(
-    extension: &ExtensionManifest,
+    extension_id: &str,
 ) -> Result<Vec<ExpectedAgentRuntimeProviderRef>> {
+    let inventory =
+        homeboy_core::extension::agent_task_executor_api::AgentTaskExecutorApi::discover(
+            &ExtensionApiAgentTaskExecutorInventoryRequest {
+                schema: EXTENSION_API_AGENT_TASK_EXECUTOR_INVENTORY_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+            },
+        );
     let mut expected = Vec::new();
-    for runtime in &extension.agent_runtimes {
-        for value in &runtime.agent_task_executors {
-            // Parsed through the shared declaration contract rather than the
-            // resolved provider type, so extension install/replace enforces
-            // byte-identical validity without depending on this crate (#12206).
-            // Only `id` and `backend` are consumed here; the resolved provider
-            // is built later by the catalog parse.
-            let declaration =
-                parse_agent_task_executor_declaration(&extension.id, &runtime.id, value)?;
-            expected.push(ExpectedAgentRuntimeProviderRef {
-                runtime_id: runtime.id.clone(),
-                provider_id: declaration.id,
-                backend: declaration.backend,
-            });
+    for executor in inventory.registered_by(extension_id) {
+        if let Some(diagnostic) = executor.diagnostic.as_ref() {
+            return Err(Error::validation_invalid_argument(
+                "agent_runtimes.agent_task_executors",
+                format!(
+                    "Extension '{}' declares an agent runtime provider that cannot be registered: {}",
+                    extension_id, diagnostic.message
+                ),
+                Some(executor.runtime_id.clone()),
+                None,
+            ));
         }
+        expected.push(ExpectedAgentRuntimeProviderRef {
+            runtime_id: executor.runtime_id.clone(),
+            provider_id: executor.id.clone(),
+            backend: executor.backend.clone(),
+        });
     }
     Ok(expected)
 }
 
-/// Agent-task implementation of core's extension provider-discovery validator.
-struct ExtensionProviderDiscoveryValidatorImpl;
+/// Resolves an extension's registered executors against this host's agent-task
+/// providers, so extension install, replace, and relink can reject a declaration
+/// that registers cleanly but cannot actually be dispatched.
+///
+/// Pass this into a lifecycle mutation from a caller that has the agent-task
+/// subsystem. A caller without it uses
+/// `ExtensionLifecycleValidation::declaration_only`, which still enforces
+/// registrability.
+pub struct AgentTaskExecutorDiscovery;
 
-impl homeboy_core::extension::registry::ExtensionProviderDiscoveryValidator
-    for ExtensionProviderDiscoveryValidatorImpl
-{
-    fn validate_installed_extension_provider_discovery(&self, extension_id: &str) -> Result<()> {
+impl homeboy_core::extension::registry::ExtensionExecutorDiscovery for AgentTaskExecutorDiscovery {
+    fn validate_registered_executors(&self, extension_id: &str) -> Result<()> {
         validate_installed_extension_agent_runtime_provider_discovery(extension_id)
     }
-}
-
-/// Register the extension provider-discovery validator so core's extension
-/// install/repair can verify declared agent-runtime providers are discoverable
-/// without depending on the agent-task subsystem.
-pub fn register() {
-    homeboy_core::extension::registry::register_extension_provider_discovery_validator(Box::new(
-        ExtensionProviderDiscoveryValidatorImpl,
-    ));
 }
 
 #[cfg(test)]
@@ -324,5 +347,29 @@ mod revision_probe_tests {
         let identity = AgentRuntimeSelectedIdentity::default();
 
         assert!(revision_probe_timeout_diagnostic(&manifest(), &identity).is_none());
+    }
+
+    #[test]
+    fn invalid_readiness_timeout_is_a_scoped_discovery_diagnostic() {
+        let mut runtime = manifest();
+        runtime.agent_task_executors = vec![serde_json::json!({
+            "id": "opencode.agent-task-executor",
+            "backend": "opencode",
+            "readiness_invocation": { "argv": ["opencode-provider"], "timeout_ms": 120001 }
+        })];
+        let mut diagnostics = Vec::new();
+
+        let providers =
+            agent_task_executor_providers_from_runtime_manifests(vec![runtime], &mut diagnostics);
+
+        assert!(providers.is_empty());
+        assert_eq!(
+            diagnostics[0].class,
+            "agent_task_executor_provider.invalid_declaration"
+        );
+        assert!(diagnostics[0]
+            .message
+            .contains("readiness_invocation.timeout_ms"));
+        assert_eq!(diagnostics[0].runtime_id.as_deref(), Some("opencode"));
     }
 }

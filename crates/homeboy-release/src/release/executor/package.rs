@@ -4,11 +4,12 @@
 //!
 //! Split out of `executor.rs` to keep packaging/payload logic together.
 
+use crate::release::context::ReleaseExtension;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
 use homeboy_core::{self};
-use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
+use homeboy_extension_contract::ExtensionCapability;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -49,7 +50,7 @@ pub(crate) struct PackageRequest<'a> {
 /// Those children read their own environment by design and must keep doing so.
 pub(crate) fn run_package(
     roots: &homeboy_core::paths::PathRoots,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     state: &mut ReleaseState,
     component: &Component,
     component_id: &str,
@@ -63,9 +64,9 @@ pub(crate) fn run_package(
     } = request;
     let cleanup_before = package_cleanup_snapshot(component)?;
     let result = (|| {
-        let package_extensions: Vec<&ExtensionManifest> = extensions
+        let package_extensions: Vec<&ReleaseExtension> = extensions
             .iter()
-            .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
+            .filter(|extension| extension.provides_action("release.package"))
             .collect();
 
         let component_build =
@@ -629,11 +630,11 @@ fn run_package_action_with_retry(
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     for attempt in 1..=PACKAGE_ACTION_MAX_ATTEMPTS {
-        match extension::invoke::execute_action(
+        match extension::invoke::action_api::invoke_action(
             extension_id,
             "release.package",
             None,
-            None,
+            &[],
             Some(payload),
         ) {
             Ok(response) => {
@@ -691,7 +692,7 @@ fn run_package_action_with_retry(
 /// Invoke an extension-declared release preflight action.
 pub(crate) fn run_extension_release_preflight(
     step: &homeboy_core::plan::PlanStep,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     state: &ReleaseState,
     component_id: &str,
     component_local_path: &str,
@@ -726,11 +727,7 @@ pub(crate) fn run_extension_release_preflight(
         );
     };
 
-    if !extension
-        .actions
-        .iter()
-        .any(|action| action.id == action_id)
-    {
+    if !extension.provides_action(action_id) {
         return step_failed(
             &step.id,
             &step.kind,
@@ -747,11 +744,11 @@ pub(crate) fn run_extension_release_preflight(
     }
 
     let payload = build_release_payload(state, component_id, component_local_path, None, None);
-    let response = match extension::invoke::execute_action(
+    let response = match extension::invoke::action_api::invoke_action(
         extension_id,
         action_id,
         None,
-        None,
+        &[],
         Some(&payload),
     ) {
         Ok(response) => response,
@@ -904,9 +901,7 @@ pub(super) fn store_artifacts_from_output(
     // dependency install inside the build script can fail intermittently, and
     // the real error must be visible in the structured error payload.
     if !success {
-        return Err(package_command_failure_error(
-            exit_code, stdout, stderr, response,
-        ));
+        return Err(package_command_failure_error(exit_code, stdout, stderr));
     }
 
     if stdout.trim().is_empty() {
@@ -1024,12 +1019,7 @@ fn safe_artifact_file_name(value: &str) -> String {
 /// Package/build tools commonly write progress to stdout and errors to stderr.
 /// Including both streams ensures the operator can diagnose the real failure
 /// instead of seeing truncated output.  Issue #3238.
-fn package_command_failure_error(
-    exit_code: i64,
-    stdout: &str,
-    stderr: &str,
-    response: &serde_json::Value,
-) -> Error {
+fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> Error {
     let stderr_trimmed = stderr.trim();
     let stdout_trimmed = stdout.trim();
     let has_stderr = !stderr_trimmed.is_empty();
@@ -1061,8 +1051,6 @@ fn package_command_failure_error(
         detail,
         serde_json::json!({
             "exit_code": exit_code,
-            "command": response.get("command").and_then(serde_json::Value::as_str),
-            "cwd": response.get("cwd").and_then(serde_json::Value::as_str),
             "relevant_error_lines": relevant_package_error_lines(stdout, stderr),
             "stdout": stdout_trimmed,
             "stderr": stderr_trimmed,

@@ -17,8 +17,23 @@ pub(super) fn collect_load_summary() -> LoadSummary {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn test_load_averages() -> Option<[f64; 3]> {
+    let raw = std::env::var("HOMEBOY_TEST_LOAD_AVERAGES").ok()?;
+    let mut values = raw.split(',').map(str::parse::<f64>);
+    Some([
+        values.next()?.ok()?,
+        values.next()?.ok()?,
+        values.next()?.ok()?,
+    ])
+}
+
 #[cfg(unix)]
 fn load_averages() -> Option<[f64; 3]> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(values) = test_load_averages() {
+        return Some(values);
+    }
     let mut values = [0.0_f64; 3];
     let count = unsafe { libc::getloadavg(values.as_mut_ptr(), values.len() as i32) };
     if count == 3 {
@@ -30,5 +45,9 @@ fn load_averages() -> Option<[f64; 3]> {
 
 #[cfg(not(unix))]
 fn load_averages() -> Option<[f64; 3]> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(values) = test_load_averages() {
+        return Some(values);
+    }
     None
 }

@@ -100,6 +100,61 @@ fn extension_parity_check_reports_copied_extension_as_actionable_ok() {
 }
 
 #[test]
+fn lab_offload_required_extensions_merge_explicit_and_provider_ids() {
+    let mut selected =
+        node_provider_with_extension("selected.provider", "test", "fixture-extension");
+    selected.runner_readiness = vec![serde_json::from_value(serde_json::json!({
+        "id": "fixture.readiness",
+        "label": "Fixture readiness",
+        "required_extensions": ["readiness-extension"]
+    }))
+    .expect("readiness parses")];
+    let other = node_provider_with_extension("other.provider", "other", "other-extension");
+
+    assert_eq!(
+        probes::lab_offload_extension_dependencies(
+            &[
+                " explicit-extension ".to_string(),
+                "fixture-extension".to_string()
+            ],
+            &[selected, other],
+            Some("test"),
+            Some("selected.provider"),
+        ),
+        vec![
+            probes::LabOffloadExtensionDependency {
+                extension_id: "explicit-extension".to_string(),
+                provider_id: None,
+            },
+            probes::LabOffloadExtensionDependency {
+                extension_id: "fixture-extension".to_string(),
+                provider_id: None,
+            },
+            probes::LabOffloadExtensionDependency {
+                extension_id: "readiness-extension".to_string(),
+                provider_id: Some("selected.provider".to_string()),
+            }
+        ]
+    );
+}
+
+fn node_provider_with_extension(
+    id: &str,
+    backend: &str,
+    extension_id: &str,
+) -> homeboy::agents::agent_tasks::provider::AgentTaskExecutorProvider {
+    let mut provider: homeboy::agents::agent_tasks::provider::AgentTaskExecutorProvider =
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "backend": backend,
+            "invocation": { "argv": ["node", "executor.cjs"] }
+        }))
+        .expect("provider parses");
+    provider.extension_id = Some(extension_id.to_string());
+    provider
+}
+
+#[test]
 fn normalizes_requested_extensions_before_parity_checks() {
     assert_eq!(
         normalized_extension_ids(&[

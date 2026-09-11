@@ -588,13 +588,13 @@ pub(super) fn calculate_component_status_with_git_cache(
 
 fn fetch_default_remote(path: &Path) {
     let remote = git::resolve_default_remote(path);
-    let _ = Command::new("git")
-        .args(["fetch", "--quiet", &remote])
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let _ = git::fetch_remote_tracking_refs_until(
+        path,
+        &["fetch", "--quiet", &remote],
+        "git fetch deploy planning remote",
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    );
 }
 
 fn git_output(path: &Path, args: &[&str]) -> Option<String> {
@@ -1014,19 +1014,7 @@ mod tests {
     use homeboy_core::server::SshClient;
     use tempfile::TempDir;
 
-    fn run_git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn init_source_repo(path: &Path) {
         run_git(path, &["init", "-q", "-b", "main"]);
@@ -1087,6 +1075,7 @@ mod tests {
             components: [("a".to_string(), source_a), ("b".to_string(), source_b)]
                 .into_iter()
                 .collect(),
+            control_plane: None,
         };
         let project = Project {
             id: "target".to_string(),

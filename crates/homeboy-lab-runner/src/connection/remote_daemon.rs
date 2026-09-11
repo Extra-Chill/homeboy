@@ -1492,6 +1492,14 @@ fn remote_daemon_status_with_timeout(
     let data = envelope
         .data
         .ok_or_else(|| "remote daemon status returned no data".to_string())?;
+    Ok(remote_daemon_status_from_data(&data))
+}
+
+/// Status normally uses the compact projection, while older remotes and
+/// diagnostics may return the full lease state. Both expose the same daemon
+/// coordinates; keep that representation detail at this boundary so lifecycle
+/// selection always receives one authoritative lease/PID view.
+pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus {
     let stale_reason = data
         .get("stale_reason")
         .and_then(Value::as_str)
@@ -1508,13 +1516,17 @@ fn remote_daemon_status_with_timeout(
         .pointer("/freshness")
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok());
+    let daemon = data
+        .get("state")
+        .or_else(|| data.get("daemon"))
+        .map(remote_daemon_from_status);
     if !data
         .get("running")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(RemoteDaemonStatus {
-            daemon: data.get("state").map(remote_daemon_from_state),
+        return RemoteDaemonStatus {
+            daemon,
             stale_reason,
             stale_reason_code,
             fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
@@ -1527,10 +1539,10 @@ fn remote_daemon_status_with_timeout(
             endpoint_probe_error: None,
             termination_evidence,
             daemon_freshness,
-        });
+        };
     }
-    let Some(state) = data.get("state") else {
-        return Ok(RemoteDaemonStatus {
+    let Some(daemon) = daemon else {
+        return RemoteDaemonStatus {
             daemon: None,
             stale_reason: Some(
                 stale_reason
@@ -1547,10 +1559,10 @@ fn remote_daemon_status_with_timeout(
             endpoint_probe_error: None,
             termination_evidence,
             daemon_freshness,
-        });
+        };
     };
-    Ok(RemoteDaemonStatus {
-        daemon: Some(remote_daemon_from_state(state)),
+    RemoteDaemonStatus {
+        daemon: Some(daemon),
         stale_reason,
         stale_reason_code,
         fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
@@ -1563,7 +1575,7 @@ fn remote_daemon_status_with_timeout(
         endpoint_probe_error: None,
         termination_evidence,
         daemon_freshness,
-    })
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1758,7 +1770,7 @@ pub(super) fn probe_remote_daemon_endpoint_until(
         RemoteDaemonWorkEvidence::from_unresolved_count(active.len().saturating_add(stale.len()));
 }
 
-fn remote_daemon_from_state(state: &Value) -> RemoteDaemon {
+fn remote_daemon_from_status(state: &Value) -> RemoteDaemon {
     RemoteDaemon {
         address: state
             .get("address")
@@ -1773,8 +1785,24 @@ fn remote_daemon_from_state(state: &Value) -> RemoteDaemon {
             .get("lease_id")
             .and_then(Value::as_str)
             .map(str::to_string),
-        version: None,
-        build_identity: None,
+        version: state
+            .get("active_version")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                state
+                    .pointer("/build_identity/version")
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_string),
+        build_identity: state
+            .get("active_build")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                state
+                    .pointer("/build_identity/display")
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_string),
         inspected_freshness: None,
     }
 }

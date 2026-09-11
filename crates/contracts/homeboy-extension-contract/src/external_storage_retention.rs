@@ -85,6 +85,31 @@ pub struct ExternalStorageRoot {
     pub path: String,
 }
 
+/// Bounded inventory evidence. Omission means the provider completed its
+/// inventory, preserving compatibility with existing v1 providers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalStorageInventoryCompleteness {
+    #[serde(default = "default_inventory_complete")]
+    pub complete: bool,
+    /// Per-root lower-bound evidence for every traversal that hit a bound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incomplete_roots: Vec<ExternalStorageIncompleteRoot>,
+}
+
+fn default_inventory_complete() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalStorageIncompleteRoot {
+    pub root_id: String,
+    pub reason: String,
+    pub observed_entries: u64,
+    pub observed_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalStorageInventory {
@@ -102,6 +127,10 @@ pub struct ExternalStorageInventory {
     /// visible separately and never candidates.
     #[serde(default)]
     pub unknown_bytes: u64,
+    /// When incomplete, byte values are lower bounds and unknown content stays
+    /// non-reclaimable. This additive field is optional for v1 providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<ExternalStorageInventoryCompleteness>,
 }
 
 fn default_external_storage_schema() -> String {
@@ -168,5 +197,6 @@ mod tests {
         .expect("inventory parses");
         assert_eq!(inventory.schema, EXTERNAL_STORAGE_RETENTION_SCHEMA);
         assert_eq!(inventory.unknown_bytes, 9);
+        assert!(inventory.completeness.is_none());
     }
 }

@@ -4,7 +4,9 @@
 
 use serde_json::{json, Value};
 
-use homeboy_core::api_jobs::{JobStatus, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
+#[cfg(test)]
+use homeboy_core::api_jobs::RemoteRunnerJobRequest;
+use homeboy_core::api_jobs::{JobStatus, RunnerJobLogSnapshot};
 use homeboy_core::observation::RunStatus;
 use homeboy_core::redaction::redact_argv;
 
@@ -162,6 +164,10 @@ fn ensure_runner_exec_observation_run(
     if !run.metadata_json.is_object() {
         run.metadata_json = json!({ "homeboy_original_metadata": run.metadata_json });
     }
+    // A pre-handoff run starts with the configured root, but a later workspace
+    // sync resolves its immutable execution path. Keep the canonical run field
+    // aligned with that durable snapshot provenance.
+    run.cwd = Some(remote_workspace.to_string());
     let metadata = run.metadata_json.as_object_mut().expect("metadata object");
     metadata.insert("kind".to_string(), json!(RUNNER_EXEC_RUN_KIND));
     metadata.insert("runner_id".to_string(), json!(runner_id));
@@ -1228,6 +1234,7 @@ pub fn record_lab_offload_submission_intent_in_store(
 
 /// Replace a preflight intent with the exact normalized, redacted request that
 /// will cross the broker boundary. This is the final durable write before POST.
+#[cfg(test)]
 pub fn record_lab_offload_submission_request(
     run_id: &str,
     request: &RemoteRunnerJobRequest,
@@ -1266,6 +1273,59 @@ pub fn record_lab_offload_submission_request(
         }),
     );
     metadata.insert(
+        "handoff_acceptance".to_string(),
+        json!({
+            "state": "pending",
+            "started_at": handoff.submitted_at,
+            "deadline_at": handoff.acceptance_deadline_at,
+        }),
+    );
+    lifecycle_store.write_record(&record)?;
+    Ok(record)
+}
+
+/// Persist the envelope-first replay input before it crosses the broker.
+pub fn record_lab_offload_submission_envelope(
+    run_id: &str,
+    request: &homeboy_runner_contract::RunnerApiSubmitRequest,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let dispatch = request.envelope.dispatch.as_ref().ok_or_else(|| {
+        Error::internal_unexpected("Lab runner submission envelope has no dispatch")
+    })?;
+    if request.submission_key.trim().is_empty() {
+        return Err(Error::internal_unexpected(
+            "Lab runner submission envelope has no stable submission key",
+        ));
+    }
+    let payload_fingerprint =
+        homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(request)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let _lock = LabHandoffLock::lock_in_store(&lifecycle_store, &run_id)?;
+    let mut record = lifecycle_store.read_record(&run_id)?;
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
+    let now = chrono::Utc::now();
+    let mut handoff = AgentTaskLabHandoff::pending(
+        &dispatch.runner_id,
+        now.to_rfc3339(),
+        (now + chrono::Duration::seconds(lab_handoff_acceptance_timeout_seconds())).to_rfc3339(),
+    );
+    handoff.submission_key = Some(request.submission_key.clone());
+    handoff.payload_fingerprint = Some(payload_fingerprint.clone());
+    record.lab_handoff = Some(handoff.clone());
+    record.ensure_metadata_object().insert(
+        "runner_submission_intent".to_string(),
+        json!({
+            "state": "pending",
+            "submission_key": request.submission_key,
+            "payload_fingerprint": payload_fingerprint,
+            "runner_id": dispatch.runner_id,
+            "replay_envelope_request": request,
+        }),
+    );
+    record.ensure_metadata_object().insert(
         "handoff_acceptance".to_string(),
         json!({
             "state": "pending",

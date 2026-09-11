@@ -122,6 +122,83 @@ fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
     });
 }
 
+/// An attached coordinator can die after child provider dispatch. Resume runs
+/// in a fresh process, so this covers the persisted graph/readiness boundary
+/// that previously rewrote terminal independent failures as successful blocks.
+#[test]
+fn fanout_resume_preserves_interrupted_independent_child_failures() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let batch_id = "interrupted-independent-children";
+        let children = ["child-a", "child-b", "child-c"];
+        let plan = AgentTaskPlan::new("interrupted-provider-wave", Vec::new());
+        for child in children {
+            let run_id = format!("cook-{child}");
+            submit_plan(&plan, Some(&run_id)).expect("persist interrupted child");
+            homeboy::agents::agent_tasks::lifecycle::record_pre_execution_failure(
+                &run_id,
+                &plan,
+                "provider_start",
+                &homeboy_core::Error::internal_unexpected(
+                    "local Cook observer was interrupted during provider execution",
+                ),
+            )
+            .expect("terminalize interrupted child");
+        }
+        persist_fanout_run_batch(
+            batch_id,
+            batch_id,
+            &children
+                .iter()
+                .map(|child| FanoutRunBatchChild {
+                    task_id: (*child).to_string(),
+                    run_id: format!("cook-{child}"),
+                })
+                .collect::<Vec<_>>(),
+            serde_json::json!({
+                "dependency_graph": {
+                    "nodes": children.iter().map(|child| serde_json::json!({
+                        "id": child,
+                        "depends_on": []
+                    })).collect::<Vec<_>>()
+                },
+                "declared_trackers": {
+                    "child-a": "https://github.com/Extra-Chill/homeboy/issues/14190",
+                    "child-b": "https://github.com/Extra-Chill/homeboy/issues/14191",
+                    "child-c": "https://github.com/Extra-Chill/homeboy/issues/14192"
+                }
+            }),
+        )
+        .expect("persist interrupted batch");
+
+        let output = Command::new(homeboy_bin())
+            .args(["agent-task", "fanout", "resume", batch_id])
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+            .output()
+            .expect("resume from a separate process");
+        assert!(output.status.success());
+        let output: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("fanout resume JSON output");
+        assert!(output["success"].as_bool().expect("resume success flag"));
+        assert_eq!(output["exit_code"], 0);
+        assert_eq!(output["status"], "succeeded");
+        assert_eq!(output["subject_state"], "failed");
+        assert_eq!(output["data"]["status"], "failed");
+        assert_eq!(output["data"]["exit_code"], 1);
+        assert_eq!(output["data"]["summary"]["succeeded"], 0);
+        assert_eq!(output["data"]["summary"]["failed"], 3);
+        for cell in output["data"]["cooks"].as_array().expect("child cells") {
+            assert_eq!(cell["status"], "failed");
+            assert_eq!(cell["exit_code"], 1);
+        }
+        for child in output["data"]["portfolio"]["status"]["children"]
+            .as_array()
+            .expect("portfolio children")
+        {
+            assert_eq!(child["tracker"], "declared_unobserved");
+        }
+    });
+}
+
 /// #13702: reading a batch that failed before admission is a *successful
 /// read*. The command exits zero so the recovery path Homeboy itself prints
 /// survives `set -e`; the failed subject state stays in `data`, and the

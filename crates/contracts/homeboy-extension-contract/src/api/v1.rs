@@ -15,6 +15,9 @@ pub const EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA: &str =
 pub const EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA: &str =
     "homeboy/extension-api-handshake-response/v1";
 pub const EXTENSION_API_V1: ExtensionApiVersion = ExtensionApiVersion { major: 1 };
+pub const FINGERPRINT_FILE_CAPABILITY_PREFIX: &str = "fingerprint.";
+pub const FORMAT_FILE_CAPABILITY_PREFIX: &str = "format.";
+pub const REFACTOR_FILE_CAPABILITY_PREFIX: &str = "refactor.";
 
 /// A transport-neutral Extension API major version.
 ///
@@ -272,6 +275,134 @@ mod tests {
                     "timeout_ms": 30_000,
                     "follow_up_command": "homeboy extension show fixture --live-readiness"
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn read_only_invoke_wire_shape_is_typed() {
+        let response = ExtensionApiInvokeResponse {
+            schema: EXTENSION_API_INVOKE_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            output: Some(serde_json::json!({ "warnings": [] })),
+            failure: None,
+            process: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("invoke response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_INVOKE_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "output": { "warnings": [] }
+            })
+        );
+    }
+
+    #[test]
+    fn environment_resolve_wire_shape_excludes_private_execution_inputs() {
+        let request = ExtensionApiEnvironmentResolveRequest {
+            schema: EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: "fixture".to_string(),
+        };
+        let response = ExtensionApiEnvironmentResolveResponse {
+            schema: EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            contribution: Some(ExtensionApiEnvironmentContribution {
+                extension_id: "fixture".to_string(),
+                version: "1.2.3".to_string(),
+                public_env: vec![("PUBLIC_PATH".to_string(), "/opt/tool/bin".to_string())],
+                secret_env_names: vec!["FIXTURE_TOKEN".to_string()],
+            }),
+            failure: None,
+            process: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).expect("environment request JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
+                "api_version": { "major": 1 },
+                "extension_id": "fixture"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(response).expect("environment response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "contribution": {
+                    "extension_id": "fixture",
+                    "version": "1.2.3",
+                    "public_env": [["PUBLIC_PATH", "/opt/tool/bin"]],
+                    "secret_env_names": ["FIXTURE_TOKEN"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn recipe_run_plan_wire_shape_exposes_only_safe_identity_and_literal_argv() {
+        let response = ExtensionApiRecipeRunPlanResponse {
+            schema: EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            plan: Some(ExtensionApiRecipeRunPlan {
+                provider_id: "fixture.recipe-run".to_string(),
+                provider_version: "1.2.3".to_string(),
+                owning_extension: "fixture".to_string(),
+                command: vec![
+                    "fixture-run".to_string(),
+                    "--recipe".to_string(),
+                    "recipe.json".to_string(),
+                ],
+            }),
+            available_provider_ids: Vec::new(),
+            selection_failure: None,
+            failure: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("recipe run plan JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "plan": {
+                    "provider_id": "fixture.recipe-run",
+                    "provider_version": "1.2.3",
+                    "owning_extension": "fixture",
+                    "command": ["fixture-run", "--recipe", "recipe.json"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn external_check_inventory_wire_shape_excludes_private_execution_data() {
+        let response = ExtensionApiExternalCheckDetailInventoryResponse {
+            schema: EXTENSION_API_EXTERNAL_CHECK_DETAIL_INVENTORY_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            providers: vec![ExtensionApiExternalCheckDetailInventoryEntry {
+                provider: Some("example-ci".to_string()),
+                owning_extension: "fixture".to_string(),
+                resolvable: true,
+                validation: ExtensionApiExternalCheckDetailProviderValidation::Valid,
+                diagnostic: None,
+            }],
+            failure: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("inventory response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_EXTERNAL_CHECK_DETAIL_INVENTORY_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "providers": [{
+                    "provider": "example-ci",
+                    "owning_extension": "fixture",
+                    "resolvable": true,
+                    "validation": "valid"
+                }]
             })
         );
     }

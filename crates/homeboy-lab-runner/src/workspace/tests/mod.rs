@@ -7,23 +7,8 @@ mod snapshot;
 mod snapshots;
 mod update;
 
-use std::path::Path;
-use std::process::Command;
-
 /// Run a git command in `path`, asserting success. Shared test helper.
-fn git(path: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {} failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_core::test_support::run_git_command as git;
 
 /// Create a git repo with a single committed file then dirty the working tree.
 fn dirty_git_repo() -> tempfile::TempDir {

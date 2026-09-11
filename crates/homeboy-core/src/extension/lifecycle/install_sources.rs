@@ -5,12 +5,12 @@
 //! assets, and linking a local source directory. Kept in a sibling module so
 //! the lifecycle root stays under the structural line/item thresholds (#5241).
 
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use homeboy_core::config::{self, from_str};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::registry::validate_installed_extension_provider_discovery;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
+use homeboy_core::extension::root_manifest::{ExtensionRootManifest, SharedAssetDeclaration};
 use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
@@ -21,28 +21,6 @@ use super::{
     InstallResult,
 };
 use homeboy_extension_contract::ExtensionManifest;
-
-#[derive(Debug, Deserialize)]
-struct ExtensionRootManifest {
-    #[serde(default)]
-    shared_assets: Vec<SharedAssetDeclaration>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum SharedAssetDeclaration {
-    Path(String),
-    Object { path: String },
-}
-
-impl SharedAssetDeclaration {
-    fn into_path(self) -> String {
-        match self {
-            SharedAssetDeclaration::Path(path) => path,
-            SharedAssetDeclaration::Object { path } => path,
-        }
-    }
-}
 
 const ROOT_MANIFEST: &str = "homeboy-extension-root.json";
 const INSTALLED_ROOT_MANIFEST: &str = ".homeboy-extension-root.json";
@@ -55,7 +33,7 @@ fn shared_assets_for_manifest(manifest_path: &Path) -> Vec<String> {
             manifest
                 .shared_assets
                 .into_iter()
-                .map(SharedAssetDeclaration::into_path)
+                .map(SharedAssetDeclaration::path)
                 .map(|path| path.trim().to_string())
                 .filter(|path| !path.is_empty())
                 .collect::<Vec<_>>()
@@ -105,9 +83,10 @@ pub(crate) fn shared_assets_for_extension_source(source: &Path) -> Vec<(String, 
 pub(super) fn install_configured_extension(
     source: &str,
     extension_id: &str,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallResult> {
     if super::is_git_url(source) {
-        return super::install(source, Some(extension_id));
+        return super::install(source, Some(extension_id), validation);
     }
 
     let source_path = Path::new(source);
@@ -122,10 +101,11 @@ pub(super) fn install_configured_extension(
             Some(extension_id),
             Some(source_path),
             None,
+            validation,
         );
     }
 
-    super::install(source, Some(extension_id))
+    super::install(source, Some(extension_id), validation)
 }
 
 /// Install a extension by cloning from a git repository URL.
@@ -137,6 +117,7 @@ pub(super) fn install_from_url(
     url: &str,
     id_override: Option<&str>,
     revision: Option<&str>,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallResult> {
     let extension_id = match id_override {
         Some(id) => slugify_id(id)?,
@@ -201,7 +182,7 @@ pub(super) fn install_from_url(
     }
 
     let manifest_path = paths::extension_manifest(&extension_id)?;
-    if let Err(err) = validate_installed_extension_provider_discovery(&extension_id) {
+    if let Err(err) = validation.validate_installed_extension(&extension_id) {
         let _ = std::fs::remove_dir_all(&extension_dir);
         return Err(err);
     }
@@ -246,7 +227,7 @@ pub(crate) fn resolve_cloned_extension(
 
         // Cloned installs copy: the clone temp dir is discarded after install,
         // so the shared trees must be materialized as standalone copies.
-        install_shared_assets_from_root(temp_dir, extension_dir, SharedAssetMode::Copy)?;
+        install_shared_assets_from_root(temp_dir, extension_dir, SharedAssetMode::Copy, None)?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
@@ -316,13 +297,16 @@ fn install_shared_assets_from_root(
     source_root: &Path,
     extension_dir: &Path,
     mode: SharedAssetMode,
+    revision: Option<&str>,
 ) -> Result<()> {
-    if runtime_generation_boundary_active()? {
+    let root_manifest = source_root.join(ROOT_MANIFEST);
+    let shared_assets = shared_assets_for_root(source_root);
+    if root_manifest.is_file() && runtime_generation_boundary_active()? {
         // Once runtime generations are active, extension refreshes publish a
         // successor generation rather than writing through the stable link.
-        homeboy_core::runtime_package::refresh_shared_assets(source_root)?;
+        homeboy_core::runtime_package::refresh_shared_assets_with_revision(source_root, revision)?;
     }
-    for shared_dir in shared_assets_for_root(source_root) {
+    for shared_dir in shared_assets {
         if matches!(
             shared_dir.as_str(),
             "agent-runtimes" | "agent-task-contracts" | "runtime-agent-ci"
@@ -452,19 +436,37 @@ pub(crate) fn install_linked_shared_assets(
     source: &Path,
     extension_dir: &Path,
     source_root: Option<&Path>,
+    revision: Option<&str>,
 ) -> Result<()> {
     if let Some(source_root) = source_root {
         return install_shared_assets_from_root(
             source_root,
             extension_dir,
             SharedAssetMode::Symlink,
+            revision,
+        );
+    }
+
+    if let Some(source_root) = runtime_package_source_root(source) {
+        return install_shared_assets_from_root(
+            source_root,
+            extension_dir,
+            SharedAssetMode::Symlink,
+            revision,
         );
     }
 
     if let Some(parent) = source.parent() {
-        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink)?;
+        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink, revision)?;
     }
     Ok(())
+}
+
+fn runtime_package_source_root(source: &Path) -> Option<&Path> {
+    let runtime_packages = source.parent()?;
+    (runtime_packages.file_name()?.to_str()? == "agent-runtimes")
+        .then(|| runtime_packages.parent())
+        .flatten()
 }
 
 /// Scan a cloned repo for subdirectories that contain a matching manifest file.
@@ -525,6 +527,7 @@ pub(super) fn install_from_path(
     id_override: Option<&str>,
     source_root: Option<&Path>,
     revision: Option<&str>,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallResult> {
     let source = Path::new(source_path);
 
@@ -575,6 +578,7 @@ pub(super) fn install_from_path(
                     Some(&extension_id),
                     Some(&source),
                     revision,
+                    validation,
                 );
             }
         }
@@ -607,7 +611,7 @@ pub(super) fn install_from_path(
 
     local_files::ensure_app_dirs()?;
 
-    install_linked_shared_assets(&source, &extension_dir, source_root)?;
+    install_linked_shared_assets(&source, &extension_dir, source_root, None)?;
 
     // Create symlink
     #[cfg(unix)]
@@ -633,7 +637,7 @@ pub(super) fn install_from_path(
         return Err(err);
     }
     let manifest_path = paths::extension_manifest(&extension_id)?;
-    if let Err(err) = validate_installed_extension_provider_discovery(&extension_id) {
+    if let Err(err) = validation.validate_installed_extension(&extension_id) {
         let _ = std::fs::remove_file(&extension_dir);
         return Err(err);
     }

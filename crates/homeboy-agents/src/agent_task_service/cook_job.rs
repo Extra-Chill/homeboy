@@ -40,14 +40,12 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 
-use homeboy_core::process::{
-    process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
-};
+use homeboy_core::process::ProcessStartIdentity;
 use homeboy_core::{Error, ErrorCode, Result};
 
 use super::work_job::{
     register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
-    WorkJobInvocation,
+    WorkJobInvocation, WorkJobPhase,
 };
 use crate::agent_task_lifecycle;
 
@@ -89,18 +87,6 @@ pub struct AgentTaskCookJobRequest {
     pub child_session_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskCookJobPhase {
-    /// Admitted, not yet supervising.
-    #[default]
-    Queued,
-    /// The daemon is watching a live detached child.
-    Supervising,
-    /// The child ended and its durable outcome was observed.
-    Completed,
-}
-
 /// The durable controller job, including its recovery checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -109,7 +95,7 @@ pub struct AgentTaskCookJob {
     pub idempotency_key: String,
     pub request: AgentTaskCookJobRequest,
     #[serde(default)]
-    pub phase: AgentTaskCookJobPhase,
+    pub phase: WorkJobPhase,
     /// The attempt id the cook published, once it has one. Recorded in the
     /// checkpoint so a resumed job reports the same handle it already announced.
     #[serde(default)]
@@ -163,7 +149,7 @@ impl AgentTaskCookJob {
                         .unwrap_or(&request.cook_id))
             ),
             request,
-            phase: AgentTaskCookJobPhase::Queued,
+            phase: WorkJobPhase::Queued,
             run_id,
             terminal_state: None,
         })
@@ -188,12 +174,12 @@ impl AgentTaskCookJob {
                 "cook job idempotency key does not match its immutable request",
             ));
         }
-        if self.phase == AgentTaskCookJobPhase::Completed && self.terminal_state.is_none() {
+        if self.phase == WorkJobPhase::Completed && self.terminal_state.is_none() {
             return Err(invalid_cook_job(
                 "completed cook jobs require an observed terminal state",
             ));
         }
-        if self.phase != AgentTaskCookJobPhase::Completed && self.terminal_state.is_some() {
+        if self.phase != WorkJobPhase::Completed && self.terminal_state.is_some() {
             return Err(invalid_cook_job(
                 "only completed cook jobs may record a terminal state",
             ));
@@ -287,12 +273,12 @@ impl WorkJobHandler for CookWorkHandler {
 
     fn prepare(&self, request: Value) -> Result<Value> {
         let mut job = AgentTaskCookJob::parse(request)?;
-        if job.phase != AgentTaskCookJobPhase::Queued || job.terminal_state.is_some() {
+        if job.phase != WorkJobPhase::Queued || job.terminal_state.is_some() {
             return Err(invalid_cook_job(
                 "new cook jobs must start queued without a terminal state",
             ));
         }
-        job.phase = AgentTaskCookJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         job.to_checkpoint()
     }
 
@@ -318,7 +304,7 @@ impl WorkJobHandler for CookWorkHandler {
         // materialization it marks the live attempt cancelled for the cook's
         // own supervisor to stop cleanly.
         let job = AgentTaskCookJob::parse(checkpoint.clone())?;
-        if job.phase == AgentTaskCookJobPhase::Completed {
+        if job.phase == WorkJobPhase::Completed {
             return Ok(());
         }
         let run_id = job
@@ -338,7 +324,7 @@ impl CookWorkHandler {
     /// child" rather than as death, so supervision can never attribute a
     /// stranger's process to this cook.
     fn supervise(&self, job: &mut AgentTaskCookJob, handle: WorkJobHandle) -> Result<Value> {
-        job.phase = AgentTaskCookJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         handle.checkpoint(job.to_checkpoint()?)?;
         handle.progress(job.progress_projection())?;
 
@@ -384,7 +370,10 @@ impl CookWorkHandler {
                 }
             }
 
-            if !child_is_live(&job.request) {
+            if !super::work_job::supervised_child_is_live(
+                job.request.child_pid,
+                &job.request.child_start_identity,
+            ) {
                 return job.observe_terminal(job.run_id.clone());
             }
 
@@ -410,10 +399,13 @@ pub enum CookJobResumeDisposition {
 
 impl AgentTaskCookJob {
     pub fn resume_disposition(&self) -> CookJobResumeDisposition {
-        if self.phase == AgentTaskCookJobPhase::Completed {
+        if self.phase == WorkJobPhase::Completed {
             return CookJobResumeDisposition::AlreadyComplete;
         }
-        if child_is_live(&self.request) {
+        if super::work_job::supervised_child_is_live(
+            self.request.child_pid,
+            &self.request.child_start_identity,
+        ) {
             return CookJobResumeDisposition::ReadoptLiveChild;
         }
         CookJobResumeDisposition::ObserveTerminalOutcome
@@ -482,7 +474,7 @@ impl AgentTaskCookJob {
             // interrupted, not finished. Say so.
             _ => agent_task_lifecycle::AgentTaskRunState::Failed,
         });
-        self.phase = AgentTaskCookJobPhase::Completed;
+        self.phase = WorkJobPhase::Completed;
         self.completed_result()
     }
 }
@@ -495,18 +487,6 @@ fn latest_run_id(cook_id: &str) -> Option<String> {
     agent_task_lifecycle::cook_index(cook_id)
         .ok()
         .map(|index| index.latest_run_id)
-}
-
-/// Whether the supervised child is still provably the process we were handed.
-fn child_is_live(request: &AgentTaskCookJobRequest) -> bool {
-    matches!(
-        process_identity_state_with_start_identity(
-            request.child_pid,
-            None,
-            Some(&request.child_start_identity),
-        ),
-        ProcessIdentityState::Live
-    )
 }
 
 fn retry_child_failure(request: &AgentTaskCookJobRequest) -> Error {
@@ -839,7 +819,7 @@ mod tests {
         assert_eq!(job.request.cook_id, "cook-round-trip");
         assert_eq!(job.request.child_pid, 4242);
         assert_eq!(job.request.child_start_identity, IDENTITY);
-        assert_eq!(job.phase, AgentTaskCookJobPhase::Queued);
+        assert_eq!(job.phase, WorkJobPhase::Queued);
         assert_eq!(job.run_id, None);
         assert_eq!(job.terminal_state, None);
 
@@ -904,7 +884,7 @@ mod tests {
         let driver = WorkJobDriver;
         let mut job =
             AgentTaskCookJob::parse(request_of("cook-public", 4242)).expect("parse request");
-        job.phase = AgentTaskCookJobPhase::Completed;
+        job.phase = WorkJobPhase::Completed;
         job.run_id = Some("cook-public-attempt-1".to_string());
         job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
         let mut value = work_request_of("cook-public", 4242);
@@ -964,7 +944,7 @@ mod tests {
     fn resume_never_re_runs_a_completed_job() {
         let mut job =
             AgentTaskCookJob::parse(request_of("cook-complete", 4242)).expect("parse request");
-        job.phase = AgentTaskCookJobPhase::Completed;
+        job.phase = WorkJobPhase::Completed;
         job.run_id = Some("cook-complete-attempt-1".to_string());
         job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
 
@@ -986,7 +966,7 @@ mod tests {
     fn resume_observes_rather_than_restarts_a_dead_child() {
         let mut job =
             AgentTaskCookJob::parse(request_of("cook-dead-child", 4242)).expect("parse request");
-        job.phase = AgentTaskCookJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         // u32::MAX is not a live pid, and the recorded start identity cannot
         // match, so liveness is provably false.
         job.request.child_pid = u32::MAX;
@@ -1115,11 +1095,11 @@ mod tests {
             .expect("persist handoff parent");
             let mut job =
                 AgentTaskCookJob::parse(request_of(cook_id, 4242)).expect("parse request");
-            job.phase = AgentTaskCookJobPhase::Supervising;
+            job.phase = WorkJobPhase::Supervising;
 
             let result = job.observe_terminal(None).expect("observe terminal");
 
-            assert_eq!(job.phase, AgentTaskCookJobPhase::Completed);
+            assert_eq!(job.phase, WorkJobPhase::Completed);
             assert_eq!(result["terminal_state"], "failed");
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("read terminalized handoff parent");
@@ -1140,7 +1120,7 @@ mod tests {
     fn cancelling_a_completed_job_is_a_no_op() {
         let mut job =
             AgentTaskCookJob::parse(request_of("cook-cancel-complete", 4242)).expect("parse");
-        job.phase = AgentTaskCookJobPhase::Completed;
+        job.phase = WorkJobPhase::Completed;
         job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
 
         CookWorkHandler
@@ -1424,7 +1404,7 @@ mod tests {
 
             let mut job =
                 AgentTaskCookJob::parse(request_of(cook_id, u32::MAX)).expect("parse request");
-            job.phase = AgentTaskCookJobPhase::Supervising;
+            job.phase = WorkJobPhase::Supervising;
             job.observe_terminal(Some(run_id.to_string()))
                 .expect("observe interrupted observer");
 

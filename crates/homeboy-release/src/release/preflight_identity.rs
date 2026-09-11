@@ -37,7 +37,6 @@ pub(super) fn revalidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn revalidation_fails_closed_when_the_source_moves_after_preflight() {
@@ -64,17 +63,5 @@ mod tests {
         assert!(error.message.contains("Release preflight source drift"));
     }
 
-    fn run_git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git");
-        assert!(
-            output.status.success(),
-            "git {:?}: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 }

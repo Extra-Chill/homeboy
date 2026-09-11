@@ -16,13 +16,16 @@ pub use admission::{
     controller_upgrade_admission, ensure_controller_upgrade_admission,
     ensure_verified_target_upgrade_admission, register_controller_upgrade_admission_provider,
     ControllerUpgradeAdmission, ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
+    VerifiedTargetUpgrade,
 };
 pub use execution::parse_build_identity_display;
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,
     run_upgrade_with_method, version_is_newer,
 };
-pub use operation::{load_upgrade_operation_status, UpgradeOperationStatus};
+pub use operation::{
+    load_upgrade_operation_status, UpgradeOperationStatus, UpgradePromotionWaitStatus,
+};
 pub use planning::resolve_binary_on_path;
 pub use release_catalog::{
     running_target_triple, InstallableSelection, ReleaseRef, SelectedRelease,
@@ -32,8 +35,9 @@ pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgrad
 pub use services::restart_extension_services;
 pub use types::{
     ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip, InstallMethod,
-    RunnerDaemonDriftEntry, RunnerExtensionSyncEntry, RunnerUpgradeEntry, ServiceRestartEntry,
-    UpgradeComponentStatus, UpgradePreflight, UpgradeResult, VersionCheck,
+    RunnerConvergenceDisposition, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry,
+    RunnerUpgradeEntry, ServiceRestartEntry, UpgradeComponentStatus, UpgradePreflight,
+    UpgradeResult, VersionCheck,
 };
 pub use validation::check_for_updates;
 

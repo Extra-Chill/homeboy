@@ -17,6 +17,8 @@ fn active_invocation_lease_survives_transient_pin_loss() {
     #[cfg(not(unix))]
     let path = exported_path.clone();
     fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("simulate pin loss");
+    // The directory is named for the invocation short id now, so this filter
+    // is resolved through the prefix recorded in `owner.json` (#14384).
     let mut options = bounded_options(false, Some("homeboy-invocation-tmp"));
     options.older_than_days = 0;
 
@@ -478,6 +480,138 @@ fn stale_cleanup_lock_from_exited_owner_is_reclaimed() {
     drop(reclaimed);
 }
 
+/// The exact production shape from #14221: a lock left behind by a category
+/// timeout, whose owner PID is gone but whose 300s lease is still in the
+/// future. Reclaim must not wait the lease out — the owner is dead, so nothing
+/// will ever release the lock or renew the lease.
+///
+/// Before the fix this needed BOTH lease expiry and a dead identity, and the
+/// acquirer only retries for ~2s against a 300s lease, so the reclaim branch
+/// was unreachable and every invocation leaked another dead-owner lock.
+#[test]
+fn cleanup_lock_from_exited_owner_is_reclaimed_while_its_lease_is_still_live() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "runtime-temp.cleanup")
+            .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    let mut owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(&owner_path).expect("owner record")).expect("owner json");
+    owner.pid = exited_pid();
+    owner.linux_starttime_ticks = None;
+    owner.process_start_identity = None;
+    // Heartbeated moments ago, so the lease has almost its full 300s left.
+    owner.heartbeat_unix_ms = super::super::cleanup_support::unix_time_ms();
+    owner.lease_deadline_unix_ms = owner
+        .heartbeat_unix_ms
+        .saturating_add(CLEANUP_LOCK_STALE_AFTER.as_millis() as u64);
+    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+        .expect("dead owner with a live lease");
+    std::mem::forget(first);
+
+    let reclaimed = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        root.path(),
+        "test.reclaimer",
+        CLEANUP_LOCK_ATTEMPTS,
+        CLEANUP_LOCK_STALE_AFTER,
+    )
+    .expect("a dead owner must be reclaimed without waiting out its lease");
+    drop(reclaimed);
+}
+
+/// The self-perpetuating half of #14221: each leaked lock must not block the
+/// next invocation. Two successive acquisitions, each abandoning a dead-owner
+/// lock, must both succeed.
+#[test]
+fn successive_leaked_dead_owner_locks_do_not_block_later_cleanups() {
+    let root = tempfile::tempdir().expect("tempdir");
+    for _ in 0..3 {
+        let lock = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+            root.path(),
+            "runtime-temp.cleanup",
+            CLEANUP_LOCK_ATTEMPTS,
+            CLEANUP_LOCK_STALE_AFTER,
+        )
+        .expect("each invocation reclaims the previous leaked lock");
+        let owner_path = lock.path.join(CLEANUP_LOCK_OWNER_FILE);
+        let mut owner: RuntimeTempCleanupLockOwner =
+            serde_json::from_slice(&fs::read(&owner_path).expect("owner")).expect("owner json");
+        // Simulate the SIGKILL at the category wall: the owner process is gone
+        // and no destructor ran, so the directory is still on disk.
+        owner.pid = exited_pid();
+        owner.linux_starttime_ticks = None;
+        owner.process_start_identity = None;
+        super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+            .expect("dead owner");
+        std::mem::forget(lock);
+    }
+    assert!(root.path().join(CLEANUP_LOCK_DIR).exists());
+}
+
+/// A live owner is still protected. The relaxed reclaim must not let a
+/// contender steal a lock whose recorded process is genuinely running.
+#[test]
+fn live_owner_is_not_reclaimed_by_the_relaxed_staleness_rule() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let first =
+        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "runtime-temp.cleanup")
+            .expect("first lock");
+    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
+    let mut owner: RuntimeTempCleanupLockOwner =
+        serde_json::from_slice(&fs::read(&owner_path).expect("owner")).expect("owner json");
+    // Lease long expired, but this process is demonstrably alive.
+    owner.heartbeat_unix_ms = 0;
+    owner.lease_deadline_unix_ms = 0;
+    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
+        .expect("expired lease, live owner");
+
+    let error = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
+        root.path(),
+        "test.contender",
+        2,
+        Duration::from_secs(0),
+    )
+    .expect_err("a live owner keeps its lock even with an expired lease");
+    assert!(error.message.contains("timed out acquiring"));
+    assert!(owner_path.exists(), "live owner's lock must survive");
+    drop(first);
+}
+
+/// The lock is released when the sweep stops on its wall-clock budget, which
+/// is the path the category timeout now takes instead of being SIGKILLed.
+#[test]
+fn budget_truncated_sweep_releases_its_cleanup_lock_and_resumes() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    for index in 0..4 {
+        let path = failed_run(&format!("homeboy-run-budget-{index}"), 64);
+        assert!(path.exists());
+    }
+
+    let mut options = bounded_options(true, None);
+    options.older_than_days = 0;
+    // Already spent: the sweep must stop at the first entry boundary.
+    options.deadline = Some(std::time::Instant::now());
+    let output = cleanup_runtime_tmp_bounded(options).expect("budget-truncated sweep returns");
+
+    assert!(
+        output.has_more,
+        "a truncated sweep must report that work remains"
+    );
+    assert!(
+        !root.path().join(CLEANUP_LOCK_DIR).exists(),
+        "the cleanup lock must not survive a budget-truncated sweep"
+    );
+
+    // And the next invocation, with budget, still makes progress.
+    options.deadline = None;
+    let resumed = cleanup_runtime_tmp_bounded(options).expect("resumed sweep");
+    assert!(resumed.removed_count > 0);
+    assert!(!root.path().join(CLEANUP_LOCK_DIR).exists());
+    env::remove_var(runtime_tmpdir_env());
+}
+
 fn exited_pid() -> u32 {
     let mut child = std::process::Command::new("true")
         .spawn()
@@ -656,5 +790,206 @@ fn external_hardlink_is_not_reported_as_reclaimable_allocation() {
     assert_eq!(output.removed_count, 1);
     assert!(external.exists());
     assert!(output.verified_reclaimed_bytes <= output.removed_allocated_bytes);
+    env::remove_var(runtime_tmpdir_env());
+}
+
+/// Restore an invocation-runtime-root override on drop.
+struct InvocationRootGuard(Option<String>);
+
+impl InvocationRootGuard {
+    fn set(path: &Path) -> Self {
+        let prior = env::var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
+        env::set_var(
+            crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+            path,
+        );
+        Self(prior)
+    }
+}
+
+impl Drop for InvocationRootGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(prior) => env::set_var(
+                crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                prior,
+            ),
+            None => env::remove_var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
+        }
+    }
+}
+
+/// The reported bug, end to end.
+///
+/// #14384: `TMPDIR` was a short symlink onto a
+/// `homeboy-invocation-tmp-<uuid>-<nanos>` directory, ~74 bytes of name before
+/// any root. Every workload that canonicalizes its temp root before creating
+/// sockets — WP Codebox's native MariaDB provider does it as part of a
+/// symlink-free containment proof — got a path that could not hold a socket.
+/// Binding through `realpath` is the assertion the old contract could not pass.
+#[cfg(unix)]
+#[test]
+fn exported_tmpdir_holds_a_socket_after_canonicalization() {
+    use std::os::unix::net::UnixListener;
+
+    let _guard = home_env_guard();
+    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+    let _root_guard = InvocationRootGuard::set(runtime_root.path());
+    let data_root = tempfile::tempdir().expect("data volume runtime temp root");
+    env::set_var(runtime_tmpdir_env(), data_root.path());
+
+    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+    let invocation = super::super::super::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &super::super::super::invocation::InvocationRequirements::default(),
+    )
+    .expect("invocation");
+
+    let exported = invocation.context().tmp_dir;
+    let canonical = exported
+        .canonicalize()
+        .expect("canonicalize exported TMPDIR");
+    let socket = canonical.join("server.sock");
+    assert!(
+        socket.as_os_str().len() < 108,
+        "socket path under the resolved TMPDIR must fit sun_path: {} bytes ({})",
+        socket.as_os_str().len(),
+        socket.display()
+    );
+    let listener = UnixListener::bind(&socket).expect("bind a socket under the resolved TMPDIR");
+
+    // The durable owner still lives on the data volume (#11125) — the fix buys
+    // socket safety by shortening the name, not by moving the bytes.
+    assert!(
+        canonical.starts_with(data_root.path().canonicalize().expect("data root")),
+        "durable temp must stay on the data volume: {}",
+        canonical.display()
+    );
+    // The uuid and the creation time left the directory name; they are still
+    // recorded where cleanup actually reads them.
+    let owner = read_run_owner(&canonical).expect("owner record");
+    assert!(!owner.owner_id.is_empty());
+    assert!(!owner.created_at.is_empty());
+    assert_eq!(owner.producer.as_deref(), Some("invocation"));
+    assert_eq!(owner.placement, None, "default placement is the data root");
+
+    drop(listener);
+    drop(invocation);
+    run_dir.cleanup();
+    env::remove_var(runtime_tmpdir_env());
+}
+
+/// A data root too long for even a 10-byte name degrades placement instead of
+/// handing out a `TMPDIR` no socket can live under.
+#[cfg(unix)]
+#[test]
+fn a_data_root_over_budget_falls_back_to_the_short_runtime_root() {
+    use std::os::unix::net::UnixListener;
+
+    let _guard = home_env_guard();
+    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+    let _root_guard = InvocationRootGuard::set(runtime_root.path());
+    let data_root = tempfile::tempdir().expect("data volume root");
+    // Deep enough that no invocation name fits the sockaddr_un budget beneath
+    // it — the long-$HOME host the fallback exists for.
+    let long_data_root = data_root.path().join("d".repeat(80));
+    fs::create_dir_all(&long_data_root).expect("long data root");
+    env::set_var(runtime_tmpdir_env(), &long_data_root);
+
+    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+    let invocation = super::super::super::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &super::super::super::invocation::InvocationRequirements::default(),
+    )
+    .expect("invocation");
+
+    let exported = invocation.context().tmp_dir;
+    let canonical = exported
+        .canonicalize()
+        .expect("canonicalize exported TMPDIR");
+    assert!(
+        canonical.starts_with(runtime_root.path().canonicalize().expect("runtime root")),
+        "over-budget data root must degrade to the short runtime root: {}",
+        canonical.display()
+    );
+    // No alias: the owner is already short, so nothing is indirected.
+    assert!(
+        !fs::symlink_metadata(&exported)
+            .expect("exported metadata")
+            .file_type()
+            .is_symlink(),
+        "a fallback-placed owner is exported directly"
+    );
+    let listener = UnixListener::bind(canonical.join("server.sock"))
+        .expect("bind a socket under the fallback TMPDIR");
+
+    let owner = read_run_owner(&canonical).expect("owner record");
+    assert_eq!(
+        owner.placement.as_deref(),
+        Some("invocation-runtime-root"),
+        "the degradation must be recorded so cleanup and operators can see it"
+    );
+
+    drop(listener);
+    drop(invocation);
+    run_dir.cleanup();
+    env::remove_var(runtime_tmpdir_env());
+}
+
+/// Cleanup has to find fallback-placed bytes, and must not mistake a live
+/// invocation's state directories — siblings in the same root, with no owner
+/// record — for strays.
+#[cfg(unix)]
+#[test]
+fn cleanup_reclaims_fallback_owners_and_spares_live_invocation_dirs() {
+    let _guard = home_env_guard();
+    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+    let _root_guard = InvocationRootGuard::set(runtime_root.path());
+    let data_root = tempfile::tempdir().expect("data volume root");
+    let long_data_root = data_root.path().join("d".repeat(80));
+    fs::create_dir_all(&long_data_root).expect("long data root");
+    env::set_var(runtime_tmpdir_env(), &long_data_root);
+
+    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+    let invocation = super::super::super::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &super::super::super::invocation::InvocationRequirements::default(),
+    )
+    .expect("invocation");
+    let context = invocation.context();
+    let fallback_owner = context.tmp_dir.clone();
+    let state_dir = context.state_dir.clone();
+    let artifact_dir = context.artifact_dir.clone();
+    fs::write(fallback_owner.join("payload.bin"), vec![b'x'; 4096]).expect("payload");
+
+    let mut options = bounded_options(true, None);
+    options.older_than_days = 0;
+
+    // While the invocation is live nothing under the shared root is reclaimed.
+    let live = cleanup_runtime_tmp_bounded(options).expect("live sweep");
+    assert_eq!(live.removed_count, 0);
+    assert!(fallback_owner.exists());
+    assert!(state_dir.exists());
+    assert!(artifact_dir.exists());
+    assert!(
+        !live
+            .rows
+            .iter()
+            .any(|row| row.path == state_dir.display().to_string()
+                || row.path == artifact_dir.display().to_string()),
+        "live invocation directories must not be inspected as runtime-temp strays"
+    );
+
+    drop(invocation);
+    assert!(!state_dir.exists(), "invocation teardown removes STATE_DIR");
+
+    let reclaimed = cleanup_runtime_tmp_bounded(options).expect("terminal sweep");
+    assert_eq!(
+        reclaimed.removed_count, 1,
+        "the fallback-placed owner is reclaimed once its invocation ends"
+    );
+    assert!(!fallback_owner.exists());
+
+    run_dir.cleanup();
     env::remove_var(runtime_tmpdir_env());
 }

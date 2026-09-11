@@ -4,6 +4,557 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.8] - 2026-09-10
+
+### Changed
+- give each wire identifier one definition
+- Accept review options after actions
+
+### Fixed
+- Fix lifecycle-owned snapshot recovery projection
+
+## [0.371.7] - 2026-09-10
+
+### Changed
+- isolate execution provenance from the developer's installation
+
+## [0.371.6] - 2026-09-10
+
+### Changed
+- Make agent-task inspection scoped and bounded
+
+### Fixed
+- preflight deferred worktrees
+
+## [0.371.5] - 2026-09-10
+
+### Changed
+- reap fixture daemons during teardown
+
+### Fixed
+- report partial external storage inventory
+
+## [0.371.4] - 2026-09-10
+
+### Changed
+- build the ssh fixtures once
+- build the trace fixtures once per crate
+- build the runs fixture once
+- declare two copy-pasted helpers once
+
+### Fixed
+- fence retained count disagreement
+- block-comment openers take precedence over doc line prefixes
+- stop authoritative rebound through SSH
+
+## [0.371.3] - 2026-09-09
+
+### Changed
+- share the conservative shell arg quoter
+- one daemon response envelope
+- one env guard instead of nine hand-rolled copies
+- one promotion request type and one serialized shape
+- Make artifact cleanup bounded and resumable without skipping candidates
+
+### Fixed
+- rename the promotion request in its integration test
+
+## [0.371.2] - 2026-09-09
+
+### Fixed
+- overlay a registered component with its own checkout manifest
+- restore the test build by dropping an unrunnable authority test
+- expose pinned configured-daemon recovery
+- preserve reconcile failure blockers
+
+## [0.371.1] - 2026-09-09
+
+### Changed
+- one duration parser for every command surface
+- declare the extension root manifest once
+
+### Fixed
+- initialize pre-execution blocker metadata
+- bound fanout preview readiness admission
+- resolve secret_env_projections from component settings in preflight.test_secret_env
+- cover remaining fetch authority paths
+- restore the workspace build for detached staging blockers
+- stop reporting platform-split tests as shadowed coverage
+- complete remote tracking fetch authority
+- expose detached staging failures
+- reuse authoritative rotation observation
+- re-resolve binary after promotion
+- persist lifecycle registry ownership
+- keep preview provider readiness owned
+- serialize remote tracking fetches
+- canonicalize execution mirror run identity
+- remove derived job authority
+
+## [0.371.0] - 2026-09-09
+
+### Added
+- update queued Cook placement
+- version heartbeat renewal API
+
+### Fixed
+- heartbeat runner-owned Cook startup
+- report only enforced probe limits
+- retain doctor failure causes
+- expose Cook before local startup
+- bound and diagnose full inventory probes
+- classify admission reservations as sidecars
+- discover unmaterialized Cook admissions
+- preserve draining generation ownership
+- preserve compact daemon lease identity
+
+## [0.370.1] - 2026-09-09
+
+### Changed
+- stop paying production probe budgets and thousand-entry fixtures in tests
+- Remove retired control-plane projections
+- Extend the generic control plane
+- root the refresh path so its tests leave the global home lock
+
+### Fixed
+- prioritize explicit lease adoption
+- route selected credentials to Lab runners
+- require targeted runner admission
+
+## [0.370.0] - 2026-09-08
+
+### Added
+- inspect durable jobs
+
+### Changed
+- Rotate local daemon generations
+
+### Fixed
+- honor managed extension snapshots
+
+## [0.369.10] - 2026-09-08
+
+### Fixed
+- refresh managed extension caches before admission
+- retain explicit runner for provider readiness
+- protect reachable stale owners
+- stage the materialized Cook workspace
+- compact default status output
+- stop summarizing an unexecuted test gate as "Tests failed"
+
+## [0.369.9] - 2026-09-08
+
+### Fixed
+- hydrate historical adoption base
+- authenticate adoption reuse fingerprint
+- reap detached descendants on runner cancellation
+- bind adoption promotion reuse
+
+## [0.369.8] - 2026-09-08
+
+### Fixed
+- skip empty package hydration
+- surface apply-ready candidates
+
+## [0.369.7] - 2026-09-08
+
+### Changed
+- Distinguish unverified provider authentication in runner doctor
+
+### Fixed
+- project admission retry status
+
+## [0.369.6] - 2026-09-08
+
+### Fixed
+- render external storage provider commands
+- retain snapshot staging ownership
+- admit exhausted Cook retries
+- carry provider credentials as SecretEnvPlan references in reverse-runner Cook handoff
+- bound reconciliation passes
+- resolve abbreviated refresh authorities
+- protect temp Cargo targets
+- Fix queued Cook readiness rearm dispatch
+- compare full build identities
+
+## [0.369.5] - 2026-09-07
+
+### Fixed
+- defer provider credentials to runner
+
+## [0.369.4] - 2026-09-07
+
+### Changed
+- Make reserve-pressure Cook failures actionable
+
+### Fixed
+- recover merged finalizations
+- retain manual retry scope
+- recover interrupted replacement gates
+- retain full source commit
+- make the exported TMPDIR socket-safe after canonicalization
+
+## [0.369.3] - 2026-09-07
+
+### Fixed
+- quote refresh authorities individually
+
+## [0.369.2] - 2026-09-07
+
+### Fixed
+- preserve detached admission diagnostics
+- resolve local tools without a login shell
+
+## [0.369.1] - 2026-09-07
+
+### Changed
+- root workspace prune tests off the global home lock
+
+### Fixed
+- preserve retained artifact evidence
+- resolve managed adoption source
+
+## [0.369.0] - 2026-09-07
+
+### Changed
+- root snapshot sync tests off the global home lock
+
+### Fixed
+- recover pending verification
+
+## [0.368.0] - 2026-09-07
+
+### Added
+- add typed execute API
+
+### Changed
+- satisfy rustfmt on the harness-only closure
+- assert canonical review evidence
+- share one git output helper across crates
+- format review imports
+- canonicalize durable review
+- use the shared git fixture helper
+- return canonical promotion acknowledgement
+- normalize git fixture helpers onto the identity-neutral contract
+- use a shared identity-neutral git helper
+- centralize action result decoding
+- own cancellation convergence
+
+### Fixed
+- recover mirrored evidence from the job owner
+- treat test-harness config as source-relevant
+- retain promotion setup evidence
+- secure durable review handoffs
+- preserve review handoff inputs
+- preserve merged promotion projection
+
+## [0.367.15] - 2026-09-07
+
+### Changed
+- return canonical resume acknowledgement
+- use the shared git fixture helper
+- return canonical retry acknowledgement
+
+### Fixed
+- recover finalized changelog history
+- enforce changelog ownership in lint
+- restore generated changelog history
+
+## [0.367.14] - 2026-09-06
+
+### Changed
+- return canonical reconcile action
+- cover explicit timeout cancellation
+- remove controller artifact URL probes
+
+### Fixed
+- bound global snapshot
+- discover extension JSON workloads
+- default job list to live jobs
+- keep fuzz detach policy controller-side
+- reap process groups on cancellation
+- include remote stdio in job logs
+- report capability admission failures
+- cancel unset agent-task waits
+- honor cancelled terminal status
+- block detached capability drift
+- project terminal timeout cancellation
+- fence detached staging readiness
+- stabilize readiness provenance evidence
+- preserve timeout detach default
+- detach accepted jobs after wait expiry
+- withhold unserved artifact URLs
+- avoid stale current version claims
+
+## [0.367.13] - 2026-09-06
+
+### Changed
+- use the shared git fixture helper
+- narrow the agent-tasks facade to its consumers
+- use canonical status resources
+- remove the orphaned gate-feedback baseline seam
+- delete unreferenced public functions
+
+### Fixed
+- cook homeboy
+- retrieve persisted comparison artifacts
+- preview directory comparison artifacts
+- expose comparison result refs
+
+## [0.367.12] - 2026-09-06
+
+### Changed
+- stop publishing internal-only modules
+
+## [0.367.11] - 2026-09-05
+
+### Changed
+- share one work-job phase and liveness check
+
+## [0.367.10] - 2026-09-05
+
+### Changed
+- assert continuation state through lifecycle records
+- own Cook continuation state in lifecycle records
+
+### Fixed
+- admit fetched base when origin is unreachable
+
+## [0.367.9] - 2026-09-03
+
+### Changed
+- simplify proof dependencies
+- centralize aggregate transitions
+- collapse control-plane dispatch
+- Gate Lab provider readiness on extension parity
+
+### Fixed
+- embed owned remote payload once
+- let scoped continuations finish
+- admit local refresh on controller
+- normalize readiness diagnostics
+- fence cancelled Cook retries
+- converge stale local daemon
+- pin preview base for replay
+- avoid unsafe ahead guidance
+- bound cancel output
+- return update help locally
+- project refresh typed failures
+- admit runner-skewed cooks to upgrade
+- reconcile active job ownership
+- disambiguate finalization components
+- preserve Cook repository paths
+- Fix readiness contract compile gates
+
+## [0.367.8] - 2026-09-03
+
+### Fixed
+- signal output drain before decoding
+
+## [0.367.7] - 2026-09-03
+
+### Added
+- add materialized rig contract
+- version claim API
+- bound the release artifact store per repository
+- add resource topology contract
+- allow Cook provider route override
+- register agent-task executors through Extension API v1
+- persist multi-repository cook waves
+
+### Changed
+- align fanout replay with admission blockers
+- format release artifact cleanup
+- own exec orchestration in runner API
+- format controller runtime retention test
+- remove inert side-effect seams
+- derive command docs at runtime
+- remove promotion provider abstraction
+- remove configured providers
+- type workspace authority sidecars
+- derive actions from extension catalog
+- resolve policy through extension catalog
+- canonicalize stored execution records
+- unify current submission input
+- route actions through API v1
+- format continuation exports
+- align preflight fixture base
+- make reverse claims envelope-only
+- single-source capability script projection
+- Complete the controller upgrade queue
+- make lifecycle executor validation an explicit dependency
+- Finalize provider worktrees explicitly
+- share component registration fixture
+- consolidate shared Git fixture execution
+- Keep Cook retries on their controller
+- collapse Lab refresh handoff
+- unify direct daemon submission
+- adopt merged PR lifecycle reconciliation
+- Migrate deployment providers to Extension API v1
+- Migrate external check resolvers to Extension API v1
+- Finalize successful candidate adoption correctly
+- Bind cleanup apply retries to active work
+- Report incomplete synchronous cleanup honestly
+- Scope artifact cleanup to the requested checkout
+- Honor configured executable tool probes
+- submit execution envelopes
+- Migrate recipe providers to Extension API v1
+- Unify review test execution plan ownership
+- Unify candidate and baseline gate execution
+- separate record decoding from schema acceptance
+- Remove Runner contract Lab dependency
+- Expose rig package root to bench extensions
+- Execute declared test plans through typed gate lifecycle
+- Migrate environment resolution to Extension API v1
+- share duplication indexes
+- build exact duplicate index once
+- Migrate fingerprint scripts to Extension API v1
+- declare bounded fanout test plans
+- Migrate runner availability to API v1
+- retire policy baseline ratchet
+- Centralize extension manifest loading
+- Add Runner API readiness operation
+- Migrate refactor analysis to Extension API v1
+- Preserve durable candidate presentation
+- Migrate runner capability admission to API v1
+- remove ambient component test wrapper
+- Test runner reconciliation claim replay
+- remove test-only production scaffolding
+- Resolve formatting through Extension API v1
+- Verify runner reconciliation projection
+- Defer stale descendant releases
+- Recover admitted runner jobs without a PID
+- Diagnose queued runner ownership
+- Queue concurrent controller upgrades
+- Resolve file capabilities through Extension API v1
+- Add Runner API v1 capabilities operation
+- retire expired compatibility flags
+
+### Fixed
+- generate recovery changelog
+- bind timeout candidate provenance
+- preserve current retention categories
+- preserve capability probe evidence
+- bound workspace synchronization
+- align retry projection with admission
+- recover repeated push races
+- gate reference against live Clap
+- bind portable readiness to gate
+- preserve native promotion scope
+- project rig workload inventory
+- retry unmaterialized Cook admissions
+- use component version for containment
+- preserve native Cook worktree ownership
+- redact rotation diagnostics
+- defer unconfirmed auto Cook placement
+- fence stale startup cleanup
+- reject malformed canonical claims
+- version provider action contract
+- surface provider rotation causes
+- clarify provider readiness next action
+- refresh stale auto Cook placement
+- fence Cook generation admission
+- derive controller runtime eligibility from retention decisions
+- reclaim runtime-temp locks from exited owners
+- reload materialized aggregate bytes
+- reload selected cook candidate
+- fund fanout child retry budgets
+- project live provider progress
+- validate live inference readiness
+- preserve interrupted fanout child state
+- distinguish retained candidates
+- resolve ambient fanout notifications
+- validate promotion base before mutation
+- rotate quota-blocked providers
+- admit controller-owned promotion
+- cook homeboy
+- deny retryable dispatch admission
+- admit submitted plans before running
+- preserve task deadlines and containment
+- bind queued readiness admission
+- trust the admission-derived plan post-admission
+- persist admitted provider readiness route
+- integrate readiness invocation deadlines
+- close readiness routing blockers
+- harden provider readiness remediation
+- preserve provider readiness routing
+- bind readiness probes to selected credentials
+- route provider readiness across rotation
+- validate queued finalization dispatchers and rearm identity
+- close continuation landing gaps
+- finalize continuation recovery
+- harden continuation recovery invariants
+- close continuation preflight gaps
+- harden continuation preflight admission
+- make continuation preflight read-only
+- resolve equivalent controller artifact projections
+- fault-isolate configured provider inventory
+- carry Cook pinned base into snapshot
+- bound changed-only audit
+- preflight dirty checkout
+- bind Cook harvest workspace
+- infer repo from target worktree
+- scope workspace recovery to explicit owner
+- restrict extension command suggestions
+- promote unresolved preview diagnostics
+- keep metadata show local
+- preserve durable runtime refresh context (#14111) [AI: OpenAI GPT-5.6 Terra via OpenCode]
+- preserve retryable fanout admission
+- validate fanout preview providers
+- retain live admission claims
+- update relink provenance atomically
+- unify provider readiness verdict
+- bound readiness invocations
+- compact cook-batch help
+- supervise explicit local submissions
+- persist Cook before resource admission
+- emit terminal Cook preview
+- converge bounded doctor recovery
+- resolve nested runtime package roots
+- bind harvest to remapped workspace provenance
+- converge cancelled provider ownership
+- preserve timeout workspace candidates
+- hydrate nested component dependencies
+- retain clean dispatch snapshot for harvest
+- project terminal notification state
+- preserve partial upgrade diagnostics
+- compare replacement candidate fingerprints
+- retain list diagnostics
+- persist refresh phase progress
+- validate fanout provider admission
+- retain gate-blocked candidates
+- diagnose invalid provider contracts
+- validate batch targets atomically
+- preserve target version diagnostics
+- skip mutable tagged recovery gates
+- authenticate detached staging requests
+- preserve subdirectory component identity
+- retain partial component inventory
+
+## [0.367.6] - 2026-08-31
+
+### Fixed
+- Fix portable release preflight output
+
+## [0.367.5] - 2026-08-31
+
+### Changed
+- Migrate runner list to API v1
+- Bound default operator payloads
+
+## [0.367.4] - 2026-08-31
+
+### Changed
+- make self-audit advisory
+- Route compiler warnings through Extension API v1
+- Define Runner API v1 discovery operations
+- Simplify Homeboy tests and CI policy
+- Define Runner API v1 handshake
+- Terminalize verified no-change before Cook-wide candidate selection
+
+### Fixed
+- keep reconciliation store-rooted
+- require live credential verification
+
 ## [0.367.3] - 2026-08-31
 
 ### Changed

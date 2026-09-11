@@ -1168,20 +1168,7 @@ mod git_steps {
     use crate::pipeline::run_pipeline;
     use crate::spec::{ComponentSpec, GitOp, PipelineStep, RigSpec};
 
-    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_core::test_support::git_command_output as run_git;
 
     fn rig_with_git_step(component_path: String, op: GitOp) -> RigSpec {
         let mut components = HashMap::new();

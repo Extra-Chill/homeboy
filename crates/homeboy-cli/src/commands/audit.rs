@@ -50,8 +50,8 @@ pub struct AuditArgs {
 
     /// Detector profile to run. `full` preserves the default full audit;
     /// `pr` runs cheap root-level blockers for changed-file review.
-    #[arg(long, value_name = "PROFILE", default_value = "full", value_parser = ["full", "pr", "architecture"])]
-    pub profile: String,
+    #[arg(long, value_name = "PROFILE", value_parser = ["full", "pr", "architecture"])]
+    pub profile: Option<String>,
 
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
@@ -137,7 +137,7 @@ fn parse_audit_profile(value: &str) -> homeboy::core::Result<code_audit::AuditPr
 pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
     let only_kinds = parse_finding_kinds(&args.only, "only")?;
     let exclude_kinds = parse_finding_kinds(&args.exclude, "exclude")?;
-    let profile = parse_audit_profile(&args.profile)?;
+    let profile = parse_audit_profile(args.profile.as_deref().unwrap_or("full"))?;
 
     let source_ctx = resolve_source_context(
         &args.comp,
@@ -159,6 +159,7 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
     let run_id = active_observation
         .as_ref()
         .map(|observation| observation.run_id().to_string());
+    emit_audit_lifecycle(run_id.as_deref());
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
         component_id: resolved_id.clone(),
         source_path: resolved_path.clone(),
@@ -218,6 +219,28 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
         )?;
     }
     Ok((output, exit_code))
+}
+
+/// Publish the durable run identity before scanning so an interrupted client can
+/// attach to the persisted audit instead of treating a long detector as a hang.
+fn emit_audit_lifecycle(run_id: Option<&str>) {
+    let Some(lifecycle) = audit_lifecycle(run_id) else {
+        return;
+    };
+    eprintln!("{lifecycle}");
+}
+
+fn audit_lifecycle(run_id: Option<&str>) -> Option<serde_json::Value> {
+    let run_id = run_id?;
+    Some(serde_json::json!({
+        "schema": "homeboy/audit-lifecycle/v1",
+        "event": "persisted",
+        "run_id": run_id,
+        "status": "running",
+        "show_command": format!("homeboy runs show {run_id}"),
+        "watch_command": format!("homeboy runs watch {run_id}"),
+        "cancel_command": format!("homeboy runs cancel {run_id}"),
+    }))
 }
 
 const AUDIT_FULL_REPORT_ARTIFACT_PREFIX: &str = "audit-report";
@@ -412,8 +435,8 @@ fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
     for kind in &args.exclude {
         parts.push(format!("--exclude={kind}"));
     }
-    if args.profile != "full" {
-        parts.push(format!("--profile={}", args.profile));
+    if let Some(profile) = args.profile.as_deref().filter(|profile| *profile != "full") {
+        parts.push(format!("--profile={profile}"));
     }
     for extension in &args.extension_override.extensions {
         parts.push(format!("--extension={extension}"));
@@ -437,7 +460,7 @@ fn audit_observation_initial_metadata(source_path: &str, args: &AuditArgs) -> se
     serde_json::json!({
         "source_path": source_path,
         "mode": if args.conventions { "conventions" } else { "audit" },
-        "profile": args.profile,
+        "profile": args.profile.as_deref().unwrap_or("full"),
         "only": args.only,
         "exclude": args.exclude,
         "extensions": args.extension_override.extensions,
@@ -655,33 +678,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    struct XdgGuard {
-        prior: Option<String>,
-    }
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self { prior }
-        }
-
-        fn set(value: &std::path::Path) -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::set_var("XDG_DATA_HOME", value);
-            Self { prior }
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
     fn tmp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -701,7 +697,7 @@ mod tests {
             conventions: false,
             only: vec![],
             exclude: vec![],
-            profile: "full".to_string(),
+            profile: Some("full".to_string()),
             baseline_args: BaselineArgs {
                 baseline: false,
                 ignore_baseline: false,
@@ -911,7 +907,7 @@ mod tests {
 
         assert_eq!(cli.audit.extension_override.extensions, vec!["rust"]);
         assert_eq!(cli.audit.changed.changed_since(), Some("origin/main"));
-        assert_eq!(cli.audit.profile, "pr");
+        assert_eq!(cli.audit.profile.as_deref(), Some("pr"));
     }
 
     #[test]
@@ -1111,7 +1107,7 @@ mod tests {
     #[test]
     fn audit_observation_start_persists_run_record() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
 
             let result = finish_adapted_observed_workflow(
@@ -1139,9 +1135,24 @@ mod tests {
     }
 
     #[test]
+    fn audit_lifecycle_exposes_durable_run_controls_before_work_starts() {
+        let lifecycle = audit_lifecycle(Some("audit-run-123")).expect("lifecycle");
+
+        assert_eq!(lifecycle["schema"], "homeboy/audit-lifecycle/v1");
+        assert_eq!(lifecycle["event"], "persisted");
+        assert_eq!(lifecycle["run_id"], "audit-run-123");
+        assert_eq!(lifecycle["status"], "running");
+        assert_eq!(
+            lifecycle["watch_command"],
+            "homeboy runs watch audit-run-123"
+        );
+        assert!(audit_lifecycle(None).is_none());
+    }
+
+    #[test]
     fn audit_observation_finish_persists_findings() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let workflow = sample_audit_workflow(home.path());
 
@@ -1183,7 +1194,7 @@ mod tests {
     #[test]
     fn audit_full_reports_use_run_scoped_resolvable_artifacts() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let first = ActiveObservation::start(
                 AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args)
@@ -1221,7 +1232,7 @@ mod tests {
     #[test]
     fn required_audit_report_failure_terminalizes_observation() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let adapter =
                 AuditObservationAdapter::new("homeboy", &home.path().to_string_lossy(), &args);
@@ -1259,7 +1270,8 @@ mod tests {
         with_isolated_home(|home| {
             let bad_data_home = home.path().join("not-a-dir");
             fs::write(&bad_data_home, "file blocks observation dir").expect("write marker");
-            let _xdg = XdgGuard::set(&bad_data_home);
+            let _xdg =
+                homeboy_core::test_support::EnvVarGuard::set("XDG_DATA_HOME", &bad_data_home);
 
             let result = finish_adapted_observed_workflow(
                 AuditObservationAdapter::new(
@@ -1313,7 +1325,7 @@ mod tests {
                 conventions: false,
                 only: vec![],
                 exclude: vec![],
-                profile: "full".to_string(),
+                profile: Some("full".to_string()),
                 baseline_args: BaselineArgs {
                     baseline: false,
                     ignore_baseline: true,

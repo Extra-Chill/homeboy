@@ -7,7 +7,7 @@ use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db,
     deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project, refactor,
     release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack,
-    status, trace, tunnel, upgrade, worktree,
+    status, topology, trace, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -237,6 +237,8 @@ pub enum Commands {
     Worktree(worktree::WorktreeArgs),
     /// Manage private service tunnel declarations
     Tunnel(tunnel::TunnelArgs),
+    /// Inspect declared resource relationships without resolving effective configuration
+    Topology(topology::TopologyArgs),
     /// Inspect persisted observation runs, artifacts, and typed evidence projections
     Runs(runs::RunsArgs),
     /// Inspect the active Homeboy binary; `self identity` reports its local build identity
@@ -682,9 +684,9 @@ mod surface {
             .filter(|entry| !entry.hidden)
             .map(|entry| entry.name.clone())
             .collect();
-        let docs_index_commands = documented_command_index_entries(include_str!(
-            "../../../../docs/commands/commands-index.md"
-        ));
+        let docs_index_commands = documented_command_index_entries(
+            &super::reference_docs::generated_command_index(&Cli::command_with_scoped_lab_args()),
+        );
 
         command_surface_doctor_report(
             command_provenance,
@@ -717,16 +719,15 @@ mod surface {
         command: Command,
         command_provenance: Vec<CommandSurfaceCommandProvenance>,
     ) -> CommandSurfaceDoctorReport {
+        let docs_index_commands = documented_command_index_entries(
+            &super::reference_docs::generated_command_index(&command),
+        );
         let help_commands = command_surface_from(command)
             .commands
             .into_iter()
             .filter(|entry| !entry.hidden)
             .map(|entry| entry.name)
             .collect();
-        let docs_index_commands = documented_command_index_entries(include_str!(
-            "../../../../docs/commands/commands-index.md"
-        ));
-
         command_surface_doctor_report(
             command_provenance,
             docs_index_commands,
@@ -739,9 +740,15 @@ mod surface {
         mut command_provenance: Vec<CommandSurfaceCommandProvenance>,
         docs_index_commands: BTreeSet<String>,
         help_commands: BTreeSet<String>,
-        runtime_extension_docs: BTreeSet<String>,
+        mut runtime_extension_docs: BTreeSet<String>,
     ) -> CommandSurfaceDoctorReport {
         command_provenance.sort_by(|left, right| left.command.cmp(&right.command));
+        runtime_extension_docs.extend(
+            command_provenance
+                .iter()
+                .filter(|entry| entry.registry == CommandSurfaceRegistry::Extension)
+                .map(|entry| entry.command.clone()),
+        );
         let provenance_by_command: BTreeMap<_, _> = command_provenance
             .iter()
             .map(|entry| (entry.command.clone(), entry.registry))
@@ -795,12 +802,12 @@ mod surface {
         push_drift_note(
             &mut drift_notes,
             &missing_from_docs_index,
-            "source registry commands missing from docs/commands/commands-index.md",
+            "source registry commands missing from the runtime command index",
         );
         push_drift_note(
             &mut drift_notes,
             &stale_docs_index,
-            "docs/commands/commands-index.md lists stale commands",
+            "runtime command index lists stale commands",
         );
         push_drift_note(
             &mut drift_notes,
@@ -911,7 +918,7 @@ mod tests {
     }
 
     fn commands_index() -> String {
-        command_doc("commands-index")
+        reference_docs::generated_command_index(&Cli::command_with_scoped_lab_args())
     }
 
     fn root_command(command: &str) -> clap::Command {
@@ -1013,7 +1020,7 @@ mod tests {
             );
             assert!(
                 index.contains(&format!("[{slug}]({slug}.md)")),
-                "docs/commands/commands-index.md is missing registered command `{}`",
+                "runtime command index is missing registered command `{}`",
                 entry.name
             );
         }
@@ -1198,6 +1205,82 @@ mod tests {
 
             assert_eq!(cli.placement, Placement::Lab);
         }
+    }
+
+    #[test]
+    fn registered_provider_readiness_parse_preserves_runner_from_both_positions() {
+        for args in [
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "providers",
+                "--backend",
+                "opencode",
+                "--validate-readiness",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "providers",
+                "--runner",
+                "homeboy-lab",
+                "--backend",
+                "opencode",
+                "--validate-readiness",
+            ]
+            .as_slice(),
+        ] {
+            let matches = Cli::command_with_scoped_lab_args()
+                .try_get_matches_from(args)
+                .expect("provider readiness accepts an explicit runner");
+            let (cli, _) = Cli::from_registered_arg_matches(&matches)
+                .expect("registered provider readiness parse retains runner");
+
+            assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+            let normalized_args = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            let preflight = crate::commands::utils::resource_policy::parsed_command_preflight_input(
+                &cli,
+                &normalized_args,
+            );
+            assert_eq!(
+                preflight.runner,
+                crate::core::parsed_command_preflight::RunnerIntent::Explicit(
+                    "homeboy-lab".to_string()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn registered_cleanup_artifacts_parse_preserves_global_placement() {
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from([
+                "homeboy",
+                "cleanup",
+                "artifacts",
+                "--placement",
+                "local",
+                "--path",
+                "/tmp/homeboy-cleanup-fixture",
+            ])
+            .expect("cleanup artifacts accepts global placement after its subcommand");
+        let (cli, _) =
+            Cli::from_registered_arg_matches(&matches).expect("registered cleanup parse succeeds");
+
+        assert_eq!(cli.placement, Placement::Local);
+        assert!(matches!(
+            cli.command,
+            Commands::Cleanup(crate::commands::cleanup::CleanupArgs {
+                command: Some(crate::commands::cleanup::CleanupCommand::Artifacts(_)),
+                ..
+            })
+        ));
     }
 
     #[test]

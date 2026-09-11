@@ -1,6 +1,7 @@
 use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -651,7 +652,14 @@ fn ensure_git_dependency_fresh(
         return Err(terminal_dependency_error(local_path, &freshness, None));
     }
 
-    let fetch_error = run_git(local_path, &["fetch", "--prune", remote]).err();
+    let fetch_error = homeboy_core::git::fetch_remote_tracking_refs_until(
+        local_path,
+        &["fetch", "--prune", remote],
+        "git fetch runner dependency",
+        &[],
+        Instant::now() + Duration::from_secs(30),
+    )
+    .err();
     let upstream_head = git_output(local_path, &["rev-parse", "@{u}"]).ok();
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
@@ -836,6 +844,7 @@ mod tests {
     use std::process::Command;
 
     use homeboy_core::engine::shell;
+    use homeboy_core::test_support::GitFixture as GitRepository;
 
     use super::{
         cache_archive_path, dependency_cache_manifest, ensure_git_dependency_fresh,
@@ -853,7 +862,7 @@ mod tests {
         // seed a synthetic git checkout on the runner so the materialized path
         // is a valid git work tree with a committed HEAD.
         homeboy_core::test_support::with_isolated_home(|_| {
-            let fixture = GitFixture::new();
+            let fixture = GitDependencyFixture::new();
             fixture.commit_file("initial.txt", "initial");
             fixture.push();
             let checkout = fixture.clone_checkout();
@@ -906,7 +915,7 @@ mod tests {
 
     #[test]
     fn auto_update_clean_dependency_fast_forwards_to_upstream() {
-        let fixture = GitFixture::new();
+        let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
 
@@ -932,7 +941,7 @@ mod tests {
 
     #[test]
     fn dirty_dependency_fails_before_snapshotting() {
-        let fixture = GitFixture::new();
+        let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
 
@@ -951,7 +960,7 @@ mod tests {
 
     #[test]
     fn detached_dependency_without_pinned_ref_fails() {
-        let fixture = GitFixture::new();
+        let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
 
@@ -997,7 +1006,7 @@ mod tests {
 
     #[test]
     fn explicit_pinned_ref_allows_detached_dependency() {
-        let fixture = GitFixture::new();
+        let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
 
@@ -1015,7 +1024,7 @@ mod tests {
 
     #[test]
     fn fetch_failure_uses_cached_upstream_when_checkout_matches() {
-        let fixture = GitFixture::new();
+        let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
 
@@ -1047,7 +1056,7 @@ mod tests {
 
     #[test]
     fn fetch_failure_is_terminal_when_cached_upstream_differs() {
-        let fixture = GitFixture::new();
+        let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
         fixture.commit_file("next.txt", "next");
@@ -1183,12 +1192,12 @@ mod tests {
         assert_eq!(value["paths"].as_array().expect("paths").len(), 2);
     }
 
-    struct GitFixture {
+    struct GitDependencyFixture {
         remote: tempfile::TempDir,
         work: tempfile::TempDir,
     }
 
-    impl GitFixture {
+    impl GitDependencyFixture {
         fn new() -> Self {
             let remote = tempfile::tempdir().expect("remote");
             run_git(remote.path(), &["init", "--bare"]);
@@ -1243,11 +1252,7 @@ mod tests {
     }
 
     fn run_git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
+        let output = GitRepository::new(path).execute(args);
         assert!(
             output.status.success(),
             "git {} failed: {}",
@@ -1257,11 +1262,7 @@ mod tests {
     }
 
     fn git_output(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
+        let output = GitRepository::new(path).execute(args);
         assert!(
             output.status.success(),
             "git {} failed: {}",

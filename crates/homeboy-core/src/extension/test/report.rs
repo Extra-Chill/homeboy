@@ -14,7 +14,7 @@ use homeboy_extension_contract::{
     PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
 };
 
-use super::run::{test_timeout, TestRunWorkflowResult};
+use super::run::TestRunWorkflowResult;
 use super::workflow::{AutoFixDriftWorkflowResult, DriftWorkflowResult};
 
 /// Exit status Homeboy assigns when it terminates a child that exhausted its
@@ -31,11 +31,11 @@ const TIMEOUT_EXIT_CODE: i32 = 124;
 /// Render a timeout as a timeout, naming the budget that was exhausted and
 /// whatever partial progress survived.
 ///
-/// The budget is read back through the same `test_timeout()` accessor the run
-/// path used to arm the child, so the number reported is always the number
-/// actually enforced rather than a duplicated constant that can drift.
-fn test_timeout_summary(counts: Option<&TestCounts>) -> String {
-    let budget_seconds = test_timeout().as_secs();
+fn test_timeout_summary(
+    counts: Option<&TestCounts>,
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
+) -> String {
+    let budget_seconds = test_execution_plan.suite_timeout().as_secs();
     match counts {
         Some(counts) if counts.passed + counts.failed > 0 => format!(
             "test phase timed out after {}s: {} passed, {} failed before termination, suite incomplete",
@@ -48,13 +48,17 @@ fn test_timeout_summary(counts: Option<&TestCounts>) -> String {
 }
 
 /// Build output from a main test workflow result.
-pub fn from_main_workflow(result: TestRunWorkflowResult) -> (TestCommandOutput, i32) {
-    from_main_workflow_with_ci_context(result, None)
+pub fn from_main_workflow(
+    result: TestRunWorkflowResult,
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
+) -> (TestCommandOutput, i32) {
+    from_main_workflow_with_ci_context(result, None, test_execution_plan)
 }
 
 pub fn from_main_workflow_with_ci_context(
     result: TestRunWorkflowResult,
     ci_context: Option<CiContext>,
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> (TestCommandOutput, i32) {
     let exit_code = result.exit_code;
     let phase = Some(test_phase_report(
@@ -65,6 +69,7 @@ pub fn from_main_workflow_with_ci_context(
             .findings
             .as_ref()
             .is_some_and(|findings| !findings.is_empty()),
+        test_execution_plan,
     ));
     let failure = if exit_code == 0 {
         None
@@ -76,6 +81,7 @@ pub fn from_main_workflow_with_ci_context(
                 .findings
                 .as_ref()
                 .is_some_and(|findings| !findings.is_empty()),
+            test_execution_plan,
         ))
     };
 
@@ -207,6 +213,7 @@ fn test_phase_report(
     exit_code: i32,
     counts: Option<&TestCounts>,
     has_findings: bool,
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> PhaseReport {
     if status == "skipped" {
         return PhaseReport {
@@ -232,7 +239,7 @@ fn test_phase_report(
                 "test phase passed".to_string()
             }
         } else if exit_code == TIMEOUT_EXIT_CODE {
-            test_timeout_summary(counts)
+            test_timeout_summary(counts, test_execution_plan)
         } else if counts.map(|counts| counts.total == 0).unwrap_or(false) {
             "test runner reported zero executed tests".to_string()
         } else if has_findings {
@@ -262,6 +269,7 @@ fn test_phase_failure(
     exit_code: i32,
     counts: Option<&TestCounts>,
     has_findings: bool,
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> PhaseFailure {
     // Checked before `has_findings`: a suite killed mid-run can still have
     // parsed a few structured failures, but partial findings from an aborted
@@ -272,7 +280,7 @@ fn test_phase_failure(
     if exit_code == TIMEOUT_EXIT_CODE {
         return PhaseFailure {
             phase: VerificationPhase::Test,
-            summary: test_timeout_summary(counts),
+            summary: test_timeout_summary(counts, test_execution_plan),
             category: PhaseFailureCategory::Infrastructure,
         };
     }
@@ -319,6 +327,24 @@ fn test_phase_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_execution_plan() -> homeboy_engine_primitives::test_execution::TestExecutionPlan {
+        homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+            std::time::Duration::from_secs(42),
+        )
+        .expect("positive timeout")
+    }
+
+    fn render(result: TestRunWorkflowResult) -> (TestCommandOutput, i32) {
+        render_with_plan(result, &test_execution_plan())
+    }
+
+    fn render_with_plan(
+        result: TestRunWorkflowResult,
+        plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
+    ) -> (TestCommandOutput, i32) {
+        from_main_workflow(result, plan)
+    }
 
     fn workflow_result(findings: Option<Vec<HomeboyFinding>>) -> TestRunWorkflowResult {
         TestRunWorkflowResult {
@@ -417,7 +443,7 @@ mod tests {
             },
         );
 
-        let (output, exit_code) = from_main_workflow(workflow);
+        let (output, exit_code) = render(workflow);
         let rendered = serde_json::to_value(output).expect("inventory output serializes");
 
         assert_eq!(exit_code, 0);
@@ -435,7 +461,7 @@ mod tests {
             homeboy_extension_contract::test_results::TestInventoryRejection::RunnerFingerprintMismatch,
         );
 
-        let (output, _) = from_main_workflow(workflow);
+        let (output, _) = render(workflow);
         let rendered = serde_json::to_value(output).expect("inventory rejection serializes");
 
         assert_eq!(
@@ -446,7 +472,7 @@ mod tests {
 
     #[test]
     fn omits_absent_inventory_rejection_from_the_command_schema() {
-        let (output, _) = from_main_workflow(workflow_result(None));
+        let (output, _) = render(workflow_result(None));
         let rendered = serde_json::to_value(output).expect("test output serializes");
 
         assert!(rendered.get("test_inventory_rejection").is_none());
@@ -454,17 +480,16 @@ mod tests {
 
     #[test]
     fn serializes_findings_when_present() {
-        let (output, exit_code) =
-            from_main_workflow(workflow_result(Some(vec![HomeboyFinding::builder(
-                "test",
-                "assertion failed",
-            )
-            .rule("AssertionFailed")
-            .severity("error")
-            .file("tests/fails.rs")
-            .line(42)
-            .metadata("test_name", "tests::fails")
-            .build()])));
+        let (output, exit_code) = render(workflow_result(Some(vec![HomeboyFinding::builder(
+            "test",
+            "assertion failed",
+        )
+        .rule("AssertionFailed")
+        .severity("error")
+        .file("tests/fails.rs")
+        .line(42)
+        .metadata("test_name", "tests::fails")
+        .build()])));
 
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert_eq!(exit_code, 1);
@@ -489,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_timed_out_test_phase_is_not_reported_as_a_test_failure() {
-        let (output, exit_code) = from_main_workflow(timed_out_workflow_result(None));
+        let (output, exit_code) = render(timed_out_workflow_result(None));
         let json = serde_json::to_value(output).expect("serialize test command output");
 
         assert_eq!(exit_code, 124);
@@ -524,15 +549,21 @@ mod tests {
 
     #[test]
     fn a_timed_out_test_phase_reports_the_budget_and_partial_progress() {
-        let (output, _) = from_main_workflow(timed_out_workflow_result(Some(TestCounts::new(
-            412, 410, 2, 0,
-        ))));
+        let plan = test_execution_plan();
+        assert_eq!(
+            plan.suite_timeout_env(),
+            ("HOMEBOY_TEST_TIMEOUT_SECONDS", "42".to_string())
+        );
+        let (output, _) = render_with_plan(
+            timed_out_workflow_result(Some(TestCounts::new(412, 410, 2, 0))),
+            &plan,
+        );
         let json = serde_json::to_value(output).expect("serialize test command output");
         let summary = json["failure"]["summary"].as_str().expect("summary");
 
-        // The budget reported is the budget enforced, read back through the
-        // same accessor the run path arms the child with.
-        let budget = super::test_timeout().as_secs();
+        // The report receives the same concrete plan that exports 42 to the
+        // runner; it never reconstructs its budget from the environment.
+        let budget = plan.suite_timeout().as_secs();
         assert!(
             summary.contains(&format!("after {budget}s")),
             "timeout must name the budget it exhausted, got: {summary}"
@@ -558,7 +589,7 @@ mod tests {
             .severity("error")
             .build()]);
 
-        let (output, _) = from_main_workflow(result);
+        let (output, _) = render(result);
         let json = serde_json::to_value(output).expect("serialize test command output");
 
         assert_ne!(
@@ -577,7 +608,7 @@ mod tests {
 
     #[test]
     fn omits_findings_when_absent() {
-        let (output, _) = from_main_workflow(workflow_result(None));
+        let (output, _) = render(workflow_result(None));
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert!(
             json.get("findings").is_none(),
@@ -598,7 +629,7 @@ mod tests {
             metadata: std::collections::BTreeMap::new(),
         }];
 
-        let (output, _) = from_main_workflow(result);
+        let (output, _) = render(result);
         let json = serde_json::to_value(output).expect("serialize test command output");
 
         assert_eq!(
@@ -620,7 +651,7 @@ mod tests {
     #[test]
     fn runner_failure_with_zero_parsed_failures_stays_failed() {
         let (output, exit_code) =
-            from_main_workflow(workflow_result_with_counts(1, TestCounts::new(3, 3, 0, 0)));
+            render(workflow_result_with_counts(1, TestCounts::new(3, 3, 0, 0)));
 
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert_eq!(exit_code, 1);
@@ -641,7 +672,7 @@ mod tests {
     #[test]
     fn successful_runner_with_zero_failures_still_passes() {
         let (output, exit_code) =
-            from_main_workflow(workflow_result_with_counts(0, TestCounts::new(3, 3, 0, 0)));
+            render(workflow_result_with_counts(0, TestCounts::new(3, 3, 0, 0)));
 
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert_eq!(exit_code, 0);
@@ -654,7 +685,7 @@ mod tests {
     #[test]
     fn zero_executed_tests_use_runner_neutral_failure_summary() {
         let (output, exit_code) =
-            from_main_workflow(workflow_result_with_counts(1, TestCounts::new(0, 0, 0, 0)));
+            render(workflow_result_with_counts(1, TestCounts::new(0, 0, 0, 0)));
 
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert_eq!(exit_code, 1);
@@ -706,7 +737,7 @@ mod tests {
             let status = "failed";
             let exit_code = normalized_exit_code(status, 0);
             let (output, reported_exit_code) =
-                from_main_workflow(workflow_result_with_counts(exit_code, counts.clone()));
+                render(workflow_result_with_counts(exit_code, counts.clone()));
             let json = serde_json::to_value(output).expect("serialize test command output");
 
             assert_eq!(
@@ -726,7 +757,7 @@ mod tests {
 
     #[test]
     fn extension_no_test_policy_is_structured_as_skipped() {
-        let (output, exit_code) = from_main_workflow(skipped_workflow_result());
+        let (output, exit_code) = render(skipped_workflow_result());
 
         let json = serde_json::to_value(output).expect("serialize test command output");
         assert_eq!(exit_code, 0);

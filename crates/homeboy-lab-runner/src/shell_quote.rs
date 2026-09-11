@@ -7,16 +7,6 @@
 //! inputs. Several lab-runner command builders relied on the allowlist behavior;
 //! this consolidates the previously copy-pasted definitions into one place
 //! without changing what gets quoted.
-pub(crate) fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,3 +34,5 @@ mod tests {
         assert_eq!(shell_arg(""), "");
     }
 }
+
+pub(crate) use homeboy_engine_primitives::shell::shell_arg;

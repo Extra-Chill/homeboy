@@ -8,8 +8,8 @@ use std::path::Path;
 
 use super::executor::release_cleanup_paths;
 use super::types::{
-    ReleaseArtifact, ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseProjectDeployResult,
-    ReleaseRun, ReleaseStepResult, ReleaseStepStatus,
+    ReleaseArtifact, ReleaseControlPlaneContext, ReleaseDeploymentResult, ReleaseDeploymentSummary,
+    ReleaseProjectDeployResult, ReleaseRun, ReleaseStepResult, ReleaseStepStatus,
 };
 
 pub(super) fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
@@ -41,6 +41,7 @@ pub(super) fn run_deployment_step(
     released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
     package_owned_paths: &[String],
+    control_plane: Option<&ReleaseControlPlaneContext>,
 ) -> ReleaseStepResult {
     let deployment = execute_deployment(
         data_root,
@@ -49,6 +50,7 @@ pub(super) fn run_deployment_step(
         released_tag,
         artifacts,
         package_owned_paths,
+        control_plane,
     );
     let deploy_failed = deployment.summary.failed > 0;
 
@@ -90,6 +92,7 @@ fn execute_deployment(
     released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
     package_owned_paths: &[String],
+    control_plane: Option<&ReleaseControlPlaneContext>,
 ) -> ReleaseDeploymentResult {
     let component_id = &component.id;
     let local_path = &component.local_path;
@@ -120,6 +123,7 @@ fn execute_deployment(
         expected_version,
         prepared_artifact,
         &projects,
+        control_plane,
     ) {
         Ok(config) => config,
         Err(error) => return failed_deployment(&projects, error.to_string()),
@@ -326,6 +330,7 @@ fn release_deployment_config(
     expected_version: Option<&str>,
     prepared_artifact: PreparedDeployArtifact,
     projects: &[String],
+    control_plane: Option<&ReleaseControlPlaneContext>,
 ) -> Result<DeployConfig> {
     let component_id = &component.id;
     let mut requested_refs = std::collections::BTreeMap::new();
@@ -345,6 +350,11 @@ fn release_deployment_config(
 
     let mut projection = PreparedDeployProjection {
         components: BTreeMap::from([(component_id.to_string(), component.clone())]),
+        control_plane: control_plane.map(|context| homeboy_deploy::DeployControlPlaneLineage {
+            mission_id: context.mission_id.clone(),
+            release_run_id: context.release_run_id.clone(),
+            recovery_component_id: Some(component_id.to_string()),
+        }),
     };
     for project_id in projects {
         let project = homeboy_core::project::load(project_id)?;
@@ -496,6 +506,22 @@ pub(super) fn resume_deployment(
     roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
 ) -> Result<Option<ReleaseDeploymentResult>> {
+    resume_deployment_checkpoint(roots, component_id, None)
+}
+
+pub(super) fn resume_deployment_for_run(
+    roots: &homeboy_core::paths::PathRoots,
+    component_id: &str,
+    deploy_run_id: &str,
+) -> Result<Option<ReleaseDeploymentResult>> {
+    resume_deployment_checkpoint(roots, component_id, Some(deploy_run_id))
+}
+
+fn resume_deployment_checkpoint(
+    roots: &homeboy_core::paths::PathRoots,
+    component_id: &str,
+    deploy_run_id: Option<&str>,
+) -> Result<Option<ReleaseDeploymentResult>> {
     let path = recovery_path_in_roots(roots.data(), component_id);
     if !path.exists() {
         return Ok(None);
@@ -508,6 +534,14 @@ pub(super) fn resume_deployment(
         return Err(Error::validation_invalid_argument(
             "recover",
             "Release deployment recovery component identity does not match",
+            None,
+            None,
+        ));
+    }
+    if deploy_run_id.is_some_and(|deploy_run_id| record.deploy_run_id != deploy_run_id) {
+        return Err(Error::validation_invalid_argument(
+            "recover",
+            "Release deployment recovery run identity does not match",
             None,
             None,
         ));
@@ -546,11 +580,21 @@ pub(super) fn resume_deployment(
 }
 
 fn release_deployment_config_from_record(record: &DeploymentRecovery) -> DeployConfig {
+    let control_plane =
+        record
+            .projection
+            .control_plane
+            .as_ref()
+            .map(|lineage| ReleaseControlPlaneContext {
+                mission_id: lineage.mission_id.clone(),
+                release_run_id: lineage.release_run_id.clone(),
+            });
     let mut config = release_deployment_config(
         &record.projection.components[&record.component_id],
         record.expected_version.as_deref(),
         record.artifact.clone(),
         &[],
+        control_plane.as_ref(),
     )
     .expect("stored release deployment config is valid");
     config.prepared_projection = Some(record.projection.clone());
@@ -605,11 +649,15 @@ mod tests {
         run_deployment_step, should_cleanup_release_artifacts,
     };
     use crate::release::types::{
-        ReleaseArtifact, ReleaseCommandInput, ReleaseDeploymentResult, ReleaseDeploymentSummary,
-        ReleasePipelineOptions, ReleaseRun, ReleaseRunResult, ReleaseState, ReleaseStepResult,
+        ReleaseArtifact, ReleaseControlPlaneContext, ReleaseDeploymentResult,
+        ReleaseDeploymentSummary, ReleaseRun, ReleaseRunResult, ReleaseState, ReleaseStepResult,
         ReleaseStepStatus,
     };
-    use crate::release::workflow::run_command;
+    use homeboy_control_plane_contract::{
+        ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneResult,
+        ControlPlaneRunState, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    };
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::defaults;
     use homeboy_core::project::{self, Project, ProjectComponentAttachment};
@@ -634,20 +682,7 @@ mod tests {
         super::recovery_path_in_roots(test_roots().data(), component_id)
     }
 
-    fn run_git(path: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?}: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_core::test_support::git_command_output as run_git;
 
     fn write_release_artifact(path: &Path) {
         let file = std::fs::File::create(path).expect("create release artifact");
@@ -881,6 +916,7 @@ mod tests {
             None,
             &[],
             &[],
+            None,
         );
 
         assert_eq!(result.id, "deploy");
@@ -918,6 +954,7 @@ mod tests {
             None,
             &artifacts,
             &["build".to_string()],
+            None,
         );
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
@@ -962,6 +999,10 @@ mod tests {
             tag: "v1.2.3".to_string(),
             source_commit: "commit".to_string(),
         };
+        let control_plane = ReleaseControlPlaneContext {
+            mission_id: "release-mission-13697".to_string(),
+            release_run_id: "release-run-13697".to_string(),
+        };
         let config = super::release_deployment_config(
             &homeboy_core::component::Component {
                 id: "demo".to_string(),
@@ -971,6 +1012,7 @@ mod tests {
             Some("1.2.3"),
             artifact.clone(),
             &[],
+            Some(&control_plane),
         )
         .expect("release deploy config");
 
@@ -981,6 +1023,13 @@ mod tests {
         assert_eq!(config.prepared_artifact, Some(artifact));
         assert_eq!(config.requested_ref_for("demo"), Some("v1.2.3"));
         assert_eq!(config.resolved_ref_for("demo"), Some("commit"));
+        let lineage = config
+            .prepared_projection
+            .as_ref()
+            .and_then(|projection| projection.control_plane.as_ref())
+            .expect("release control-plane lineage");
+        assert_eq!(lineage.mission_id, control_plane.mission_id);
+        assert_eq!(lineage.release_run_id, control_plane.release_run_id);
         assert!(
             !config.head,
             "release deploy must not deploy the registered worktree HEAD"
@@ -1031,6 +1080,7 @@ mod tests {
                 Some("1.2.3"),
                 artifact,
                 &["first".to_string(), "second".to_string()],
+                None,
             )
             .expect("release deploy config");
             let projection = config.prepared_projection.as_ref().expect("projection");
@@ -1158,6 +1208,10 @@ mod tests {
                 .expect("save project");
             }
 
+            let control_plane = ReleaseControlPlaneContext {
+                mission_id: "release-mission-13697".to_string(),
+                release_run_id: "release-run-13697".to_string(),
+            };
             let first = run_deployment_step(
                 test_roots().data(),
                 &component,
@@ -1165,6 +1219,7 @@ mod tests {
                 None,
                 &[artifact],
                 &package_owned_paths,
+                Some(&control_plane),
             );
             assert_eq!(first.status, ReleaseStepStatus::Failed);
             let first_deployment = first
@@ -1187,6 +1242,18 @@ mod tests {
             assert!(recovery_path("fixture").exists());
             assert!(source.join("build/intermediate").is_file());
             assert!(source.join("fixture-1.2.4.tgz").is_file());
+            let recovery: super::DeploymentRecovery = serde_json::from_slice(
+                &std::fs::read(recovery_path("fixture")).expect("recovery checkpoint"),
+            )
+            .expect("decode recovery checkpoint");
+            let deploy_run = RunId::new(&recovery.deploy_run_id).expect("deploy run id");
+            let mismatched_run =
+                super::resume_deployment_for_run(&test_roots(), "fixture", "deploy-run-unrelated")
+                    .expect_err("another run cannot consume this checkpoint");
+            assert!(mismatched_run
+                .message
+                .contains("recovery run identity does not match"));
+            assert!(recovery_path("fixture").exists());
 
             // A process restart reloads the checkpoint, not an in-memory release plan.
             // The completed target is now invalid: success proves the resumed lifecycle skips it.
@@ -1197,36 +1264,97 @@ mod tests {
             retry.base_path = Some(retry_target.display().to_string());
             project::save(&retry).expect("repair failed target");
 
-            let (recovered, exit_code) = run_command(ReleaseCommandInput {
-                component_id: component.id.clone(),
-                recover: true,
-                pipeline: ReleasePipelineOptions {
-                    deploy: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .expect("recover deployment");
-            assert_eq!(exit_code, 0);
-            assert_eq!(recovered.status, "released");
-            assert!(
-                recovered.run.is_none(),
-                "recovery must not replay publication"
+            crate::release::control_plane::register_action_delegate();
+            homeboy_agents::orchestration::register();
+            let projected = homeboy_core::control_plane::run(&deploy_run)
+                .expect("project deploy control-plane run");
+            assert_eq!(
+                projected
+                    .action_eligibility
+                    .as_ref()
+                    .expect("action eligibility")
+                    .actions[0]
+                    .availability,
+                homeboy_control_plane_contract::ControlPlaneActionAvailability::Available
+            );
+            let store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
+                &test_roots(),
+            )
+            .expect("observation store");
+            let record = store
+                .get_run(deploy_run.as_str())
+                .expect("read deploy run")
+                .expect("deploy run");
+            assert_eq!(
+                record.metadata_json["control_plane"]["actions"][0]["action"],
+                "resume"
             );
             assert_eq!(
-                recovered
-                    .deployment
-                    .as_ref()
-                    .expect("recovered deployment")
-                    .summary
-                    .skipped,
-                1,
-                "completed target is skipped"
+                record.metadata_json["control_plane"]["actions"][0]["availability"],
+                "available"
             );
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "release-deploy-recovery-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: false,
+            };
+            let execute = || {
+                let response =
+                    homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                        method: homeboy_core::http_api::HttpMethod::Post,
+                        path: format!("/v1/control-plane/runs/{}/actions", deploy_run.as_str()),
+                        body: Some(serde_json::to_value(&request).expect("action request")),
+                    })
+                    .expect("control-plane HTTP action");
+                assert_eq!(response.status, 200, "{}", response.body);
+                serde_json::from_value::<ControlPlaneResult<ControlPlaneActionAcknowledgement>>(
+                    response.body,
+                )
+                .expect("typed action result")
+                .resource
+                .expect("action acknowledgement")
+            };
+            let acknowledgement = execute();
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::Succeeded
+            );
+            assert_eq!(
+                acknowledgement.resource.state,
+                ControlPlaneRunState::Succeeded
+            );
+            assert_eq!(
+                execute(),
+                acknowledgement,
+                "same key replays one acknowledgement"
+            );
+            let recovered_after_effect =
+                crate::release::control_plane::resume_deploy_action(&record, &request)
+                    .expect("reconcile interrupted acknowledgement");
+            assert_eq!(
+                recovered_after_effect.outcome,
+                ControlPlaneActionOutcome::AlreadySatisfied
+            );
+            let events = store
+                .control_plane_event_stream(&deploy_run)
+                .expect("action events")
+                .expect("deploy event stream");
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| event.kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["action.accepted", "action.succeeded"]
+            );
+            let recovered: ReleaseDeploymentResult =
+                serde_json::from_value(acknowledgement.result.data.clone())
+                    .expect("recovered deployment result");
+            assert_eq!(recovered.summary.skipped, 1, "completed target is skipped");
             let retried = recovered
-                .deployment
-                .as_ref()
-                .expect("recovered deployment")
                 .projects
                 .iter()
                 .find(|project| project.project_id == "retry")

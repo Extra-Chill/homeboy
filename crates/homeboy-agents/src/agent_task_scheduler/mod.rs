@@ -57,6 +57,7 @@ use candidate_adoption::{
 };
 pub use engine::*;
 use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};
+use harvest::mark_timeout_workspace_candidates_incomplete;
 use harvest::{
     committed_harvest_failure, committed_harvest_preflight_outcome, harvest_committed_patch,
     harvest_uncommitted_patch,

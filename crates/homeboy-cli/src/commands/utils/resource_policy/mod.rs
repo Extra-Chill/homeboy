@@ -52,7 +52,7 @@ pub(crate) fn parsed_command_preflight_input(
     let normalized_args = crate::command_capability::homeboy_owned_args(normalized_args);
 
     let resource_admission =
-        hot_command(&cli.command).map_or(ResourceAdmissionRequirement::Exempt, |command| {
+        hot_command_for_cli(cli).map_or(ResourceAdmissionRequirement::Exempt, |command| {
             ResourceAdmissionRequirement::Required {
                 label: command.label.to_string(),
                 engages_at: if command.offload_only_when_hot {
@@ -498,6 +498,25 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
         });
     }
 
+    // Promotion of a durable controller candidate cannot transfer its mutation,
+    // artifact selection, or finalization authority to Lab. Its deterministic
+    // gate workload is nevertheless portable, so a ready runner admits the
+    // controller coordinator under CPU pressure just as it does for Cook.
+    if matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Promote(args),
+        }) if crate::commands::contract_lab_routing::agent_task_promotion_source_is_controller_owned(&args.source)
+    ) {
+        return Some(HotCommand {
+            label: "agent-task promote",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+            offload_only_when_hot: true,
+        });
+    }
+
     let route = command.lab_route().ok()?;
     if !route.portability_contract().is_resource_intensive() {
         return None;
@@ -519,6 +538,21 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
+}
+
+/// Local extension replacement is bounded controller configuration work. Its
+/// source has already been admitted by existence, so stale Lab inventory must
+/// not block it. An explicit Lab placement or runner remains an operator-owned
+/// portable routing request and retains the ordinary workload policy.
+pub(crate) fn hot_command_for_cli(cli: &Cli) -> Option<HotCommand> {
+    let local_extension_refresh = matches!(
+        &cli.command,
+        Commands::Extension(args) if args.refreshes_local_source()
+    );
+    if local_extension_refresh && cli.runner.is_none() && cli.placement != Placement::Lab {
+        return None;
+    }
+    hot_command(&cli.command)
 }
 
 /// Classify a descriptor-composed route with the exact portable/local-only and
@@ -1606,6 +1640,36 @@ mod tests {
     }
 
     #[test]
+    fn continuation_preflight_is_controller_only_and_resource_exempt() {
+        use crate::core::parsed_command_preflight::{
+            ControllerExecution, ResourceAdmissionRequirement,
+        };
+
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "missing-cook",
+            "--preflight",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&args);
+        let preflight = parsed_command_preflight_input(&cli, &args);
+
+        assert_eq!(
+            preflight.controller_execution,
+            ControllerExecution::ControllerOnly
+        );
+        assert_eq!(
+            preflight.resource_admission,
+            ResourceAdmissionRequirement::Exempt
+        );
+        assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
     fn agent_task_cook_batch_dry_run_does_not_start_hot_workloads() {
         let cli = Cli::parse_from([
             "homeboy",
@@ -1807,6 +1871,68 @@ mod tests {
             Some("missing-lab"),
             Some(&ready),
         ));
+    }
+
+    #[test]
+    fn controller_owned_promotion_admits_a_ready_runner_for_portable_gates_when_hot() {
+        with_isolated_home(|_| {
+            let run_id = "promotion-admission-run";
+            crate::agents::agent_tasks::lifecycle::submit_plan(
+                &crate::agents::agent_tasks::AgentTaskPlan::new("fixture", Vec::new()),
+                Some(run_id),
+            )
+            .expect("persist controller-owned promotion source");
+            let cli = Cli::parse_from([
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "promote",
+                run_id,
+                "--to-worktree",
+                "homeboy@promotion-admission",
+                "--verify",
+                "cargo test --lib",
+            ]);
+            let command = hot_command(&cli.command).expect("promotion is resource managed");
+            let preflight = parsed_command_preflight_input(
+                &cli,
+                &[
+                    "homeboy".to_string(),
+                    "--runner".to_string(),
+                    "homeboy-lab".to_string(),
+                    "agent-task".to_string(),
+                    "promote".to_string(),
+                    run_id.to_string(),
+                ],
+            );
+            let ready = ready_lab();
+            let mut resources = coordination_resources();
+            resources.recommendation = ResourceRecommendation::Hot;
+            resources.load.recommendation = ResourceRecommendation::Hot;
+
+            assert_eq!(command.label, "agent-task promote");
+            assert!(command.lab_offload_supported);
+            assert!(command.allows_warm_runner_coordination);
+            assert_eq!(
+                preflight.controller_execution,
+                crate::core::parsed_command_preflight::ControllerExecution::SplitPlacementCoordinator,
+            );
+            assert!(matches!(
+                preflight.lab_route,
+                crate::core::parsed_command_preflight::LabRouteIntent::Unsupported
+            ));
+            assert!(admits_warm_runner_coordination(
+                command,
+                &resources,
+                cli.runner.as_deref(),
+                Some(&ready),
+            ));
+            assert!(
+                !admits_warm_runner_coordination(command, &resources, None, Some(&ready)),
+                "an unpinned controller-owned promotion must not treat a ready Lab as local capacity"
+            );
+        });
     }
 
     /// #13631/#13632: an operator who explicitly pins `--runner homeboy-lab`

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -5,8 +6,9 @@ use std::sync::{
 use std::time::Duration;
 
 use homeboy_core::api_jobs::{
-    JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
+    Job, JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
 };
+use homeboy_core::broker_auth::BROKER_TOKEN_HEADER;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::server::{RunnerPolicy, RunnerSecretEnvRef};
 use homeboy_core::test_support;
@@ -24,6 +26,7 @@ use super::support::{
 };
 use super::worker_options;
 use crate::runner_staging_operation::SourceArtifactTransfer;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 
 #[test]
 fn reverse_worker_executes_claimed_job_and_finishes_it() {
@@ -49,7 +52,7 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
         .expect("set policy");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -162,12 +165,120 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
 }
 
 #[test]
+fn reverse_worker_receives_controller_credential_over_authenticated_broker_without_persistence() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+            false,
+        )
+        .expect("create runner");
+        crate::merge(
+            Some("lab"),
+            &serde_json::json!({
+                "policy": RunnerPolicy {
+                    allow_raw_exec: Some(true),
+                    workspace_roots: vec!["/tmp".to_string()],
+                    allowed_commands: vec!["sh".to_string()],
+                    ..Default::default()
+                }
+            })
+            .to_string(),
+            &[],
+        )
+        .expect("set policy");
+        let broker = test_support::AuthenticatedReverseBrokerFixture::start("lab");
+        let sentinel = "controller-secret-sentinel-do-not-persist";
+        let request = RemoteRunnerJobRequest {
+            runner_id: "lab".to_string(),
+            project_id: None,
+            operation: "runner.exec".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "test -n \"$PROVIDER_TOKEN\" && printf controller-credential-ok".to_string(),
+            ],
+            cwd: Some("/tmp".to_string()),
+            env: Default::default(),
+            secret_env_names: vec!["PROVIDER_TOKEN".to_string()],
+            secret_env_plan: SecretEnvPlan {
+                env_materialization: Some(
+                    homeboy_runner_contract::env_materialization_plan::EnvMaterializationPlan {
+                        secret_refs: vec![
+                            homeboy_runner_contract::env_materialization_plan::EnvSecretRef {
+                                name: "PROVIDER_TOKEN".to_string(),
+                                owner: Some("controller".to_string()),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ),
+                ..SecretEnvPlan::from_secret_env_names(["PROVIDER_TOKEN".to_string()])
+            },
+            env_materialization: None,
+            capture_patch: false,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            require_paths: Vec::new(),
+            extension_env_providers: Vec::new(),
+            lab_runner_workload: None,
+            lifecycle: None,
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            metadata: None,
+        };
+        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "controller-credential-worker-e2e".to_string(),
+            envelope: request.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: Some(homeboy_runner_contract::RunnerCredentialDelivery {
+                env: BTreeMap::from([("PROVIDER_TOKEN".to_string(), sentinel.to_string())]),
+            }),
+        };
+        let response: serde_json::Value = reqwest::blocking::Client::new()
+            .post(format!("{}/runner/jobs", broker.url()))
+            .header(BROKER_TOKEN_HEADER, broker.token())
+            .json(&submission)
+            .send()
+            .expect("submit controller credential job")
+            .error_for_status()
+            .expect("accept controller credential job")
+            .json()
+            .expect("decode controller submission response");
+        let job: Job = serde_json::from_value(response["data"]["body"]["job"].clone())
+            .expect("decode submitted job");
+
+        let mut options = worker_options(broker.url().to_string());
+        options.broker_token = Some(broker.token().to_string());
+        let (output, exit_code) = run_reverse_worker(options).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.job.as_ref().expect("finished job").id, job.id);
+        assert_eq!(
+            result_event_data(&broker.store, job.id)["stdout"],
+            serde_json::json!("controller-credential-ok")
+        );
+        for value in [
+            serde_json::to_string(&output).expect("serialize worker output"),
+            serde_json::to_string(&broker.store.get(job.id).expect("stored job"))
+                .expect("serialize stored job"),
+            serde_json::to_string(&broker.store.events(job.id).expect("stored events"))
+                .expect("serialize stored events"),
+        ] {
+            assert!(!value.contains(sentinel));
+        }
+    });
+}
+
+#[test]
 fn reverse_worker_restart_cannot_replay_a_consumed_receipt_and_keeps_context_evidence() {
     test_support::with_isolated_home(|_| {
         create_shell_runner();
         let store = JobStore::default();
         let job = store
-            .submit_remote_runner_job(run_id_echo_request())
+            .submit_runner_api_fixture(run_id_echo_request())
             .expect("queue job");
         let claim = store
             .claim_remote_runner_job("lab", None, 30_000, None)
@@ -219,7 +330,7 @@ fn reverse_worker_restart_cannot_replay_a_consumed_receipt_and_keeps_context_evi
 #[test]
 fn reverse_provider_dispatch_rejects_runner_mismatch_before_provider_script() {
     assert_tampered_claim_rejects_before_provider(|claim| {
-        claim["job"]["claimed_by_runner_id"] = serde_json::json!("other-runner");
+        claim["execution_context"]["runner_id"] = serde_json::json!("other-runner");
     });
 }
 
@@ -253,7 +364,7 @@ fn reverse_provider_dispatch_retry_keeps_controller_run_and_separates_attempt_jo
         let store = JobStore::default();
         let controller_run_id = "cook-controller-run";
         let first = store
-            .submit_remote_runner_job(provider_request(
+            .submit_runner_api_fixture(provider_request(
                 &provider,
                 &marker,
                 "attempt-1",
@@ -261,7 +372,7 @@ fn reverse_provider_dispatch_retry_keeps_controller_run_and_separates_attempt_jo
             ))
             .expect("queue first provider attempt");
         let second = store
-            .submit_remote_runner_job(provider_request(
+            .submit_runner_api_fixture(provider_request(
                 &provider,
                 &marker,
                 "attempt-2",
@@ -343,7 +454,7 @@ fn reverse_worker_verifies_private_at_file_then_cleans_it_up() {
             .expect("lock private plan");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -403,7 +514,7 @@ fn reverse_worker_rejects_tampered_private_at_file() {
             .expect("lock private plan");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -667,9 +778,9 @@ fn reverse_worker_drains_fifo_jobs_after_completion_and_reconnect() {
         second.lifecycle.as_mut().expect("lifecycle").durable_run_id =
             Some("lab-run-second".to_string());
 
-        let first_job = store.submit_remote_runner_job(first).expect("queue first");
+        let first_job = store.submit_runner_api_fixture(first).expect("queue first");
         let second_job = store
-            .submit_remote_runner_job(second)
+            .submit_runner_api_fixture(second)
             .expect("queue second");
 
         let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
@@ -741,9 +852,11 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
         .expect("configure named runner secret");
         let store = JobStore::default();
         let mut request = run_id_echo_request();
-        request.command[2] = "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"import\",\"current_item\":\"%s\",\"completed\":1,\"total\":2,\"metadata\":{\"api_key\":\"%s\"}}\\n' \"$TOKEN\" \"$TOKEN\"; printf 'HOMEBOY_RUNNER_PROGRESS {not-json}\\n'; printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"done\",\"status\":\"succeeded\"}\\n'; sleep 0.1; dd if=/dev/zero bs=1024 count=4097 2>/dev/null; printf tail".to_string();
+        request.command[2] = "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"import\",\"current_item\":\"%s\",\"completed\":1,\"total\":2,\"metadata\":{\"api_key\":\"%s\"}}\\n' \"$TOKEN\" \"$TOKEN\"; printf 'HOMEBOY_RUNNER_PROGRESS {not-json}\\n'; printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"done\",\"status\":\"succeeded\"}\\n'; printf 'worker stderr' >&2; sleep 0.1; dd if=/dev/zero bs=1024 count=4097 2>/dev/null; printf tail".to_string();
         request.secret_env_names = vec!["TOKEN".to_string()];
-        store.submit_remote_runner_job(request).expect("submit job");
+        store
+            .submit_runner_api_fixture(request)
+            .expect("submit job");
         let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 9);
 
         let (output, exit_code) =
@@ -779,6 +892,9 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
         assert_eq!(progress["metadata"]["api_key"], "[REDACTED]");
         assert!(events.iter().all(|event| event.kind != JobEventKind::Status
             || event.message.as_deref() != Some("succeeded")));
+        assert!(events.iter().any(|event| {
+            event.kind == JobEventKind::Stderr && event.message.as_deref() == Some("worker stderr")
+        }));
         let result = result_event_data(&store, job.id);
         assert!(result["stdout"].as_str().expect("stdout").ends_with("tail"));
         assert_eq!(result["capture"]["stdout"]["truncated"], true);
@@ -817,6 +933,7 @@ fn reverse_worker_injects_lifecycle_run_id_into_claimed_job_env() {
         homeboy_core::extension::lifecycle::install(
             &extension.path().display().to_string(),
             Some("fixture"),
+            ExtensionLifecycleValidation::declaration_only(),
         )
         .expect("install provider fixture");
         let store = JobStore::default();
@@ -845,7 +962,9 @@ fn reverse_worker_injects_lifecycle_run_id_into_claimed_job_env() {
             active_child_count: None,
             active_cell_count: None,
         });
-        store.submit_remote_runner_job(request).expect("submit job");
+        store
+            .submit_runner_api_fixture(request)
+            .expect("submit job");
         let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
 
         let (output, exit_code) =
@@ -872,7 +991,9 @@ fn reverse_worker_uses_metadata_run_id_for_claimed_job_env() {
         request.metadata = Some(serde_json::json!({
             "run_id": "metadata-run-456",
         }));
-        store.submit_remote_runner_job(request).expect("submit job");
+        store
+            .submit_runner_api_fixture(request)
+            .expect("submit job");
         let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
 
         let (output, exit_code) =
@@ -932,7 +1053,9 @@ fn reverse_worker_executes_from_envelope_dispatch_fields() {
             active_child_count: Some(1),
             active_cell_count: Some(2),
         });
-        store.submit_remote_runner_job(request).expect("submit job");
+        store
+            .submit_runner_api_fixture(request)
+            .expect("submit job");
         assert!(!std::fs::read_to_string(&path)
             .expect("read durable job")
             .contains("secret-b"));
@@ -988,7 +1111,7 @@ fn reverse_worker_executes_a_verified_staged_source_package() {
             "staged_source_artifact": artifact,
         }));
         let job = store
-            .submit_remote_runner_job(request)
+            .submit_runner_api_fixture(request)
             .expect("submit staged job");
         drop(store);
         let store = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
@@ -1047,7 +1170,7 @@ fn reverse_worker_reports_execution_failure_to_broker() {
         .expect("create runner");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -1094,7 +1217,7 @@ fn reverse_worker_loop_reports_failed_job_status() {
         .expect("create runner");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -1168,7 +1291,7 @@ fn reverse_worker_skips_execution_when_claim_is_cancelled_before_start() {
         .expect("create runner");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -1236,7 +1359,7 @@ fn reverse_worker_skips_finish_when_cancelled_after_execution() {
         .expect("set policy");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -1313,7 +1436,7 @@ fn reverse_worker_interrupts_running_job_when_broker_cancel_is_observed() {
         let marker = cwd.join("should-not-exist");
         let store = JobStore::default();
         store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
@@ -1426,7 +1549,7 @@ fn assert_tampered_claim_rejects_before_provider(
         std::fs::write(&provider, "#!/bin/sh\ntouch \"$1\"\n").expect("write provider script");
         let store = JobStore::default();
         let job = store
-            .submit_remote_runner_job(provider_request(
+            .submit_runner_api_fixture(provider_request(
                 &provider,
                 &marker,
                 "attempt-1",

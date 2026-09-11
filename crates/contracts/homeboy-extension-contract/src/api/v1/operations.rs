@@ -1,4 +1,4 @@
-//! Catalog, capability-resolution, and readiness operation envelopes.
+//! Catalog, capability-resolution, readiness, and read-only invocation envelopes.
 
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +6,23 @@ use super::{
     ExtensionApiCapabilityDescriptor, ExtensionApiCompatibility, ExtensionApiDescriptor,
     ExtensionApiVersion,
 };
+
+mod action;
+mod agent_task_executor;
+mod deployment;
+mod environment;
+mod execute;
+mod external_check_detail;
+mod invocation;
+mod recipe_run;
+pub use action::*;
+pub use agent_task_executor::*;
+pub use deployment::*;
+pub use environment::*;
+pub use execute::*;
+pub use external_check_detail::*;
+pub use invocation::*;
+pub use recipe_run::*;
 
 pub const EXTENSION_API_CATALOG_REQUEST_SCHEMA: &str = "homeboy/extension-api-catalog-request/v1";
 pub const EXTENSION_API_CATALOG_RESPONSE_SCHEMA: &str = "homeboy/extension-api-catalog-response/v1";
@@ -65,6 +82,11 @@ pub enum ExtensionApiOperationFailureCode {
     ExtensionInvalid,
     ExtensionIncompatible,
     CapabilityNotProvided,
+    CapabilityExecutionFailed,
+    CapabilityOutputInvalid,
+    InvalidIdempotencyKey,
+    IdempotencyConflict,
+    InvocationInProgress,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

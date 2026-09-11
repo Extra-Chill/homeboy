@@ -51,9 +51,13 @@ pub(crate) fn run_command_output(
                 agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
             let summary_kind = agent_task_summary_kind_for_output(&args);
             let bounded_operation = agent_task_bounded_operation(&args);
+            let redact_cancel = matches!(
+                &args.command,
+                crate::commands::agent_task::AgentTaskCommand::Cancel(_)
+            );
             if matches!(
                 &args.command,
-                crate::commands::agent_task::AgentTaskCommand::Cook(_)
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) if !cook_args.preview
             ) {
                 if let Some(path) = output_file {
                     let full = agent_task_requests_full_output(&args);
@@ -178,6 +182,7 @@ pub(crate) fn run_command_output(
                         summary_kind,
                         full,
                         bounded_operation,
+                        redact_cancel,
                     )
                     .with_command(spec.name)
                     .with_output_file_already_written();
@@ -190,7 +195,14 @@ pub(crate) fn run_command_output(
                     render_controller_run_from_spec_output_ref(payload, exit_code, output_file)
                 })
             } else {
-                agent_task_command_run(result.0, result.1, summary_kind, full, bounded_operation)
+                agent_task_command_run(
+                    result.0,
+                    result.1,
+                    summary_kind,
+                    full,
+                    bounded_operation,
+                    redact_cancel,
+                )
             }
         }
         Commands::Runner(args) if refresh_homeboy_uses_bounded_output(&args) => {
@@ -215,9 +227,7 @@ pub(crate) fn run_command_output(
             |payload, _| super::activity::render_activity_summary(payload),
         ),
         Commands::Bench(args) => {
-            let summarize = args.is_run_invocation()
-                && !args.wants_full_json()
-                && !homeboy::core::lab_routing::is_lab_offload_subprocess();
+            let summarize = args.is_run_invocation() && !args.wants_full_json();
             command_run_with_summary(
                 dispatch(Commands::Bench(args), spec, placement),
                 |payload, _| {
@@ -231,7 +241,6 @@ pub(crate) fn run_command_output(
             let summarize = matches!(
                 args.command,
                 Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
-                    | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
                     | Some(crate::commands::cleanup::CleanupCommand::AutomaticRetention)
             ) && !homeboy::core::lab_routing::is_lab_offload_subprocess();
             command_run_with_summary(
@@ -248,9 +257,11 @@ pub(crate) fn run_command_output(
             let summarize_show = args.show_summary_eligible() && operator_output;
             let summarize_dossier = args.dossier_summary_eligible() && operator_output;
             let summarize_proof = args.proof_summary_eligible() && operator_output;
-            command_run_with_summary(
-                dispatch(Commands::Runs(args), spec, placement),
-                |payload, _| {
+            let result = dispatch(Commands::Runs(args), spec, placement);
+            if summarize_show {
+                runs_show_command_run(result)
+            } else {
+                command_run_with_summary(result, |payload, _| {
                     if let Some(rendered) =
                         super::runs_summary::render_runs_field_selection(payload)
                     {
@@ -264,8 +275,8 @@ pub(crate) fn run_command_output(
                     } else {
                         None
                     }
-                },
-            )
+                })
+            }
         }
         Commands::Release(args) => {
             let full = args.requests_full_output();
@@ -285,6 +296,22 @@ pub(crate) fn run_command_output(
     };
 
     run.with_command(spec.name)
+}
+
+fn runs_show_command_run((output_file_result, exit_code): JsonRun) -> CommandRun {
+    let stdout_result = output_file_result
+        .clone()
+        .map(|payload| super::runs_summary::project_runs_show_output(&payload));
+    let summary_stdout = output_file_result
+        .as_ref()
+        .ok()
+        .and_then(super::runs_summary::render_runs_show_summary);
+    CommandRun::from_command_stdout_result("runs", stdout_result, exit_code)
+        .with_output_file_result(output_file_result)
+        .with_presentation(CommandPresentation {
+            stdout: summary_stdout,
+            stderr: None,
+        })
 }
 
 /// Release payloads contain execution plans and step transcripts that can be
@@ -588,6 +615,9 @@ fn bounded_refresh_error_projection(
             "error": {
                 "code": error.code.as_str(),
                 "message": bounded_refresh_text(&error.message),
+                "details": {
+                    "_homeboy_actions": bounded_refresh_error_actions(error),
+                },
             },
             "artifacts": error.details.get("artifacts").cloned().unwrap_or_else(|| serde_json::json!({
                 "output": output_file,
@@ -597,6 +627,32 @@ fn bounded_refresh_error_projection(
         }),
         exit_code,
     )
+}
+
+/// Keep executable recovery actions in the bounded envelope without admitting
+/// arbitrary error detail or action evidence beyond the stdout budget.
+fn bounded_refresh_error_actions(error: &homeboy::core::Error) -> Vec<Value> {
+    error
+        .details
+        .get(homeboy::core::error::ACTIONS_DETAILS_KEY)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(4)
+        .filter_map(|action| {
+            let action = action.as_object()?;
+            Some(serde_json::json!({
+                "id": action.get("id")?.as_str().map(bounded_refresh_text),
+                "label": action.get("label")?.as_str().map(bounded_refresh_text),
+                "program": action.get("program")?.as_str().map(bounded_refresh_text),
+                "args": action.get("args").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str).take(16).map(bounded_refresh_text).collect::<Vec<_>>(),
+                "safety": action.get("safety")?.as_str().map(bounded_refresh_text),
+                "required_confirmations": action.get("required_confirmations").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str).take(4).map(bounded_refresh_text).collect::<Vec<_>>(),
+            }))
+        })
+        .collect()
 }
 
 /// Enforce the budget after command-envelope rendering, because lifted action
@@ -839,12 +895,23 @@ fn agent_task_command_run(
     summary_kind: Option<super::agent_task_summary::AgentTaskSummaryKind>,
     full: bool,
     bounded_operation: Option<&'static str>,
+    redact_cancel: bool,
 ) -> CommandRun {
+    // Lifecycle records can retain provider launch metadata. Redact once before
+    // either the compact projection, `--full`, or `--output` can serialize it.
+    let output_file_result = if redact_cancel {
+        output_file_result
+            .map(|value| homeboy::core::redaction::RedactionPolicy::default().redact_json(&value))
+    } else {
+        output_file_result
+    };
     let stdout_result = output_file_result.clone().map(|mut value| {
         if let Some(operation) = bounded_operation {
-            value = crate::commands::agent_task::status::bounded_full_operation_report(
-                value, operation,
-            );
+            value = if operation == "cancel" {
+                crate::commands::agent_task::status::bounded_cancel_report(value)
+            } else {
+                crate::commands::agent_task::status::bounded_full_operation_report(value, operation)
+            };
         } else if !full {
             crate::commands::agent_task::status::project_operator_output(&mut value);
         }
@@ -873,6 +940,7 @@ fn agent_task_bounded_operation(
         AgentTaskCommand::FinalizePr(_) => Some("finalize-pr"),
         AgentTaskCommand::Cook(args) if args.full => Some("cook"),
         AgentTaskCommand::CookContinue(args) if args.full => Some("cook-continue"),
+        AgentTaskCommand::Cancel(args) if !args.full => Some("cancel"),
         _ => None,
     }
 }
@@ -891,6 +959,7 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
         AgentTaskCommand::Promote(args) => args.full,
         AgentTaskCommand::Adopt(args) => args.full,
         AgentTaskCommand::FinalizePr(args) => args.full,
+        AgentTaskCommand::Cancel(args) => args.full,
         _ => false,
     }
 }
@@ -1073,6 +1142,46 @@ fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
 mod tests {
     use super::*;
 
+    #[test]
+    fn runs_show_stdout_is_compact_while_output_file_payload_stays_lossless() {
+        let payload = serde_json::json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "run-output-detail",
+                    "kind": "runner-exec",
+                    "status": "failed",
+                    "metadata": {
+                        "runner_terminal_projection": { "state": "terminal_checkpointed", "status": "failed" },
+                        "source_snapshot": { "marker": "full-source-snapshot", "body": "x".repeat(256 * 1024) },
+                    },
+                    "artifacts": [],
+                },
+            },
+        });
+
+        let run = runs_show_command_run((Ok(payload.clone()), 1));
+        let stdout = run.stdout_result.expect("compact stdout");
+        let output = run
+            .output_file_result
+            .expect("lossless output result")
+            .expect("lossless output");
+
+        assert!(stdout
+            .pointer("/payload/run/metadata/source_snapshot")
+            .is_none());
+        assert_eq!(
+            stdout.pointer("/payload/run/metadata/operator_projection/authoritative_runner_terminal_state/status"),
+            Some(&Value::String("failed".to_string()))
+        );
+        assert_eq!(
+            output.pointer("/payload/run/metadata/source_snapshot/marker"),
+            Some(&Value::String("full-source-snapshot".to_string()))
+        );
+        assert_eq!(output, payload);
+    }
+
     /// A rolled-back release must still report the commit it created.
     ///
     /// Regression for #13708: `release_commit` was sourced only from the
@@ -1188,7 +1297,7 @@ mod tests {
     #[test]
     fn agent_task_stdout_is_bounded_while_output_file_result_is_lossless() {
         let payload = serde_json::json!({ "stdout": "x".repeat(512 * 1024) });
-        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, None);
+        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, None, false);
 
         assert!(
             run.stdout_result.as_ref().expect("stdout")["stdout"]
@@ -1202,6 +1311,68 @@ mod tests {
                 .as_ref()
                 .expect("lossless output file"),
             &payload
+        );
+    }
+
+    #[test]
+    fn cancel_stdout_is_compact_redacted_and_output_file_retains_full_evidence() {
+        let payload = serde_json::json!({
+            "schema": "homeboy/control-plane-action-acknowledgement/v1",
+            "acknowledgement": "cancel-run:action:cancel:key",
+            "run": "cancel-run",
+            "outcome": "succeeded",
+            "resource": { "run": "cancel-run", "state": "cancelled" },
+            "result": { "schema": "homeboy/control-plane-cancel-result/v1", "data": {
+                "schema": "homeboy/control-plane-cancel-result/v1",
+                "disposition": "cancelled", "terminal": true, "wait_timeout_seconds": 15,
+                "waited_seconds": 0, "poll_count": 0
+            }},
+            "metadata": {
+                "provider_launch_environment": { "OPENAI_API_KEY": "actual-secret" },
+                "replay_argv": (0..500).map(|_| "x".repeat(256)).collect::<Vec<_>>(),
+                "execution_records": (0..500).map(|_| serde_json::json!({ "output": "x".repeat(256) })).collect::<Vec<_>>(),
+            }
+        });
+        let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, Some("cancel"), true);
+        let stdout = run.stdout_result.as_ref().expect("bounded stdout");
+        let rendered = serde_json::to_vec(stdout).expect("serialize bounded stdout");
+
+        assert!(
+            rendered.len() <= 4 * 1024,
+            "projection was {} bytes",
+            rendered.len()
+        );
+        assert_eq!(stdout["run"]["state"], "cancelled");
+        assert_eq!(stdout["cancellation"]["disposition"], "cancelled");
+        assert_eq!(
+            stdout["next_action"]["command"],
+            "homeboy agent-task status cancel-run"
+        );
+        assert!(!rendered
+            .windows(b"provider_launch_environment".len())
+            .any(|window| window == b"provider_launch_environment"));
+        let output = run
+            .output_file_result(crate::command_contract::CommandOutputFileMode::GenericEnvelope)
+            .as_ref()
+            .expect("lossless output file");
+        assert_eq!(
+            output["metadata"]["replay_argv"],
+            payload["metadata"]["replay_argv"]
+        );
+        assert_eq!(
+            output["metadata"]["provider_launch_environment"]["OPENAI_API_KEY"],
+            "[REDACTED]"
+        );
+
+        let full = agent_task_command_run(Ok(payload.clone()), 0, None, true, None, true);
+        let full = full.stdout_result.as_ref().expect("full stdout");
+        assert_eq!(
+            full["metadata"]["replay_argv"],
+            payload["metadata"]["replay_argv"]
+        );
+        assert_eq!(
+            full["metadata"]["provider_launch_environment"]["OPENAI_API_KEY"],
+            "[REDACTED]"
         );
     }
 
@@ -1351,6 +1522,13 @@ mod tests {
             "run_id": "run-1",
             "error_log": "homeboy://run/run-1/artifact/error-log-run-1",
         });
+        error.details["_homeboy_actions"] = serde_json::json!([{
+            "id": "inspect-runner-status",
+            "label": "inspect runner admission",
+            "program": "homeboy",
+            "args": ["runner", "status", "homeboy-lab"],
+            "safety": "read_only"
+        }]);
 
         let projection = bounded_refresh_error_projection(&error, 2, None);
         assert!(
@@ -1358,6 +1536,10 @@ mod tests {
                 <= MAX_REFRESH_PROJECTION_BYTES
         );
         assert_eq!(projection["artifacts"]["run_id"], "run-1");
+        assert_eq!(
+            projection["error"]["details"]["_homeboy_actions"][0]["program"],
+            "homeboy"
+        );
         assert!(!serde_json::to_string(&projection)
             .unwrap()
             .contains(&"x".repeat(512)));

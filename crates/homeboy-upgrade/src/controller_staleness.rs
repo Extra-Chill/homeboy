@@ -17,10 +17,10 @@
 //! whole surface costs one small file read per command and at most one network
 //! call per day — the call the startup check was already making.
 //!
-//! Every failure mode degrades to [`ControllerCurrency::Unknown`]: no cache, an
-//! unparseable version, an operator-disabled update check, or an offline host
-//! all report "not established" rather than guessing "current" or failing a
-//! command.
+//! Every failure mode degrades to [`ControllerCurrency::Unknown`]: no cache, a
+//! stale cache, an unparseable version, an operator-disabled update check, or
+//! an offline host all report "not established" rather than guessing "current"
+//! or failing a command.
 //!
 //! # What this deliberately does not compute
 //!
@@ -102,7 +102,9 @@ pub struct ControllerStaleness {
     /// Embedded git commit of the running build, when the build recorded one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_commit: Option<String>,
-    /// Latest published release, as of the cached check.
+    /// Latest published release, as of the cached check. When `status` is
+    /// `unknown` and this is present, `detail` identifies it as an expired
+    /// cached observation and gives the command that verifies it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_version: Option<String>,
     /// Minor releases between the running build and the latest published
@@ -120,7 +122,7 @@ pub struct ControllerStaleness {
     pub cache_age_secs: Option<u64>,
     /// One-line human summary.
     pub detail: String,
-    /// Command that resolves the drift, present only when there is drift.
+    /// Command that resolves the drift or verifies an expired cached release.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
 }
@@ -148,13 +150,47 @@ pub fn current() -> ControllerStaleness {
         );
     }
 
+    let now = update_check_cache::now_unix();
     let cached = update_check::cached_latest_release();
+    if let Some(cached) = cached.as_ref() {
+        if !update_check::cached_latest_release_is_fresh(cached.checked_at) {
+            return expired_cache(&identity, cached, now);
+        }
+    }
     assess(
         &identity,
         cached.as_ref().map(|entry| entry.latest_version.as_str()),
         cached.as_ref().map(|entry| entry.checked_at),
-        update_check_cache::now_unix(),
+        now,
     )
+}
+
+/// An expired update-check cache is not authoritative enough to say that a
+/// matching patch version is current. Keep the observation and its age visible,
+/// but direct the operator to the live check that owns this answer.
+fn expired_cache(
+    identity: &BuildIdentity,
+    cached: &update_check::CachedLatestRelease,
+    now: u64,
+) -> ControllerStaleness {
+    let latest_version = normalize_version(&cached.latest_version);
+    let cache_age_secs = age_secs(cached.checked_at, now);
+    ControllerStaleness {
+        status: ControllerCurrency::Unknown,
+        stale: false,
+        escalated: false,
+        running_version: identity.version.clone(),
+        build_identity: identity.display.clone(),
+        git_commit: identity.git_commit.clone(),
+        latest_version: Some(latest_version.clone()),
+        minor_releases_behind: None,
+        checked_at: Some(cached.checked_at),
+        cache_age_secs: Some(cache_age_secs),
+        detail: format!(
+            "controller freshness not established: v{latest_version} is a cached release observation from {cache_age_secs}s ago; run `homeboy upgrade --check` to verify the current release"
+        ),
+        remediation: Some("homeboy upgrade --check".to_string()),
+    }
 }
 
 /// Pure staleness comparison. Separated from cache and clock access so the
@@ -496,6 +532,25 @@ mod tests {
     }
 
     #[test]
+    fn expired_cache_never_reports_a_matching_patch_as_current() {
+        let cached = update_check::CachedLatestRelease {
+            latest_version: "0.367.11".to_string(),
+            checked_at: 100,
+        };
+        let staleness = expired_cache(&identity("0.367.11", None), &cached, 100 + 86_401);
+
+        assert_eq!(staleness.status, ControllerCurrency::Unknown);
+        assert!(!staleness.stale);
+        assert_eq!(staleness.latest_version.as_deref(), Some("0.367.11"));
+        assert_eq!(staleness.cache_age_secs, Some(86_401));
+        assert_eq!(
+            staleness.remediation.as_deref(),
+            Some("homeboy upgrade --check")
+        );
+        assert!(staleness.detail.contains("cached release observation"));
+    }
+
+    #[test]
     fn serialized_shape_is_stable() {
         let staleness = assess(
             &identity("0.327.0", Some("ed33954781a9")),
@@ -557,7 +612,11 @@ mod tests {
 
         assert_eq!(staleness.running_version, build_identity::current().version);
         assert_eq!(staleness.stale, staleness.status.is_behind());
-        assert_eq!(staleness.stale, staleness.remediation.is_some());
+        assert!(
+            staleness.stale
+                || staleness.remediation.is_none()
+                || staleness.status == ControllerCurrency::Unknown
+        );
         assert!(!staleness.detail.is_empty());
     }
 }

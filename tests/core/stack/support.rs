@@ -1,6 +1,7 @@
 use std::fs;
-use std::process::Command;
+use std::path::Path;
 
+use homeboy_core::test_support::GitFixture;
 use tempfile::TempDir;
 
 pub(crate) fn init_repo() -> (TempDir, String) {
@@ -16,11 +17,7 @@ pub(crate) fn init_repo() -> (TempDir, String) {
 }
 
 pub(crate) fn git(path: &str, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .unwrap_or_else(|e| panic!("git {:?}: {}", args, e));
+    let out = GitFixture::new(Path::new(path)).execute(args);
     assert!(
         out.status.success(),
         "git {:?} failed: {} / {}",
@@ -38,11 +35,7 @@ pub(crate) fn commit_file(dir: &TempDir, path: &str, file: &str, body: &str, msg
 }
 
 pub(crate) fn rev_parse(path: &str, rev: &str) -> String {
-    let out = Command::new("git")
-        .args(["rev-parse", rev])
-        .current_dir(path)
-        .output()
-        .unwrap();
+    let out = GitFixture::new(Path::new(path)).execute(&["rev-parse", rev]);
     assert!(
         out.status.success(),
         "git rev-parse {rev} failed: {}",

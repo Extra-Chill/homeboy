@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 mod contract {
     use super::*;
@@ -20,7 +20,19 @@ mod contract {
     pub(super) const RUN_OWNER_FILE: &str = ".homeboy-run-owner-v1.json";
     pub(super) const RUN_OWNER_SCHEMA: &str = "homeboy/runtime-run-owner/v1";
     pub(super) const CLEANUP_LOCK_DIR: &str = ".cleanup.lock";
+    /// Lease a live cleanup owner renews on every heartbeat.
+    ///
+    /// This bounds only the case where the owner's process identity cannot be
+    /// disproved. An owner whose recorded identity has demonstrably exited is
+    /// reclaimed without waiting this out — see `acquire_cleanup_lock_with_policy`.
     pub(super) const CLEANUP_LOCK_STALE_AFTER: Duration = Duration::from_secs(300);
+    /// Contention tolerance for a *live* holder: ~2s of retries.
+    ///
+    /// Deliberately far shorter than [`CLEANUP_LOCK_STALE_AFTER`]. Waiting out a
+    /// 300s lease inside one acquisition would turn a busy lock into a 300s
+    /// hang, and it is unnecessary: reclaim is driven by process identity, not
+    /// by the lease, so an abandoned lock is recovered on the first attempt
+    /// rather than after the lease expires.
     pub(super) const CLEANUP_LOCK_ATTEMPTS: usize = 100;
     pub(super) const CLEANUP_LOCK_SLEEP: Duration = Duration::from_millis(20);
     pub(super) const CLEANUP_LOCK_OWNER_FILE: &str = "owner.json";
@@ -64,8 +76,13 @@ pub struct RuntimeTempOwner {
 
 impl RuntimeTempOwner {
     /// Allocate a metadata-backed child temp root before launching a workload.
+    ///
+    /// The temp root is exported to the child as `TMPDIR`, so it carries the
+    /// same socket-safety obligation as the invocation temp root and is
+    /// allocated through the same placement logic (#14384).
     pub fn allocate(prefix: &str, producer: &str) -> Result<Self> {
-        let (path, pin) = managed_run_temp_dir_for_producer(prefix, Some(producer))?;
+        let short = crate::engine::invocation::short_invocation_id();
+        let (path, pin, placement) = socket_safe_run_temp_dir(&short, prefix, Some(producer))?;
         let exported = (|| {
             let runtime_root = crate::engine::invocation::invocation_runtime_root()?;
             fs::create_dir_all(&runtime_root).map_err(|error| {
@@ -79,8 +96,9 @@ impl RuntimeTempOwner {
             })?;
             crate::engine::invocation::exported_runtime_tmp_dir(
                 &runtime_root,
-                &crate::engine::invocation::short_invocation_id(),
+                &short,
                 &path,
+                placement,
             )
         })();
         let (exported_path, runtime_tmp_alias) = match exported {
@@ -232,6 +250,47 @@ struct RuntimeRunOwner {
     /// Absent values are legacy entries and retain their existing treatment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     producer: Option<String>,
+    /// Which root this owner was allocated under, when it was not the default
+    /// data-volume runtime root.
+    ///
+    /// Socket-safe allocations degrade to the short invocation runtime root
+    /// when the data-volume path cannot satisfy the `sockaddr_un` budget
+    /// (#14384). Recording that here is what lets an operator reading
+    /// `cleanup` output tell a deliberate degradation from a stray directory
+    /// under `/tmp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<String>,
+    /// The allocation prefix this owner would have carried in its directory
+    /// name.
+    ///
+    /// A socket-safe owner's directory is named for its short id alone, because
+    /// a `<prefix>-<uuid>-<nanos>` name cannot fit the `sockaddr_un` budget
+    /// (#14384). `cleanup --prefix` is an operator affordance that predates
+    /// that, so the prefix is recorded here and the filter honors it. Absent on
+    /// entries whose name already carries the prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allocation_prefix: Option<String>,
+}
+
+/// Where a socket-safe managed temp owner was allocated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TempPlacement {
+    /// The default: the data-volume runtime root, per #11125.
+    DataRoot,
+    /// The short invocation runtime root, chosen because the data-volume path
+    /// could not satisfy the `sockaddr_un` budget.
+    InvocationRuntimeRoot,
+}
+
+impl TempPlacement {
+    fn owner_value(self) -> Option<String> {
+        match self {
+            // Absent means "the default", which keeps every pre-existing owner
+            // record valid without a migration.
+            Self::DataRoot => None,
+            Self::InvocationRuntimeRoot => Some("invocation-runtime-root".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +305,22 @@ pub struct RuntimeTempCleanupOptions<'a> {
     pub run_max_bytes: u64,
     pub run_max_count: usize,
     pub cursor: Option<&'a str>,
+    /// Wall-clock budget for this sweep. When it is spent the sweep stops at an
+    /// entry boundary and returns what it already reclaimed, with `has_more`
+    /// and a resumable `next_cursor`.
+    ///
+    /// Without it, a caller that imposes its own deadline — the aggregate
+    /// `cleanup` per-category wall — can only *kill* the sweep. That discards
+    /// every reclaimed byte and, because a killed process runs no destructor,
+    /// abandons the cleanup lock directory on every run (#14221).
+    pub deadline: Option<Instant>,
+}
+
+impl RuntimeTempCleanupOptions<'_> {
+    fn budget_spent(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
 }
 
 #[derive(Debug)]
@@ -400,7 +475,91 @@ pub(crate) fn managed_run_temp_dir_for_producer(
     producer: Option<&str>,
 ) -> Result<(PathBuf, RuntimeTempPin)> {
     let root = ensure_runtime_tmp_dir()?;
-    let path = root.join(unique_name(prefix, ""));
+    managed_run_temp_dir_in_root(
+        &root,
+        &unique_name(prefix, ""),
+        prefix,
+        producer,
+        TempPlacement::DataRoot,
+    )
+}
+
+/// Allocate a metadata-backed temp owner whose path a workload can safely
+/// `realpath()` and then bind a UNIX socket under.
+///
+/// The default `<prefix>-<uuid>-<nanos>` name is ~74 bytes, which no data root
+/// is short enough to absorb: the Linux budget for the whole path is 75 bytes.
+/// A workload that canonicalizes `$TMPDIR` — standard practice before creating
+/// sockets or doing containment proofs — therefore got a path that could not
+/// hold a socket, even though the short `.t` alias it was handed could
+/// (#14384).
+///
+/// So the directory name here is just the caller's short id. The uuid and the
+/// creation time are not lost: they live in `owner.json` as `owner_id` and
+/// `created_at`, which is already where cleanup reads an entry's age from.
+///
+/// When even the short name cannot fit under the data root — a long `$HOME` or
+/// `HOMEBOY_DATA_DIR` — the owner is allocated under the short invocation
+/// runtime root instead and the degradation is recorded in `owner.json`.
+/// #11125 (durable bytes follow the data volume) is preserved everywhere it
+/// can be honored, and given up only where honoring it would silently hand out
+/// an unusable `TMPDIR`.
+pub(crate) fn socket_safe_run_temp_dir(
+    short: &str,
+    prefix: &str,
+    producer: Option<&str>,
+) -> Result<(PathBuf, RuntimeTempPin, TempPlacement)> {
+    // Resolved without creating anything: a root that cannot host a socket-safe
+    // owner should not be materialized, and `ensure_runtime_tmp_dir` also runs
+    // capacity preflight and automatic retention against whatever it is handed.
+    let data_root = runtime_root()?;
+    if crate::engine::invocation::enforce_path_budget(&data_root.join(short)).is_ok() {
+        let data_root = ensure_runtime_tmp_dir()?;
+        let (path, pin) = managed_run_temp_dir_in_root(
+            &data_root,
+            short,
+            prefix,
+            producer,
+            TempPlacement::DataRoot,
+        )?;
+        return Ok((path, pin, TempPlacement::DataRoot));
+    }
+
+    let fallback_root = crate::engine::invocation::invocation_runtime_root()?;
+    fs::create_dir_all(&fallback_root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "create socket-safe runtime temp root {}",
+                fallback_root.display()
+            )),
+        )
+    })?;
+    // The `.t` suffix keeps the fallback owner from colliding with the
+    // invocation's own STATE_DIR (`<short>`) and ARTIFACT_DIR (`<short>.a`)
+    // siblings under the same root.
+    let name = format!("{short}.t");
+    // Fail closed rather than hand out a path no socket can live under. The
+    // error already names the override env var, which is the operator's way out.
+    crate::engine::invocation::enforce_path_budget(&fallback_root.join(&name))?;
+    let (path, pin) = managed_run_temp_dir_in_root(
+        &fallback_root,
+        &name,
+        prefix,
+        producer,
+        TempPlacement::InvocationRuntimeRoot,
+    )?;
+    Ok((path, pin, TempPlacement::InvocationRuntimeRoot))
+}
+
+fn managed_run_temp_dir_in_root(
+    root: &Path,
+    name: &str,
+    prefix: &str,
+    producer: Option<&str>,
+    placement: TempPlacement,
+) -> Result<(PathBuf, RuntimeTempPin)> {
+    let path = root.join(name);
     // Cleanup ignores this short-lived staging name. Renaming after durable owner
     // metadata and a live pin exist prevents cleanup from observing a half-owned run.
     let staging = root.join(format!(
@@ -427,6 +586,8 @@ pub(crate) fn managed_run_temp_dir_for_producer(
         completed_at: None,
         reason: None,
         producer: producer.map(str::to_string),
+        placement: placement.owner_value(),
+        allocation_prefix: (!name.starts_with(prefix)).then(|| prefix.to_string()),
     };
     if let Err(error) = write_run_owner(&staging, &owner) {
         let _ = fs::remove_dir_all(&staging);
@@ -1014,6 +1175,7 @@ pub fn cleanup_runtime_tmp(
         run_max_bytes: u64::MAX,
         run_max_count: usize::MAX,
         cursor: None,
+        deadline: None,
     })
 }
 
@@ -1041,14 +1203,18 @@ fn cleanup_runtime_tmp_bounded_with_remover(
     options: RuntimeTempCleanupOptions<'_>,
     remover: RuntimeTempEntryRemover,
 ) -> Result<RuntimeTempCleanupOutput> {
-    let mut output = cleanup_runtime_tmp_root(runtime_root()?, options, remover)?;
+    let mut output =
+        cleanup_runtime_tmp_root(runtime_root()?, options, remover, RootSweepScope::All)?;
 
     for superseded in superseded_runtime_roots() {
         // The bound is shared across roots so an aggregate sweep still returns
         // a bounded report. Exhausting it here defers the drain to the next
         // invocation rather than silently dropping it.
         let remaining = options.limit.max(1).saturating_sub(output.rows.len());
-        if remaining == 0 {
+        // The wall-clock budget is shared across roots for the same reason the
+        // row bound is: the drain must defer to the next invocation rather than
+        // push the sweep past the caller's deadline and be killed (#14221).
+        if remaining == 0 || options.budget_spent() {
             output.has_more = true;
             break;
         }
@@ -1058,7 +1224,12 @@ fn cleanup_runtime_tmp_bounded_with_remover(
         let mut superseded_options = options;
         superseded_options.cursor = None;
         superseded_options.limit = remaining;
-        let drained = cleanup_runtime_tmp_root(superseded.clone(), superseded_options, remover)?;
+        let drained = cleanup_runtime_tmp_root(
+            superseded.clone(),
+            superseded_options,
+            remover,
+            RootSweepScope::All,
+        )?;
         merge_runtime_temp_cleanup(&mut output, drained);
         if options.apply {
             // Best effort, and only ever succeeds once the root is genuinely
@@ -1068,7 +1239,115 @@ fn cleanup_runtime_tmp_bounded_with_remover(
         }
     }
 
+    // Drain socket-safe fallback owners. `socket_safe_run_temp_dir` places an
+    // owner here when the data-volume path cannot satisfy the `sockaddr_un`
+    // budget, so on a long-`$HOME` host this is where the durable temp bytes
+    // actually accumulate. Not sweeping it would leak them permanently — the
+    // #11125 failure mode, moved to a new root.
+    if let Some(fallback) = socket_safe_fallback_root() {
+        let remaining = options.limit.max(1).saturating_sub(output.rows.len());
+        if remaining > 0 && !options.budget_spent() {
+            let mut fallback_options = options;
+            fallback_options.cursor = None;
+            fallback_options.limit = remaining;
+            let drained = cleanup_runtime_tmp_root(
+                fallback,
+                fallback_options,
+                remover,
+                // Managed-only. This root also holds every live invocation's
+                // STATE_DIR and ARTIFACT_DIR, which carry no owner record and
+                // are owned by the invocation lease, not by this sweep.
+                // Treating them as unmanaged strays would delete the working
+                // directories of running workloads.
+                RootSweepScope::ManagedOnly,
+            )?;
+            merge_runtime_temp_cleanup(&mut output, drained);
+        } else {
+            output.has_more = true;
+        }
+    }
+
     Ok(output)
+}
+
+/// The socket-safe fallback root, when this host actually has bytes there.
+///
+/// This root is shared: it also holds the state and artifact directories of
+/// every live invocation on the machine, including other processes'. So it is
+/// swept only when there is a reason to, which is either of
+///
+/// 1. the current configuration would allocate a fallback owner here, or
+/// 2. a previous configuration already did.
+///
+/// (2) is not redundant. An operator who moves `HOMEBOY_DATA_DIR` to a shorter
+/// path stops producing fallback owners but does not reclaim the ones already
+/// written, and abandoning them is the #11125 leak with a new address.
+fn socket_safe_fallback_root() -> Option<PathBuf> {
+    let fallback = crate::engine::invocation::invocation_runtime_root().ok()?;
+    if !fallback.is_dir() {
+        return None;
+    }
+    // Under the `HOMEBOY_INVOCATION_RUNTIME_DIR` override these can name the
+    // same directory; sweeping it twice would double-count every row.
+    let active = runtime_root().ok()?;
+    if fallback == active || superseded_runtime_roots().contains(&fallback) {
+        return None;
+    }
+
+    let allocates_here = crate::engine::invocation::enforce_path_budget(
+        // Any short id has the same length, so this measures the shape the
+        // allocator would produce rather than a specific allocation.
+        &active.join("0".repeat(SHORT_INVOCATION_ID_LEN)),
+    )
+    .is_err();
+    if allocates_here || root_holds_fallback_owner(&fallback) {
+        return Some(fallback);
+    }
+    None
+}
+
+/// Length of a `short_invocation_id`, which is the whole name of a socket-safe
+/// managed temp directory.
+const SHORT_INVOCATION_ID_LEN: usize = 10;
+
+/// Whether a managed entry satisfies `cleanup --prefix`.
+///
+/// A socket-safe owner's directory name is its short id, so the prefix it was
+/// allocated under lives in `owner.json` instead. Falling back to the record
+/// keeps `--prefix homeboy-invocation-tmp` selecting invocation temp after
+/// #14384 shortened the name. The record is only read when the cheap name test
+/// fails, so an unfiltered sweep costs nothing extra.
+fn managed_entry_matches_prefix(path: &Path, name: &str, prefix: &str) -> bool {
+    if name.starts_with(prefix) {
+        return true;
+    }
+    read_run_owner(path)
+        .ok()
+        .and_then(|owner| owner.allocation_prefix)
+        .is_some_and(|recorded| recorded.starts_with(prefix))
+}
+
+fn root_holds_fallback_owner(root: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        read_run_owner(&entry.path())
+            .ok()
+            .and_then(|owner| owner.placement)
+            .is_some()
+    })
+}
+
+/// Which entries a single-root sweep is allowed to consider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootSweepScope {
+    /// Managed owners plus unmanaged strays: the contract for a root Homeboy
+    /// owns end to end.
+    All,
+    /// Managed owners only, for a shared root that also holds directories
+    /// belonging to another lifecycle.
+    ManagedOnly,
 }
 
 /// Fold a superseded-root sweep into the active-root report.
@@ -1098,6 +1377,7 @@ fn cleanup_runtime_tmp_root(
     root: PathBuf,
     options: RuntimeTempCleanupOptions<'_>,
     remover: RuntimeTempEntryRemover,
+    scope: RootSweepScope,
 ) -> Result<RuntimeTempCleanupOutput> {
     let lock = acquire_cleanup_lock(&root, "runtime-temp.cleanup")?;
     let mut output = RuntimeTempCleanupOutput {
@@ -1168,7 +1448,7 @@ fn cleanup_runtime_tmp_root(
         }
         if entry.path().join(RUN_OWNER_FILE).is_file() {
             managed.push(entry);
-        } else {
+        } else if scope == RootSweepScope::All {
             unmanaged.push(entry);
         }
     }
@@ -1201,20 +1481,34 @@ fn cleanup_runtime_tmp_root(
     let page_end = start
         .saturating_add(options.limit.max(1))
         .min(managed.len());
-    let managed_has_more = page_end < managed.len();
-    let page_last_name = managed
+    let mut managed_has_more = page_end < managed.len();
+    let mut page_last_name = managed
         .get(page_end.saturating_sub(1))
         .map(|entry| entry.file_name().to_string_lossy().to_string());
     let managed = managed.into_iter().skip(start).take(options.limit.max(1));
 
     let mut managed_inspections = Vec::new();
+    // Resume point for a budget-truncated page: the last entry this invocation
+    // actually finished with, so the next one starts at the first it did not.
+    let mut last_inspected_name: Option<String> = None;
     for entry in managed {
+        // Inspecting an entry recursively measures its storage, which on a
+        // large runtime root is the dominant cost of the whole sweep. Stopping
+        // here — at an entry boundary, before that walk — is what lets the
+        // sweep return normally, release its lock, and hand the caller a
+        // resumable cursor instead of being killed mid-scan (#14221).
+        if options.budget_spent() {
+            managed_has_more = true;
+            page_last_name = last_inspected_name.clone().or(page_last_name);
+            break;
+        }
         lock.heartbeat()?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        last_inspected_name = Some(name.clone());
         if options
             .prefix
-            .is_some_and(|prefix| !name.starts_with(prefix))
+            .is_some_and(|prefix| !managed_entry_matches_prefix(&path, &name, prefix))
         {
             output.skipped_count += 1;
             output
@@ -1260,6 +1554,8 @@ fn cleanup_runtime_tmp_root(
                     completed_at: None,
                     reason: Some(error.message.clone()),
                     producer: None,
+                    placement: None,
+                    allocation_prefix: None,
                 };
                 let warning = format!("owner metadata is corrupt: {}", error.message);
                 if age < CORRUPT_OWNER_GRACE {
@@ -1379,6 +1675,12 @@ fn cleanup_runtime_tmp_root(
     });
     for (inspection, eligibility_reason) in managed_decisions.into_iter().take(options.limit.max(1))
     {
+        // Removal is the phase that actually reclaims bytes, so a spent budget
+        // stops it rather than abandoning the rows it already applied.
+        if options.budget_spent() {
+            managed_has_more = true;
+            break;
+        }
         lock.heartbeat()?;
         output.totals.inspected_count += 1;
         let mut row = RuntimeTempCleanupRow {
@@ -1484,15 +1786,20 @@ fn cleanup_runtime_tmp_root(
             .to_string_lossy()
             .to_string()
     });
+    let mut unmanaged_truncated_at = None;
     for entry in unmanaged
         .into_iter()
         .skip(unmanaged_start)
         .take(unmanaged_capacity)
     {
+        if options.budget_spent() {
+            break;
+        }
         lock.heartbeat()?;
         output.totals.inspected_count += 1;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        unmanaged_truncated_at = Some(name.clone());
         let mut row = RuntimeTempCleanupRow {
             path: path.display().to_string(),
             name: name.clone(),
@@ -1569,15 +1876,23 @@ fn cleanup_runtime_tmp_root(
         output.rows.push(row);
     }
 
+    // A budget-truncated unmanaged page resumes from the last entry it actually
+    // reached, not from the page end it never got to.
+    let unmanaged_resume = if options.budget_spent() {
+        unmanaged_truncated_at.or(unmanaged_last_name)
+    } else {
+        unmanaged_last_name
+    };
+    let unmanaged_has_more = unmanaged_end < unmanaged_len || options.budget_spent();
     if managed_has_more {
         output.has_more = true;
         output.next_cursor = page_last_name
             .map(|name| format_runtime_cursor("managed", &name, retained_count, retained_bytes));
-    } else if unmanaged_end < unmanaged_len {
+    } else if unmanaged_has_more {
         output.has_more = true;
         output.next_cursor = Some(format_runtime_cursor(
             "unmanaged",
-            unmanaged_last_name.as_deref().unwrap_or(""),
+            unmanaged_resume.as_deref().unwrap_or(""),
             retained_count,
             retained_bytes,
         ));
@@ -1710,10 +2025,24 @@ mod cleanup_support {
                         .and_then(|raw| {
                             serde_json::from_str::<RuntimeTempCleanupLockOwner>(&raw).ok()
                         });
+                    // An owner whose recorded process identity has demonstrably
+                    // exited holds nothing: there is no process left to finish
+                    // the operation or release the directory. Requiring its
+                    // lease to *also* expire made the documented reclaim
+                    // unreachable in the case it exists for. The lease is 300s
+                    // but acquisition only retries for ~2s, so a dead owner's
+                    // lock could never be reclaimed by any invocation — every
+                    // run timed out and leaked another dead-owner lock on top
+                    // of it, permanently blocking the category (#14221).
+                    //
+                    // The lease still governs the *unverifiable* case, where
+                    // the identity can be neither confirmed live nor proven
+                    // dead. There, expiry is the only evidence available.
                     let stale = owner.as_ref().is_some_and(|owner| {
-                        unix_time_ms().saturating_sub(owner.heartbeat_unix_ms)
-                            > stale_after.as_millis() as u64
-                            && process_identity_is_stale(owner)
+                        process_identity_is_stale(owner)
+                            || (process_identity_is_unverifiable(owner)
+                                && unix_time_ms().saturating_sub(owner.heartbeat_unix_ms)
+                                    > stale_after.as_millis() as u64)
                     }) || owner.is_none()
                         && fs::metadata(&path)
                             .ok()
@@ -1844,11 +2173,24 @@ mod cleanup_support {
         )
     }
 
+    /// The recorded owner has provably exited, or the PID now belongs to a
+    /// different process. Either way nothing is holding the lock.
     fn process_identity_is_stale(owner: &RuntimeTempCleanupLockOwner) -> bool {
         matches!(
             process_identity_state(owner),
             crate::process::ProcessIdentityState::Dead
                 | crate::process::ProcessIdentityState::IdentityMismatch
+        )
+    }
+
+    /// The owner's liveness cannot be determined — an unreadable `/proc` entry,
+    /// an owner recorded on another host, or a platform without identity
+    /// inspection. Lease expiry is the only evidence available for these, so
+    /// they alone still have to wait out [`CLEANUP_LOCK_STALE_AFTER`].
+    fn process_identity_is_unverifiable(owner: &RuntimeTempCleanupLockOwner) -> bool {
+        matches!(
+            process_identity_state(owner),
+            crate::process::ProcessIdentityState::Unverifiable
         )
     }
 
@@ -2091,6 +2433,7 @@ mod tests {
             run_max_bytes: 1024 * 1024 * 1024,
             run_max_count: 100,
             cursor: None,
+            deadline: None,
         }
     }
 
@@ -2134,6 +2477,8 @@ mod tests {
             completed_at: Some(now),
             reason: None,
             producer: Some("legacy_producer".to_string()),
+            placement: None,
+            allocation_prefix: None,
         };
         write_run_owner(&path, &owner).expect("superseded owner record");
         fs::write(path.join("evidence.bin"), vec![b'x'; 64]).expect("superseded evidence");

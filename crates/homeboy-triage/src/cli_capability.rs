@@ -157,8 +157,11 @@ fn run_triage(args: TriageArgs) -> homeboy_core::Result<(TriageCommandOutput, i3
             until: args
                 .until
                 .or_else(|| args.auto_merge.then_some("green-mergeable".to_string())),
-            timeout: parse_duration("timeout", &args.timeout)?,
-            poll_interval: parse_duration("poll-interval", &args.poll_interval)?,
+            timeout: homeboy_core::duration::parse_duration("timeout", &args.timeout)?,
+            poll_interval: homeboy_core::duration::parse_duration(
+                "poll-interval",
+                &args.poll_interval,
+            )?,
             auto_merge: args.auto_merge,
             merge_method: args.merge_method,
         })?;
@@ -243,43 +246,6 @@ fn resolve_component_target(
         (Some(component_id), None) => Ok(TriageTarget::Component(component_id)),
         (component_id, Some(path)) => Ok(TriageTarget::Path { path, component_id }),
     }
-}
-
-fn parse_duration(name: &str, raw: &str) -> homeboy_core::Result<std::time::Duration> {
-    let seconds = raw
-        .strip_suffix("ms")
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|value| value as f64 / 1000.0)
-        .or_else(|| {
-            raw.strip_suffix('s')
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|value| value as f64)
-        })
-        .or_else(|| {
-            raw.strip_suffix('m')
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|value| value as f64 * 60.0)
-        })
-        .or_else(|| {
-            raw.strip_suffix('h')
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|value| value as f64 * 3600.0)
-        })
-        .or_else(|| {
-            raw.strip_suffix('d')
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|value| value as f64 * 86400.0)
-        });
-    seconds
-        .map(std::time::Duration::from_secs_f64)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                name,
-                "expected a duration such as 500ms, 30s, 5m, 1h, or 7d",
-                Some(raw.to_string()),
-                None,
-            )
-        })
 }
 
 #[cfg(test)]

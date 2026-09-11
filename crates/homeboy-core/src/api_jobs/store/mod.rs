@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use fs4::fs_std::FileExt;
+use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -37,6 +39,7 @@ const LOCAL_CHILD_RESERVATION_LEASE_MS: u64 = 60_000;
 /// Admissions protect the controller-to-daemon handoff window. A stopped
 /// controller must eventually stop consuming daemon replacement capacity.
 pub(crate) const ADMISSION_RESERVATION_LEASE_MS: u64 = 30_000;
+const LOCAL_CHILD_CANCELLATION_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionReservation {
@@ -58,6 +61,10 @@ pub struct JobStore {
     pub(super) next_event_sequence: Arc<AtomicU64>,
     pub(super) persistence: Option<Arc<JobStorePersistence>>,
     pub(super) daemon_lease_id: Option<String>,
+    /// Controller-supplied credentials are intentionally process-local. They
+    /// never enter the durable queue snapshot or its event stream.
+    pub(super) credential_deliveries:
+        Arc<Mutex<HashMap<uuid::Uuid, super::remote_runner::EphemeralCredentialDelivery>>>,
     #[cfg(test)]
     terminal_write_failures: Arc<AtomicU64>,
     #[cfg(test)]
@@ -126,6 +133,11 @@ pub(crate) struct ControllerJobState {
     /// Driver-owned safe projection exposed in the queued event and API logs.
     pub(crate) public_request: Value,
     pub(crate) request_digest: String,
+    /// Optional semantic identity that coalesces matching work only while its
+    /// durable job remains nonterminal. The caller's idempotency key still
+    /// permanently identifies this particular submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) active_idempotency_key: Option<String>,
     /// The controller-minted durable run this job executes for, declared by
     /// the driver from its typed request and persisted at admission — before
     /// any driver work can escape the daemon lifecycle. Recovery reconciles
@@ -211,7 +223,7 @@ pub(super) struct LocalChildExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reservation_expires_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    process: Option<LocalChildProcessIdentity>,
+    pub(super) process: Option<LocalChildProcessIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -602,6 +614,7 @@ impl JobStore {
                 terminal_job_retention_bytes,
             })),
             daemon_lease_id: None,
+            credential_deliveries: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -763,6 +776,7 @@ impl JobStore {
                 terminal_job_retention_bytes,
             })),
             daemon_lease_id: None,
+            credential_deliveries: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -1510,7 +1524,7 @@ impl JobStore {
         }
     }
 
-    pub(crate) fn list(&self) -> Vec<Job> {
+    pub fn list(&self) -> Vec<Job> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let mut jobs: Vec<Job> = inner
             .jobs
@@ -1519,6 +1533,54 @@ impl JobStore {
             .collect();
         jobs.sort_by_key(|job| (job.created_at_ms, job.id));
         jobs
+    }
+
+    /// Return a safe, non-reconciling projection for daemon-job inspection.
+    pub fn inspection(&self, job_id: Uuid) -> Result<super::DaemonJobInspection> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        let linked_durable_run_id = stored
+            .controller_job
+            .as_ref()
+            .and_then(|controller| controller.linked_durable_run_id.clone())
+            .or_else(|| {
+                stored.events.iter().find_map(|event| {
+                    event.data.as_ref().and_then(|data| {
+                        ["durable_run_id", "run_id", "agent_task_run_id"]
+                            .iter()
+                            .find_map(|key| data.get(*key)?.as_str().map(str::to_string))
+                    })
+                })
+            });
+        let child_identity = stored
+            .local_child
+            .as_ref()
+            .and_then(|child| child.process.as_ref())
+            .map(|process| super::DaemonJobChildIdentity {
+                pid: process.pid,
+                process_group_id: process.process_group_id,
+            });
+        let terminal_disposition = stored.job.status.is_terminal().then(|| {
+            stored
+                .job
+                .stale_reason
+                .clone()
+                .unwrap_or_else(|| stored.job.status.as_str().to_string())
+        });
+        let checkpoint = stored
+            .controller_job
+            .as_ref()
+            .and_then(|controller| controller.checkpoint.clone());
+        Ok(super::DaemonJobInspection {
+            job: stored.job.clone(),
+            linked_durable_run_id,
+            child_identity,
+            terminal_disposition,
+            checkpoint,
+        })
     }
 
     pub fn events(&self, job_id: Uuid) -> Result<Vec<JobEvent>> {
@@ -1567,7 +1629,10 @@ impl JobStore {
                 Some(vec![format!("POST /controller/jobs/{job_id}/cancel")]),
             ));
         }
-        self.transition(job_id, JobStatus::Cancelled, reason.into())
+        let child = self.local_child_process(job_id)?;
+        let job = self.transition(job_id, JobStatus::Cancelled, reason.into())?;
+        reap_cancelled_local_child(child.as_ref())?;
+        Ok(job)
     }
 
     #[cfg(test)]
@@ -1924,6 +1989,26 @@ impl JobStore {
                 None,
             ));
         }
+        if let Some(active_idempotency_key) = controller_job.active_idempotency_key.as_deref() {
+            let active = inner.jobs.values().find(|stored| {
+                !stored.job.status.is_terminal()
+                    && stored
+                        .controller_job
+                        .as_ref()
+                        .and_then(|state| state.active_idempotency_key.as_deref())
+                        == Some(active_idempotency_key)
+            });
+            if let Some(active) = active {
+                let active_state = active
+                    .controller_job
+                    .as_ref()
+                    .expect("active controller submission has controller state");
+                if controller_submission_fingerprint(active_state) != fingerprint {
+                    return Err(controller_idempotency_conflict(active_idempotency_key));
+                }
+                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(active.job.clone())));
+            }
+        }
         let job = Job {
             id: Uuid::new_v4(),
             operation,
@@ -2133,7 +2218,7 @@ impl JobStore {
         request: LocalRunnerJobRequest,
         capacity: usize,
         run: F,
-    ) -> Result<JobRunner>
+    ) -> Result<(JobRunner, bool)>
     where
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
@@ -2148,7 +2233,7 @@ impl JobStore {
         // `JobRunner` contract is preserved.
         if !created {
             let handle = thread::spawn(|| {});
-            return Ok(JobRunner { job_id, handle });
+            return Ok((JobRunner { job_id, handle }, false));
         }
         let handle_store = self.clone();
         let worker_store = self.clone();
@@ -2208,7 +2293,7 @@ impl JobStore {
                 }
             }
         });
-        Ok(JobRunner { job_id, handle })
+        Ok((JobRunner { job_id, handle }, true))
     }
 
     fn run_background_with_start_policy<T, F>(
@@ -2805,6 +2890,59 @@ impl JobStore {
             .map(|persistence| persistence.event_retention_limit)
             .unwrap_or(usize::MAX)
     }
+
+    fn local_child_process(&self, job_id: Uuid) -> Result<Option<LocalChildProcessIdentity>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        Ok(stored
+            .local_child
+            .as_ref()
+            .and_then(|child| child.process.clone()))
+    }
+}
+
+/// Stop the isolated group recorded before the job became visible as running.
+/// The executor owns reaping its direct child; waiting for the group here also
+/// prevents a cancelled job from leaving its descendants available to later work.
+pub(super) fn reap_cancelled_local_child(child: Option<&LocalChildProcessIdentity>) -> Result<()> {
+    let Some(child) = child else {
+        return Ok(());
+    };
+    let Some(process_group_id) = child.process_group_id else {
+        return Ok(());
+    };
+    if process_group_id != child.pid {
+        return Err(Error::internal_unexpected(format!(
+            "refuse to reap recorded process group {process_group_id}: expected isolated leader {}",
+            child.pid
+        )));
+    }
+    if let LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks } =
+        &child.discriminator
+    {
+        match crate::process::linux_process_starttime_ticks(child.pid) {
+            Ok(Some(actual)) if actual != *ticks => {
+                return Err(Error::internal_unexpected(format!(
+                    "refuse to reap reused local child process group {process_group_id}"
+                )));
+            }
+            Ok(_) => {}
+            Err(evidence) => {
+                return Err(Error::internal_unexpected(format!(
+                    "inspect local child {}/process group {process_group_id} before cancellation: {evidence}",
+                    child.pid
+                )));
+            }
+        }
+    }
+    crate::process::terminate_isolated_process_group_with_grace(
+        process_group_id,
+        LOCAL_CHILD_CANCELLATION_GRACE,
+    )?;
+    Ok(())
 }
 
 impl JobStore {
@@ -3012,7 +3150,7 @@ fn stored_job_durable_run_id(stored: &StoredJob) -> Option<String> {
     stored
         .remote_runner
         .as_ref()
-        .and_then(|remote| remote.request.lifecycle.as_ref())
+        .and_then(|remote| remote.envelope.lifecycle.as_ref())
         .or_else(|| {
             stored
                 .local_runner
@@ -3043,8 +3181,12 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
     let run_id = stored
         .remote_runner
         .as_ref()
-        .and_then(|remote| remote.request.lab_runner_workload.as_ref())
-        .and_then(|workload| workload.agent_task.as_ref())
+        .and_then(|remote| {
+            lab_runner_workload_from_execution_envelope(&remote.envelope)
+                .ok()
+                .flatten()
+        })
+        .and_then(|workload| workload.agent_task)
         .map(|agent_task| agent_task.run_id.trim().to_string())
         .or_else(|| {
             stored

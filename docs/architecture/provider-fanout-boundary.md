@@ -44,6 +44,16 @@ finalization per cook. Provider adapters still receive one normalized
 `AgentTaskRequest` at a time and return one normalized `AgentTaskOutcome` at a
 time.
 
+`fanout cook-batch` is the concise same-repository planner. A
+`homeboy/agent-task-batch-cook-fanout-plan/v1` submitted through `fanout
+run-plan` may instead contain cells for independent repositories. Before any
+child is admitted, Homeboy persists the fanout roster and a sanitized immutable
+cell manifest. The manifest retains each cell's repository, base/head,
+worktree, verification profile, provider policy, placement directive, evidence
+source identity, finalization intent, and Cook-recipe replay identity. Recipes
+remain the authoritative private execution records; the manifest never copies
+private gate commands, provider configuration, or evidence source paths.
+
 Durable batch fanout (`agent-task fanout submit-batch`) is the generic queue and
 reconcile surface for independent agent-task plans. It persists one child run
 per task and exposes stable read-side reports:
