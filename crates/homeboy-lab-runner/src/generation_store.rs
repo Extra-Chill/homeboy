@@ -1380,6 +1380,7 @@ trait GenerationEndpointOperations {
     /// job store. Settle them before treating its active count as ownership.
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool;
     fn active_jobs(&self, session: &RunnerSession) -> Option<usize>;
+    fn proven_stopped(&self, session: &RunnerSession) -> bool;
     fn stop(&self, session: &RunnerSession) -> bool;
     fn terminate_tunnel(&self, session: &RunnerSession);
 }
@@ -1423,6 +1424,10 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
             .pointer("/freshness/active_jobs")
             .and_then(serde_json::Value::as_u64)
             .and_then(|count| usize::try_from(count).ok())
+    }
+
+    fn proven_stopped(&self, _session: &RunnerSession) -> bool {
+        false
     }
 
     fn stop(&self, session: &RunnerSession) -> bool {
@@ -1593,6 +1598,19 @@ impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
             .and_then(|count| usize::try_from(count).ok())
     }
 
+    fn proven_stopped(&self, session: &RunnerSession) -> bool {
+        let Some(pid) = session.remote_daemon_pid else {
+            return false;
+        };
+        self.client
+            .execute_with_timeout(
+                &format!("kill -0 {pid} 2>/dev/null"),
+                Duration::from_secs(5),
+            )
+            .exit_code
+            == 1
+    }
+
     fn stop(&self, session: &RunnerSession) -> bool {
         let Some(lease_id) = session.remote_daemon_lease_id.as_deref() else {
             return false;
@@ -1625,6 +1643,10 @@ where
         self.primary
             .active_jobs(session)
             .or_else(|| self.fallback.active_jobs(session))
+    }
+
+    fn proven_stopped(&self, session: &RunnerSession) -> bool {
+        self.primary.proven_stopped(session) || self.fallback.proven_stopped(session)
     }
 
     fn stop(&self, session: &RunnerSession) -> bool {
@@ -1719,7 +1741,16 @@ fn reconcile_with(
                     } else {
                         operations.active_jobs(&session)
                     };
-                (generation, active_jobs, job_owner_ids, observed_active_jobs)
+                let proven_stopped = draining
+                    && observed_active_jobs.is_none()
+                    && operations.proven_stopped(&session);
+                (
+                    generation,
+                    active_jobs,
+                    job_owner_ids,
+                    observed_active_jobs,
+                    proven_stopped,
+                )
             },
         )
         .collect::<Vec<_>>();
@@ -1727,11 +1758,17 @@ fn reconcile_with(
     // endpoint stop remains outside this lock because it is remote I/O.
     let stoppable = with_registry_lock(runner_id, || {
         let Some(mut generations) = read_locked(runner_id, legacy)? else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let mut authoritative_zero = Vec::new();
-        for (generation, prior_active_jobs, prior_job_owner_ids, observed_active_jobs) in
-            &observations
+        let mut already_stopped = Vec::new();
+        for (
+            generation,
+            prior_active_jobs,
+            prior_job_owner_ids,
+            observed_active_jobs,
+            proven_stopped,
+        ) in &observations
         {
             if let Some(entry) = generations.generations.get(generation) {
                 let state_unchanged = entry.active_jobs == *prior_active_jobs
@@ -1746,6 +1783,12 @@ fn reconcile_with(
                     continue;
                 }
             }
+            let has_result_owners = generations
+                .generations
+                .get(generation)
+                .is_some_and(|entry| {
+                    has_result_owners_for(&generations, generation, &entry.endpoint)
+                });
             if let Some(entry) = generations.generations.get_mut(generation) {
                 entry.observed_active_jobs = *observed_active_jobs;
                 if let Some(active_jobs) = observed_active_jobs {
@@ -1758,6 +1801,13 @@ fn reconcile_with(
                         !owner_matches_generation(owner, generation, &entry.endpoint)
                     });
                     authoritative_zero.push(generation.clone());
+                }
+                if *proven_stopped
+                    && entry.drain_state == crate::RollingDrainState::Draining
+                    && entry.active_jobs == 0
+                    && !has_result_owners
+                {
+                    already_stopped.push(generation.clone());
                 }
             }
         }
@@ -1773,20 +1823,24 @@ fn reconcile_with(
             })
             .collect::<Vec<_>>();
         write(runner_id, &generations)?;
-        Ok(stoppable)
+        Ok((stoppable, already_stopped))
     })?;
 
-    let stopped = stoppable
-        .into_iter()
-        .filter_map(|(generation, session)| {
-            if operations.stop(&session) {
-                operations.terminate_tunnel(&session);
-                Some(generation)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    let (stoppable, already_stopped) = stoppable;
+    let mut stopped = already_stopped;
+    stopped.extend(
+        stoppable
+            .into_iter()
+            .filter_map(|(generation, session)| {
+                if operations.stop(&session) {
+                    operations.terminate_tunnel(&session);
+                    Some(generation)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
     let retired_generation_ids = with_registry_lock(runner_id, || {
         let Some(mut generations) = read_locked(runner_id, legacy)? else {
             return Ok(Vec::new());
@@ -2499,6 +2553,7 @@ mod tests {
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
         terminal_reconcile_failures: RefCell<std::collections::BTreeSet<String>>,
         stop_failures: RefCell<std::collections::BTreeSet<String>>,
+        stopped_leases_proven: RefCell<std::collections::BTreeSet<String>>,
         terminal_reconciled_leases: RefCell<Vec<String>>,
         stopped_leases: RefCell<Vec<String>>,
         terminated_pids: RefCell<Vec<u32>>,
@@ -2521,6 +2576,12 @@ mod tests {
                 .borrow()
                 .get(session.remote_daemon_lease_id.as_deref()?)
                 .copied()
+        }
+
+        fn proven_stopped(&self, session: &RunnerSession) -> bool {
+            self.stopped_leases_proven
+                .borrow()
+                .contains(session.remote_daemon_lease_id.as_deref().expect("lease"))
         }
 
         fn stop(&self, session: &RunnerSession) -> bool {
@@ -2999,6 +3060,10 @@ mod tests {
                 Some(0)
             }
 
+            fn proven_stopped(&self, _: &RunnerSession) -> bool {
+                false
+            }
+
             fn stop(&self, _: &RunnerSession) -> bool {
                 true
             }
@@ -3374,6 +3439,36 @@ mod tests {
                 Some(session("lease-stale", "daemon-stale", Some(101)))
             );
             assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn proven_stopped_draining_generation_retires_without_touching_live_owner() {
+        test_support::with_isolated_home(|_| {
+            let stopped = session("lease-stopped", "daemon-stopped", Some(101));
+            let live = session("lease-live", "daemon-live", Some(202));
+            activate(
+                "runner-a",
+                &stopped,
+                "lease-live".to_string(),
+                live.clone(),
+                &[],
+            )
+            .expect("activate live generation");
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .stopped_leases_proven
+                .borrow_mut()
+                .insert("lease-stopped".to_string());
+            reconcile_with("runner-a", Some(&live), &operations)
+                .expect("retire proven stopped generation");
+
+            let projection = status_projection("runner-a", Some(&live)).expect("projection");
+            assert_eq!(projection.len(), 1);
+            assert_eq!(projection[0].generation, "lease-live");
+            assert!(operations.stopped_leases.borrow().is_empty());
+            assert!(operations.terminated_pids.borrow().is_empty());
         });
     }
 
