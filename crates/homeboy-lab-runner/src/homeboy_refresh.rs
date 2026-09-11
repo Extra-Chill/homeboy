@@ -2287,7 +2287,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
                     transfer.upload_file(&local_binary.display().to_string(), &remote_binary)?;
                     let (_chmod, exit) = exec(
                         &options.runner_id,
-                        RunnerExecOptions::diagnostic_raw_shell(format!(
+                        dev_sync_execution_options(format!(
                             "chmod 0755 {}",
                             quote_path(&remote_binary)
                         )),
@@ -2325,9 +2325,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
                     )?;
                     let (output, exit) = exec(
                         &options.runner_id,
-                        RunnerExecOptions::diagnostic_raw_shell(source_snapshot_build_script(
-                            &snapshot,
-                        )),
+                        dev_sync_execution_options(source_snapshot_build_script(&snapshot)),
                     )?;
                     if exit != 0 {
                         let detail = [output.stderr.trim(), output.stdout.trim()]
@@ -2437,6 +2435,12 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
         },
         0,
     ))
+}
+
+// Dev-sync changes the selected job binary, so connected runners must execute
+// it through their admission daemon rather than diagnostic SSH.
+fn dev_sync_execution_options(script: String) -> RunnerExecOptions {
+    RunnerExecOptions::raw_command(vec!["bash".to_string(), "-lc".to_string(), script])
 }
 
 fn dev_sync_failure_output(

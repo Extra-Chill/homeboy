@@ -122,6 +122,15 @@ fn dev_binary_path_uses_content_hash_slot() {
 }
 
 #[test]
+fn dev_sync_shell_commands_use_daemon_backed_execution() {
+    let options = dev_sync_execution_options("printf synced".to_string());
+
+    assert!(!options.allow_diagnostic_ssh);
+    assert!(options.raw_exec);
+    assert_eq!(options.command, ["bash", "-lc", "printf synced"]);
+}
+
+#[test]
 fn extension_overlay_plan_uses_content_hash_slot() {
     let dir = tempfile::tempdir().expect("extension source");
     std::fs::write(dir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
