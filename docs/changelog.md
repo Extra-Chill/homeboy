@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.371.9] - 2026-09-11
+
+### Changed
+- harden detached admission coverage
+- cover interrupted detached admission
+
+### Fixed
+- retain explicit Cargo target lifecycle
+- close detached admission races
+- recover interrupted detached admission
+- preserve rooted failure recovery
+- root recovery command routing
+- root finalization projections
+- preserve rooted continuation semantics
+- atomically publish detached supervision
+- fence detached admission ownership
+- bind reports to runtime stores
+- persist detached handoff admission
+- validate output before handoff
+- admit before workspace bootstrap
+
 ## [0.371.8] - 2026-09-10
 
 ### Changed
