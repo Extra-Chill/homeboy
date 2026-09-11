@@ -1806,7 +1806,12 @@ fn refresh_execution_options(
         // materializes that path, so its script is the bootstrap capability
         // check rather than the normal configured-binary preflight.
         return RunnerExecOptions::diagnostic_raw_shell(plan.script.clone())
-            .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT);
+            .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT)
+            .with_capability_preflight(RunnerCapabilityPreflight {
+                command: "runner.refresh-homeboy bootstrap".to_string(),
+                timeout: Some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+                ..Default::default()
+            });
     }
 
     RunnerExecOptions::raw_command(vec![

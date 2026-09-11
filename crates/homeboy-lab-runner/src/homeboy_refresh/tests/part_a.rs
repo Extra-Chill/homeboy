@@ -1826,7 +1826,11 @@ fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transpor
         options.command,
         vec!["bash", "-lc", "managed clone fetch build select"]
     );
-    assert!(options.capability_preflight.is_none());
+    assert!(options
+        .capability_preflight
+        .expect("bootstrap preflight")
+        .required_commands
+        .is_empty());
 }
 
 fn stale_daemon_admission_snapshot(
