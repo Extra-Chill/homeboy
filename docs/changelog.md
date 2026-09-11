@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.372.0] - 2026-09-11
+
+### Added
+- attribute the audit detectors phase with named spans and an unattributed-time self-check
+
+### Fixed
+- retain post-swap failure evidence
+- settle terminal generation jobs
+- probe lab artifact root
+- defer unresolved preview base
+- preserve terminal startup diagnosis
+- surface silent provider startup diagnostics
+
 ## [0.371.9] - 2026-09-11
 
 ### Changed
