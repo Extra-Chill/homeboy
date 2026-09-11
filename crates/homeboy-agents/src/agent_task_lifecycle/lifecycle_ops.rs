@@ -4900,12 +4900,11 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
             skipped.push(queue_skip(&record, Some(&plan), &error));
             continue;
         }
-        // The queue admission is allowed to bind a route. Persist that exact
-        // plan before claiming it so execution cannot reload and re-derive a
-        // different provider or credential contract.
-        persist_controller_plan_in_store(lifecycle_store, &record.run_id, &plan)?;
-        match mark_running_in_store(lifecycle_store, &record.run_id) {
-            Ok(claimed) => {
+        // Plan binding and the queued-to-running transition share one config
+        // lock. Preflight is deliberately outside that lock, but its result is
+        // never persisted unless this consumer still owns the queued record.
+        match lifecycle_store.bind_controller_plan_and_claim_queued_run(&record.run_id, &plan)? {
+            Some(claimed) => {
                 return Ok(AgentTaskQueuedRunClaim {
                     record: Some(claimed),
                     skipped,
@@ -4913,11 +4912,9 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
                     admission_limit_reached: false,
                 })
             }
-            Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
-                quarantine_queued_run_in_store(lifecycle_store, &record, Some(&plan), &error)?;
-                skipped.push(queue_skip(&record, Some(&plan), &error));
-            }
-            Err(error) => return Err(error),
+            // A concurrent consumer or operator changed the record after
+            // preflight. Do not turn that normal CAS loss into a quarantine.
+            None => continue,
         }
     }
 
@@ -5171,6 +5168,26 @@ pub fn quarantine_queued_run_exact_in_store(
                 None,
             )
         })
+}
+
+/// Return the immutable receiver acceptance receipt for one dispatch intent.
+pub fn dispatch_acceptance_receipt_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+) -> Result<Option<Value>> {
+    let run_id = require_literal_run_id(run_id)?;
+    Ok(lifecycle_store
+        .read_record(&run_id)?
+        .metadata
+        .get("cook_dispatch_acceptance_receipts")
+        .and_then(Value::as_array)
+        .and_then(|receipts| {
+            receipts
+                .iter()
+                .find(|receipt| receipt["operation_key"] == operation_key)
+        })
+        .cloned())
 }
 
 fn normalized_operator_quarantine_reason(reason: &str) -> String {

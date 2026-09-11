@@ -208,6 +208,10 @@ pub(super) fn intercept_local_cook_retry(
     let (retry_runs, retry_record) = match existing_retry {
         Some(record) => (true, record),
         None => {
+            let idempotency_key = retry
+                .idempotency_key
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let acknowledgement =
                 homeboy::agents::orchestration::execute_action_from_current_environment(
                 &retry.run_id,
@@ -215,10 +219,11 @@ pub(super) fn intercept_local_cook_retry(
                     schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                         .to_string(),
                     action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-                    idempotency_key: retry
-                        .idempotency_key
-                        .clone()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    effect_id: homeboy_control_plane_contract::EffectId(format!(
+                        "cli:{}:retry:{idempotency_key}",
+                        retry.run_id
+                    )),
+                    idempotency_key,
                     actor: "homeboy-cli-local-detach".to_string(),
                     expected_updated_at: None,
                     parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {

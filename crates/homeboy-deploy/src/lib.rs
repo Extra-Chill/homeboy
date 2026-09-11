@@ -707,6 +707,9 @@ pub fn run_multi(
                             project_id
                         )
                     }
+                    lifecycle::DeployTargetStatus::Unknown => {
+                        "Deployment dispatch is recovery-required after an interrupted process; reconcile authoritative provider evidence before retrying".to_string()
+                    }
                     _ => "Already succeeded in the resumed deploy run".to_string(),
                 }),
                 results: vec![],

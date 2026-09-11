@@ -1003,6 +1003,12 @@ fn classify_liveness(
     if record.has_live_pending_local_cook_supervisor(now) {
         return AgentTaskLiveness::Active;
     }
+    // A completed Retry action intentionally leaves its successor queued until
+    // the durable queue consumer claims it. That reservation survives the
+    // short-lived caller, so lack of a live PID is not stale ownership.
+    if durable_queued_retry_is_live(record) {
+        return AgentTaskLiveness::Active;
+    }
     // A local Cook retry owns a queued lifecycle reservation before its child
     // begins provider execution. Its current daemon job is the authoritative
     // owner, so test it before generic queued-record staleness.
@@ -1093,6 +1099,13 @@ fn classify_liveness(
         // we genuinely cannot confirm this run either way.
         (false, false) => AgentTaskLiveness::Unreconciled,
     }
+}
+
+fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
+    record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && record.metadata["retry_of"]
+            .as_str()
+            .is_some_and(|run_id| !run_id.is_empty())
 }
 
 fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
@@ -1388,6 +1401,25 @@ mod tests {
         assert_eq!(
             classify_liveness(&invalid, Some(10), now),
             AgentTaskLiveness::Stale
+        );
+    }
+
+    #[test]
+    fn durable_queued_retry_survives_launcher_death_until_the_queue_consumer_claims_it() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        let mut retry = queued_record(json!({}));
+        retry.metadata["retry_of"] = json!("source-attempt");
+        assert_eq!(
+            classify_liveness(&retry, Some(10), now),
+            AgentTaskLiveness::Active
+        );
+
+        retry.metadata["queue_quarantine"] = json!({ "reason": "operator hold" });
+        assert_eq!(
+            classify_liveness(&retry, Some(10), now),
+            AgentTaskLiveness::Active
         );
     }
 

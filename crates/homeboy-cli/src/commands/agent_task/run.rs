@@ -8357,14 +8357,19 @@ pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
             None,
         ));
     }
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::PlacementUpdate,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:placement-update:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
@@ -8389,6 +8394,7 @@ pub(super) fn run_resume_with_executor(
     idempotency_key: Option<String>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
+    let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement =
         homeboy::agents::orchestration::execute_resume_action_from_current_environment(
             &run_id,
@@ -8396,8 +8402,10 @@ pub(super) fn run_resume_with_executor(
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
-                idempotency_key: idempotency_key
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "cli:{run_id}:resume:{idempotency_key}"
+                )),
+                idempotency_key,
                 actor: "homeboy-cli".to_string(),
                 expected_updated_at: None,
                 parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
@@ -8405,19 +8413,38 @@ pub(super) fn run_resume_with_executor(
             },
             executor,
         )?;
-    let exit_code = match homeboy::agents::agent_task_action_result::resume(&acknowledgement)? {
+    let resume_result = homeboy::agents::agent_task_action_result::resume(&acknowledgement)?;
+    let exit_code = match &resume_result {
         homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
             exit_code,
             ..
-        } => exit_code,
+        } => *exit_code,
         homeboy::agents::agent_task_action_result::ResumeActionResult::UnmaterializedCook {
             terminal,
             ..
-        } => i32::from(terminal) * 2,
+        } => i32::from(*terminal) * 2,
     };
     Ok((
-        serde_json::to_value(acknowledgement)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        // Historical terminal transport recovery has always returned the
+        // aggregate-shaped status cursor. Keep that compatibility projection
+        // while the mutation itself remains a durable action acknowledgement.
+        serde_json::to_value(match (&resume_result, acknowledgement.outcome) {
+            (
+                homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
+                    aggregate,
+                    ..
+                },
+                homeboy_control_plane_contract::ControlPlaneActionOutcome::AlreadySatisfied,
+            ) => aggregate,
+            _ => {
+                return Ok((
+                    serde_json::to_value(acknowledgement)
+                        .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                    exit_code,
+                ))
+            }
+        })
+        .map_err(|error| Error::internal_json(error.to_string(), None))?,
         exit_code,
     ))
 }
@@ -8449,47 +8476,20 @@ where
         args.allow_provider_rotation,
         args.provider_rotations,
     );
-    if !route_override.is_empty() {
-        let retry = agent_task_service::retry_with_provider_route_override(
-            &args.run_id,
-            args.new_run_id.as_deref(),
-            args.run,
-            args.force,
-            route_override,
-        )?;
-        if args.run && retry.run && retry.record.metadata["cook_id"].is_string() {
-            return continue_cook_with_queued_execution(
-                CookContinueArgs {
-                    cook_or_attempt_id: retry.record.run_id,
-                    preflight: false,
-                    rearm: false,
-                    artifact_id: None,
-                    timeout_ms: None,
-                    review_form_timeout_ms: None,
-                    backend: None,
-                    selector: None,
-                    model: None,
-                    allow_provider_rotation: false,
-                    provider_rotations: None,
-                    full: false,
-                },
-                executor,
-                reconstruct_dispatcher,
-                true,
-            );
-        }
-        let mut value = serde_json::to_value(retry.record).unwrap_or(Value::Null);
-        value["provider_route_override"] = json!(true);
-        return Ok((value, 0));
-    }
+    let idempotency_key = args
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:retry:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
@@ -8498,16 +8498,30 @@ where
                 data: serde_json::json!({
                     "new_run_id": args.new_run_id,
                     "force": args.force,
+                    "provider_route": (!route_override.is_empty()).then(|| serde_json::json!({
+                        "backend": route_override.backend,
+                        "selector": route_override.selector,
+                        "model": route_override.model,
+                        "allow_provider_rotation": route_override.allow_provider_rotation,
+                        "provider_rotations": route_override.provider_rotations,
+                    })),
                 }),
             },
             confirmed: true,
         },
     )?;
     let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
-    let execute = args.run && retry.runnable;
+    // Reservation is acknowledged independently from execution. Only the call
+    // that created the successor may dispatch it; a replayed acknowledgement
+    // must be inspected or resumed through the durable lifecycle instead.
+    let execute = args.run && retry.created;
     if execute {
         let record = retry.record;
         if record.metadata["cook_id"].is_string() {
+            // The retry acknowledgement is already durable, so this dispatch is
+            // free to report the Cook outcome it produced. Returning the
+            // acknowledgement instead would exit 0 and hide a durable failure
+            // from `agent-task retry --run`.
             return continue_cook_with_queued_execution(
                 CookContinueArgs {
                     cook_or_attempt_id: record.run_id,
@@ -8528,7 +8542,7 @@ where
                 true,
             );
         }
-        return run_submitted_with_executor(record.run_id, None, executor);
+        let _ = run_submitted_with_executor(record.run_id, None, executor)?;
     }
     Ok((
         serde_json::to_value(acknowledgement)

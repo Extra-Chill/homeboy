@@ -16889,12 +16889,10 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
 }
 
 #[test]
-fn retry_dispatch_operation_key_claim_dispatches_once() {
-    // #8357: the detached retry-dispatch path reserves a durable claim keyed by
-    // the retry run id before the handoff and completes it after. A resumed pass
-    // (or a concurrent one) observes the completed claim / held lease and must
-    // not send a second handoff. This exercises that exactly-once contract at the
-    // claim boundary without the full git-backed cook loop.
+fn retry_dispatch_receipt_prevents_redispatch_after_completion_crash() {
+    // The receiver has accepted the handoff, but the controller dies before it
+    // completes its operation claim. A replay must see the receipt and retain
+    // the intent-bound lease instead of sending a second handoff.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
     let cook_id = "cook-dispatch-claim";
@@ -16907,31 +16905,63 @@ fn retry_dispatch_operation_key_claim_dispatches_once() {
     let operation_key = retry_dispatch_operation_key(next_run_id);
     let lease = std::time::Duration::from_secs(60);
 
-    // First pass acquires the claim → performs the (modeled) dispatch → completes.
+    let intent = serde_json::json!({
+        "schema": "homeboy/cook-dispatch-intent/v1",
+        "run_id": next_run_id,
+        "operation_key": operation_key,
+    });
     assert_eq!(
-        lifecycle_store
-            .claim_cook_operation(next_run_id, &operation_key, lease)
-            .unwrap(),
-        agent_task_lifecycle::ClaimOutcome::Acquired
-    );
-    lifecycle_store
-        .complete_cook_operation(
+        agent_task_lifecycle::claim_operation_with_intent_in_store(
+            &lifecycle_store,
             next_run_id,
             &operation_key,
-            serde_json::json!({ "dispatched_run_id": next_run_id }),
+            lease,
+            &intent,
         )
-        .unwrap();
+        .unwrap(),
+        agent_task_lifecycle::ClaimOutcome::Acquired
+    );
+    agent_task_lifecycle::record_detached_lab_run_in_store(
+        &lifecycle_store,
+        agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: next_run_id,
+            runner_id: "fixture-lab",
+            runner_job_id: "accepted-daemon-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        },
+    )
+    .expect("receiver accepts and persists receipt");
+    lifecycle_store
+        .mutate_record(next_run_id, |record| {
+            record.metadata["cook_operation_claims"][0]["owner_pid"] = serde_json::json!(u32::MAX);
+            true
+        })
+        .expect("simulate controller crash");
 
-    // A resumed pass observes AlreadyCompleted and must not re-dispatch.
-    match lifecycle_store
-        .claim_cook_operation(next_run_id, &operation_key, lease)
-        .unwrap()
+    match agent_task_lifecycle::claim_operation_with_intent_in_store(
+        &lifecycle_store,
+        next_run_id,
+        &operation_key,
+        lease,
+        &intent,
+    )
+    .unwrap()
     {
-        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
-            assert_eq!(result["dispatched_run_id"], next_run_id);
-        }
-        other => panic!("expected AlreadyCompleted, got {other:?}"),
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
+        other => panic!("expected retained receipt lease, got {other:?}"),
     }
+    let record = lifecycle_store
+        .read_record(next_run_id)
+        .expect("receipt record");
+    assert_eq!(
+        record.metadata["cook_dispatch_acceptance_receipts"][0]["operation_key"],
+        operation_key
+    );
+    assert_eq!(
+        record.metadata["cook_dispatch_acceptance_receipts"][0]["receipt"]["accepted_by"],
+        "runner_daemon"
+    );
 }
 
 #[test]

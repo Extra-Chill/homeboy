@@ -166,6 +166,19 @@ fn retry_action_queues_durable_retry_and_records_parent_lineage() {
     with_isolated_home(|_| {
         crate::agent_task_lifecycle::submit_plan(&test_plan(), Some("retry-source-run"))
             .expect("source run submitted");
+        // A red gate requesting a retry has already produced a terminal failed
+        // attempt. Retry admission now enforces that precondition, so the
+        // fixture states it instead of retrying a still-queued run.
+        crate::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+            .mutate_record("retry-source-run", |record| {
+                crate::agent_task_lifecycle::set_run_state(
+                    record,
+                    crate::agent_task_lifecycle::AgentTaskRunState::Failed,
+                );
+                true
+            })
+            .expect("terminalize the retried source run");
         let mut record = init(ControllerInitRequest {
             loop_id: "loop-service-retry".to_string(),
             phase: "repair".to_string(),

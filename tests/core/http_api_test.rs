@@ -20,7 +20,7 @@ use homeboy_control_plane_contract::{
     ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
     ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
     ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, EventId, ExecutionId,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor, EventId, ExecutionId,
     MissionCursor, MissionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
@@ -1417,6 +1417,7 @@ fn control_plane_action_http_uses_the_typed_provider_contract() {
     register_fixture_control_plane_provider();
     let request = ControlPlaneActionRequest {
         schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+        effect_id: EffectId("fixture:http-request-1".to_string()),
         action: ControlPlaneAction::Cancel,
         idempotency_key: "http-request-1".to_string(),
         actor: "test-client".to_string(),
