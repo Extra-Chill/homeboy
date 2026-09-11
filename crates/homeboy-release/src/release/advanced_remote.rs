@@ -322,9 +322,23 @@ fn require_unpublished_github_tag(component: &Component, tag_name: &str) -> Resu
         return Ok(());
     }
 
-    match super::executor::github_release_exists_for_tag(component, tag_name) {
-        Some(false) => Ok(()),
-        Some(true) => Err(Error::validation_invalid_argument(
+    match super::executor::github_release_lookup_for_tag(component, tag_name) {
+        // A non-GitHub remote short-circuits above, so `None` here means the
+        // remote stopped resolving mid-recovery. Refuse rather than assume.
+        Some(super::executor::GhReleaseLookup::Absent) => Ok(()),
+        None => Err(Error::validation_invalid_argument(
+            "tag",
+            format!(
+                "Refusing to move '{}': could not verify whether a GitHub Release exists because no GitHub remote resolved for this component",
+                tag_name
+            ),
+            None,
+            Some(vec![
+                "Confirm the component's GitHub remote is reachable, then retry release recovery."
+                    .to_string(),
+            ]),
+        )),
+        Some(super::executor::GhReleaseLookup::Published) => Err(Error::validation_invalid_argument(
             "tag",
             format!(
                 "Refusing to move '{}': a GitHub Release already exists for this tag",
@@ -333,16 +347,15 @@ fn require_unpublished_github_tag(component: &Component, tag_name: &str) -> Resu
             None,
             None,
         )),
-        None => Err(Error::validation_invalid_argument(
+        Some(super::executor::GhReleaseLookup::Indeterminate(blocker)) => Err(Error::validation_invalid_argument(
             "tag",
             format!(
-                "Refusing to move '{}': could not verify whether a GitHub Release exists",
-                tag_name
+                "Refusing to move '{}': could not verify whether a GitHub Release exists because {}",
+                tag_name,
+                blocker.describe()
             ),
             None,
-            Some(vec![
-                "Authenticate gh for this repository and retry release recovery.".to_string(),
-            ]),
+            Some(vec![blocker.remedy()]),
         )),
     }
 }
