@@ -8518,10 +8518,11 @@ where
     if execute {
         let record = retry.record;
         if record.metadata["cook_id"].is_string() {
-            // The retry acknowledgement is durable before this optional dispatch.
-            // A crash here is recovered from the reserved successor, never by a
-            // second retry action.
-            let _ = continue_cook_with_queued_execution(
+            // The retry acknowledgement is already durable, so this dispatch is
+            // free to report the Cook outcome it produced. Returning the
+            // acknowledgement instead would exit 0 and hide a durable failure
+            // from `agent-task retry --run`.
+            return continue_cook_with_queued_execution(
                 CookContinueArgs {
                     cook_or_attempt_id: record.run_id,
                     preflight: false,
@@ -8539,11 +8540,7 @@ where
                 executor,
                 reconstruct_dispatcher,
                 true,
-            )?;
-            return Ok((
-                serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
-                0,
-            ));
+            );
         }
         let _ = run_submitted_with_executor(record.run_id, None, executor)?;
     }

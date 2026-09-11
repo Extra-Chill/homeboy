@@ -3744,12 +3744,12 @@ fn default_retry(
             provider_rotations: route.provider_rotations,
         }
     });
-    // The default action delegate runs the successor it reserves. A caller that
-    // only wants the reservation supplies its own delegate with `run` false.
+    // The action reserves the successor; dispatching it is the caller's own
+    // step, so a CLI that runs the retry itself is not raced by this delegate.
     crate::agent_task_service::retry_with_provider_route_override(
         run_id,
         parameters.new_run_id.as_deref(),
-        true,
+        false,
         parameters.force,
         route.unwrap_or_default(),
     )

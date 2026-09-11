@@ -771,21 +771,10 @@ impl AgentTaskLifecycleStore {
             return Ok(None);
         };
         if mutate(&mut index) {
-            self.write_cook_index_attempt_locked(
-                &index.cook_id,
-                index
-                    .attempts
-                    .last()
-                    .map(|entry| entry.attempt)
-                    .unwrap_or_default(),
-                &index.latest_run_id,
-                index
-                    .attempts
-                    .last()
-                    .map(|entry| entry.recorded_at.clone())
-                    .unwrap_or_default(),
-                index.latest_substantive_candidate.clone(),
-            )?;
+            // The mutated index is persisted whole. Re-deriving it from its
+            // attempt fields would discard every other mutation the caller
+            // made, including the cancellation fence that closes a mission.
+            persist_cook_index_in_store(self, &index)?;
         }
         Ok(Some(index))
     }
@@ -1864,10 +1853,26 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
             index.latest_substantive_candidate = Some(candidate);
         }
     }
+    persist_cook_index_in_store(store, &index)?;
+    Ok(index)
+}
+
+/// Commit one complete Cook index: its canonical SQLite projection, the alias
+/// it owns, and the derived compatibility file.
+///
+/// Callers hand over the whole index rather than a set of attempt fields, so a
+/// mutation to any other field — a cancellation fence above all — is persisted
+/// instead of being silently dropped by a rebuild from storage.
+pub(super) fn persist_cook_index_in_store(
+    store: &AgentTaskLifecycleStore,
+    index: &AgentTaskCookIndex,
+) -> Result<()> {
+    let cook_id = sanitize_run_id(&index.cook_id);
+    let path = store.cook_index_path(&cook_id);
     // Publishing an alias is an index operation, not a record read: a root may
     // legitimately index an attempt whose lifecycle record it does not hold.
     let latest_projection = match store.read_record(&index.latest_run_id) {
-        Ok(latest) => agent_task_resource_projection(store, &latest, Some(&index))?,
+        Ok(latest) => agent_task_resource_projection(store, &latest, Some(index))?,
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
             ControlPlaneResourceProjection {
                 resource_type: "agent_task_run".to_string(),
@@ -1908,8 +1913,7 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
     // SQLite is canonical for action resolution. The filesystem index is a
     // derived compatibility projection written only after this commit.
     observations.replace_control_plane_resource_projections(&projections)?;
-    write_cook_index_projection(&path, &index)?;
-    Ok(index)
+    write_cook_index_projection(&path, index)
 }
 
 #[cfg(test)]

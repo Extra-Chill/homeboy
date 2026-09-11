@@ -1283,11 +1283,15 @@ pub fn retry_with_provider_route_override(
     Ok(retry)
 }
 
+/// Retrying an unmaterialized admission *is* a request to admit it again, so
+/// the rearm is not conditioned on the caller's dispatch intent. A reservation
+/// that left the replacement admission inert would need a second, unrelated
+/// reconcile pass before anything could happen.
 fn reconcile_unmaterialized_cook_retry(
     retry: &mut AgentTaskRetryServiceResult,
-    run: bool,
+    _run: bool,
 ) -> Result<()> {
-    if run && agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
+    if agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
         agent_task_lifecycle::rearm_unmaterialized_cook_admission(&retry.record.run_id)?;
         crate::agent_task_service::reconcile_unmaterialized_cook_admission(&retry.record.run_id)?;
         retry.record = agent_task_lifecycle::exact_record(&retry.record.run_id)?;
