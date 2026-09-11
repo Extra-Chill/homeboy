@@ -127,6 +127,13 @@ pub(crate) fn push_release_branch(
         Some(component_id),
         git::PushOptions {
             tags: true,
+            // The branch and the release tag must land together or not at all.
+            // A remote that rejects the branch per-ref -- branch protection
+            // requiring a pull request, or a non-fast-forward after the remote
+            // advanced -- otherwise still accepts the tag from this same push,
+            // stranding the tag on a commit that never reached the branch
+            // (issues #13529, #13677, #14139).
+            atomic: true,
             force_with_lease: false,
             refspec: Some(format!("HEAD:refs/heads/{branch}")),
             ..Default::default()

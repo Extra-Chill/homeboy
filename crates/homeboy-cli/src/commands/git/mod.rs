@@ -101,6 +101,12 @@ enum GitCommand {
         #[arg(long)]
         tags: bool,
 
+        /// Update every ref in the push or none of them (`--atomic`). Use when
+        /// a branch and its tag must land together, so a per-ref rejection
+        /// cannot strand one without the other.
+        #[arg(long)]
+        atomic: bool,
+
         /// Use `--force-with-lease` for safe force-pushes (e.g. after a
         /// rebase). Refuses to overwrite the remote if it has commits the
         /// local ref hasn't seen. Plain `--force` is intentionally not
@@ -368,6 +374,7 @@ pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
             json,
             component_id,
             tags,
+            atomic,
             force_with_lease,
             remote_url,
             token,
@@ -385,6 +392,7 @@ pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
                 component_id.as_deref(),
                 PushOptions {
                     tags,
+                    atomic,
                     force_with_lease,
                     remote_url,
                     token,
