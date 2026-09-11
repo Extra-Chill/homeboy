@@ -400,6 +400,80 @@ mod tests {
         );
     }
 
+    /// A remote that rejects the branch per-ref -- branch protection requiring a
+    /// pull request (issues #13529, #13677), or a rejected non-fast-forward
+    /// (issue #14139) -- must not leave the release tag behind on the remote.
+    /// Git updates refs independently unless the push is atomic, so without
+    /// `--atomic` the tag lands on a commit that never reached the branch and
+    /// every later recovery has to reason about a tag that points nowhere.
+    #[test]
+    fn run_git_push_leaves_no_tag_when_the_branch_ref_is_rejected() {
+        let local = tempfile::tempdir().expect("local tempdir");
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        git(local.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            local.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(local.path().join("README.md"), "base").expect("write fixture");
+        git(local.path(), &["add", "."]);
+        git(local.path(), &["commit", "-m", "base"]);
+        git(local.path(), &["push", "origin", "main"]);
+
+        // Reject only branch updates, the way a protected default branch does.
+        // A `pre-receive` hook would reject the whole push and prove nothing;
+        // `update` runs per ref, which is the condition that strands the tag.
+        let hook = remote.path().join("hooks").join("update");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ncase \"$1\" in refs/heads/*) echo \"remote: - Changes must be made through a pull request.\" >&2; exit 1;; esac\nexit 0\n",
+        )
+        .expect("write update hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod hook");
+        }
+
+        std::fs::write(local.path().join("release.txt"), "release").expect("write release");
+        git(local.path(), &["add", "."]);
+        git(local.path(), &["commit", "-m", "release: v1.0.0"]);
+        git(
+            local.path(),
+            &["tag", "-a", "v1.0.0", "-m", "Release v1.0.0"],
+        );
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"), Some("main"))
+            .expect("push step should return result");
+
+        assert_eq!(
+            result.status,
+            ReleaseStepStatus::Failed,
+            "a rejected branch ref must fail the push step"
+        );
+        let tag_on_remote = Command::new("git")
+            .args(["show-ref", "--verify", "refs/tags/v1.0.0"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git show-ref");
+        assert!(
+            !tag_on_remote.status.success(),
+            "the release tag must not reach the remote when the branch ref is rejected"
+        );
+    }
+
     #[test]
     fn test_is_non_fast_forward_rejection() {
         // The exact shape of git's stderr from issue #3611's failed push.
