@@ -2865,14 +2865,18 @@ fn refreshed_runner_patch_in_roots(
     runner_id: &str,
     homeboy_path: &str,
 ) -> Result<Value> {
+    let runner = load_in_roots(roots, runner_id)?;
+    let removed_daemon_state_dir = runner.env.contains_key("HOMEBOY_DAEMON_STATE_DIR");
     let env = refreshed_runner_env_in_roots(roots, runner_id, homeboy_path)?;
     let mut patch = serde_json::json!({
         "homeboy_path": homeboy_path,
         "env": env,
     });
-    // Config merge deletes null object fields. Include the deletion explicitly
-    // because omitted map keys retain their prior persisted values.
-    patch["env"]["HOMEBOY_DAEMON_STATE_DIR"] = Value::Null;
+    // Config merge deletes null object fields. A fresh runner has no such key,
+    // and a null map value is not a valid initial environment value.
+    if removed_daemon_state_dir {
+        patch["env"]["HOMEBOY_DAEMON_STATE_DIR"] = Value::Null;
+    }
     Ok(patch)
 }
 

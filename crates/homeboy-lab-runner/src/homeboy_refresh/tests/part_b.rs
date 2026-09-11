@@ -110,6 +110,19 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
             Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy")
         );
         assert_eq!(offload_env.get("HOMEBOY_DAEMON_STATE_DIR"), None);
+
+        crate::create(
+            r#"{"id":"lab-fresh","kind":"local","workspace_root":"/runner/ws"}"#,
+            false,
+        )
+        .expect("create fresh runner");
+        let fresh_patch = refreshed_runner_patch_in_roots(
+            &ambient_roots(),
+            "lab-fresh",
+            "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
+        )
+        .expect("fresh refresh patch");
+        assert!(fresh_patch["env"].get("HOMEBOY_DAEMON_STATE_DIR").is_none());
     });
 }
 
