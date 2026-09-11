@@ -950,10 +950,26 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         .initial_plan;
     let mut aggregate = review_form_aggregate(&plan);
     aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
-    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
     aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    aggregate.outcomes[0].diagnostics = vec![
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_timeout".to_string(),
+            message: "provider exceeded timeout_ms=1200000".to_string(),
+            data: serde_json::json!({ "timeout_ms": 1_200_000 }),
+        },
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_rotation_exhausted".to_string(),
+            message: "an earlier provider rotation exhausted".to_string(),
+            data: serde_json::json!({}),
+        },
+    ];
+    let mut startup_outcome = aggregate.outcomes[0].clone();
+    startup_outcome.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    startup_outcome.failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
-    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+    startup_outcome.diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
         class: "agent_task.provider_liveness_timeout".to_string(),
         message: "provider produced no observable progress before the liveness boundary"
             .to_string(),
@@ -968,6 +984,7 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
             "workspace_progress_events": 0,
         }),
     }];
+    aggregate.outcomes.push(startup_outcome);
     let mut report = cook_report(CookReportInput {
         cook_id: "startup-without-output-report".to_string(),
         status: "provider_failure",
@@ -1001,6 +1018,16 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         next_actions: Vec::new(),
     });
 
+    make_provider_timeout_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        &plan,
+        "startup-without-output-run",
+        Some(AgentTaskExecutionBudget::new(1, 1, 0)),
+        false,
+    );
+    make_provider_rotation_actionable(None, &mut report, &aggregate, "startup-without-output-run");
     make_startup_without_output_actionable(
         None,
         &mut report,
@@ -1037,6 +1064,65 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         .legal_actions
         .iter()
         .all(|action| !action.command.contains("--timeout-ms")));
+}
+
+#[test]
+fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure() {
+    let plan = compile_options("later-terminal-failure")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "deadline": "liveness",
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    let mut later_failure = aggregate.outcomes[0].clone();
+    later_failure.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    later_failure.failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
+    later_failure.diagnostics.clear();
+    aggregate.outcomes.push(later_failure);
+    let mut report = cook_report(CookReportInput {
+        cook_id: "later-terminal-failure".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: Some("later provider execution failed".to_string()),
+        exit_code: 1,
+        invocation_latest_run_id: Some("later-terminal-failure-run"),
+    });
+    report.value.terminal_phase = Some("provider".to_string());
+    report.value.terminal_failure_classification = Some("provider_execution_failed".to_string());
+
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "later-terminal-failure-run",
+    );
+
+    assert_eq!(report.value.terminal_phase.as_deref(), Some("provider"));
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_execution_failed")
+    );
+    assert_eq!(
+        report.value.stop_reason.as_deref(),
+        Some("later provider execution failed")
+    );
 }
 
 #[test]

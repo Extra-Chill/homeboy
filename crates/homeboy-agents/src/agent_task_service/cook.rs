@@ -4332,15 +4332,17 @@ fn provider_timeout_ms(
 }
 
 /// The runner records this only after every observable progress channel stayed
-/// empty. It is not a wall-clock timeout: keep the distinction at Cook's
-/// operator-facing boundary rather than suggesting a larger timeout.
+/// empty. Classify only the current terminal completion, not prior attempts.
+/// It is not a wall-clock timeout: keep the distinction at Cook's operator-facing
+/// boundary rather than suggesting a larger timeout.
 fn startup_without_output_liveness_diagnostic(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Option<&crate::agent_task::AgentTaskDiagnostic> {
     aggregate
         .outcomes
+        .last()?
+        .diagnostics
         .iter()
-        .flat_map(|outcome| &outcome.diagnostics)
         .find(|diagnostic| {
             diagnostic.class == "agent_task.provider_liveness_timeout"
                 && diagnostic.data["deadline"] == "liveness"
@@ -7271,13 +7273,13 @@ fn run_cook_spine(
                 )
                 .unwrap_or(true),
             );
-            make_startup_without_output_actionable(
+            make_provider_rotation_actionable(
                 Some(lifecycle_store),
                 &mut report,
                 &aggregate,
                 &run_id,
             );
-            make_provider_rotation_actionable(
+            make_startup_without_output_actionable(
                 Some(lifecycle_store),
                 &mut report,
                 &aggregate,
