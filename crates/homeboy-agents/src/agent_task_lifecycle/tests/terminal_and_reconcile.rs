@@ -296,6 +296,37 @@ impl RunnerContinuationProvider for ServiceRunnerFixture {
 }
 
 #[test]
+fn aggregate_transition_commits_record_aggregate_and_terminal_artifact_projection() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let mut record = stub_lab_offload_submission(&lifecycle_store, &plan, "aggregate-transition")
+        .expect("submit aggregate transition run");
+    let aggregate = succeeded_aggregate(&plan);
+
+    let completed = record_aggregate_in_store(&lifecycle_store, &mut record, &plan, &aggregate)
+        .expect("apply aggregate transition");
+    let persisted = lifecycle_store
+        .read_record("aggregate-transition")
+        .expect("persisted transitioned record");
+    let persisted_aggregate = lifecycle_store
+        .read_aggregate("aggregate-transition")
+        .expect("persisted transitioned aggregate");
+
+    assert_eq!(completed.state, AgentTaskRunState::Succeeded);
+    assert_eq!(persisted.state, AgentTaskRunState::Succeeded);
+    assert_eq!(
+        persisted.lifecycle.execution.state,
+        homeboy_core::run_lifecycle_record::RunExecutionState::Succeeded
+    );
+    assert_eq!(persisted_aggregate, aggregate);
+    assert_eq!(
+        persisted.metadata["artifact_projection"]["status"],
+        "complete"
+    );
+}
+
+#[test]
 fn cancellation_routes_managed_service_cleanup_to_its_lab_owner() {
     with_isolated_home(|_| {
         ensure_runner_continuation_provider_reset_hook();
@@ -587,6 +618,7 @@ fn detached_handoff_persists_only_the_runner_api_replay_envelope() {
             envelope: legacy.execution_envelope(),
             workspace_claim_binding: None,
             workspace_owner_lease: None,
+            credential_delivery: None,
         };
 
         let pending = record_lab_offload_submission_envelope(run_id, &submission)
@@ -3525,19 +3557,7 @@ fn prepare_dirty_scheduler_workspace(scratch: &std::path::Path) {
     std::fs::write(fixture.join("untracked.txt"), "generated\n").expect("fixture state");
 }
 
-fn run_git(cwd: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_core::test_support::run_git_command as run_git;
 
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The reservation is made through the sibling that was handed
@@ -3564,6 +3584,10 @@ fn local_provider_reservation_persists_reusable_owner_identity_before_execution(
     assert_eq!(
         execution["owner_identity"],
         json!("owner-identity:task-a:1")
+    );
+    assert_eq!(
+        execution["execution_identity"],
+        json!("owner-identity:task-a:1:execution")
     );
     assert_eq!(execution["state"], json!("running"));
 }

@@ -105,6 +105,66 @@ pub(crate) fn capability_admission_has_blocking_drift(
             && admission.provenance.ancestry != LabRuntimeAncestry::ExactSource)
 }
 
+/// Reject a direct Lab handoff for the capability evidence actually observed.
+/// This is intentionally distinct from stale_runner_homeboy_error: matching
+/// daemon and command identities do not prove the required capabilities exist.
+pub(crate) fn capability_admission_error(
+    runner_id: &str,
+    admission: &LabCapabilityAdmission,
+    require_exact_runner_version: bool,
+) -> Error {
+    debug_assert!(capability_admission_has_blocking_drift(
+        admission,
+        require_exact_runner_version
+    ));
+    let ancestry = admission.provenance.ancestry;
+    let (cause_class, cause, remediation) = if !admission.compatible {
+        (
+            "capability_incompatible",
+            admission
+                .provenance
+                .rejection_reason
+                .as_deref()
+                .unwrap_or("the runner did not provide a capability rejection reason"),
+            "Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
+        )
+    } else {
+        (
+            if ancestry == LabRuntimeAncestry::Unknown {
+                "strict_ancestry_unknown"
+            } else {
+                "strict_ancestry_not_exact"
+            },
+            "strict identity fencing requires exact-source ancestry",
+            "Reconnect the runner to collect exact source provenance, then retry.",
+        )
+    };
+    let message = if !admission.compatible {
+        format!(
+            "Lab offload refused runner `{runner_id}` because its capability admission is incompatible: {cause}. {remediation}"
+        )
+    } else {
+        format!(
+            "Lab offload refused runner `{runner_id}` because {cause}, but admission reported {ancestry:?}. {remediation}"
+        )
+    };
+
+    Error::new(
+        ErrorCode::RunnerCapabilityMissing,
+        message,
+        serde_json::json!({
+            "runner_id": runner_id,
+            "admission_cause_class": cause_class,
+            "rejection_reason": admission.provenance.rejection_reason,
+            "ancestry": ancestry,
+            "require_exact_runner_version": require_exact_runner_version,
+            "capability_admission": admission,
+            "remediation": remediation,
+        }),
+    )
+    .with_hint(remediation)
+}
+
 pub(super) fn hash_bound_runner_command_evidence(
     status: &RunnerStatusReport,
     homeboy: &str,

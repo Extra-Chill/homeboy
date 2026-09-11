@@ -926,7 +926,7 @@ fn persisted_timeout_candidate_is_admitted_for_continuation() {
 
         let source = serde_json::to_string(&aggregate).expect("serialize persisted aggregate");
         let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
-            &crate::agent_task_promotion::AgentTaskPromotionOptions {
+            &crate::agent_task_promotion::AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("service-timeout-candidate".to_string()),
                 source_path: Some(lifecycle_store.aggregate_path("service-timeout-candidate")),
@@ -976,7 +976,7 @@ fn service_normalizes_resolved_component_worktree_plan() {
 }
 
 #[test]
-fn service_materializes_component_worktree_before_provider_dispatch() {
+fn run_plan_record_run_id_preparation_preserves_component_worktree_branch_for_discovery() {
     with_isolated_home(|home| {
         let repo = home.path().join("fixture");
         create_git_repo(&repo);
@@ -1051,6 +1051,21 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             Some("fixture@fix-service-task")
         );
         assert!(Path::new(&record.worktree_path).is_dir());
+
+        // `run-plan --record-run-id` prepares the component worktree before
+        // submitting the lifecycle record, so discovery must retain its
+        // original branch after preparation clears `workspace.branch`.
+        let scoped = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                branch: Some("fix/service-task".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover prepared durable run by branch");
+        assert_eq!(scoped.runs.len(), 1);
+        assert_eq!(scoped.runs[0].run_id, "service-materialized-worktree");
+        assert_eq!(scoped.runs[0].branch.as_deref(), Some("fix/service-task"));
     });
 }
 
@@ -1241,7 +1256,7 @@ fn run_next_bounds_malformed_continuation_admission_and_progresses_on_retry() {
                 .filter_map(std::result::Result::ok)
                 .filter(
                     |entry| entry.path().extension().and_then(|value| value.to_str())
-                        == Some("failed")
+                        == Some("malformed")
                 )
                 .count(),
             agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
@@ -3000,6 +3015,96 @@ fn discovery_filters_by_cook_identity_and_classifies_only_live_queued_records_as
                 .state,
             AgentTaskRunState::Cancelled
         );
+    });
+}
+
+#[test]
+fn discovery_federates_unmaterialized_cook_admissions_by_task_identity() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            "cook-pending-admission",
+            serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-binding/v1",
+                "source": {
+                    "repository": "Extra-Chill/homeboy",
+                    "task_refs": ["https://github.com/Extra-Chill/homeboy/issues/14463"]
+                },
+                "worktree_ref": "/work/homeboy@fix-14463"
+            }),
+            "queued",
+            "awaiting runner admission",
+        )
+        .expect("persist admission");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("unrelated-materialized"))
+            .expect("persist unrelated lifecycle record");
+
+        let report = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                repo: Some("Extra-Chill/homeboy".to_string()),
+                workspace: Some("/work/homeboy@fix-14463".to_string()),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/14463".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover matching admission");
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.runs.len(), 1);
+        let admission = &report.runs[0];
+        assert_eq!(admission.run_id, "cook-pending-admission");
+        assert_eq!(admission.state, AgentTaskRunState::Queued);
+        assert_eq!(
+            admission.task_url.as_deref(),
+            Some("https://github.com/Extra-Chill/homeboy/issues/14463")
+        );
+        assert!(admission
+            .commands
+            .status
+            .ends_with("cook-pending-admission"));
+        assert_eq!(report.record_health.healthy, 1);
+        assert_eq!(report.global_record_health.healthy, 2);
+    });
+}
+
+#[test]
+fn discovery_keeps_cancelled_unmaterialized_admissions_in_filtered_history() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            "cook-cancelled-admission",
+            serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-binding/v1",
+                "source": {
+                    "repository": "Extra-Chill/homeboy",
+                    "task_refs": ["https://github.com/Extra-Chill/homeboy/issues/14463"]
+                }
+            }),
+            "queued",
+            "awaiting runner admission",
+        )
+        .expect("persist admission");
+        agent_task_lifecycle::rewrite_record_for_test("cook-cancelled-admission", |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Cancelled);
+        })
+        .expect("cancel admission");
+
+        let report = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/14463".to_string()),
+                state: Some("cancelled".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover cancelled admission");
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.runs[0].run_id, "cook-cancelled-admission");
+        assert_eq!(report.runs[0].state, AgentTaskRunState::Cancelled);
     });
 }
 

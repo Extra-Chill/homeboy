@@ -155,7 +155,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let mut provider_config = dispatch_provider_config(
+    let (mut provider_config, mut generated_provider_client_context) = dispatch_provider_config(
         request,
         &repo,
         &component,
@@ -168,6 +168,9 @@ pub fn build_dispatch_plan_with_provider_requirements(
         .as_ref()
         .and_then(|route| route.provider_config.as_object())
     {
+        // A selected policy route owns its explicit context, even when the
+        // base config received a Homeboy-generated fanout context.
+        generated_provider_client_context &= !overrides.contains_key("client_context");
         provider_config
             .as_object_mut()
             .expect("dispatch provider config object")
@@ -361,6 +364,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "resolved_runtime_identity": request.core.resolved_provider_policy
                     .as_ref()
                     .and_then(|policy| policy.runtime_identity.as_ref()),
+                "provider_readiness_generated_fanout_context": request.core.generated_fanout_context && generated_provider_client_context,
             }),
         });
     }
@@ -762,7 +766,6 @@ mod tests {
     use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
     use homeboy_core::test_support::with_isolated_home;
     use std::collections::HashMap;
-    use std::process::Command;
     use std::sync::Arc;
 
     #[test]
@@ -1261,6 +1264,78 @@ mod tests {
                 .filter_map(|entry| entry.model.as_deref())
                 .collect::<Vec<_>>(),
             ["model-two", "model-three"]
+        );
+    }
+
+    #[test]
+    fn policy_route_client_context_is_not_marked_as_generated_fanout_context() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with the policy provider context.".to_string()),
+            core: DispatchCoreInputs {
+                generated_fanout_context: true,
+                resolved_provider_policy: Some(
+                    crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                        backend: "policy-backend".to_string(),
+                        selector: None,
+                        model: None,
+                        rotation: Some(AgentTaskProviderRotationPolicy {
+                            entries: vec![
+                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                    provider_config: serde_json::json!({
+                                        "client_context": {"fanout": {"cook_id": "caller-owned"}}
+                                    }),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }),
+                        rotation_starts_with_first_entry: true,
+                        retry: AgentTaskRetryPolicy::default(),
+                        liveness_timeout_ms: None,
+                        runtime_identity: None,
+                    },
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].executor.config["client_context"]["fanout"]["cook_id"],
+            "caller-owned"
+        );
+        assert_eq!(
+            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
+            false
+        );
+    }
+
+    #[test]
+    fn generated_fanout_context_remains_marked_for_readiness_identity() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with generated fanout context.".to_string()),
+            core: DispatchCoreInputs {
+                generated_fanout_context: true,
+                client_context: Some(
+                    serde_json::json!({
+                        "fanout": {
+                            "id": "shared-fanout",
+                            "semantics": "batch_cook",
+                            "cook_id": "generated-child"
+                        }
+                    })
+                    .to_string(),
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(
+            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
+            true
         );
     }
 
@@ -1994,14 +2069,7 @@ mod tests {
         run_git(path, &["commit", "-m", "init"]);
     }
 
-    fn run_git(path: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git command runs");
-        assert!(status.success(), "git {:?} failed", args);
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     #[test]
     fn resolves_workspace_path_without_specialized_coupling() {
@@ -2232,6 +2300,7 @@ mod tests {
                 tasks_json: overrides.core.tasks_json,
                 provider_config: overrides.core.provider_config,
                 client_context: overrides.core.client_context,
+                generated_fanout_context: overrides.core.generated_fanout_context,
                 attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
                 provider_rotations: overrides.core.provider_rotations,
@@ -2246,17 +2315,5 @@ mod tests {
         }
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as git;
 }

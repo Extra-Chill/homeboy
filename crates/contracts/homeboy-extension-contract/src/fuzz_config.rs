@@ -15,6 +15,12 @@ pub struct FuzzConfig {
     pub runtime_helpers: Vec<RuntimeHelperRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workloads: Vec<FuzzWorkloadConfig>,
+    /// Extension-owned JSON values that declare a workload when present.
+    ///
+    /// This keeps ecosystem-specific manifest paths and JSON pointers in the
+    /// extension contract while core performs only generic JSON lookup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workload_json_probes: Vec<FuzzWorkloadJsonProbe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case_artifact: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -40,4 +46,18 @@ pub struct FuzzWorkloadConfig {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleContract>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FuzzWorkloadJsonProbe {
+    /// JSON file relative to the component root.
+    pub path: String,
+    /// RFC 6901 JSON Pointer whose non-empty string value declares the workload.
+    pub pointer: String,
+    /// Stable workload identifier emitted when the pointer resolves.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }

@@ -761,7 +761,6 @@ pub(super) fn verify_expected_version(components: &[Component], expected: &str) 
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
-    use std::process::Command;
 
     use super::{
         guard_deployment_provenance, guard_head_matches_invocation_checkout,
@@ -896,18 +895,7 @@ mod tests {
             .expect("projects without a policy retain legacy force semantics");
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as git;
 
     #[test]
     fn stale_local_source_refuses_until_explicitly_allowed() {

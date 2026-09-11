@@ -37,7 +37,7 @@ pub enum AgentTaskFanoutCommand {
     /// --private-verify inputs or --verification-profiles. A child that cannot
     /// verify its work cannot promote it (#9838).
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --preview\n\nOne repository per batch: every issue in a cook-batch must belong to --repo. Plan separate batches and coordinate them with the multi-repository wave tracker: https://github.com/Extra-Chill/homeboy/issues/11088\n\nTwo phases: without --run-plan, cook-batch validates and materializes the batch, then returns a fanout run-plan command. Add --run-plan only after reviewing that plan to execute every child.\n\nVerification is required: every child needs a shared --verify/--private-verify gate or an assignment in --verification-profiles; a child that cannot verify cannot promote.\n\nPlacement: run the batch on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nPer-child verification profiles:\n  homeboy agent-task fanout cook-batch --repo REPO --verification-profiles @profiles.json ISSUE_URL... --preview\n\nUse --help-full for provider, gate, resource, environment, artifact, runner, and scheduling controls."
+        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --preview\n\nOne repository per batch: every issue in a cook-batch must belong to --repo. For independent repositories, create a multi-repository batch-cook manifest with one cook cell per repository, then run:\n  homeboy agent-task fanout run-plan --input @multi-repo-plan.json\n\nTwo phases: without --run-plan, cook-batch validates and materializes the batch, then returns a fanout run-plan command. Add --run-plan only after reviewing that plan to execute every child.\n\nVerification is required: every child needs a shared --verify/--private-verify gate or an assignment in --verification-profiles; a child that cannot verify cannot promote.\n\nPlacement: run the batch on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nPer-child verification profiles:\n  homeboy agent-task fanout cook-batch --repo REPO --verification-profiles @profiles.json ISSUE_URL... --preview\n\nUse --help-full for provider, gate, resource, environment, artifact, runner, and scheduling controls."
     )]
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
     /// Normalize and inspect a batch-cook plan without submitting or running it.
@@ -201,10 +201,10 @@ pub struct AgentTaskFanoutCookBatchArgs {
     )]
     pub max_duration: Option<u64>,
     /// Resolve and validate the batch without repository hydration, provider
-    /// dispatch, or worktree creation. Runs the selected provider's bounded
-    /// readiness admission, then prints the static plan, worktree projection,
-    /// preflight, and a replayable command — the batch-wide counterpart of
-    /// `agent-task cook --preview`.
+    /// dispatch, or worktree creation. Static planning remains bounded
+    /// separately; preview then performs one bounded provider-owned readiness
+    /// admission using the batch deadline before printing the plan and replay
+    /// command.
     /// `--dry-run` is accepted as the historical spelling of this flag.
     #[arg(long = "preview", alias = "dry-run")]
     pub preview: bool,

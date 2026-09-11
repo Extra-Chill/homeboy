@@ -13,13 +13,61 @@
 //! primitives base rather than all of `homeboy-core` for changed-file scoping.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use homeboy_error::{Error, Result};
+
+use crate::command;
+use crate::git_remote_tracking_authority::with_remote_tracking_authority_until;
 
 /// Run a git subcommand in `path`, returning the raw process output.
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<Output> {
     Command::new("git").args(args).current_dir(path).output()
+}
+
+/// Run Git until `deadline`, terminating its process group if a transport or
+/// credential helper stalls.
+fn execute_git_until(path: &str, args: &[&str], deadline: Instant) -> Result<Output> {
+    execute_git_until_with_program(path, args, Path::new("git"), || deadline)
+}
+
+fn execute_git_until_with_program(
+    path: &str,
+    args: &[&str],
+    program: &Path,
+    deadline: impl FnOnce() -> Instant,
+) -> Result<Output> {
+    let mut process = Command::new(program);
+    process
+        .args(args)
+        .current_dir(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command::isolate_process_tree(&mut process);
+    let mut child = process
+        .spawn()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let deadline = deadline();
+    let mut timed_out = false;
+    let output = command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        command::DEFAULT_CAPTURE_LIMIT_BYTES,
+        || {
+            timed_out = Instant::now() >= deadline;
+            timed_out
+        },
+    )
+    .map_err(|error| Error::git_command_failed(error.to_string()))?
+    .into_output();
+    if timed_out {
+        return Err(Error::git_command_failed(
+            "git shallow-clone fetch deadline exhausted; terminated child process group",
+        ));
+    }
+    Ok(output)
 }
 
 /// Get the files that changed on the current branch relative to `git_ref`.
@@ -118,7 +166,19 @@ fn has_merge_base(path: &str, git_ref: &str) -> bool {
 /// Resolve the default remote of a repository: prefer `origin`, else a sole
 /// remote, else fall back to `origin`.
 fn resolve_default_remote(path: &str) -> String {
-    let remotes: Vec<String> = execute_git(path, &["remote"])
+    let remotes = remote_names(path);
+
+    if remotes.iter().any(|remote| remote == "origin") {
+        return "origin".to_string();
+    }
+    if let [only] = remotes.as_slice() {
+        return only.clone();
+    }
+    "origin".to_string()
+}
+
+fn remote_names(path: &str) -> Vec<String> {
+    execute_git(path, &["remote"])
         .ok()
         .filter(|out| out.status.success())
         .map(|out| {
@@ -129,15 +189,32 @@ fn resolve_default_remote(path: &str) -> String {
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    if remotes.iter().any(|remote| remote == "origin") {
-        return "origin".to_string();
+fn remote_and_ref(path: &str, git_ref: &str) -> (String, String) {
+    let remote_ref = git_ref.strip_prefix("refs/remotes/").unwrap_or(git_ref);
+    if let Some((remote, reference)) = remote_ref.split_once('/') {
+        if !reference.is_empty() && remote_names(path).iter().any(|name| name == remote) {
+            return (remote.to_string(), reference.to_string());
+        }
     }
-    if let [only] = remotes.as_slice() {
-        return only.clone();
+
+    (resolve_default_remote(path), git_ref.to_string())
+}
+
+fn fetch_until(path: &str, args: &[&str], deadline: Instant) -> Result<()> {
+    let output = execute_git_until(path, args, deadline)?;
+    if output.status.success() {
+        return Ok(());
     }
-    "origin".to_string()
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(Error::git_command_failed(format!(
+        "git {} failed: {}",
+        args.join(" "),
+        stderr.trim()
+    )))
 }
 
 /// In shallow clones, the merge base between a ref and HEAD may not be
@@ -167,32 +244,41 @@ pub fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     }
 
     eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    with_remote_tracking_authority_until(
+        std::path::Path::new(path),
+        "deepen shallow clone",
+        deadline,
+        |_| {
+            // Fetch the ref itself if it's not already present.
+            let (remote, reference) = remote_and_ref(path, git_ref);
+            let tracking_ref = reference.strip_prefix("refs/heads/").unwrap_or(&reference);
+            let refspec = format!("{reference}:refs/remotes/{remote}/{tracking_ref}");
+            fetch_until(path, &["fetch", &remote, &refspec, "--depth=50"], deadline)?;
 
-    // Fetch the ref itself if it's not already present.
-    let remote = resolve_default_remote(path);
-    let _ = execute_git(path, &["fetch", &remote, git_ref, "--depth=50"]);
+            // Progressive deepening: try increasingly generous depths.
+            for depth in &["50", "200"] {
+                fetch_until(path, &["fetch", &remote, "--deepen", depth], deadline)?;
+                if has_merge_base(path, git_ref) {
+                    eprintln!("Merge base found after deepening by {depth} commits");
+                    return Ok(());
+                }
+            }
 
-    // Progressive deepening: try increasingly generous depths.
-    for depth in &["50", "200"] {
-        let _ = execute_git(path, &["fetch", "--deepen", depth]);
-        if has_merge_base(path, git_ref) {
-            eprintln!("Merge base found after deepening by {depth} commits");
-            return Ok(());
-        }
-    }
+            // Last resort: full unshallow.
+            eprintln!("Merge base not found with depth 200, unshallowing repository");
+            fetch_until(path, &["fetch", &remote, "--unshallow"], deadline)?;
 
-    // Last resort: full unshallow.
-    eprintln!("Merge base not found with depth 200, unshallowing repository");
-    let _ = execute_git(path, &["fetch", "--unshallow"]);
-
-    if has_merge_base(path, git_ref) {
-        eprintln!("Merge base found after full unshallow");
-        Ok(())
-    } else {
-        Err(Error::git_command_failed(format!(
-            "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
-        )))
-    }
+            if has_merge_base(path, git_ref) {
+                eprintln!("Merge base found after full unshallow");
+                Ok(())
+            } else {
+                Err(Error::git_command_failed(format!(
+                    "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
+                )))
+            }
+        },
+    )
 }
 
 /// Parse newline-delimited `git diff --name-only` output into a file list.
@@ -207,6 +293,7 @@ fn parse_diff_output(stdout: &[u8]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[test]
     fn get_files_changed_since_includes_dirty_and_untracked_files() {
@@ -272,5 +359,234 @@ mod tests {
             !files.contains(&"deleted.txt".to_string()),
             "deleted file excluded: {files:?}"
         );
+    }
+
+    #[test]
+    fn remote_qualified_refs_use_their_configured_remote() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        execute_git(path, &["init", "-q"]).expect("initialize repository");
+        execute_git(
+            path,
+            &["remote", "add", "origin", "https://origin.invalid/repo.git"],
+        )
+        .expect("configure origin");
+        execute_git(
+            path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://upstream.invalid/repo.git",
+            ],
+        )
+        .expect("configure upstream");
+
+        assert_eq!(
+            remote_and_ref(path, "upstream/main"),
+            ("upstream".to_string(), "main".to_string())
+        );
+        assert_eq!(
+            remote_and_ref(path, "refs/remotes/upstream/main"),
+            ("upstream".to_string(), "main".to_string())
+        );
+    }
+
+    #[test]
+    fn shallow_clone_fetches_and_unshallows_remote_qualified_ref_from_its_named_remote() {
+        use std::io::Write;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let source = dir.path().join("source");
+        let remote = dir.path().join("remote.git");
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir(&source).expect("create source");
+        let source_path = source.to_str().expect("utf-8 source path");
+        execute_git(source_path, &["init", "-q", "-b", "main"]).expect("initialize source");
+        execute_git(source_path, &["config", "user.email", "test@example.com"])
+            .expect("configure author email");
+        execute_git(source_path, &["config", "user.name", "test"]).expect("configure author name");
+        std::fs::write(source.join("base.txt"), "base\n").expect("write base commit");
+        execute_git(source_path, &["add", "."]).expect("stage base commit");
+        execute_git(source_path, &["commit", "-qm", "base"]).expect("commit base");
+        execute_git(source_path, &["switch", "-qc", "feature"]).expect("create feature branch");
+        let parent = String::from_utf8_lossy(
+            &execute_git(source_path, &["rev-parse", "HEAD"])
+                .expect("resolve feature parent")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        // The 50 and 200 deepen steps cannot reach this feature's base.
+        let mut history = String::new();
+        for index in 1..=300 {
+            let message = format!("feature {index}");
+            let previous = if index == 1 {
+                parent.clone()
+            } else {
+                format!(":{}", index - 1)
+            };
+            history.push_str(&format!(
+                "commit refs/heads/feature\nmark :{index}\nauthor test <test@example.com> 0 +0000\ncommitter test <test@example.com> 0 +0000\ndata {}\n{message}\nfrom {previous}\n\n",
+                message.len()
+            ));
+        }
+        let mut importer = Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(source_path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("start feature history importer");
+        importer
+            .stdin
+            .take()
+            .expect("feature history importer stdin")
+            .write_all(history.as_bytes())
+            .expect("write feature history");
+        assert!(
+            importer
+                .wait()
+                .expect("wait for feature history importer")
+                .success(),
+            "import feature history"
+        );
+        execute_git(
+            source_path,
+            &[
+                "init",
+                "--bare",
+                "-q",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        )
+        .expect("initialize remote");
+        execute_git(
+            source_path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        )
+        .expect("configure upstream remote");
+        execute_git(source_path, &["push", "-q", "upstream", "main", "feature"])
+            .expect("push source branches");
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--branch",
+                "feature",
+                &format!("file://{}", remote.display()),
+                checkout.to_str().expect("utf-8 checkout path"),
+            ])
+            .output()
+            .expect("clone shallow checkout");
+        assert!(clone.status.success(), "shallow clone must succeed");
+        let checkout_path = checkout.to_str().expect("utf-8 checkout path");
+        execute_git(checkout_path, &["remote", "rename", "origin", "upstream"])
+            .expect("rename checkout remote");
+        execute_git(
+            checkout_path,
+            &["remote", "add", "origin", "file:///missing/origin.git"],
+        )
+        .expect("configure default remote");
+        execute_git(
+            checkout_path,
+            &["config", "branch.feature.remote", "origin"],
+        )
+        .expect("configure unusable branch remote");
+        execute_git(
+            checkout_path,
+            &["config", "branch.feature.merge", "refs/heads/feature"],
+        )
+        .expect("configure tracked branch");
+
+        ensure_ancestry_for_ref(checkout_path, "upstream/main")
+            .expect("fetch named remote ref and resolve merge base");
+        assert!(has_merge_base(checkout_path, "upstream/main"));
+    }
+
+    #[test]
+    fn failed_fetch_status_is_returned_as_an_error() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        execute_git(path, &["init", "-q"]).expect("initialize repository");
+        execute_git(
+            path,
+            &["remote", "add", "origin", "file:///missing/repository.git"],
+        )
+        .expect("configure missing remote");
+
+        let error = fetch_until(
+            path,
+            &["fetch", "origin", "main", "--depth=50"],
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect_err("a failed fetch status must be returned");
+
+        assert!(error
+            .message
+            .contains("git fetch origin main --depth=50 failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_terminates_a_stalled_git_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        let git = dir.path().join("git");
+        let ready_file = dir.path().join("helper-ready");
+        let release_file = dir.path().join("start-stall");
+        let pid_file = dir.path().join("descendant.pid");
+        let script = format!(
+            "#!/bin/sh\ntouch {}\nwhile [ ! -f {} ]; do sleep 0.01; done\nsleep 30 &\necho $! > {}\nwait\n",
+            crate::shell::quote_path(&ready_file.display().to_string()),
+            crate::shell::quote_path(&release_file.display().to_string()),
+            crate::shell::quote_path(&pid_file.display().to_string())
+        );
+        std::fs::write(&git, script).expect("write stalled git");
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))
+            .expect("make stalled git executable");
+
+        let mut deadline_started = None;
+        let error = execute_git_until_with_program(path, &["fetch", "origin"], &git, || {
+            wait_for_file(&ready_file);
+            std::fs::write(&release_file, "start stalled helper").expect("release stalled helper");
+            wait_for_file(&pid_file);
+            let started = Instant::now();
+            deadline_started = Some(started);
+            started + Duration::from_secs(1)
+        })
+        .expect_err("stalled fetch must exhaust its deadline");
+
+        assert!(deadline_started.expect("deadline started").elapsed() < Duration::from_secs(2));
+        assert!(error.message.contains("deadline exhausted"));
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        assert!(
+            !command::process_is_running(descendant_pid),
+            "deadline left descendant {descendant_pid} runnable"
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_for_file(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "stalled Git helper did not record {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

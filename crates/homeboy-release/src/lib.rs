@@ -18,3 +18,4 @@
 pub mod release;
 
 pub use release::provider_impl;
+pub use release::register_action_delegate;

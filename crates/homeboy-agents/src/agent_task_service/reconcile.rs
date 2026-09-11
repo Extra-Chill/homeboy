@@ -2401,4 +2401,100 @@ mod tests {
             assert!(terminal.metadata.get("provider_execution").is_none());
         });
     }
+
+    #[test]
+    fn exhausted_unmaterialized_admission_retries_its_original_binding_once_after_runner_recovers()
+    {
+        with_isolated_home(|_| {
+            let cook_id = "reconcile-unmaterialized-retry-after-exhaustion";
+            let binding = serde_json::json!({
+                "schema": "homeboy/unmaterialized-cook-binding/v1",
+                "request_ref": "sha256:original-submission",
+                "worktree_ref": "homeboy@fix-unmaterialized-admission-retry",
+                "task": { "prompt_ref": "sha256:exact-task-prompt" },
+                "gates": { "verify": ["cargo test -p homeboy-agents"] },
+                "retry": { "max_attempts": 3, "provider_rotations": 0 },
+                "provider_runtime_refs": { "backend": "opencode", "model": "gpt-5.6" },
+                "placement": { "candidate_runner_refs": ["lab"], "local_fallback": false },
+                "replay_intent": {
+                    "cook_id": cook_id,
+                    "argv": ["agent-task", "cook", "--run-id", cook_id]
+                }
+            });
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                binding.clone(),
+                "blocked_runner_stale",
+                "runner stale",
+            )
+            .expect("admit original Cook");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["unmaterialized_cook_admission"]["retry"]["max_attempts"] =
+                    serde_json::json!(1);
+                record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("make original admission exhaust");
+
+            let exhausted = reconcile_unmaterialized_cook_admissions_with(
+                Some(cook_id),
+                |_| Ok(serde_json::json!({ "state": "blocked_runner_stale" })),
+                |_| panic!("exhausted admission must not replay"),
+            )
+            .expect("exhaust admission");
+            assert_eq!(exhausted["exhausted"], 1);
+            let source = agent_task_lifecycle::exact_record(cook_id).expect("failed source");
+            assert_eq!(
+                source.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+
+            let retry = crate::agent_task_service::retry(cook_id, None, false, false)
+                .expect("native retry reserves a successor admission");
+            assert!(retry.created);
+            assert!(retry.record.tasks.is_empty());
+            let admission = &retry.record.metadata["unmaterialized_cook_admission"];
+            assert_eq!(retry.record.metadata["retry_of"], cook_id);
+            assert_eq!(admission["binding"]["task"], binding["task"]);
+            assert_eq!(admission["binding"]["gates"], binding["gates"]);
+            assert_eq!(
+                admission["binding"]["worktree_ref"],
+                binding["worktree_ref"]
+            );
+            assert_eq!(admission["binding"]["retry"], binding["retry"]);
+            assert_eq!(
+                admission["binding"]["replay_intent"]["cook_id"],
+                retry.record.run_id
+            );
+
+            agent_task_lifecycle::rearm_unmaterialized_cook_admission(&retry.record.run_id)
+                .expect("runner readiness repair rearms the successor admission");
+            let replay_requests = std::cell::RefCell::new(Vec::new());
+            let recovered = reconcile_unmaterialized_cook_admissions_with(
+                Some(&retry.record.run_id),
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "repaired-lab" })),
+                |request| {
+                    replay_requests.borrow_mut().push(request.clone());
+                    Ok(serde_json::json!({ "worker_id": "repaired-worker" }))
+                },
+            )
+            .expect("repaired runner replays successor");
+            assert_eq!(recovered["replayed"], 1);
+            assert_eq!(replay_requests.borrow().len(), 1);
+            assert_eq!(
+                replay_requests.borrow()[0]["intent"]["argv"],
+                serde_json::json!(["agent-task", "cook", "--run-id", retry.record.run_id])
+            );
+
+            let duplicate = reconcile_unmaterialized_cook_admissions_with(
+                Some(&retry.record.run_id),
+                |_| panic!("active replay lease must prevent a duplicate runner selection"),
+                |_| panic!("active replay lease must prevent duplicate materialization"),
+            )
+            .expect("duplicate pass is inert");
+            assert_eq!(duplicate["replayed"], 0);
+            assert_eq!(replay_requests.borrow().len(), 1);
+        });
+    }
 }

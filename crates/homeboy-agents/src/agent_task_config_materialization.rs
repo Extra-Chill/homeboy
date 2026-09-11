@@ -160,10 +160,20 @@ fn materialize_configured_ref(
     let checkout =
         materialized_checkout_path(data_root, &configured_ref.repo, &configured_ref.ref_name);
     if checkout.join(".git").exists() {
-        git::run_git(
+        git::with_remote_tracking_authority_until(
             &checkout,
-            &["fetch", "--prune", "origin"],
             "git fetch provider ref",
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            |remaining| {
+                git::run_git_with_env_timeout(
+                    &checkout,
+                    &["fetch", "--prune", "origin"],
+                    "git fetch provider ref",
+                    &[],
+                    remaining,
+                )
+                .map(|_| ())
+            },
         )?;
     } else {
         if let Some(parent) = checkout.parent() {

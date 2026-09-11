@@ -138,6 +138,26 @@ mod migrated_legacy_lab_arg_tests {
     }
 
     #[test]
+    fn rewrite_strips_controller_detach_policy() {
+        let input = args(&[
+            "homeboy",
+            "--detach-after-handoff",
+            "fuzz",
+            "run",
+            "component-a",
+        ]);
+
+        assert_eq!(
+            rewrite_lab_offload_args(&input, "/runner/project", &[], None),
+            args(&["homeboy", "fuzz", "run", "component-a"])
+        );
+        assert_eq!(
+            rewrite_runner_resident_lab_offload_args(&input, None),
+            args(&["homeboy", "fuzz", "run", "component-a"])
+        );
+    }
+
+    #[test]
     fn rewrite_maps_structured_output_to_runner_path() {
         let input = args(&[
             "homeboy",

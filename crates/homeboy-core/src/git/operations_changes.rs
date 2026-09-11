@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::path::Path;
 
 use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
@@ -122,7 +123,13 @@ pub fn detect_baseline_with_version_and_tag_prefix(
     // machine) are available before we resolve the baseline. Best-effort:
     // if there is no remote or the network is unavailable we silently
     // proceed with whatever tags are already local.
-    let _ = crate::engine::command::run_in_optional(path, "git", &["fetch", "--tags", "--quiet"]);
+    let _ = super::fetch_remote_tracking_refs_until(
+        Path::new(path),
+        &["fetch", "--tags", "--quiet"],
+        "git fetch --tags",
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    );
 
     detect_baseline_with_version_and_tag_prefix_from_fetched_tags(path, current_version, tag_prefix)
 }

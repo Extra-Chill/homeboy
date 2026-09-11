@@ -48,9 +48,9 @@ pub mod source_metadata;
 pub use maintenance::update_all;
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use source::{
-    check_update_available, check_update_available_until, is_git_url, read_source_cleanliness,
-    read_source_revision, read_source_revision_at, read_source_url, ExtensionSourceCleanliness,
-    UpdateAvailable,
+    check_update_available, check_update_available_until, is_git_url, is_local_source,
+    read_source_cleanliness, read_source_revision, read_source_revision_at, read_source_url,
+    ExtensionSourceCleanliness, UpdateAvailable,
 };
 use source::{read_source_metadata_value, source_metadata_dir};
 

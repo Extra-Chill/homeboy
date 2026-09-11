@@ -83,6 +83,27 @@ pub struct RunRecord {
     pub metadata_json: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MissionRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub run_count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionCursor {
+    pub created_at: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissionPage {
+    pub missions: Vec<MissionRecord>,
+    pub truncated: bool,
+    pub next_cursor: Option<MissionCursor>,
+}
+
 /// Keyset position of the last row a page returned, in the store's canonical
 /// `ORDER BY started_at DESC, id DESC` order.
 ///

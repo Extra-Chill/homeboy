@@ -80,7 +80,9 @@ for scenario in $selected; do
   if [ "$scenario" = "visual" ]; then
     visual_comparison_dir="$HOMEBOY_BENCH_RESULTS_FILE.visual-comparisons/$scenario"
     mkdir -p "$visual_comparison_dir"
-    artifacts=", \"artifacts\": { \"visual_comparison_dir\": { \"path\": \"$visual_comparison_dir\", \"type\": \"directory\" } }"
+    visual_result="$visual_comparison_dir/result.txt"
+    printf 'visual result\n' > "$visual_result"
+    artifacts=", \"artifacts\": { \"visual_comparison_dir\": { \"path\": \"$visual_comparison_dir\", \"type\": \"directory\" }, \"visual_result\": { \"path\": \"$visual_result\" }, \"visual_url\": { \"url\": \"https://artifacts.example.test/visual.txt\" } }"
   fi
   cat >> "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
     $comma{ "id": "$scenario", "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0}, "metrics": { "p95_ms": 1.0, "warmup_iterations": ${HOMEBOY_BENCH_WARMUP_ITERATIONS:--1}, "bench_env_projected": $(if [ "$BENCH_ENV_PROJECTION" = "present" ]; then printf 1; else printf 0; fi) }$artifacts }

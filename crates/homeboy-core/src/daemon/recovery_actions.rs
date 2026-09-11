@@ -250,7 +250,12 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         })
         .map(|evidence| evidence.job_id)
         .collect();
-    if let Some(lease_id) = freshness.lease_id.as_deref() {
+    if freshness.stale_reason_code == Some(super::DaemonStaleReasonCode::PidDead) {
+        let Some(lease_id) = freshness.lease_id.as_deref() else {
+            return DaemonRecoveryPlan::nothing(
+                "daemon PID is dead but the recorded lease identity is unavailable".to_string(),
+            );
+        };
         if !job_ids.is_empty() {
             let action = reconcile_dead_lease_orphans(lease_id, &job_ids);
             let required_confirmations = action.required_confirmations.clone();
@@ -561,12 +566,12 @@ mod tests {
         );
     }
 
-    /// Every `--job-id` is filled from the report; only the attestation that no
-    /// report can contain is demanded from the operator.
+    /// Every `--job-id` is filled from a proven-dead lease report; only the
+    /// attestation that no report can contain is demanded from the operator.
     #[test]
     fn a_pidless_job_set_is_filled_from_the_report_but_still_demands_the_attestation() {
         let mut status = status(
-            Some(super::super::DaemonStaleReasonCode::LeaseCorrupt),
+            Some(super::super::DaemonStaleReasonCode::PidDead),
             Vec::new(),
             2,
         );
@@ -601,7 +606,7 @@ mod tests {
     #[test]
     fn terminal_evidence_jobs_are_reconciled_without_workload_attestation() {
         let mut status = status(
-            Some(super::super::DaemonStaleReasonCode::LeaseCorrupt),
+            Some(super::super::DaemonStaleReasonCode::PidDead),
             Vec::new(),
             1,
         );
@@ -627,6 +632,41 @@ mod tests {
             vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
             "the ambiguous workload keeps the operator attestation"
         );
+    }
+
+    #[test]
+    fn reachable_version_mismatch_with_active_jobs_never_offers_dead_lease_reconciliation() {
+        let mut status = status(
+            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            Vec::new(),
+            2,
+        );
+        status.active_job_recovery_evidence = vec![
+            crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+                operation: "controller.work".to_string(),
+                ..recovery_evidence(Uuid::from_u128(1))
+            },
+            crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+                operation: "controller.lab.staging-dispatch".to_string(),
+                linked_durable_run_id: Some("active-staging-dispatch".to_string()),
+                linked_durable_run_state: Some(
+                    crate::api_jobs::DaemonLinkedDurableRunState::Active,
+                ),
+                disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous,
+                ..recovery_evidence(Uuid::from_u128(2))
+            },
+        ];
+
+        let plan = plan_recovery(&status);
+
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
+        assert!(!plan.executable);
+        assert!(plan.required_confirmations.is_empty());
+        assert!(plan.steps.iter().all(|step| {
+            step.code != DAEMON_RECONCILE_DEAD_LEASE_ORPHANS
+                && !step.command.contains(CONFIRM_WORKLOAD_PROCESSES_ABSENT)
+        }));
     }
 
     /// Replacement may proceed without any attestation when every active job

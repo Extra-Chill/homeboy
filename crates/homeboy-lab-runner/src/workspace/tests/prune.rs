@@ -49,30 +49,47 @@ fn prune_diagnosis(output: &crate::workspace::types::RunnerWorkspacePruneOutput)
     )
 }
 
+/// Seed a local runner definition into an explicitly injected config root, so
+/// the test never touches the process-global env lock (#14362).
+fn rooted_local_runner(roots: &homeboy_core::paths::PathRoots, id: &str, workspace_root: &Path) {
+    use homeboy_core::config::ConfigEntity;
+    fs::create_dir_all(<crate::Runner as ConfigEntity>::config_dir_in_root(
+        roots.config(),
+    ))
+    .expect("runner config dir");
+    let runner: crate::Runner = serde_json::from_str(&format!(
+        r#"{{"id":"{id}","kind":"local","workspace_root":"{}"}}"#,
+        workspace_root.display()
+    ))
+    .expect("runner spec");
+    fs::write(
+        <crate::Runner as ConfigEntity>::config_path_in_root(roots.config(), id),
+        serde_json::to_string_pretty(&runner).expect("serialize runner"),
+    )
+    .expect("write runner config");
+}
+
 #[test]
 fn prune_workspaces_previews_orphans_without_deleting_by_default() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("orphan-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "hello\n").expect("source file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-preview","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (synced, _) = sync_workspace(
+        rooted_local_runner(&roots, "lab-local-prune-preview", runner_root.path());
+        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-preview",
             sync_options(source.display().to_string()),
         )
         .expect("sync workspace");
         fs::remove_dir_all(&source).expect("remove source");
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-preview",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -101,12 +118,14 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
             "stale_materialized_workspace_lifecycle"
         );
         assert!(Path::new(&synced.remote_path).exists());
-    });
+    }
 }
 
 #[test]
 fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source_parent = tempfile::tempdir().expect("source parent");
         let orphan_source = source_parent.path().join("orphan-source");
         let live_source = source_parent.path().join("live-source");
@@ -115,20 +134,15 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
         fs::create_dir_all(&live_source).expect("live source dir");
         fs::write(orphan_source.join("file.txt"), "orphan\n").expect("orphan file");
         fs::write(live_source.join("file.txt"), "live\n").expect("live file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-apply","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (orphan, _) = sync_workspace(
+        rooted_local_runner(&roots, "lab-local-prune-apply", runner_root.path());
+        let (orphan, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-apply",
             sync_options(orphan_source.display().to_string()),
         )
         .expect("sync orphan workspace");
-        let (live, _) = sync_workspace(
+        let (live, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-apply",
             sync_options(live_source.display().to_string()),
         )
@@ -141,7 +155,8 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
         fs::write(unmanaged.join("file.txt"), "do not delete\n").expect("unmanaged file");
         fs::remove_dir_all(&orphan_source).expect("remove orphan source");
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-apply",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -168,24 +183,19 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
         assert!(!Path::new(&orphan.remote_path).exists());
         assert!(!Path::new(&live.remote_path).exists());
         assert!(unmanaged.exists());
-    });
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root.path().join("_lab_workspaces/process-owned");
         write_orphan_workspace(&workspace);
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-process-owned","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-prune-process-owned", runner_root.path());
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("sleep 30")
@@ -194,7 +204,8 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
             .expect("hold workspace cwd");
 
         for apply in [false, true] {
-            let (output, exit_code) = prune_workspaces(
+            let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+                &roots,
                 "lab-local-prune-process-owned",
                 RunnerWorkspacePruneOptions {
                     apply,
@@ -213,12 +224,14 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
         }
         child.kill().expect("stop held process");
         child.wait().expect("reap held process");
-    });
+    }
 }
 
 #[test]
 fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root.path().join("_lab_workspaces/active-lease");
         write_orphan_workspace(&workspace);
@@ -243,16 +256,10 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
             "status": "active",
         });
         fs::write(&metadata_path, metadata.to_string()).expect("write metadata");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-active-lease","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-prune-active-lease", runner_root.path());
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-active-lease",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -276,7 +283,7 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
         assert_eq!(output.withheld_by_liveness_reason[0].workspace_count, 1);
         assert!(output.withheld_by_liveness_reason[0].bytes > 0);
         assert!(workspace.exists());
-    });
+    }
 }
 
 #[test]
@@ -565,21 +572,17 @@ fn absent_job_error() -> homeboy_core::Error {
 
 #[test]
 fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("live-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "live\n").expect("source file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-ttl","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (synced, _) = sync_workspace(
+        rooted_local_runner(&roots, "lab-local-prune-ttl", runner_root.path());
+        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-ttl",
             sync_options(source.display().to_string()),
         )
@@ -592,7 +595,8 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         metadata["resource_lifecycle"]["ttl"] = serde_json::json!("2020-01-01T00:00:00Z");
         fs::write(&metadata_path, metadata.to_string()).expect("write metadata");
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-ttl",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -611,32 +615,29 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
         assert!(Path::new(&synced.remote_path).exists());
         assert!(source.exists());
-    });
+    }
 }
 
 #[test]
 fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("live-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "live\n").expect("source file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-materialized","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (synced, _) = sync_workspace(
+        rooted_local_runner(&roots, "lab-local-prune-materialized", runner_root.path());
+        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-materialized",
             sync_options(source.display().to_string()),
         )
         .expect("sync workspace");
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-materialized",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -657,33 +658,34 @@ fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
         );
         assert!(!Path::new(&synced.remote_path).exists());
         assert!(source.exists());
-    });
+    }
 }
 
 #[test]
 fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("removed-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "removed\n").expect("source file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-materialized-missing","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (synced, _) = sync_workspace(
+        rooted_local_runner(
+            &roots,
+            "lab-local-prune-materialized-missing",
+            runner_root.path(),
+        );
+        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-materialized-missing",
             sync_options(source.display().to_string()),
         )
         .expect("sync workspace");
         fs::remove_dir_all(&source).expect("remove source");
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-materialized-missing",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -703,7 +705,7 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
             "stale_materialized_workspace_lifecycle"
         );
         assert!(!Path::new(&synced.remote_path).exists());
-    });
+    }
 }
 
 #[test]
@@ -863,7 +865,9 @@ fn uncertain_handoff_disarms_ttl_pruning() {
 
 #[test]
 fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root
             .path()
@@ -885,16 +889,10 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
             .to_string(),
         )
         .expect("write metadata");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-odd-preview","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-prune-odd-preview", runner_root.path());
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-odd-preview",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -920,12 +918,14 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
         assert_eq!(output.candidates[0].reason, "source_path_missing");
         assert!(workspace.exists());
         assert!(output.removed.is_empty());
-    });
+    }
 }
 
 #[test]
 fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source_parent = tempfile::tempdir().expect("source parent");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let source_a = source_parent.path().join("orphan-source-a");
@@ -934,20 +934,15 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
         fs::create_dir_all(&source_b).expect("source b dir");
         fs::write(source_a.join("file.txt"), "a\n").expect("source a file");
         fs::write(source_b.join("file.txt"), "larger b\n").expect("source b file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-limited","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        sync_workspace(
+        rooted_local_runner(&roots, "lab-local-prune-limited", runner_root.path());
+        crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-limited",
             sync_options(source_a.display().to_string()),
         )
         .expect("sync source a");
-        sync_workspace(
+        crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-limited",
             sync_options(source_b.display().to_string()),
         )
@@ -955,7 +950,8 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
         fs::remove_dir_all(&source_a).expect("remove source a");
         fs::remove_dir_all(&source_b).expect("remove source b");
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-limited",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -986,12 +982,14 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
             .as_deref()
             .is_some_and(|command| command.contains(&format!("--cursor {cursor}"))));
         assert!(output.drain_command.contains(&format!("--cursor {cursor}")));
-    });
+    }
 }
 
 #[test]
 fn prune_workspaces_apply_passes_drain_until_empty() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         let source_parent = tempfile::tempdir().expect("source parent");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let source_a = source_parent.path().join("drain-source-a");
@@ -1000,20 +998,15 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         fs::create_dir_all(&source_b).expect("source b dir");
         fs::write(source_a.join("file.txt"), "a\n").expect("source a file");
         fs::write(source_b.join("file.txt"), "b\n").expect("source b file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-drain","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (workspace_a, _) = sync_workspace(
+        rooted_local_runner(&roots, "lab-local-prune-drain", runner_root.path());
+        let (workspace_a, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-drain",
             sync_options(source_a.display().to_string()),
         )
         .expect("sync source a");
-        let (workspace_b, _) = sync_workspace(
+        let (workspace_b, _) = crate::workspace::sync::sync_workspace_in_roots(
+            &roots,
             "lab-local-prune-drain",
             sync_options(source_b.display().to_string()),
         )
@@ -1021,7 +1014,8 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         fs::remove_dir_all(&source_a).expect("remove source a");
         fs::remove_dir_all(&source_b).expect("remove source b");
 
-        let (output, exit_code) = prune_workspaces(
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-drain",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -1045,12 +1039,14 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         assert!(output.next_command.is_none());
         assert!(!Path::new(&workspace_a.remote_path).exists());
         assert!(!Path::new(&workspace_b.remote_path).exists());
-    });
+    }
 }
 
 #[test]
 fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
         const REMOVABLE_COUNT: usize = 23;
         const WORKSPACE_COUNT: usize = REMOVABLE_COUNT + 2;
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -1082,14 +1078,7 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
             "cleanup_command": null,
         });
         fs::write(&metadata_path, metadata.to_string()).expect("write unknown metadata");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-prune-convergence","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
+        rooted_local_runner(&roots, "lab-local-prune-convergence", runner_root.path());
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("sleep 30")
@@ -1097,7 +1086,8 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
             .spawn()
             .expect("hold active workspace cwd");
 
-        let (interrupted, _) = prune_workspaces(
+        let (interrupted, _) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-convergence",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -1117,7 +1107,8 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
         assert!(Path::new(&interrupted.receipt_path).is_file());
         assert_eq!(interrupted.cursor_history.len(), interrupted.pass_count * 2);
 
-        let (resumed, _) = prune_workspaces(
+        let (resumed, _) = crate::workspace::sync::prune_workspaces_in_roots(
+            &roots,
             "lab-local-prune-convergence",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -1158,14 +1149,18 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
         );
         child.kill().expect("stop active workspace holder");
         child.wait().expect("reap active workspace holder");
-    });
+    }
 }
 
 #[test]
 fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        const WORKSPACE_COUNT: usize = 5_214;
-        const ORPHAN_INDICES: [usize; 3] = [1_333, 2_607, 5_213];
+        // Pagination is what this covers: the scan limit below is 127, so this
+        // still walks several pages and places orphans mid-page, on a later
+        // page, and on the final entry. Thousands of fixtures only multiplied
+        // setup I/O without adding a distinct cursor transition.
+        const WORKSPACE_COUNT: usize = 640;
+        const ORPHAN_INDICES: [usize; 3] = [200, 401, 639];
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspaces_root = runner_root.path().join("_lab_workspaces");
         fs::create_dir_all(&workspaces_root).expect("workspaces root");
@@ -1239,7 +1234,11 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
 #[test]
 fn ssh_prune_scan_command_bounds_thousands_of_entries() {
     let temp = tempfile::tempdir().expect("tempdir");
-    for index in 0..5_214 {
+    // The generated scan breaks out of its read loop once `scan_limit` entries
+    // are counted, so entries beyond the limit are never processed. Size the
+    // fixture to prove the bound and the `partial` marker, not to benchmark
+    // `find`.
+    for index in 0..40 {
         write_orphan_workspace(&temp.path().join(format!("workspace-{index:05}")));
     }
 

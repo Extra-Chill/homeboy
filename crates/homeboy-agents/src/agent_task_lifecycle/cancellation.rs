@@ -595,8 +595,10 @@ fn cancel_resolved_run_in_store(
         // The controller owns every child admitted during staging, including the
         // final runner job. Never bypass it merely because that child identity
         // was already projected onto the parent.
-        let controller_job = homeboy_core::daemon::LocalControllerJobClient::connect()?
-            .cancel(&controller_job_id, cancellation_reason)?;
+        let controller_job = homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(
+            &controller_job_id,
+        )?
+        .cancel(&controller_job_id, cancellation_reason)?;
         let metadata = record.ensure_metadata_object();
         metadata.insert(
             "controller_job_cancellation".to_string(),
@@ -820,7 +822,7 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
         return Ok(false);
     };
 
-    let job = match homeboy_core::daemon::LocalControllerJobClient::connect()
+    let job = match homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)
         .and_then(|client| client.status(job_id))
     {
         Ok(job) => job,

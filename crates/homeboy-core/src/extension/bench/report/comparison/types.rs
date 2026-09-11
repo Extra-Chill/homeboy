@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use serde_json::Value;
 
-use super::super::BenchArtifactRef;
+use super::super::{BenchArtifactRef, BenchPersistedRun};
 use crate::extension::bench::diagnostic::BenchDiagnostic;
 use crate::extension::bench::parsing::{BenchMetricPhase, BenchMetricPolicy, BenchResults};
 use crate::extension::bench::run::BenchRunFailure;
@@ -76,6 +76,11 @@ pub struct BenchComparisonOutput {
     pub reports: BenchComparisonReports,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_baseline_expansion: Option<BenchDefaultBaselineExpansion>,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub actionable: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -109,6 +114,11 @@ pub struct BenchComparisonSummaryOutput {
     pub hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_baseline_expansion: Option<BenchDefaultBaselineExpansion>,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub actionable: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -127,6 +137,8 @@ pub struct BenchComparisonRigSummary {
     pub exit_code: i32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_run: Option<BenchPersistedRun>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -171,6 +183,8 @@ pub struct RigBenchEntry {
     pub failure: Option<BenchRunFailure>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_run: Option<BenchPersistedRun>,
 }
 
 impl From<BenchComparisonOutput> for BenchComparisonSummaryOutput {
@@ -191,6 +205,7 @@ impl From<BenchComparisonOutput> for BenchComparisonSummaryOutput {
                     status: rig.status,
                     exit_code: rig.exit_code,
                     diagnostics: rig.diagnostics,
+                    persisted_run: rig.persisted_run,
                 })
                 .collect(),
             summary: output.summary,
@@ -203,6 +218,7 @@ impl From<BenchComparisonOutput> for BenchComparisonSummaryOutput {
             diagnostic_classes: output.diagnostic_classes,
             hints: output.hints,
             default_baseline_expansion: output.default_baseline_expansion,
+            actionable: output.actionable,
         }
     }
 }

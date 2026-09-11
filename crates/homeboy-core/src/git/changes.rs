@@ -1,10 +1,11 @@
 use std::path::{Component, Path};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::error::{Error, Result};
 
-use super::execute_git;
+use super::{execute_git, fetch_remote_tracking_refs_until, resolve_default_remote};
 
 const VERBOSE_UNTRACKED_THRESHOLD: usize = 200;
 
@@ -158,10 +159,34 @@ fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
 
 /// Get file paths changed between a ref and HEAD.
 ///
-/// Relocated to [`homeboy_engine_primitives::git_changes::get_files_changed_since`]
-/// (a std-only git primitive shared by audit, refactor, and lint/test scoping);
-/// re-exported here so `git::get_files_changed_since` callers are unaffected.
-pub use homeboy_engine_primitives::git_changes::get_files_changed_since;
+/// This core-owned entrypoint serializes shallow-clone deepening for linked
+/// worktrees. Engine primitives retain their standalone implementation for
+/// isolated callers that cannot depend on core.
+pub fn get_files_changed_since(path: &str, git_ref: &str) -> Result<Vec<String>> {
+    ensure_ancestry_for_ref(path, git_ref)?;
+    let output = execute_git(
+        path,
+        &[
+            "diff",
+            "--name-only",
+            "--diff-filter=ACMR",
+            &format!("{git_ref}...HEAD"),
+        ],
+    )
+    .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "git diff {git_ref}...HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let mut files: std::collections::BTreeSet<String> = parse_changed_since_output(&output.stdout)
+        .into_iter()
+        .collect();
+    files.extend(get_working_tree_files_for_changed_since(path)?);
+    Ok(files.into_iter().collect())
+}
 
 /// Ensure a ref's merge base with HEAD is reachable, then return it.
 ///
@@ -172,7 +197,7 @@ pub use homeboy_engine_primitives::git_changes::get_files_changed_since;
 /// behavior should treat the error as a signal to skip changed-since scoping
 /// rather than aborting.
 pub fn resolve_merge_base(path: &str, git_ref: &str) -> Result<String> {
-    homeboy_engine_primitives::git_changes::ensure_ancestry_for_ref(path, git_ref)?;
+    ensure_ancestry_for_ref(path, git_ref)?;
 
     let output = execute_git(path, &["merge-base", git_ref, "HEAD"])
         .map_err(|e| Error::git_command_failed(e.to_string()))?;
@@ -193,6 +218,124 @@ pub fn resolve_merge_base(path: &str, git_ref: &str) -> Result<String> {
     }
 
     Ok(merge_base)
+}
+
+fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
+    if has_merge_base(path, git_ref) {
+        return Ok(());
+    }
+    if !is_shallow_repo(path) {
+        return Err(Error::git_command_failed(format!(
+            "Cannot resolve merge base for {git_ref}: ref is not reachable and repository is not shallow (is the ref valid?)"
+        )));
+    }
+
+    eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
+    let repository = Path::new(path);
+    let (remote, reference) = remote_and_ref(path, git_ref);
+    let tracking_ref = reference.strip_prefix("refs/heads/").unwrap_or(&reference);
+    let refspec = format!("{reference}:refs/remotes/{remote}/{tracking_ref}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    fetch_remote_tracking_refs_until(
+        repository,
+        &["fetch", &remote, &refspec, "--depth=50"],
+        "git fetch changed-since ref",
+        &[],
+        deadline,
+    )?;
+    for depth in ["50", "200"] {
+        fetch_remote_tracking_refs_until(
+            repository,
+            &["fetch", &remote, "--deepen", depth],
+            "git deepen changed-since history",
+            &[],
+            deadline,
+        )?;
+        if has_merge_base(path, git_ref) {
+            eprintln!("Merge base found after deepening by {depth} commits");
+            return Ok(());
+        }
+    }
+    eprintln!("Merge base not found with depth 200, unshallowing repository");
+    fetch_remote_tracking_refs_until(
+        repository,
+        &["fetch", &remote, "--unshallow"],
+        "git unshallow changed-since history",
+        &[],
+        deadline,
+    )?;
+    if has_merge_base(path, git_ref) {
+        eprintln!("Merge base found after full unshallow");
+        Ok(())
+    } else {
+        Err(Error::git_command_failed(format!(
+            "Cannot resolve merge base for {git_ref} even after full unshallow — the ref may not exist in the remote"
+        )))
+    }
+}
+
+fn remote_and_ref(path: &str, git_ref: &str) -> (String, String) {
+    let remote_ref = git_ref.strip_prefix("refs/remotes/").unwrap_or(git_ref);
+    if let Some((remote, reference)) = remote_ref.split_once('/') {
+        let remotes = execute_git(path, &["remote"])
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .any(|name| name == remote)
+            })
+            .unwrap_or(false);
+        if !reference.is_empty() && remotes {
+            return (remote.to_string(), reference.to_string());
+        }
+    }
+
+    (resolve_default_remote(Path::new(path)), git_ref.to_string())
+}
+
+fn is_shallow_repo(path: &str) -> bool {
+    execute_git(path, &["rev-parse", "--is-shallow-repository"])
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+fn has_merge_base(path: &str, git_ref: &str) -> bool {
+    execute_git(path, &["merge-base", git_ref, "HEAD"])
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
+fn get_working_tree_files_for_changed_since(path: &str) -> Result<Vec<String>> {
+    let _ = execute_git(path, &["update-index", "--refresh"]);
+    let mut files = std::collections::BTreeSet::new();
+    for args in [
+        vec!["diff", "--name-only", "--diff-filter=ACMR"],
+        vec!["diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        vec!["ls-files", "--others", "--exclude-standard"],
+    ] {
+        let output = execute_git(path, &args)
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        files.extend(parse_changed_since_output(&output.stdout));
+    }
+    Ok(files.into_iter().collect())
+}
+
+fn parse_changed_since_output(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Get all dirty files in the working tree (modified, new, deleted).
@@ -515,6 +658,88 @@ mod tests {
             .contains(&"untracked name.txt".to_string()));
         assert!(changes.untracked.contains(&"worktree name.txt".to_string()));
         assert!(changes.staged.iter().all(|path| !path.contains(" -> ")));
+    }
+
+    #[test]
+    fn get_files_changed_since_uses_core_owned_changed_since_path() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap();
+        init_repo_with_initial_commit(path);
+        git(path, &["checkout", "-qb", "candidate"]);
+        fs::write(dir.path().join("changed.txt"), "changed\n").unwrap();
+        git(path, &["add", "changed.txt"]);
+        git(path, &["commit", "-qm", "changed"]);
+        fs::write(dir.path().join("untracked.txt"), "untracked\n").unwrap();
+
+        let files = get_files_changed_since(path, "main").expect("changed files");
+
+        assert!(files.contains(&"changed.txt".to_string()));
+        assert!(files.contains(&"untracked.txt".to_string()));
+    }
+
+    #[test]
+    fn resolve_merge_base_deepens_remote_qualified_ref_through_named_remote() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let source = dir.path().join("source");
+        let remote = dir.path().join("remote.git");
+        let checkout = dir.path().join("checkout");
+        fs::create_dir(&source).expect("create source");
+        let source_path = source.to_str().expect("utf-8 source path");
+        init_repo_with_initial_commit(source_path);
+        git(source_path, &["checkout", "-qb", "feature"]);
+        fs::write(source.join("feature.txt"), "feature\n").expect("write feature commit");
+        git(source_path, &["add", "."]);
+        git(source_path, &["commit", "-qm", "feature"]);
+        git(
+            source_path,
+            &[
+                "init",
+                "--bare",
+                "-q",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(
+            source_path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(source_path, &["push", "-q", "upstream", "main", "feature"]);
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--branch",
+                "feature",
+                &format!("file://{}", remote.display()),
+                checkout.to_str().expect("utf-8 checkout path"),
+            ])
+            .output()
+            .expect("clone shallow checkout");
+        assert!(clone.status.success(), "shallow clone must succeed");
+        let checkout_path = checkout.to_str().expect("utf-8 checkout path");
+        git(checkout_path, &["remote", "rename", "origin", "upstream"]);
+        git(
+            checkout_path,
+            &["remote", "add", "origin", "file:///missing/origin.git"],
+        );
+        git(
+            checkout_path,
+            &["config", "branch.feature.remote", "origin"],
+        );
+        git(
+            checkout_path,
+            &["config", "branch.feature.merge", "refs/heads/feature"],
+        );
+
+        let merge_base = resolve_merge_base(checkout_path, "upstream/main")
+            .expect("resolve through upstream rather than branch origin");
+        assert!(!merge_base.is_empty());
     }
 
     fn init_repo_with_initial_commit(path: &str) {

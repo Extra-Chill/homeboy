@@ -240,6 +240,8 @@ fn reverse_worker_result_preserves_execution_provenance() {
         },
     );
     let execution_record = RunnerExecutionRecord::terminal("job-1", "lab", "local", 0)
+        .with_job_id("job-1")
+        .with_mirror_run_id(Some("mirror-run-1".to_string()))
         .with_orchestration_provenance(Some(provenance));
 
     let result = remote_runner_result_from_exec_output(
@@ -278,6 +280,9 @@ fn reverse_worker_result_preserves_execution_provenance() {
 
     let data = result.data.as_ref().expect("data");
     assert_eq!(data["execution_record"]["runner_id"], "lab");
+    assert_eq!(data["execution_record"]["job_id"], "job-1");
+    assert_eq!(data["execution_record"]["mirror_run_id"], "mirror-run-1");
+    assert!(data["execution_record"].get("remote_run_id").is_none());
     assert_eq!(data["outcome"]["schema"], "homeboy/run-outcome-envelope/v1");
     assert_eq!(data["outcome"]["status"], "succeeded");
     assert_eq!(data["outcome"]["runner_id"], "lab");

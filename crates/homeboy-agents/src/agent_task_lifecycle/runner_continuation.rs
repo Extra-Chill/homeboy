@@ -96,6 +96,7 @@ pub trait RunnerContinuationProvider: Send + Sync {
         _runner_id: &str,
         _workspace: WorkspaceIdentity,
         _lifecycle_revision: u64,
+        _deadline: std::time::Instant,
     ) -> Result<WorkspaceClaim> {
         Err(Error::validation_invalid_argument(
             "workspace_claim",
@@ -105,11 +106,21 @@ pub trait RunnerContinuationProvider: Send + Sync {
         ))
     }
 
-    fn validate_workspace_claim(&self, _runner_id: &str, _claim: &WorkspaceClaim) -> Result<bool> {
+    fn validate_workspace_claim(
+        &self,
+        _runner_id: &str,
+        _claim: &WorkspaceClaim,
+        _deadline: std::time::Instant,
+    ) -> Result<bool> {
         Ok(false)
     }
 
-    fn release_workspace_claim(&self, _runner_id: &str, _claim: &WorkspaceClaim) -> Result<()> {
+    fn release_workspace_claim(
+        &self,
+        _runner_id: &str,
+        _claim: &WorkspaceClaim,
+        _deadline: std::time::Instant,
+    ) -> Result<()> {
         Err(Error::validation_invalid_argument(
             "workspace_claim",
             "runner does not advertise workspace claim capability",

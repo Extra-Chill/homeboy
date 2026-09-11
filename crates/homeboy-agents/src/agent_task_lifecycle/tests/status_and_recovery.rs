@@ -627,6 +627,7 @@ fn public_candidate_adoption_gate_progress_is_durable() {
             progress: Some(homeboy_engine_primitives::command::CommandProgress {
                 phase: "tests".to_string(),
                 current: Some("case".to_string()),
+                ..Default::default()
             }),
             output_tail: "running output tail".to_string(),
         },
@@ -705,6 +706,7 @@ fn private_candidate_adoption_gate_progress_is_redacted_before_persistence() {
             progress: Some(homeboy_engine_primitives::command::CommandProgress {
                 phase: "private-phase-secret".to_string(),
                 current: Some("sha256:private-digest-123 count=42".to_string()),
+                ..Default::default()
             }),
             output_tail: "private output secret".to_string(),
         },

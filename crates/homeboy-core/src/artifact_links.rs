@@ -269,6 +269,97 @@ pub fn public_artifact_url_is_reachable_or_legacy(artifact: &ArtifactRecord) -> 
     }
 }
 
+/// Integrity-aware availability of a controller-retained artifact.
+///
+/// Local SHA-256-verified bytes are the required evidence. An optional public
+/// alias probe is metadata: HTTP 404 does not make retained evidence invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetainedArtifactAvailability {
+    Available {
+        unreachable_aliases: Vec<PublicArtifactUrlValidation>,
+    },
+    Missing {
+        reason: String,
+    },
+    ChecksumMismatch {
+        expected: String,
+        actual: String,
+    },
+}
+
+impl RetainedArtifactAvailability {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+
+    pub fn unreachable_aliases(&self) -> &[PublicArtifactUrlValidation] {
+        match self {
+            Self::Available {
+                unreachable_aliases,
+            } => unreachable_aliases,
+            Self::Missing { .. } | Self::ChecksumMismatch { .. } => &[],
+        }
+    }
+}
+
+/// Classify retained-artifact availability from local bytes and optional alias
+/// metadata. Required missing or checksum-mismatched evidence fails; an
+/// unreachable public alias is exposed without invalidating verified bytes.
+pub fn classify_retained_artifact_availability(
+    artifact: &ArtifactRecord,
+) -> Result<RetainedArtifactAvailability> {
+    let path = Path::new(&artifact.path);
+    let expected_sha256 = artifact.sha256.as_deref().filter(|sha| !sha.is_empty());
+    if !path.is_file() {
+        return Ok(RetainedArtifactAvailability::Missing {
+            reason: "required retained artifact file is missing".to_string(),
+        });
+    }
+    let Some(expected_sha256) = expected_sha256 else {
+        return Ok(RetainedArtifactAvailability::Missing {
+            reason: "required retained artifact checksum is missing".to_string(),
+        });
+    };
+    let actual = crate::artifact_metadata::sha256_file(path)?;
+    if actual != expected_sha256 {
+        return Ok(RetainedArtifactAvailability::ChecksumMismatch {
+            expected: expected_sha256.to_string(),
+            actual,
+        });
+    }
+    Ok(RetainedArtifactAvailability::Available {
+        unreachable_aliases: unreachable_public_artifact_aliases(artifact),
+    })
+}
+
+/// Public aliases that were probed and are not reviewer-reachable.
+pub fn unreachable_public_artifact_aliases(
+    artifact: &ArtifactRecord,
+) -> Vec<PublicArtifactUrlValidation> {
+    let Some(validation) = artifact.metadata_json.get("public_url_validation") else {
+        return Vec::new();
+    };
+    if validation.get("reachable").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
+    vec![PublicArtifactUrlValidation {
+        url: validation
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        reachable: false,
+        status_code: validation
+            .get("status_code")
+            .and_then(Value::as_u64)
+            .and_then(|code| u16::try_from(code).ok()),
+        error: validation
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }]
+}
+
 pub fn annotate_public_artifact_url_validation(
     artifact: &mut ArtifactRecord,
 ) -> Option<PublicArtifactUrlValidation> {
@@ -566,6 +657,82 @@ mod tests {
         assert!(public_artifact_url_is_reachable_or_legacy(&legacy));
         assert!(public_artifact_url_is_reachable_or_legacy(&reachable));
         assert!(!public_artifact_url_is_reachable_or_legacy(&unreachable));
+    }
+
+    #[test]
+    fn retained_sha256_verified_artifact_stays_available_when_public_alias_returns_404() {
+        let public_url = serve_once(404);
+        let source = tempfile::NamedTempFile::new().expect("retained artifact");
+        std::fs::write(source.path(), b"retained bytes").expect("write retained bytes");
+        let sha256 = crate::artifact_metadata::sha256_file(source.path()).expect("sha256");
+        let artifact = ArtifactRecord {
+            artifact_type: "file".to_string(),
+            path: source.path().display().to_string(),
+            sha256: Some(sha256),
+            size_bytes: Some(14),
+            metadata_json: serde_json::json!({
+                "public_url_validation": public_artifact_url_validation_json(
+                    &validate_public_artifact_url(&public_url),
+                )
+            }),
+            ..viewer_artifact()
+        };
+
+        let availability =
+            classify_retained_artifact_availability(&artifact).expect("classify availability");
+        let RetainedArtifactAvailability::Available {
+            unreachable_aliases,
+        } = availability
+        else {
+            panic!("verified local bytes must remain available: {availability:?}");
+        };
+        assert_eq!(unreachable_aliases.len(), 1);
+        assert_eq!(unreachable_aliases[0].status_code, Some(404));
+        assert_eq!(
+            unreachable_aliases[0].error.as_deref(),
+            Some("public artifact URL returned HTTP 404")
+        );
+    }
+
+    #[test]
+    fn required_missing_retained_artifact_fails_availability() {
+        let artifact = ArtifactRecord {
+            artifact_type: "file".to_string(),
+            path: "/tmp/homeboy-missing-retained-artifact".to_string(),
+            sha256: Some("abc".to_string()),
+            ..viewer_artifact()
+        };
+
+        let availability =
+            classify_retained_artifact_availability(&artifact).expect("classify availability");
+        match availability {
+            RetainedArtifactAvailability::Missing { reason } => {
+                assert!(reason.contains("missing"));
+            }
+            other => panic!("missing required evidence must fail: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn checksum_mismatched_retained_artifact_fails_availability() {
+        let source = tempfile::NamedTempFile::new().expect("retained artifact");
+        std::fs::write(source.path(), b"altered bytes").expect("write retained bytes");
+        let artifact = ArtifactRecord {
+            artifact_type: "file".to_string(),
+            path: source.path().display().to_string(),
+            sha256: Some("0".repeat(64)),
+            ..viewer_artifact()
+        };
+
+        let availability =
+            classify_retained_artifact_availability(&artifact).expect("classify availability");
+        match availability {
+            RetainedArtifactAvailability::ChecksumMismatch { expected, actual } => {
+                assert_eq!(expected, "0".repeat(64));
+                assert_ne!(actual, expected);
+            }
+            other => panic!("checksum-mismatched evidence must fail: {other:?}"),
+        }
     }
 
     struct EnvGuard {

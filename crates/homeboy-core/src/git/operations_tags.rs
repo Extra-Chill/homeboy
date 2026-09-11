@@ -157,11 +157,12 @@ pub fn remote_branch_commit(path: &str, branch: &str) -> Result<Option<String>> 
 /// resolved from the repository (preferring `origin`) rather than assumed.
 pub fn fetch_origin(path: &str) -> Result<()> {
     let remote = super::resolve_default_remote(Path::new(path));
-    crate::engine::command::run_in(
-        path,
-        "git",
+    super::fetch_remote_tracking_refs_until(
+        Path::new(path),
         &["fetch", &remote],
         &format!("git fetch {remote}"),
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
     )?;
     Ok(())
 }
@@ -193,17 +194,25 @@ pub fn fetch_tags(path: &str) -> Result<()> {
     // commits and ancestry can be evaluated. `--unshallow` errors on a complete
     // repo, so it is gated on the shallow marker and run best-effort.
     if is_shallow(path) {
-        let _ = crate::engine::command::run_in_optional(
-            path,
-            "git",
+        let _ = super::fetch_remote_tracking_refs_until(
+            Path::new(path),
             &["fetch", "--unshallow", "--tags", &remote],
+            "git fetch --unshallow --tags",
+            &[],
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
         );
     }
 
     // Fetch tags from the remote so the latest release tag and its commits are
     // present locally. Best-effort: offline/no-remote checkouts fall through to
     // the guard with whatever local history exists.
-    let _ = crate::engine::command::run_in_optional(path, "git", &["fetch", "--tags", &remote]);
+    let _ = super::fetch_remote_tracking_refs_until(
+        Path::new(path),
+        &["fetch", "--tags", &remote],
+        "git fetch --tags",
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    );
 
     Ok(())
 }

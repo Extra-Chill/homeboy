@@ -1098,6 +1098,64 @@ fn namespace_mismatch_detected_in_convention() {
 }
 
 #[test]
+fn namespace_conforming_file_not_reported() {
+    // Regression test companion for #14527.
+    //
+    // Inverse of `namespace_mismatch_detected_in_convention`: a file whose
+    // fingerprint carries exactly the expected namespace (as the fixed
+    // producer now yields for a file declaring its namespace after a long
+    // docblock) must be conforming — never reported as "Missing namespace
+    // declaration". A convention deviation may only be synthesized from an
+    // accurate fingerprint; a file the producer could not fingerprint at all
+    // is dropped upstream (`fingerprint_content` returns None) and never
+    // reaches this comparison.
+    let fingerprints = vec![
+        FileFingerprint {
+            relative_path: "abilities/CreateFlow.php".to_string(),
+            language: Language::Php,
+            methods: vec!["execute".to_string()],
+            type_name: Some("CreateFlow".to_string()),
+            namespace: Some("SamplePlugin\\Abilities\\Flow".to_string()),
+            ..Default::default()
+        },
+        FileFingerprint {
+            relative_path: "abilities/UpdateFlow.php".to_string(),
+            language: Language::Php,
+            methods: vec!["execute".to_string()],
+            type_name: Some("UpdateFlow".to_string()),
+            namespace: Some("SamplePlugin\\Abilities\\Flow".to_string()),
+            ..Default::default()
+        },
+        FileFingerprint {
+            relative_path: "abilities/DeleteFlow.php".to_string(),
+            language: Language::Php,
+            methods: vec!["execute".to_string()],
+            type_name: Some("DeleteFlow".to_string()),
+            namespace: Some("SamplePlugin\\Abilities\\Flow".to_string()), // declares the expected namespace
+            ..Default::default()
+        },
+    ];
+
+    let convention = discover_conventions("Flow", "abilities/*", &fingerprints).unwrap();
+
+    assert_eq!(
+        convention.expected_namespace,
+        Some("SamplePlugin\\Abilities\\Flow".to_string())
+    );
+    assert!(
+        convention.outliers.is_empty(),
+        "A file declaring exactly the expected namespace must not produce deviations. Got: {:?}",
+        convention
+            .outliers
+            .iter()
+            .flat_map(|o| &o.deviations)
+            .map(|d| &d.description)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(convention.conforming.len(), 3);
+}
+
+#[test]
 fn missing_import_not_flagged_for_same_namespace_reference() {
     // Regression test for #1135 (case 2).
     //

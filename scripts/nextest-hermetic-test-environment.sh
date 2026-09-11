@@ -123,17 +123,61 @@ exec perl -MPOSIX=setsid,WNOHANG -MTime::HiRes=time -e '
         return unless defined $tmpdir && $tmpdir =~ m{/\.homeboy-test-tmp/run\.[^/]+$};
         system("rm", "-rf", "--", $tmpdir);
     };
-    my $cleanup = sub {
-        # A clean test leaves no process in its private group. Avoid charging
-        # nextest process-per-test execution a grace period in that case.
-        return unless kill 0, -$child;
-        kill "TERM", -$child;
-        # Give actual descendants a bounded chance to exit cleanly before
-        # enforcing the same process-group cleanup guarantee.
-        if (kill 0, -$child) {
-            select undef, undef, undef, 1;
-            kill "KILL", -$child if kill 0, -$child;
+    my $process_snapshot = sub {
+        open my $ps, "-|", "/bin/ps", "-axo", "pid=,ppid=,lstart=" or return {};
+        my %processes;
+        while (my $line = <$ps>) {
+            my ($pid, $parent, $started) = $line =~ /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
+            $processes{$pid} = { pid => $pid, parent => $parent, started => $started }
+                if defined $pid;
         }
+        close $ps;
+        return \%processes;
+    };
+    my $descendants = sub {
+        my ($root, $processes) = @_;
+        my %children;
+        for my $process (values %$processes) {
+            push @{ $children{$process->{parent}} }, $process;
+        }
+        my @tree = grep { defined } ($processes->{$root});
+        my %seen = ($root => 1);
+        for (my $index = 0; $index < @tree; $index++) {
+            for my $process (@{ $children{$tree[$index]{pid}} // [] }) {
+                next if $seen{$process->{pid}}++;
+                push @tree, $process;
+            }
+        }
+        return @tree;
+    };
+    my $signal_owned = sub {
+        my ($signal, $owned) = @_;
+        # A nested Homeboy command can make its own process group. Snapshot the
+        # tree before signaling the test group so those descendants cannot
+        # reparent and escape cleanup when the test binary exits.
+        my $current = $process_snapshot->();
+        for my $pid (keys %$owned) {
+            next unless exists $current->{$pid} && $current->{$pid}{started} eq $owned->{$pid};
+            kill $signal, $pid;
+        }
+        kill $signal, -$child;
+    };
+    my $cleanup = sub {
+        # A clean test leaves no process in its private group. Avoid both the
+        # process-table scan and termination grace period for normal nextest
+        # cases.
+        return unless kill 0, -$child;
+        my $snapshot = $process_snapshot->();
+        my %owned = map { $_->{pid} => $_->{started} } $descendants->($child, $snapshot);
+        $signal_owned->("TERM", \%owned);
+        # Re-discover after the grace period so descendants started while the
+        # first snapshot was taken receive the forced signal too. Retain the
+        # TERM snapshot: a cooperative parent can exit and reparent a detached
+        # TERM-resistant child before escalation.
+        select undef, undef, undef, 1;
+        $snapshot = $process_snapshot->();
+        $owned{$_->{pid}} = $_->{started} for $descendants->($child, $snapshot);
+        $signal_owned->("KILL", \%owned);
         waitpid $child, 0;
         while (waitpid(-1, WNOHANG) > 0) {}
     };

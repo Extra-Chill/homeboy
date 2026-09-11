@@ -338,6 +338,27 @@ fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
     if let Some(job_id) = request
         .path
         .strip_prefix("/runner/jobs/")
+        .and_then(|tail| tail.strip_suffix("/heartbeat"))
+    {
+        let _job_id = uuid::Uuid::parse_str(job_id).expect("heartbeat job id");
+        let request: homeboy_runner_contract::RunnerApiHeartbeatRequest =
+            serde_json::from_value(request.body.clone()).expect("canonical heartbeat request");
+        let response = homeboy_runner_contract::RunnerApiHeartbeatResponse {
+            schema: homeboy_runner_contract::RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            outcome: homeboy_runner_contract::RunnerApiHeartbeatOutcome::Renewed {
+                claim_expires_at_ms: request.lease_ms,
+                workspace_owner_lease: request.workspace_owner_lease,
+            },
+        };
+        return serde_json::json!({
+            "success": true,
+            "data": { "body": { "response": response } }
+        });
+    }
+    if let Some(job_id) = request
+        .path
+        .strip_prefix("/runner/jobs/")
         .and_then(|tail| tail.strip_suffix("/consume"))
     {
         let job_id = uuid::Uuid::parse_str(job_id).expect("consume job id");

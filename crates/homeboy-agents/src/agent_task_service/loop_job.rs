@@ -2,16 +2,14 @@
 
 use std::time::Duration;
 
-use homeboy_core::process::{
-    process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
-};
+use homeboy_core::process::ProcessStartIdentity;
 use homeboy_core::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::work_job::{
     register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
-    WorkJobInvocation,
+    WorkJobInvocation, WorkJobPhase,
 };
 use crate::agent_task_loop_controller::{self, AgentTaskLoopControllerState};
 
@@ -29,15 +27,6 @@ pub struct AgentTaskLoopJobRequest {
     pub child_start_identity: ProcessStartIdentity,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskLoopJobPhase {
-    #[default]
-    Queued,
-    Supervising,
-    Completed,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTaskLoopJob {
@@ -45,7 +34,7 @@ pub struct AgentTaskLoopJob {
     pub idempotency_key: String,
     pub request: AgentTaskLoopJobRequest,
     #[serde(default)]
-    pub phase: AgentTaskLoopJobPhase,
+    pub phase: WorkJobPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_state: Option<AgentTaskLoopControllerState>,
 }
@@ -66,7 +55,7 @@ impl AgentTaskLoopJob {
             schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
             idempotency_key: format!("agent-task-loop:{}", request.loop_id),
             request,
-            phase: AgentTaskLoopJobPhase::Queued,
+            phase: WorkJobPhase::Queued,
             controller_state: None,
         })
     }
@@ -82,7 +71,7 @@ impl AgentTaskLoopJob {
                 "loop job identity does not match its immutable request",
             ));
         }
-        if job.phase == AgentTaskLoopJobPhase::Completed
+        if job.phase == WorkJobPhase::Completed
             && !job
                 .controller_state
                 .is_some_and(controller_state_is_terminal)
@@ -165,12 +154,12 @@ impl WorkJobHandler for LoopWorkHandler {
 
     fn prepare(&self, request: Value) -> Result<Value> {
         let mut job = AgentTaskLoopJob::parse(request)?;
-        if job.phase != AgentTaskLoopJobPhase::Queued || job.controller_state.is_some() {
+        if job.phase != WorkJobPhase::Queued || job.controller_state.is_some() {
             return Err(invalid_loop_job(
                 "new loop jobs must start queued without controller state",
             ));
         }
-        job.phase = AgentTaskLoopJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
         job.to_checkpoint()
     }
@@ -182,8 +171,7 @@ impl WorkJobHandler for LoopWorkHandler {
         invocation: WorkJobInvocation,
     ) -> Result<Value> {
         let mut job = AgentTaskLoopJob::parse(checkpoint)?;
-        if invocation == WorkJobInvocation::Resume && job.phase == AgentTaskLoopJobPhase::Completed
-        {
+        if invocation == WorkJobInvocation::Resume && job.phase == WorkJobPhase::Completed {
             return Ok(job.result());
         }
         self.supervise(&mut job, handle)
@@ -191,7 +179,12 @@ impl WorkJobHandler for LoopWorkHandler {
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
         let job = AgentTaskLoopJob::parse(checkpoint.clone())?;
-        if job.phase == AgentTaskLoopJobPhase::Completed || !coordinator_is_live(&job.request) {
+        if job.phase == WorkJobPhase::Completed
+            || !super::work_job::supervised_child_is_live(
+                job.request.child_pid,
+                &job.request.child_start_identity,
+            )
+        {
             return Ok(());
         }
         homeboy_core::process::terminate_process_tree(job.request.child_pid).map(|_| ())
@@ -200,7 +193,7 @@ impl WorkJobHandler for LoopWorkHandler {
 
 impl LoopWorkHandler {
     fn supervise(&self, job: &mut AgentTaskLoopJob, handle: WorkJobHandle) -> Result<Value> {
-        job.phase = AgentTaskLoopJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
         handle.checkpoint(job.to_checkpoint()?)?;
         handle.progress(job.result())?;
@@ -214,14 +207,17 @@ impl LoopWorkHandler {
                 .controller_state
                 .is_some_and(controller_state_is_terminal)
             {
-                job.phase = AgentTaskLoopJobPhase::Completed;
+                job.phase = WorkJobPhase::Completed;
                 return Ok(job.result());
             }
             if handle.is_cancelled() {
                 let _ = self.cancel(&job.to_checkpoint()?);
                 return terminalize_interrupted(job, AgentTaskLoopControllerState::Abandoned);
             }
-            if !coordinator_is_live(&job.request) {
+            if !super::work_job::supervised_child_is_live(
+                job.request.child_pid,
+                &job.request.child_start_identity,
+            ) {
                 return terminalize_interrupted(job, AgentTaskLoopControllerState::Failed);
             }
             std::thread::sleep(SUPERVISION_POLL);
@@ -243,19 +239,8 @@ fn terminalize_interrupted(
         agent_task_loop_controller::write_controller(&record)?;
         job.controller_state = Some(interrupted_state);
     }
-    job.phase = AgentTaskLoopJobPhase::Completed;
+    job.phase = WorkJobPhase::Completed;
     Ok(job.result())
-}
-
-fn coordinator_is_live(request: &AgentTaskLoopJobRequest) -> bool {
-    matches!(
-        process_identity_state_with_start_identity(
-            request.child_pid,
-            None,
-            Some(&request.child_start_identity),
-        ),
-        ProcessIdentityState::Live
-    )
 }
 
 fn controller_state_is_terminal(state: AgentTaskLoopControllerState) -> bool {
@@ -304,6 +289,7 @@ mod tests {
     use std::sync::Arc;
 
     use homeboy_core::daemon::controller_job_driver::ControllerJobDriver;
+    use homeboy_core::process::ProcessIdentityState;
     use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
 
     use super::*;

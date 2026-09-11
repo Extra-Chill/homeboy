@@ -217,23 +217,8 @@ pub fn short_head_revision(dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("run git test fixture command");
-
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     #[test]
     fn optional_helpers_return_head_remote_toplevel_and_clean_status() {

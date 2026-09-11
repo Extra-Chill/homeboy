@@ -11,41 +11,37 @@ use homeboy_core::stream_capture::StreamCaptureMetadata;
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
 
+/// A fully resolved promotion input.
+///
+/// This is the durable shape: `AgentTaskPromotionJob` persists it under
+/// `homeboy/agent-task-promotion-job/v1`, so a recovered job never reparses
+/// operator argv or reselects an aggregate candidate. It is also what the
+/// in-process promotion path takes, so there is one field group and one
+/// serialized shape rather than two that must be kept in step by hand.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskPromotionOptions {
+pub struct AgentTaskPromotionRequest {
     pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_run_id: Option<String>,
     pub source_path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_worktree_path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_worktree: String,
     pub base_ref: Option<String>,
     /// Immutable task workspace base captured before provider dispatch. This is
     /// required when recovering agent-created commits so promotion never picks
     /// up commits that were already present in a reused workspace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_base_sha: Option<String>,
     /// An immutable commit selected by a controller-owned candidate adoption.
     /// When present promotion derives the patch from this revision rather than
     /// the source workspace's current HEAD.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_ref: Option<String>,
-    pub to_worktree: String,
     pub task_id: Option<String>,
     pub artifact_id: Option<String>,
     #[serde(default)]
     pub dry_run: bool,
-    /// Deterministic verification gates. Flattened so the serialized shape keeps
-    /// the historical flat `verify` / `private_verify` / `private_gate_reveal`
-    /// keys while the field group is defined once in `VerifyGateOptions`.
-    #[serde(flatten)]
+    /// Deterministic verification gates.
+    #[serde(default)]
     pub gates: VerifyGateOptions,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_command: Option<String>,
-    /// Structured provider invocation. This preserves argv boundaries for
-    /// portable providers; `provider_command` remains a deprecated fallback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_invocation: Option<CommandInvocation>,
 }
 

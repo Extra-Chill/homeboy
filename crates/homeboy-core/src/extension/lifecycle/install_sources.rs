@@ -5,12 +5,12 @@
 //! assets, and linking a local source directory. Kept in a sibling module so
 //! the lifecycle root stays under the structural line/item thresholds (#5241).
 
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use homeboy_core::config::{self, from_str};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension::registry::ExtensionLifecycleValidation;
+use homeboy_core::extension::root_manifest::{ExtensionRootManifest, SharedAssetDeclaration};
 use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
@@ -21,28 +21,6 @@ use super::{
     InstallResult,
 };
 use homeboy_extension_contract::ExtensionManifest;
-
-#[derive(Debug, Deserialize)]
-struct ExtensionRootManifest {
-    #[serde(default)]
-    shared_assets: Vec<SharedAssetDeclaration>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum SharedAssetDeclaration {
-    Path(String),
-    Object { path: String },
-}
-
-impl SharedAssetDeclaration {
-    fn into_path(self) -> String {
-        match self {
-            SharedAssetDeclaration::Path(path) => path,
-            SharedAssetDeclaration::Object { path } => path,
-        }
-    }
-}
 
 const ROOT_MANIFEST: &str = "homeboy-extension-root.json";
 const INSTALLED_ROOT_MANIFEST: &str = ".homeboy-extension-root.json";
@@ -55,7 +33,7 @@ fn shared_assets_for_manifest(manifest_path: &Path) -> Vec<String> {
             manifest
                 .shared_assets
                 .into_iter()
-                .map(SharedAssetDeclaration::into_path)
+                .map(SharedAssetDeclaration::path)
                 .map(|path| path.trim().to_string())
                 .filter(|path| !path.is_empty())
                 .collect::<Vec<_>>()

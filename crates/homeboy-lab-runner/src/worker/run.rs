@@ -25,8 +25,8 @@ use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_exec
 
 use super::super::execution::{exec_worker_local_until_cancelled_with_progress, RunnerExecOptions};
 use super::broker::{
-    append_progress_data, cancelled_job_snapshot, claim_job, consume_execution, finish_job,
-    start_claim_heartbeat, validate_workspace_owner,
+    append_progress_data, cancelled_job_snapshot, claim_job, consume_credential_delivery,
+    consume_execution, finish_job, start_claim_heartbeat, validate_workspace_owner,
 };
 use super::result::{
     cancelled_output, claimed_output, log_worker_event, remote_runner_result_from_exec_output,
@@ -387,6 +387,16 @@ fn run_once_output(
             lease,
         )?;
     }
+    // Bind the controller capability while the live claim is freshly verified,
+    // before potentially slow source preparation. The values remain only in
+    // this worker process until they are projected into the execution child.
+    let controller_credentials = consume_credential_delivery(
+        &client,
+        &options.broker_url,
+        options.broker_token.as_deref(),
+        &options.runner_id,
+        &claim,
+    )?;
     let _command_assets = materialize_command_assets(&claim.job_id, &mut execution_envelope)?;
     let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
     let _staged_workspace = materialize_staged_source_artifact(
@@ -435,15 +445,17 @@ fn run_once_output(
                 .as_ref(),
         )
     });
+    let mut exec_options = runner_exec_options_from_envelope(
+        execution_envelope.clone(),
+        capability_preflight,
+        claimed_run_id,
+        execution_context.clone(),
+        claim.job_id.clone(),
+    )?;
+    exec_options.env.extend(controller_credentials);
     let exec_result = exec_worker_local_until_cancelled_with_progress(
         &options.runner_id,
-        runner_exec_options_from_envelope(
-            execution_envelope.clone(),
-            capability_preflight,
-            claimed_run_id,
-            execution_context.clone(),
-            claim.job_id.clone(),
-        )?,
+        exec_options,
         || {
             verify_staged_workspace_before_execution(
                 &options.runner_id,

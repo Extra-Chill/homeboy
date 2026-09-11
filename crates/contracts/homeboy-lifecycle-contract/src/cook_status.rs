@@ -46,15 +46,15 @@
 //! a persisted report, has no process exit code to branch on and cannot decide
 //! success, terminality, or retry from the string alone.
 //!
-//! `homeboy_core::run_lifecycle_status::RunLifecycleStatus` is the closed
-//! vocabulary that answers those questions, and `From<&CookStatus>` is the
-//! projection onto it. Reports emit it as an additive `lifecycle_status`
-//! beside the unchanged `status`, so callers that match on the raw string keep
-//! working while a machine consumer gets a decidable classification.
+//! `homeboy_core::run_lifecycle_status::RunLifecycleStatus` is the internal
+//! closed vocabulary that answers those questions, and `From<&CookStatus>` is
+//! the projection onto it. External consumers read canonical lifecycle and
+//! retry eligibility from `homeboy/control-plane-run/v1`.
 //!
 //! That projection is deliberately *not* an authority on terminality. It is
 //! pinned to agree with [`CookStatus::is_in_flight`] for every known variant,
-//! and reports emit `terminal` from the declared [`CookDisposition`] below.
+//! while internal aggregation reads terminality from the declared
+//! [`CookDisposition`] below.
 //! [`CookStatus::Unknown`] projects to an explicit "unknown" rather than a
 //! manufactured failure, for exactly the reason terminality is declared here
 //! rather than inferred.

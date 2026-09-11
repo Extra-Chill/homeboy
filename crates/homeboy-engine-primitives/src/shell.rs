@@ -74,6 +74,21 @@ fn split_respecting_quotes(input: &str) -> Vec<String> {
     result
 }
 
+/// Quote a shell argument, leaving conservatively safe words bare.
+///
+/// Unlike [`quote_arg`], which quotes anything containing a shell metacharacter,
+/// this keeps unquoted only an explicit allowlist. Command builders that render
+/// readable remote commands use it so a plain path or flag stays legible.
+pub fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 pub fn quote_path(path: &str) -> String {
     format!("'{}'", escape_single_quote_content(path))
 }

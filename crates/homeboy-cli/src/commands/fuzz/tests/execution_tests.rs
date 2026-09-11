@@ -946,6 +946,22 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
 }
 
 #[test]
+fn fuzz_run_outcome_fails_when_successful_command_omits_campaign() {
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        None,
+        None,
+        homeboy::fuzz::FuzzGateProfile::Evidence,
+    );
+
+    assert_eq!(outcome.status, "failed");
+    assert!(!outcome.success);
+    assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
 fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
     let mut campaign = empty_fuzz_campaign();
     campaign.findings = vec![FuzzFinding {

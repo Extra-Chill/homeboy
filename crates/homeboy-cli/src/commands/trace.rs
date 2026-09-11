@@ -55,6 +55,8 @@ mod run_service;
 mod schedule;
 #[cfg(test)]
 mod test_fixture;
+#[cfg(test)]
+mod test_support;
 mod workload;
 
 use compare_bundle::run_compare_bundle;

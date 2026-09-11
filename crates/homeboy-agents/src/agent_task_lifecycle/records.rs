@@ -943,10 +943,6 @@ impl AgentTaskRunRecord {
             .and_then(Value::as_str)
             == Some("planned")
             && execution
-                .and_then(|value| value.get("agent_task_run_id"))
-                .and_then(Value::as_str)
-                == Some(self.run_id.as_str())
-            && execution
                 .and_then(|value| value.get("runner_id"))
                 .and_then(Value::as_str)
                 .is_some_and(|runner_id| self.runner_id() == Some(runner_id))

@@ -32,6 +32,8 @@ pub use homeboy_core::broker_auth::{
 };
 mod capabilities;
 mod cli_resolver;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub use cli_resolver::{
     resolve_agent_task_dispatch, resolve_command_label, resolve_lab_runner_hint,
     set_agent_task_dispatch_resolver, set_command_label_resolver, set_lab_runner_hint_provider,
@@ -450,10 +452,10 @@ pub use session::{
     RunnerDaemonGenerationStatus, RunnerDaemonVerification, RunnerDisconnectReport,
     RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerLeaselessRecoveryContract,
     RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
-    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
-    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, RunnerUnresolvedJobOwner,
-    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
+    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerRetainedJobInconsistency,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
+    RunnerUnresolvedJobOwner, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
@@ -959,6 +961,33 @@ pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness
     lab_runner_readiness_from_refresh_observations(preferred.as_deref(), observations)
 }
 
+/// Read one explicitly selected runner for immediate workload admission. Unlike
+/// the bounded inventory refresh, this never substitutes another runner.
+pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerReadiness> {
+    let runner = load(runner_id)?;
+    runner_probe_gate::invalidate_runner_probes(runner_id);
+    let status = runner_admission_snapshot(runner_id)?.status;
+    let capabilities_ready = !runner_capability_inventory(runner_id)?
+        .runtime_ids
+        .is_empty();
+    let mode = status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+    let candidate = lab_runner_admission_candidate(
+        runner_id,
+        mode,
+        runner.settings.concurrency_limit,
+        &status,
+        capabilities_ready,
+        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    );
+    Ok(lab_runner_readiness_from_candidates(
+        Some(runner_id),
+        vec![candidate],
+    ))
+}
+
 fn observe_lab_runner_admission_candidate(
     runner_id: &str,
     deadline: std::time::Instant,
@@ -966,9 +995,9 @@ fn observe_lab_runner_admission_candidate(
     let runner = load(runner_id)?;
     runner_probe_gate::invalidate_runner_probes(runner_id);
     let status = runner_admission_snapshot_until(runner_id, deadline)?.status;
-    let capabilities_ready = runner_capability_inventory_until(runner_id, deadline)?
+    let capabilities_ready = !runner_capability_inventory_until(runner_id, deadline)?
         .runtime_ids
-        .contains("homeboy");
+        .is_empty();
     let mode = status
         .session
         .as_ref()
@@ -1399,6 +1428,24 @@ fn resolve_default_lab_runner_from_candidates(
 }
 
 pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
+    create_in_roots(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        json_spec,
+        skip_existing,
+    )
+}
+
+/// [`create`] against an explicitly injected config root.
+///
+/// Existence checks and the persisted write both follow `roots`, so creating a
+/// runner in an injected root cannot observe or overwrite the ambient
+/// installation's registry (#14362).
+#[allow(dead_code)]
+pub fn create_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    json_spec: &str,
+    skip_existing: bool,
+) -> Result<CreateOutput<Runner>> {
     let raw = config::read_json_spec_to_string(json_spec)?;
     let value: Value = config::from_str(&raw)?;
 
@@ -1410,12 +1457,12 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runne
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
-            if skip_existing && load(&id).is_ok() {
+            if skip_existing && load_in_roots(roots, &id).is_ok() {
                 summary.record_skipped(id);
                 continue;
             }
 
-            match create_single_value(item.clone()) {
+            match create_single_value_in_roots(roots, item.clone()) {
                 Ok(result) => summary.record_created(result.id),
                 Err(err) => summary.record_error(id, err.message),
             }
@@ -1423,7 +1470,9 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runne
         return Ok(CreateOutput::Bulk(summary));
     }
 
-    Ok(CreateOutput::Single(create_single_value(value)?))
+    Ok(CreateOutput::Single(create_single_value_in_roots(
+        roots, value,
+    )?))
 }
 
 /// Inspect a legacy runner configuration without resolving or rendering values.
@@ -1526,6 +1575,58 @@ fn runner_secret_name(runner_id: &str, key: &str) -> String {
     format!("runner/{runner_id}/{key}")
 }
 
+/// [`merge`] against an explicitly injected config root.
+///
+/// Resolving the runner ambiently while merging into an injected root would
+/// read one installation's registry and write another's (#14362).
+#[allow(dead_code)]
+pub fn merge_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    id: Option<&str>,
+    json_spec: &str,
+    replace_fields: &[String],
+) -> Result<MergeOutput> {
+    let raw = config::read_json_spec_to_string(json_spec)?;
+    let parsed: Value = config::from_str(&raw)?;
+
+    if parsed.is_array() {
+        return Ok(MergeOutput::Bulk(config::merge_batch_from_json_in_root::<
+            Runner,
+        >(roots.config(), &raw)?));
+    }
+
+    let effective_id = id
+        .map(String::from)
+        .or_else(|| parsed.get("id").and_then(Value::as_str).map(String::from))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "id",
+                "Provide runner ID as argument or in JSON body",
+                None,
+                None,
+            )
+        })?;
+
+    if let Ok(runner) = config::load_in_root::<Runner>(roots.config(), &effective_id) {
+        if runner.kind == RunnerKind::Local {
+            return Ok(MergeOutput::Single(config::merge_from_json_in_root::<
+                Runner,
+            >(
+                roots.config(),
+                Some(&effective_id),
+                &raw,
+                replace_fields,
+            )?));
+        }
+    }
+
+    Ok(MergeOutput::Single(merge_server_runner(
+        &effective_id,
+        parsed,
+        replace_fields,
+    )?))
+}
+
 pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {
     let raw = config::read_json_spec_to_string(json_spec)?;
     let parsed: Value = config::from_str(&raw)?;
@@ -1601,7 +1702,10 @@ pub fn enable_server_runner(server_id: &str, patch: Value) -> Result<Runner> {
     Ok(runner_from_spec(server_id, spec))
 }
 
-fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
+fn create_single_value_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    value: Value,
+) -> Result<CreateResult<Runner>> {
     let id = value
         .get("id")
         .and_then(Value::as_str)
@@ -1615,7 +1719,7 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
 
     match runner.kind {
         RunnerKind::Local => {
-            if config::exists::<Runner>(&id) {
+            if config::exists_in_root::<Runner>(roots.config(), &id) {
                 return Err(Error::validation_invalid_argument(
                     "runner.id",
                     format!("runner '{}' already exists", id),
@@ -1624,7 +1728,7 @@ fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
                 ));
             }
             config::validate(&runner)?;
-            config::save(&runner)?;
+            config::save_in_root(roots.config(), &runner)?;
             Ok(CreateResult {
                 id: runner.id.clone(),
                 entity: runner,
@@ -1974,7 +2078,7 @@ mod tests {
                 "old".to_string(),
                 "current".to_string(),
                 None,
-                Some("current".to_string()),
+                Some("homeboy 0.371.0+d1a1a6d2092f250780ccf40a57a12becff2a164f".to_string()),
             )),
             configured_job_binary_build_identity: None,
             daemon_freshness: Some(DaemonFreshnessReport {
@@ -1983,7 +2087,7 @@ mod tests {
                 restartable: true,
                 lease_id: Some("lease-current".to_string()),
                 pid: Some(1),
-                recovery_evidence: None,
+                recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
                 ownership_evidence: None,
                 adoption_command: None,
                 binary_hash: None,
@@ -1992,7 +2096,13 @@ mod tests {
                 runtime_paths: None,
                 active_jobs: 0,
                 termination_evidence: None,
-                repair_plan: Vec::new(),
+                repair_plan: vec![crate::daemon_repair::action_step(
+                    crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                    crate::daemon_repair::refresh_homeboy_action_for_ref(
+                        "homeboy-lab",
+                        Some("d1a1a6d2092f250780ccf40a57a12becff2a164f"),
+                    ),
+                )],
             }),
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
@@ -2011,6 +2121,12 @@ mod tests {
 
         assert!(!snapshot.summary.accepting_jobs);
         assert!(snapshot.summary.safe_to_rotate);
+        assert_eq!(
+            snapshot.summary.next_action.as_deref(),
+            Some(
+                "homeboy runner refresh-homeboy homeboy-lab --ref d1a1a6d2092f250780ccf40a57a12becff2a164f --reconnect"
+            )
+        );
     }
 
     #[test]

@@ -2,14 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     effective_provider_config, executor::effective_provider_for_request,
-    provider_credential_readiness, readiness_verdict_with_credentials_and_deadline,
-    resolve_provider_for_backend, runtime_readiness::provider_requires_live_auth_validation,
+    provider_credential_readiness, resolve_provider_for_backend,
+    runtime_readiness::provider_requires_live_auth_validation,
     validate_provider_immediate_failure_patterns, AgentTaskProviderCatalog, ProviderResolution,
     ProviderRuntimeReadinessCache,
 };
 use crate::agent_task_scheduler::{
     AgentTaskPlan, AgentTaskScheduleSupport, ProviderRouteDiagnosticData, ProviderRouteEvidence,
 };
+use homeboy_core::Error;
 use serde_json::Value;
 
 /// One redacted, precedence-ordered answer to whether a provider can accept
@@ -225,6 +226,7 @@ fn evaluate_provider_dispatchability_with_config_and_credentials(
         cache,
         runtime_evidence_out,
         None,
+        false,
     )
 }
 
@@ -243,6 +245,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     cache: &mut ProviderRuntimeReadinessCache,
     runtime_evidence_out: &mut Option<AgentTaskProviderRuntimeEvidence>,
     deadline_unix_ms: Option<u64>,
+    generated_fanout_context: bool,
 ) -> AgentTaskProviderDispatchability {
     let candidate_providers = catalog
         .providers()
@@ -250,13 +253,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         .filter(|provider| provider.backend == backend)
         .collect::<Vec<_>>();
     let unresolved = |state: &'static str, reason: &'static str, route_reason: String| {
-        // A selector can fail while the backend's declared providers are otherwise
-        // usable. Preserve that component evidence while route precedence keeps
-        // the aggregate verdict unavailable.
-        let credentials_ready = !candidate_providers.is_empty()
-            && candidate_providers
-                .iter()
-                .all(|provider| provider_credential_readiness(provider).dispatchable);
         let configuration_ready = !candidate_providers.is_empty()
             && candidate_providers
                 .iter()
@@ -271,12 +267,8 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                 reason: None,
             },
             credentials: AgentTaskProviderDispatchabilityCredentialCheck {
-                status: if credentials_ready {
-                    AgentTaskProviderCredentialStatus::Unverified
-                } else {
-                    AgentTaskProviderCredentialStatus::Missing
-                },
-                ready: credentials_ready,
+                status: AgentTaskProviderCredentialStatus::Unverified,
+                ready: false,
                 missing: Vec::new(),
                 // A route that never resolved to one provider was never
                 // probed, so nothing here was live-verified.
@@ -364,15 +356,19 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         },
     };
     let mut runtime_remediation = Vec::new();
-    let (runtime, runtime_evidence) =
-        if probe_runtime && model_ready && credentials.dispatchable && configuration.ready {
-            let config = effective_provider_config(config, model);
-            match readiness_verdict_with_credentials_and_deadline(
+    let (runtime, runtime_evidence) = if probe_runtime
+        && model_ready
+        && credentials.dispatchable
+        && configuration.ready
+    {
+        let config = effective_provider_config(config, model);
+        match super::runtime_readiness::readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
                 provider,
                 &config,
                 credential_env,
                 cache,
                 deadline_unix_ms,
+                generated_fanout_context,
             ) {
                 Ok(verdict) => {
                     let remediation = (!verdict.remediation.trim().is_empty())
@@ -380,19 +376,21 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                     if let Some(remediation) = remediation.as_ref() {
                         runtime_remediation.push(remediation.clone());
                     }
-                    let classification = if verdict.classification.trim().is_empty() {
-                        "unknown"
-                    } else {
-                        verdict.classification.trim()
+                    let classification = match verdict.classification.trim() {
+                        "" => "unknown".to_string(),
+                        "provider_account_blocked" => "account".to_string(),
+                        classification => classification.to_string(),
                     };
                     let reason = (!verdict.ready).then(|| {
                         if verdict.reason.trim().is_empty() {
-                            classification.to_string()
+                            classification.clone()
                         } else {
-                            format!(
-                                "{classification}: {}",
-                                homeboy_core::redaction::redact_string(&verdict.reason)
-                            )
+                            let mut cause = homeboy_core::redaction::redact_string(&verdict.reason);
+                            let prefix = format!("{}:", verdict.classification.trim());
+                            while let Some(next) = cause.strip_prefix(&prefix) {
+                                cause = next.trim_start().to_string();
+                            }
+                            format!("{classification}: {cause}")
                         }
                     });
                     let evidence = AgentTaskProviderRuntimeEvidence {
@@ -437,15 +435,15 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                     )
                 }
             }
-        } else {
-            (
-                AgentTaskProviderDispatchabilityCheck {
-                    ready: !probe_runtime,
-                    reason: (!probe_runtime).then_some("not requested".to_string()),
-                },
-                None,
-            )
-        };
+    } else {
+        (
+            AgentTaskProviderDispatchabilityCheck {
+                ready: !probe_runtime,
+                reason: (!probe_runtime).then_some("not requested".to_string()),
+            },
+            None,
+        )
+    };
     // `runtime.ready` alone conflates two very different situations: a
     // provider-declared probe actually ran and passed, versus no probe being
     // declared at all (in which case `run_provider_readiness_invocation`
@@ -723,6 +721,7 @@ fn missing_readiness_invocation_diagnosis(
 
 fn sanitize_classification(classification: &str) -> String {
     match classification {
+        "provider_account_blocked" => "account".to_string(),
         "ready"
         | "deterministic_incompatibility"
         | "auth_failure"
@@ -893,6 +892,68 @@ pub(crate) fn evaluate_request_dispatchability(
     )
 }
 
+/// Returns the runtime-readiness cache identity for a plan's first selected
+/// route, using the same route candidate and secret normalization as admission.
+pub fn provider_runtime_readiness_cache_identity_for_plan(
+    catalog: &AgentTaskProviderCatalog,
+    plan: &AgentTaskPlan,
+) -> homeboy_core::Result<String> {
+    let task = plan.tasks.first().ok_or_else(|| {
+        Error::internal_unexpected("provider readiness identity requires a provider task")
+    })?;
+    let (mut request, _) =
+        AgentTaskScheduleSupport::provider_route_candidates(task, plan.options.rotation.as_ref())
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                Error::internal_unexpected("provider readiness identity requires a route")
+            })?;
+    let provider = effective_provider_for_request(&request, catalog.providers())
+        .map_err(|reason| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                reason,
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                "no provider satisfies the effective route and required capabilities",
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?;
+    let base_secret_env = request
+        .metadata
+        .get("provider_admission")
+        .and_then(|value| value.get("base_secret_env"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+        .unwrap_or_else(|| request.executor.secret_env.clone());
+    super::secrets::apply_provider_runner_secret_env_contract_for_request(
+        &mut request,
+        &provider,
+        &base_secret_env,
+    );
+    let credential_env = super::secrets::provider_request_credential_env(&request, &provider)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                error.message,
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?;
+    let config = effective_provider_config(&request.executor.config, request.executor.model());
+    super::runtime_readiness::readiness_cache_identity_for_generated_fanout_context(
+        &provider,
+        &config,
+        &credential_env,
+        task.metadata["provider_readiness_generated_fanout_context"] == true,
+    )
+}
+
 pub(crate) fn evaluate_request_dispatchability_with_credentials(
     catalog: &AgentTaskProviderCatalog,
     request: &crate::agent_task::AgentTaskRequest,
@@ -916,6 +977,7 @@ pub(crate) fn evaluate_request_dispatchability_with_credentials(
         cache,
         &mut runtime_evidence,
         request.limits.execution_deadline_unix_ms,
+        request.metadata["provider_readiness_generated_fanout_context"] == true,
     );
     EvaluatedRequestDispatchability {
         dispatchability,
@@ -1739,6 +1801,70 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_route_never_claims_credentials_are_missing() {
+        let provider: super::super::AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "credential.provider",
+            "backend": "credential",
+            "provider_defaults": {
+                "credential": {
+                    "required_secret_env": ["HOMEBOY_TEST_UNRESOLVED_ROUTE_CREDENTIAL"]
+                }
+            }
+        }))
+        .expect("provider fixture");
+        let verdict = evaluate_provider_dispatchability(
+            &catalog(provider),
+            "credential",
+            Some("missing.provider"),
+            None,
+            false,
+        );
+
+        assert_eq!(verdict.state, "route_unavailable");
+        assert_eq!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Unverified
+        );
+        assert!(!verdict.checks.credentials.ready);
+        assert!(verdict.checks.credentials.missing.is_empty());
+    }
+
+    #[test]
+    fn repeated_provider_classification_is_normalized_in_readiness_output() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'provider_account_blocked',retryable:false,remediation:'switch account',reason:'provider_account_blocked: provider_account_blocked: account access rejected',cache_key:'blocked',identity:{}}));",
+        )
+        .expect("readiness script");
+
+        let verdict = evaluate_provider_dispatchability(
+            &catalog(provider(&script, &count)),
+            "test",
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(verdict.state, "account_unavailable");
+        assert_eq!(
+            verdict.checks.runtime.reason.as_deref(),
+            Some("account: account access rejected")
+        );
+        assert_eq!(
+            verdict
+                .readiness
+                .live_inference
+                .evidence
+                .as_ref()
+                .map(|evidence| evidence.classification.as_str()),
+            Some("account")
+        );
+    }
+
+    #[test]
     fn aggregate_precedence_keeps_each_failed_dimension_unavailable() {
         let credential_provider: super::super::AgentTaskExecutorProvider =
             serde_json::from_value(json!({
@@ -2195,7 +2321,7 @@ mod tests {
             .expect("fallback credential");
         std::fs::write(
             &script,
-            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');const token=process.env.TEST_ACCOUNT_TOKEN||'';const ready=token==='fallback-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:token,reason:token,cache_key:token,identity:{account:token}}));",
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync(process.argv[2],'probe\\n');const token=process.env.TEST_ACCOUNT_TOKEN||'';const ready=token==='fallback-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:token,reason:token,cache_key:token,identity:{account:token}}));",
         )
         .expect("readiness script");
         let mut provider = provider(&script, &count);

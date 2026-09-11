@@ -96,6 +96,210 @@ fn diagnose_projects_causal_pre_execution_provider_evidence() {
 }
 
 #[test]
+fn historical_cook_snapshot_failure_projects_lifecycle_admission() {
+    with_temp_home(|| {
+        let run_id = "run-cli-cook-snapshot-failure";
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut plan = test_plan();
+        plan.metadata["generic_lab_command_replay"] = serde_json::json!({
+            "schema": "homeboy/generic-lab-command-replay/v1",
+            "normalized_args": ["homeboy", "bench"],
+            "materialization": {
+                "canonical_root": workspace.path(),
+                "content_identity": "snapshot:recorded",
+            },
+        });
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit Cook attempt");
+        let error = Error::validation_invalid_argument(
+            "workspace_snapshot",
+            "Lab workspace snapshot construction failed before SSH transport",
+            None,
+            None,
+        )
+        .with_retryable(false);
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "lab_workspace_stage",
+            &error,
+        )
+        .expect("record snapshot failure");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_id"] = serde_json::json!("cook-snapshot-parent");
+            record.metadata["pre_execution_failure"]["details"] = serde_json::json!({
+                "classification": "snapshot_construction",
+                "recovery": {
+                    "owner": "homeboy_snapshot_staging",
+                    "action": "rebuild_snapshot_staging_and_replay_cook",
+                    "command": "homeboy agent-task retry <run-id> --run",
+                },
+            });
+        })
+        .expect("mark Cook ownership and snapshot recovery");
+
+        let (status_value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            ..Default::default()
+        })
+        .expect("status snapshot failure");
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose snapshot failure");
+
+        let expected = &diagnosis["lab_snapshot_failure"];
+        assert_eq!(&status_value["lab_snapshot_failure"], expected);
+        assert_eq!(expected["owner"]["cook_id"], "cook-snapshot-parent");
+        assert_eq!(expected["owner"]["attempt_run_id"], run_id);
+        assert_eq!(expected["owner"]["lifecycle"], "cook");
+        assert_eq!(expected["readiness"], "unavailable");
+        assert_eq!(expected["admission"]["admitted"], false);
+        assert!(expected["action"].is_null());
+        assert_eq!(diagnosis["retry_replay"]["readiness"], "unavailable");
+        assert!(diagnosis["retry_replay"]["action"].is_null());
+        assert!(!diagnosis
+            .to_string()
+            .contains("homeboy agent-task retry <run-id> --run"));
+        assert!(!status_value
+            .to_string()
+            .contains("homeboy agent-task retry <run-id> --run"));
+        assert!(homeboy::agents::agent_task_service::retry(run_id, None, false, false).is_err());
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id)
+                .expect("durable attempt")
+                .metadata["provider_executions_consumed"],
+            0
+        );
+    });
+}
+
+#[test]
+fn current_non_cook_snapshot_failure_keeps_admitted_lab_replay_actionable() {
+    with_temp_home(|| {
+        let run_id = "run-cli-generic-snapshot-failure";
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("workspace.txt"), "recorded")
+            .expect("write workspace");
+        let identity = homeboy::runner::generic_lab_replay_artifact_identity(workspace.path())
+            .expect("record identity");
+        let mut plan = test_plan();
+        plan.metadata["generic_lab_command_replay"] = serde_json::json!({
+            "schema": "homeboy/generic-lab-command-replay/v1",
+            "normalized_args": ["homeboy", "bench"],
+            "materialization": {
+                "canonical_root": workspace.path(),
+                "content_identity": identity,
+            },
+        });
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit generic replay");
+        let error = Error::internal_unexpected("snapshot staging unavailable").with_retryable(true);
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "lab_workspace_stage",
+            &error,
+        )
+        .expect("record snapshot failure");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["pre_execution_failure"]["details"] = serde_json::json!({
+                "classification": "snapshot_construction",
+                "recovery": {
+                    "owner": "durable_lifecycle",
+                    "action": "project_lifecycle_recovery",
+                    "reason": "No safe in-place recovery is known until the durable lifecycle owner evaluates this failed snapshot record.",
+                    "remediation": "Correct the controller-side snapshot inputs, then start the replacement lifecycle run selected by its owner.",
+                },
+            });
+        })
+        .expect("mark current snapshot recovery");
+
+        let (status_value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            ..Default::default()
+        })
+        .expect("status snapshot failure");
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose snapshot failure");
+
+        assert_eq!(
+            status_value["lab_snapshot_failure"],
+            diagnosis["lab_snapshot_failure"]
+        );
+        assert_eq!(status_value["lab_snapshot_failure"]["readiness"], "ready");
+        assert_eq!(
+            diagnosis["lab_snapshot_failure"]["action"]["id"],
+            "agent-task.retry.lab-replay.v1"
+        );
+        let command = diagnosis["retry_replay"]["action"]["args"]
+            .as_array()
+            .expect("admitted retry args");
+        assert_eq!(command[3], "retry");
+        assert_eq!(command[4], run_id);
+        assert!(diagnosis["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("actionable retry")
+            .iter()
+            .any(|action| action["action"]["id"] == "agent-task.retry.lab-replay.v1"));
+    });
+}
+
+#[test]
+fn status_projects_detached_staging_phase_and_failure_cause() {
+    with_temp_home(|| {
+        let run_id = "run-cli-detached-staging-failure";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("record staging phase");
+        let error = Error::validation_invalid_argument(
+            "rig",
+            "runner dispatch cannot materialize selected rig package",
+            Some("fixture-rig".to_string()),
+            None,
+        );
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "lab_staging_controller",
+            &error,
+        )
+        .expect("record staging failure");
+
+        let (status_value, exit_code) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+            ..Default::default()
+        })
+        .expect("status projects staging failure");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(status_value["state"], "failed");
+        assert_eq!(status_value["phase"], "materializing");
+        assert_eq!(
+            status_value["blocker"]["code"],
+            "validation.invalid_argument"
+        );
+        assert_eq!(
+            status_value["blocker"]["message"],
+            "Invalid argument 'rig': runner dispatch cannot materialize selected rig package"
+        );
+    });
+}
+
+#[test]
 fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-controller-admission-hash-io";
@@ -308,7 +512,7 @@ fn canonical_status_refs_hydrate_through_the_agent_task_resolver() {
 }
 
 #[test]
-fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry() {
+fn status_returns_control_plane_run_for_a_cancelled_retry() {
     with_isolated_home(|_| {
         let cook_id = "status-scope-cook";
         let source_run_id = "status-scope-attempt-1";
@@ -416,13 +620,16 @@ fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry()
             timeout: "30m".to_string(),
         };
         let value = status(status_args()).expect("canonical status").0;
+        assert_eq!(value["schema"], "homeboy/control-plane-run/v1");
         assert_eq!(value["run"], retry_run_id);
         assert_eq!(value["state"], "cancelled");
+        assert!(value.get("status_scope").is_none());
+        assert!(value.get("control_plane_run").is_none());
     });
 }
 
 #[test]
-fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
+fn status_returns_control_plane_run_when_cook_selection_is_bounded() {
     with_isolated_home(|_| {
         let cook_id = "status-scope-degraded-cook";
         let plan = test_plan();
@@ -454,8 +661,10 @@ fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
         })
         .expect("canonical status")
         .0;
+        assert_eq!(value["schema"], "homeboy/control-plane-run/v1");
         assert_eq!(value["run"], retry_run_id.as_str());
         assert_eq!(value["state"], "cancelled");
+        assert!(value.get("status_scope").is_none());
     });
 }
 
@@ -473,8 +682,10 @@ fn status_omits_scope_for_an_ordinary_non_cook_attempt() {
         })
         .expect("status");
 
+        assert_eq!(value["schema"], "homeboy/control-plane-run/v1");
         assert_eq!(value["run"], run_id);
         assert_eq!(value["state"], "queued");
+        assert!(value.get("status_scope").is_none());
     });
 }
 
@@ -532,20 +743,14 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
 
         assert_eq!(exit_code, 0);
         assert_eq!(value["state"], "candidate_recoverable");
-        assert_eq!(
-            value["durable_candidate"]["canonical_candidate"]["state"],
-            "patch_available"
-        );
+        assert_eq!(value["candidate"]["state"], "patch_available");
+        assert!(value.get("durable_candidate").is_none());
         assert!(
             rendered.contains("Status: candidate_recoverable"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("Candidate state: patch_available"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("Patch candidates: 1 non-empty / 0 empty"),
+            rendered.contains("Candidate: patch_available"),
             "{rendered}"
         );
         assert!(rendered.contains("Artifacts: 1"), "{rendered}");
@@ -733,6 +938,7 @@ impl AgentTaskCookAttemptDispatcher for CountingCookDispatcher {
 #[derive(Clone, Default)]
 struct CountingCookExecutor {
     executions: Arc<AtomicUsize>,
+    patch_path: Option<String>,
 }
 
 impl AgentTaskExecutorAdapter for CountingCookExecutor {
@@ -746,6 +952,18 @@ impl AgentTaskExecutorAdapter for CountingCookExecutor {
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("unexpected execution".to_string()),
+            artifacts: self
+                .patch_path
+                .as_ref()
+                .map(|path| {
+                    vec![AgentTaskArtifact {
+                        id: "candidate".to_string(),
+                        kind: "patch".to_string(),
+                        path: Some(path.clone()),
+                        ..Default::default()
+                    }]
+                })
+                .unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -1060,16 +1278,23 @@ fn recoverable_runner_cook_args(source: &std::path::Path) -> AgentTaskCookArgs {
 
 fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
     let root = tempfile::tempdir().expect("fixture root");
+    let remote = root.path().join("origin.git");
     let primary = root.path().join("primary");
     let source = root.path().join("worktree");
     std::fs::create_dir(&primary).expect("create primary checkout");
+    let initialized = Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&remote)
+        .status()
+        .expect("create fixture remote");
+    assert!(initialized.success());
     init_runtime_component_checkout(&primary);
     let remote = Command::new("git")
         .args([
             "remote",
             "add",
             "origin",
-            "https://github.com/example/fixture.git",
+            remote.to_str().expect("fixture remote path"),
         ])
         .current_dir(&primary)
         .status()
@@ -1084,6 +1309,12 @@ fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
         },
     )
     .expect("register fixture primary");
+    let pushed = Command::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&primary)
+        .status()
+        .expect("push fixture main");
+    assert!(pushed.success());
     let worktree = Command::new("git")
         .args(["worktree", "add", "-b", "fixture-recovery"])
         .arg(&source)
@@ -1119,6 +1350,175 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
         .expect("cook status resolves through its public alias");
         assert_eq!(status_exit, 0);
         assert_eq!(status_value["state"], "failed");
+    });
+}
+
+#[test]
+fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
+    with_temp_home(|| {
+        let cook_id = "cook-readiness-rearm";
+        let source_run_id = "cook-readiness-rearm-attempt-1";
+        let (root, source) = recoverable_runner_worktree();
+        let patch = root.path().join("candidate.patch");
+        std::fs::write(
+            &patch,
+            "diff --git a/plugin.php b/plugin.php\nindex 5ed90c8..70525e4 100644\n--- a/plugin.php\n+++ b/plugin.php\n@@ -1 +1,2 @@\n <?php\n+// recovered readiness retry\n",
+        )
+        .expect("write candidate patch");
+        let mut source_plan = AgentTaskPlan::new(
+            "cook-readiness-rearm-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture", "model": "fixture-model" },
+                "instructions": "retry readiness"
+            }))
+            .expect("provider task")],
+        );
+        source_plan.tasks[0].workspace.root = Some(source.display().to_string());
+        source_plan.tasks[0].metadata = json!({
+            "worktree_provision": { "kind": "explicit_cwd" }
+        });
+        let options = homeboy::agents::agent_task_service::CookRequest {
+            identity: homeboy::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: source_run_id.to_string(),
+                initial_plan: source_plan.clone(),
+            },
+            workspace: homeboy::agents::agent_task_service::CookWorkspace {
+                to_worktree: source.display().to_string(),
+                source_worktree_path: Some(source),
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                ..Default::default()
+            },
+            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
+            finalization: homeboy::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "Readiness rearm".to_string(),
+                commit_message: "Readiness rearm".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&source_plan, Some(source_run_id))
+            .expect("persist source attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            source_run_id,
+        )
+        .expect("bind source attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            source_run_id,
+            &source_plan,
+            "provider_readiness",
+            &Error::internal_unexpected("injected readiness timeout").with_retryable(true),
+        )
+        .expect("persist retryable readiness failure");
+        assert_eq!(
+            agent_task_lifecycle::exact_record(source_run_id)
+                .expect("source record")
+                .metadata["provider_executions_consumed"],
+            0
+        );
+        let refusal = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: source_run_id.to_string(),
+                preflight: false,
+                rearm: false,
+                artifact_id: None,
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+                full: true,
+            },
+            Arc::new(CapturingExecutor::default()),
+            |_| Ok(None),
+        )
+        .expect_err("non-rearm continuation cannot reuse a terminal attempt");
+        assert!(refusal.message.contains("requires --rearm"));
+
+        let (continued, continued_exit_code) = continue_cook_with(
+            CookContinueArgs {
+                cook_or_attempt_id: source_run_id.to_string(),
+                preflight: false,
+                rearm: true,
+                artifact_id: None,
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+                full: true,
+            },
+            Arc::new(CapturingExecutor::default()),
+            |_| Ok(None),
+        )
+        .expect("rearm reserves and dispatches a successor");
+
+        assert_eq!(continued_exit_code, 0, "{continued:#}");
+        let index =
+            agent_task_lifecycle::cook_index(cook_id).expect("Cook index includes successor");
+        let successor_run_id = index.latest_run_id;
+        assert_ne!(successor_run_id, source_run_id, "{continued:#}");
+        assert_eq!(continued["latest_run_id"], successor_run_id);
+        let successor = agent_task_lifecycle::exact_record(&successor_run_id)
+            .expect("successor record is durable");
+        assert_eq!(successor.state, AgentTaskRunState::Queued, "{successor:#?}");
+        assert_eq!(successor.metadata["retry_of"], source_run_id);
+        assert_eq!(successor.metadata["provider_executions_consumed"], 0);
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let queued = homeboy::agents::agent_task_service::run_next_with_cook_dispatcher(
+            Arc::new(CountingCookExecutor {
+                executions: Arc::clone(&executions),
+                patch_path: Some(patch.display().to_string()),
+            }),
+            |_| Ok(None),
+            Some(&std::collections::HashSet::from([successor_run_id.clone()])),
+        )
+        .expect("queue owner executes the Cook successor through its lifecycle");
+
+        let completed = agent_task_lifecycle::exact_record(&successor_run_id)
+            .expect("successor completion is durable");
+        assert_eq!(queued.exit_code, 0, "{queued:#?}\n{completed:#?}");
+        assert_eq!(executions.load(Ordering::SeqCst), 1, "{queued:#?}");
+        assert_eq!(completed.metadata["provider_executions_consumed"], 1);
+        assert!(
+            completed.metadata["latest_promotion"]["deterministic_gates"].is_array(),
+            "Cook promotion and gates must run instead of the generic plan runner: {completed:#?}"
+        );
+        assert_eq!(
+            completed.metadata["cook_progress"]["terminal_status"],
+            "green_no_finalize",
+            "the Cook-owned no-finalize finalization decision must close the lifecycle: {completed:#?}"
+        );
     });
 }
 
@@ -2016,7 +2416,6 @@ fn diagnose_surfaces_queued_runner_ownership_before_a_job_id_is_recorded() {
             record.metadata["runner_id"] = json!("homeboy-lab");
             record.metadata["runner_execution_record"] = json!({
                 "status": "planned",
-                "agent_task_run_id": run_id,
                 "runner_id": "homeboy-lab"
             });
             record.metadata["cook_progress"] = json!({ "phase": "provider_start" });
@@ -2272,8 +2671,17 @@ fn unmaterialized_cook_resume_replays_the_canonical_action_result() {
         let replay = resume(args()).expect("replay admission resume");
 
         assert_eq!(replay, first);
-        assert_eq!(first.0["schema"], "homeboy/unmaterialized-cook-resume/v1");
-        assert_eq!(first.0["run_id"], run_id);
+        assert_eq!(
+            first.0["schema"],
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(first.0["action"], "resume");
+        assert_eq!(first.0["idempotency_key"], "resume-unmaterialized-1");
+        assert_eq!(
+            first.0["result"]["schema"],
+            "homeboy/unmaterialized-cook-resume/v1"
+        );
+        assert_eq!(first.0["result"]["data"]["run_id"], run_id);
     });
 }
 
@@ -2511,7 +2919,7 @@ fn logs_return_canonical_events_while_diagnostics_stay_on_diagnose_and_review() 
         assert_eq!(diagnose_value["root_cause"]["class"], "provider_discovery");
         assert_eq!(diagnose_value["root_cause"]["task_id"], "task-a");
         assert_eq!(
-            review_value["diagnostic_summary"]["message"],
+            review_value["evidence"]["diagnostic_summary"]["message"],
             diagnose_value["root_cause"]["message"]
         );
         assert_eq!(
@@ -4349,11 +4757,20 @@ fn cancel_command_marks_queued_run_cancelled() {
             idempotency_key: Some("cli-cancel-1".to_string()),
         })
         .expect("cancelled");
-        // The reported outcome must describe the durable effect, not merely that
-        // the request was accepted (#12572).
-        assert_eq!(value["cancellation"]["outcome"], "cancelled");
-        assert_eq!(value["cancellation"]["terminal"], true);
-        assert_eq!(value["cancellation"]["run_id"], "run-cli-cancel");
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(value.clone()).expect("canonical acknowledgement");
+        let result: homeboy_control_plane_contract::ControlPlaneCancelResult =
+            serde_json::from_value(acknowledgement.result.data.clone()).expect("typed result");
+        assert_eq!(
+            acknowledgement.result.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA
+        );
+        assert_eq!(
+            result.disposition,
+            homeboy_control_plane_contract::ControlPlaneCancelDisposition::Cancelled
+        );
+        assert!(result.terminal);
+        assert_eq!(acknowledgement.resource.run.as_str(), "run-cli-cancel");
         let replay = cancel(CancelArgs {
             run_id: "run-cli-cancel".to_string(),
             full: false,
@@ -4362,21 +4779,21 @@ fn cancel_command_marks_queued_run_cancelled() {
         })
         .expect("replayed cancellation")
         .0;
-        assert_eq!(
-            replay["cancellation"]["acknowledgement"],
-            value["cancellation"]["acknowledgement"]
-        );
-        let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
+        assert_eq!(replay, value);
 
         assert_eq!(exit_code, 0);
-        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            acknowledgement.resource.state,
+            homeboy_control_plane_contract::ControlPlaneRunState::Cancelled
+        );
+        let record = agent_task_lifecycle::status("run-cli-cancel").expect("record");
         assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
         assert_eq!(record.metadata["cancel_reason"], json!("not selected"));
     });
 }
 
 #[test]
-fn reconcile_apply_uses_a_replayable_control_plane_action() {
+fn reconcile_apply_returns_the_replayable_control_plane_acknowledgement() {
     with_temp_home(|| {
         let run_id = "run-cli-reconcile-action";
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
@@ -4389,16 +4806,25 @@ fn reconcile_apply_uses_a_replayable_control_plane_action() {
             idempotency_key: Some("cli-reconcile-1".to_string()),
         };
         let (first, exit_code) = reconcile_run(apply()).expect("reconcile action");
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(first.clone()).expect("canonical action acknowledgement");
         assert_eq!(exit_code, 0);
-        assert_eq!(first["schema"], "homeboy/agent-task-reconcile/v1");
-        assert_eq!(first["authorization"], "explicit-apply");
-        assert_eq!(first["idempotency_key"], "cli-reconcile-1");
+        assert_eq!(
+            acknowledgement.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(
+            acknowledgement.action,
+            homeboy_control_plane_contract::ControlPlaneAction::Reconcile
+        );
+        assert_eq!(acknowledgement.idempotency_key, "cli-reconcile-1");
+        assert_eq!(
+            acknowledgement.result.schema,
+            "homeboy/agent-task-reconcile/v1"
+        );
 
         let replay = reconcile_run(apply()).expect("replay").0;
-        assert_eq!(
-            replay["action_acknowledgement"],
-            first["action_acknowledgement"]
-        );
+        assert_eq!(replay, first);
 
         let preview = reconcile_run(ReconcileArgs {
             run_id: run_id.to_string(),
@@ -4409,7 +4835,7 @@ fn reconcile_apply_uses_a_replayable_control_plane_action() {
         .expect("preview")
         .0;
         assert_eq!(preview["authorization"], "preview");
-        assert!(preview.get("action_acknowledgement").is_none());
+        assert_eq!(preview["schema"], "homeboy/agent-task-reconcile/v1");
     });
 }
 
@@ -4439,19 +4865,11 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
 
         assert_eq!(exit_code, 0);
         assert_eq!(
-            value["cancellation"]["outcome"],
+            value["result"]["data"]["disposition"],
             "deferred_for_terminal_provider"
         );
-        assert_eq!(value["cancellation"]["terminal"], false);
-        assert_eq!(value["state"], "running");
-        assert!(
-            value["summary"]
-                .as_str()
-                .expect("summary")
-                .contains("deliberately not applied"),
-            "unexpected summary: {}",
-            value["summary"]
-        );
+        assert_eq!(value["result"]["data"]["terminal"], false);
+        assert_ne!(value["resource"]["state"], "cancelled");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "a deliberate deferral must not consume the convergence wait"
@@ -4460,7 +4878,7 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
 }
 
 #[test]
-fn retry_command_submits_new_queued_run() {
+fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-retry-source"))
             .expect("submitted");
@@ -4478,13 +4896,32 @@ fn retry_command_submits_new_queued_run() {
             provider_rotations: None,
         })
         .expect("retry queued");
-        let action_acknowledgement = value["action_acknowledgement"].clone();
-        let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(value.clone()).expect("canonical action acknowledgement");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(record.run_id, "run-retry-cli");
-        assert_eq!(record.state, AgentTaskRunState::Queued);
-        assert_eq!(record.metadata["retry_of"], json!("run-retry-source"));
+        assert_eq!(
+            acknowledgement.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(
+            acknowledgement.action,
+            homeboy_control_plane_contract::ControlPlaneAction::Retry
+        );
+        assert_eq!(acknowledgement.idempotency_key, "retry-cli-1");
+        assert_eq!(
+            acknowledgement.result.data["record"]["run_id"],
+            "run-retry-cli"
+        );
+        assert_eq!(acknowledgement.result.data["record"]["state"], "queued");
+        assert_eq!(
+            acknowledgement.result.data["record"]["metadata"]["retry_of"],
+            json!("run-retry-source")
+        );
+        assert_eq!(
+            value,
+            serde_json::to_value(&acknowledgement).expect("serialize canonical acknowledgement")
+        );
         let replay = retry(RetryArgs {
             run_id: "run-retry-source".to_string(),
             new_run_id: Some("run-retry-cli".to_string()),
@@ -4499,7 +4936,7 @@ fn retry_command_submits_new_queued_run() {
         })
         .expect("replayed retry")
         .0;
-        assert_eq!(replay["action_acknowledgement"], action_acknowledgement);
+        assert_eq!(replay, value);
         assert_eq!(
             agent_task_lifecycle::list_records().expect("records").len(),
             2,
@@ -4765,6 +5202,8 @@ fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
         "cargo test exact::replacement",
         "--authorize-external-proof",
         "Chris approved corrected gate evidence",
+        "--authorize-interrupted-rerun",
+        "Chris approved rerunning after the interrupted executor",
     ])
     .expect("replacement verification command parses");
     let Commands::AgentTask(args) = cli.command else {
@@ -4778,6 +5217,10 @@ fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
     assert_eq!(
         args.authorize_external_proof,
         "Chris approved corrected gate evidence"
+    );
+    assert_eq!(
+        args.authorize_interrupted_rerun.as_deref(),
+        Some("Chris approved rerunning after the interrupted executor")
     );
 }
 
@@ -4822,15 +5265,15 @@ fn verify_replacement_file_gates_are_snapshotted_before_execution() {
 }
 
 #[test]
-fn resume_command_executes_existing_run() {
+fn resume_command_executes_existing_run_and_returns_the_replayable_acknowledgement() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli")).expect("submitted");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (_value, exit_code) = run_resume_with_executor(
+        let (value, exit_code) = run_resume_with_executor(
             "run-resume-cli".to_string(),
             false,
-            None,
+            Some("resume-cli-1".to_string()),
             Arc::new(InspectingExecutor {
                 run_id: "run-resume-cli".to_string(),
                 observed_status: Arc::clone(&observed_status),
@@ -4846,8 +5289,39 @@ fn resume_command_executes_existing_run() {
         let completed = lifecycle_status("run-resume-cli").expect("completed status");
 
         assert_eq!(exit_code, 0);
+        let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
+            serde_json::from_value(value.clone()).expect("canonical action acknowledgement");
+        assert_eq!(
+            acknowledgement.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
+        );
+        assert_eq!(
+            acknowledgement.action,
+            homeboy_control_plane_contract::ControlPlaneAction::Resume
+        );
+        assert_eq!(acknowledgement.idempotency_key, "resume-cli-1");
+        assert_eq!(
+            acknowledgement.resource.state,
+            homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+        );
         assert!(observed.metadata["resume_requested_at"].is_string());
         assert_eq!(completed.state, AgentTaskRunState::Succeeded);
+
+        let replay_executor = Arc::new(CapturingExecutor::default());
+        let replay = run_resume_with_executor(
+            "run-resume-cli".to_string(),
+            false,
+            Some("resume-cli-1".to_string()),
+            replay_executor.clone(),
+        )
+        .expect("replayed resume")
+        .0;
+        assert_eq!(replay, value);
+        assert!(replay_executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
     });
 }
 
@@ -5046,6 +5520,41 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         assert!(observed.workspace.task_url.is_none());
         assert!(observed.workspace.cleanup.is_none());
         assert!(observed.workspace.materialization.is_null());
+    });
+}
+
+#[test]
+fn durable_run_plan_preserves_materialized_worktree_branch_for_discovery() {
+    with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
+        plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
+        plan.tasks[0].workspace.branch = Some("fix/durable-branch".to_string());
+        plan.tasks[0].workspace.base_ref = Some("origin/main".to_string());
+        plan.tasks[0].workspace.materialization = json!({
+            "root": workspace.path().display().to_string()
+        });
+
+        run_loaded_plan(
+            plan,
+            Some("materialized-branch-run"),
+            Arc::new(CapturingExecutor::default()),
+        )
+        .expect("durable run-plan completed");
+
+        let report = homeboy::agents::agent_task_service::discover_runs_with_options(
+            homeboy::agents::agent_task_service::AgentTaskDiscoveryFilter::All,
+            homeboy::agents::agent_task_service::AgentTaskDiscoveryOptions {
+                branch: Some("fix/durable-branch".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover materialized durable run");
+        assert_eq!(report.runs.len(), 1);
+        assert_eq!(report.runs[0].run_id, "materialized-branch-run");
+        assert_eq!(report.runs[0].branch.as_deref(), Some("fix/durable-branch"));
     });
 }
 

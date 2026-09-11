@@ -1,6 +1,7 @@
 use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -651,7 +652,14 @@ fn ensure_git_dependency_fresh(
         return Err(terminal_dependency_error(local_path, &freshness, None));
     }
 
-    let fetch_error = run_git(local_path, &["fetch", "--prune", remote]).err();
+    let fetch_error = homeboy_core::git::fetch_remote_tracking_refs_until(
+        local_path,
+        &["fetch", "--prune", remote],
+        "git fetch runner dependency",
+        &[],
+        Instant::now() + Duration::from_secs(30),
+    )
+    .err();
     let upstream_head = git_output(local_path, &["rev-parse", "@{u}"]).ok();
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {

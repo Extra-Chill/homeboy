@@ -1,0 +1,12 @@
+{
+  "schema": "homeboy/control-plane-run-page/v1",
+  "runs": [
+    {
+      "schema": "homeboy/control-plane-run/v1",
+      "run": "run-fixture-1",
+      "state": "running",
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "has_more": false
+}

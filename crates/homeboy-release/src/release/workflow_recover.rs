@@ -10,6 +10,7 @@ use homeboy_core::plan::PlanStep;
 use homeboy_engine_primitives::shell::quote_path;
 
 use super::advanced_remote;
+use super::changelog_history;
 use super::context::load_component;
 use super::scope::ReleaseScope;
 use super::types::{ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan};
@@ -58,6 +59,72 @@ pub(super) fn run_recover(
     Option<super::types::ReleaseWorkspaceOutput>,
     i32,
 )> {
+    if !input.repair_changelog_history.is_empty() {
+        let component = load_component(
+            &input.component_id,
+            &ReleaseOptions {
+                path_override: input.path_override.clone(),
+                ..Default::default()
+            },
+        )?;
+        let report = changelog_history::recover(
+            &component,
+            &input.component_id,
+            &input.repair_changelog_history,
+            !input.dry_run,
+        )?;
+        let affected_entries = report
+            .affected_versions
+            .iter()
+            .map(|section| section.entries.len())
+            .sum::<usize>();
+        let changed = affected_entries > 0;
+        let status = match (!input.dry_run, changed) {
+            (true, true) => "repaired",
+            (true, false) => "unchanged",
+            (false, true) => "planned",
+            (false, false) => "clean",
+        }
+        .to_string();
+        let release_summary = if changed {
+            vec![format!(
+                "{} {} proven post-release changelog entr{} across {} finalized section{}.",
+                if input.dry_run { "Detected" } else { "Removed" },
+                affected_entries,
+                if affected_entries == 1 { "y" } else { "ies" },
+                report.affected_versions.len(),
+                if report.affected_versions.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+            )]
+        } else {
+            vec!["No post-release changelog entries were detected in the requested finalized sections.".to_string()]
+        };
+        return Ok((
+            ReleaseCommandResult {
+                component_id: input.component_id.clone(),
+                status,
+                phase: release_execution_plan(input).phase,
+                bump_type: "recover".to_string(),
+                dry_run: input.dry_run,
+                releasable_commits: 0,
+                new_version: None,
+                tag: None,
+                skipped_reason: None,
+                plan: None,
+                run: None,
+                deployment: None,
+                continuation_command: None,
+                release_summary,
+                changelog_history_recovery: Some(report),
+                readiness: None,
+            },
+            None,
+            0,
+        ));
+    }
     if let Some(record) =
         super::workspace::reconcile_pending(roots, &input.component_id, owner_run_ref)?
     {
@@ -67,6 +134,7 @@ pub(super) fn run_recover(
             releasable_commits: 0, new_version: None, tag: None, skipped_reason: None, plan: None, run: None,
             deployment: None, continuation_command: None,
             release_summary: vec![format!("Reconciled provider workspace `{}` without replaying release mutation or push.", record.owner_run_ref)],
+            changelog_history_recovery: None,
             readiness: None,
         }, Some(super::workspace::output_from_record(&record)), 0));
     }
@@ -88,6 +156,7 @@ pub(super) fn run_recover(
                 deployment: Some(deployment),
                 continuation_command: None,
                 release_summary: vec!["Resumed only incomplete release deployment targets; publication steps were not replayed.".to_string()],
+                changelog_history_recovery: None,
                 readiness: None,
             },
             None,
@@ -384,6 +453,7 @@ pub(super) fn run_recover(
                     )],
                 ]
                 .concat(),
+                changelog_history_recovery: None,
                 readiness: None,
             },
             None,
@@ -566,6 +636,7 @@ pub(super) fn run_recover(
                 )],
             ]
             .concat(),
+            changelog_history_recovery: None,
             readiness: None,
         },
         None,
@@ -836,6 +907,7 @@ where
             )],
         ]
         .concat(),
+        changelog_history_recovery: None,
         readiness: None,
     }))
 }
@@ -954,6 +1026,7 @@ fn recovery_dry_run_result(
         deployment: None,
         continuation_command: None,
         release_summary: actions,
+        changelog_history_recovery: None,
         readiness: None,
     }
 }

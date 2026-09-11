@@ -1206,9 +1206,10 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
     assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
     assert_eq!(err.details["field"], "runner");
     assert_eq!(err.details["id"], "homeboy lab");
-    assert!(err
-        .message
-        .contains("Lab offload refused runner `homeboy lab`"));
+    assert_eq!(
+        err.message,
+        "Invalid argument 'runner': Lab offload refused runner `homeboy lab` because its active daemon control plane differs from the configured job command binary `/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy`. Active daemon control plane: homeboy 0.0.0+test; job command binary: homeboy 0.229.11+new. connected runner daemon control plane version `homeboy 0.228.0` differs from configured job command binary version `homeboy 0.229.11`; run recovery_commands in order when runner active jobs are drained Stale runner runtimes can return malformed or misleading provider output; follow the first remediation hint before retrying."
+    );
     assert!(err
         .message
         .contains("/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof"));

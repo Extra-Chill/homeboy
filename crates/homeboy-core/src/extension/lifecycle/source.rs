@@ -16,6 +16,15 @@ pub fn is_git_url(source: &str) -> bool {
         || source.ends_with(".git")
 }
 
+/// Whether a refresh source names an extant controller-local resource.
+///
+/// Keep this alongside the source transport classifier so admission and the
+/// lifecycle agree about which inputs are local rather than inferring product
+/// conventions from extension IDs or manifests.
+pub fn is_local_source(source: &str) -> bool {
+    !is_git_url(source) && Path::new(source).exists()
+}
+
 /// Check if a git-cloned extension has updates available.
 /// Runs `git fetch` then checks if HEAD is behind the remote tracking branch.
 /// Returns None for linked extensions or if check fails.
@@ -104,7 +113,6 @@ pub struct UpdateAvailable {
 mod tests {
     use super::*;
     use crate::test_support;
-    use std::process::Command;
     use std::time::Instant;
 
     #[test]
@@ -148,19 +156,7 @@ mod tests {
         assert!(timeouts[1].1 < timeouts[0].1);
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git fixture command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 }
 
 pub fn read_source_revision(extension_id: &str) -> Option<String> {
@@ -326,7 +322,6 @@ fn source_metadata_file(extension_dir: &std::path::Path, kind: &str) -> String {
 #[cfg(test)]
 mod cleanliness_tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn modified_and_untracked_status_lines_yield_paths() {
@@ -373,19 +368,7 @@ mod cleanliness_tests {
         );
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 
     fn commit_all(path: &Path) {
         git(path, &["init", "-b", "main"]);

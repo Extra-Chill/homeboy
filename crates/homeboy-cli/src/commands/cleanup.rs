@@ -205,6 +205,11 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
                     CleanupArtifactsSortArg::Size => ArtifactCleanupSort::Size,
                 },
                 limit: args.limit,
+                cursor: args
+                    .cursor
+                    .as_deref()
+                    .map(cleanup::parse_artifact_cleanup_cursor)
+                    .transpose()?,
                 merged_only: args.merged_only,
                 min_age_days: args.min_age_days,
                 include_active_worktrees: args.include_active_worktrees,
@@ -510,7 +515,7 @@ fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
 }
 
 fn cleanup_job_status(job_id: &str, full: bool) -> homeboy::core::Result<Value> {
-    let job = LocalControllerJobClient::connect()?.status(job_id)?;
+    let job = LocalControllerJobClient::connect_existing_job(job_id)?.status(job_id)?;
     if full {
         return serde_json::to_value(job).map_err(|error| {
             homeboy::core::Error::internal_json(
@@ -525,7 +530,7 @@ fn cleanup_job_status(job_id: &str, full: bool) -> homeboy::core::Result<Value> 
 fn cleanup_job_resume(job_id: &str) -> homeboy::core::Result<Value> {
     // Starting is idempotent: a running or terminal job returns its durable state.
     Ok(compact_cleanup_job(
-        &LocalControllerJobClient::connect()?.start(job_id)?,
+        &LocalControllerJobClient::connect_existing_job(job_id)?.start(job_id)?,
         "resume",
     ))
 }
@@ -678,7 +683,7 @@ fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResul
             .map(|output| (output, 0));
     }
 
-    let timeout = cleanup_category_timeout(cleanup_category_base_budget(), None)
+    let timeout = cleanup_category_timeout(cleanup_category_budget(true), None)
         .saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
     let executable = std::env::current_exe().map_err(|error| {
         homeboy::core::Error::internal_io(
@@ -1988,7 +1993,14 @@ fn cleanup_inventory_with_deadline(
             &args,
             deadline,
             CleanupCategoryCommandOverrides::default(),
-            || repo_artifacts_category(apply, deadline).map(|category| vec![category]),
+            || {
+                repo_artifacts_category(
+                    apply,
+                    cleanup_category_action_deadline(deadline),
+                    args.cursor.as_deref(),
+                )
+                .map(|category| vec![category])
+            },
         );
     }
 
@@ -2001,11 +2013,26 @@ fn cleanup_inventory_with_deadline(
             deadline,
             CleanupCategoryCommandOverrides::default(),
             || {
-                let output = worktree::cleanup(WorktreeCleanupOptions {
-                    force: false,
-                    dry_run: !apply,
-                    cleanup_branches: apply,
-                    allow_unmerged_branches: false,
+                let category_deadline = cleanup_category_action_deadline(deadline);
+                let remaining = category_deadline
+                    .map(|deadline| {
+                        deadline.duration_since(SystemTime::now()).map_err(|_| {
+                            homeboy::core::Error::internal_unexpected(
+                                "cleanup category deadline exhausted before task-worktree cleanup",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let output = worktree::cleanup_page(worktree::WorktreeCleanupPageOptions {
+                    cleanup: WorktreeCleanupOptions {
+                        force: false,
+                        dry_run: !apply,
+                        cleanup_branches: apply,
+                        allow_unmerged_branches: false,
+                    },
+                    limit: args.limit.unwrap_or(500).max(1) as usize,
+                    cursor: args.cursor.clone(),
+                    deadline: remaining.and_then(|remaining| Instant::now().checked_add(remaining)),
                 })?;
                 task_worktrees_category(output, apply).map(|category| vec![category])
             },
@@ -2456,7 +2483,7 @@ fn cleanup_inventory_with_deadline(
                         cursor: args.cursor.clone(),
                         now: std::time::SystemTime::now(),
                         lease_ttl: policy.shared_store_lease_ttl(),
-                        deadline: None,
+                        deadline: cleanup_category_action_deadline(deadline),
                     })?;
                 category_from_output(
                     SHARED_CARGO_TARGETS_METADATA,
@@ -2500,26 +2527,10 @@ fn cleanup_inventory_with_deadline(
                         } else {
                             OutputBudget::COLLECTION.max_items
                         },
-                        deadline: deadline.or_else(|| {
-                            SystemTime::now().checked_add(Duration::from_secs(
-                                config.retention.automatic_retention_max_run_seconds,
-                            ))
-                        }),
+                        deadline: cleanup_category_action_deadline(deadline),
                     },
                 )?;
-                category_from_output(
-                    EXTERNAL_STORAGE_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.candidate_count,
-                        applied_count: output.applied_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.estimated_bytes,
-                        reclaimed_bytes: output.reclaimed_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
+                external_storage_category(output, apply)
             },
         );
     }
@@ -2788,7 +2799,8 @@ fn run_cleanup_category_process(
     args: &CleanupArgs,
     deadline: Option<SystemTime>,
 ) -> std::result::Result<Vec<CleanupInventoryCategory>, Box<CleanupInventoryCategory>> {
-    let wall_clock_budget = cleanup_category_timeout(cleanup_category_base_budget(), deadline);
+    let wall_clock_budget =
+        cleanup_category_timeout(cleanup_category_budget(args.include.len() == 1), deadline);
     if wall_clock_budget <= CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2) {
         return Err(Box::new(cleanup_category_timeout_failure(
             metadata,
@@ -3010,14 +3022,23 @@ fn exhausted_category_budget(deadline: Option<SystemTime>) -> Option<Duration> {
     (remaining < CLEANUP_CATEGORY_MINIMUM_BUDGET).then_some(remaining)
 }
 
-/// Budget every cleanup category starts from, before category-specific needs.
-fn cleanup_category_base_budget() -> Duration {
+/// Budget a cleanup category according to how the operator can resume it.
+///
+/// Multi-category sweeps retain the shorter isolation budget so one hung owner
+/// cannot starve everything after it. A scoped category is itself the published
+/// continuation, so it receives the aggregate budget and can finish legitimate
+/// work whose cost scales with retained resources (#12727).
+fn cleanup_category_budget(scoped: bool) -> Duration {
     test_cleanup_category_timeout().unwrap_or_else(|| {
-        Duration::from_secs(
-            defaults::load_config()
-                .retention
-                .cleanup_category_max_seconds,
-        )
+        let retention = defaults::load_config().retention;
+        let seconds = if scoped {
+            retention
+                .cleanup_category_max_seconds
+                .max(retention.cleanup_aggregate_max_seconds)
+        } else {
+            retention.cleanup_category_max_seconds
+        };
+        Duration::from_secs(seconds)
     })
 }
 
@@ -3029,6 +3050,27 @@ fn cleanup_category_timeout(required: Duration, deadline: Option<SystemTime>) ->
                 .unwrap_or(Duration::ZERO),
         )
     })
+}
+
+/// Bound direct category work to the child process's inherited allowance, not
+/// merely the parent aggregate wall. Reserve time for the child to serialize
+/// evidence before its supervisor reaps it.
+fn cleanup_category_action_deadline(deadline: Option<SystemTime>) -> Option<SystemTime> {
+    let child_deadline = std::env::var(CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|milliseconds| {
+            SystemTime::now().checked_add(
+                Duration::from_millis(milliseconds)
+                    .saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE),
+            )
+        });
+    match (deadline, child_deadline) {
+        (Some(parent), Some(child)) => Some(parent.min(child)),
+        (Some(parent), None) => Some(parent),
+        (None, Some(child)) => Some(child),
+        (None, None) => None,
+    }
 }
 
 fn cleanup_category_heartbeat() -> Duration {
@@ -3401,7 +3443,11 @@ struct RepoArtifactRootDiagnostic {
 fn repo_artifacts_category(
     apply: bool,
     deadline: Option<SystemTime>,
+    cursor: Option<&str>,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
+    let cursor = cursor
+        .map(cleanup::parse_artifact_cleanup_cursor)
+        .transpose()?;
     let configured_roots: Vec<PathBuf> = homeboy::core::component::registered()
         .unwrap_or_default()
         .into_iter()
@@ -3409,6 +3455,26 @@ fn repo_artifacts_category(
         .collect();
     let include_source_checkout = configured_roots.is_empty();
     let mut collected_roots = repo_artifact_roots(configured_roots, include_source_checkout, apply);
+    if let Some(cursor) = &cursor {
+        if collected_roots.roots.len() > 1 {
+            let cursor_root = PathBuf::from(&cursor.root);
+            collected_roots.roots.retain(|(_, options)| {
+                options
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path == &cursor_root)
+            });
+        }
+        if collected_roots.roots.len() != 1 {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "cursor",
+                "artifact cleanup cursor does not match a configured cleanup root",
+                None,
+                None,
+            ));
+        }
+        collected_roots.roots[0].1.cursor = Some(cursor.clone());
+    }
     apply_repo_artifact_scan_budget(&mut collected_roots.roots, deadline);
     let mut output = cleanup_repo_artifact_roots(collected_roots.roots);
     output.diagnostics.extend(collected_roots.diagnostics);
@@ -3433,6 +3499,11 @@ fn repo_artifacts_category(
         .iter()
         .filter(|diagnostic| !diagnostic.success)
         .count();
+    let partial_inventory = output
+        .diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.output.as_ref())
+        .any(|output| !output.scan_complete);
     Ok(CleanupInventoryCategory {
         category: REPO_ARTIFACTS_METADATA.category.to_string(),
         canonical_cleanup_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
@@ -3447,18 +3518,26 @@ fn repo_artifacts_category(
                 .all(|diagnostic| !diagnostic.success),
         skip_reason: (failure_count > 0)
             .then(|| format!("{failure_count} owned cleanup root(s) could not be inspected")),
-        failure: (failure_count > 0).then(|| CleanupInventoryCategoryFailure {
-            code: "cleanup.partial_inventory".to_string(),
-            message: format!("{failure_count} owned cleanup root(s) could not be inspected"),
-            retryable: Some(true),
+        failure: (failure_count > 0 || partial_inventory).then(|| {
+            CleanupInventoryCategoryFailure {
+                code: "cleanup.partial_inventory".to_string(),
+                message: if partial_inventory {
+                    "repo artifact inventory reached its bounded worktree scan budget".to_string()
+                } else {
+                    format!("{failure_count} owned cleanup root(s) could not be inspected")
+                },
+                retryable: Some(true),
+            }
         }),
-        outcome: if failure_count > 0 {
+        outcome: if partial_inventory {
+            CLEANUP_CATEGORY_OUTCOME_TIMED_OUT
+        } else if failure_count > 0 {
             "failed"
         } else {
             "completed"
         }
         .to_string(),
-        inventory_completeness: if failure_count > 0 {
+        inventory_completeness: if failure_count > 0 || partial_inventory {
             "partial"
         } else {
             "complete"
@@ -3467,7 +3546,8 @@ fn repo_artifacts_category(
         elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
-        continuation_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        continuation_command: repo_artifact_continuation_command(apply, &output.diagnostics)
+            .unwrap_or_else(|| REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply)),
         cleanup_run_ref: None,
         candidate_count: output.candidate_count,
         applied_count: output.applied_count,
@@ -3482,6 +3562,22 @@ fn repo_artifacts_category(
             )
         })?,
     })
+}
+
+fn repo_artifact_continuation_command(
+    apply: bool,
+    diagnostics: &[RepoArtifactRootDiagnostic],
+) -> Option<String> {
+    let cursor = diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.output.as_ref())
+        .find_map(|output| output.next_cursor.as_ref())?;
+    let cursor = serde_json::to_string(cursor).ok()?;
+    Some(format!(
+        "{} --cursor {}",
+        REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        quote_arg(&cursor)
+    ))
 }
 
 struct RepoArtifactRootsCleanup {
@@ -3512,6 +3608,7 @@ fn cleanup_repo_artifact_roots(
     for (scope, options) in roots {
         match cleanup::cleanup_artifacts(options) {
             Ok(root_output) => {
+                let scan_complete = root_output.scan_complete;
                 output.candidate_count += root_output.candidate_count;
                 output.applied_count += root_output.applied_count;
                 output.skipped_count += root_output.skipped_count;
@@ -3524,6 +3621,9 @@ fn cleanup_repo_artifact_roots(
                     output: Some(root_output),
                     error: None,
                 });
+                if !scan_complete {
+                    break;
+                }
             }
             Err(error) => output.diagnostics.push(RepoArtifactRootDiagnostic {
                 scope,
@@ -3572,6 +3672,7 @@ fn repo_artifact_roots(
                     temp_roots: Vec::new(),
                     sort: ArtifactCleanupSort::Discovery,
                     limit: None,
+                    cursor: None,
                     merged_only: false,
                     min_age_days: None,
                     include_active_worktrees: false,
@@ -3591,6 +3692,7 @@ fn repo_artifact_roots(
                 temp_roots: Vec::new(),
                 sort: ArtifactCleanupSort::Discovery,
                 limit: None,
+                cursor: None,
                 merged_only: false,
                 min_age_days: None,
                 include_active_worktrees: false,
@@ -3709,6 +3811,31 @@ fn category_from_output<T: Serialize>(
     )
 }
 
+fn external_storage_category(
+    output: cleanup::ExternalStorageCleanupOutput,
+    apply: bool,
+) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
+    let inventory_complete = output.inventory_complete;
+    category_from_output(
+        EXTERNAL_STORAGE_METADATA,
+        apply,
+        CleanupCategoryMetrics {
+            candidate_count: output.candidate_count,
+            applied_count: output.applied_count,
+            skipped_count: output.skipped_count,
+            estimated_bytes: output.estimated_bytes,
+            reclaimed_bytes: output.reclaimed_bytes,
+        },
+        output,
+    )
+    .map(|mut category| {
+        if !inventory_complete {
+            category.inventory_completeness = "partial".to_string();
+        }
+        vec![category]
+    })
+}
+
 fn category_from_command<T: Serialize>(
     commands: CleanupCategoryCommands,
     metrics: CleanupCategoryMetrics,
@@ -3762,6 +3889,10 @@ fn task_worktrees_category(
         output,
     )?;
     category.reconciliation_blocker_count = reconciliation_blocker_count;
+    if let Some(continuation) = category.output.get("continuation").and_then(Value::as_str) {
+        category.inventory_completeness = "partial".to_string();
+        category.continuation_command = continuation.to_string();
+    }
     Ok(category)
 }
 
@@ -4434,6 +4565,26 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn scoped_cleanup_continuations_receive_the_aggregate_budget() {
+        with_isolated_home(|_| {
+            let retention = defaults::RetentionConfig::default();
+
+            assert_eq!(
+                cleanup_category_budget(false),
+                Duration::from_secs(retention.cleanup_category_max_seconds)
+            );
+            assert_eq!(
+                cleanup_category_budget(true),
+                Duration::from_secs(
+                    retention
+                        .cleanup_category_max_seconds
+                        .max(retention.cleanup_aggregate_max_seconds)
+                )
+            );
+        });
+    }
 
     fn controller_cleanup_request() -> Value {
         serde_json::to_value(CleanupArgs {
@@ -5958,6 +6109,8 @@ mod tests {
                 candidates: Vec::new(),
                 removed: Vec::new(),
                 skipped: Vec::new(),
+                next_cursor: None,
+                continuation: None,
             },
             false,
         )
@@ -5986,6 +6139,8 @@ mod tests {
                 candidates: Vec::new(),
                 removed: Vec::new(),
                 skipped: Vec::new(),
+                next_cursor: None,
+                continuation: None,
             },
             false,
         )
@@ -6161,6 +6316,30 @@ mod tests {
         );
         assert!(summary.contains("Observed filesystem availability increase: 4.0 KiB\n"));
         assert!(summary.contains("size not measured (pressure) /tmp/homeboy/target\n"));
+    }
+
+    #[test]
+    fn external_storage_category_propagates_partial_inventory() {
+        let category = external_storage_category(
+            cleanup::ExternalStorageCleanupOutput {
+                provider_count: 1,
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                unknown_bytes: 12,
+                unknown_bytes_is_lower_bound: true,
+                inventory_complete: false,
+                incomplete_roots: Vec::new(),
+                providers: Vec::new(),
+            },
+            false,
+        )
+        .expect("external storage category");
+        assert_eq!(category[0].category, "external_storage");
+        assert_eq!(category[0].inventory_completeness, "partial");
+        assert_eq!(category[0].output["unknown_bytes"], 12);
     }
 
     #[test]

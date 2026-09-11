@@ -1919,7 +1919,7 @@ mod tests {
         .expect("runner execution record should normalize");
 
         assert_eq!(output.execution_id, "job-1");
-        assert_eq!(output.remote_run_id.as_deref(), Some("run-1"));
+        assert_eq!(output.mirror_run_id.as_deref(), Some("run-1"));
         assert_eq!(output.materialized_paths.len(), 1);
         assert_eq!(output.materialized_paths[0].remote_path, "/runner/project");
         assert_eq!(output.artifact_refs[0].id, "summary");

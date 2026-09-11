@@ -37,6 +37,7 @@ mod completion_tracker;
 mod control;
 pub mod controller_job_driver;
 mod daemon_lease;
+mod generation_store;
 pub mod orchestration;
 mod patch_capture;
 pub mod recovery_actions;
@@ -207,41 +208,40 @@ impl LocalControllerJobClient {
     /// before submission instead of handing new lifecycle records to it.
     pub fn connect_current_build() -> Result<Self> {
         let admission_guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
-        let status = read_status()?;
-        if status.reachable && !status.fresh {
-            let daemon_identity = status
-                .state
-                .as_ref()
-                .map(|state| state.build_identity.display.clone());
-            let recovery_command = (status.freshness.restartable
-                && status.freshness.active_jobs == 0)
-                .then_some("homeboy daemon recover --yes");
-            let mut error = Error::validation_invalid_argument(
-                "daemon_build_identity",
-                "controller jobs require the resident daemon to match the invoking Homeboy build",
-                daemon_identity.clone(),
-                Some(vec![
-                    "Preserve active daemon jobs, then restart or upgrade the daemon through its lease-bound recovery plan before retrying detached work."
-                        .to_string(),
-                    "Attached callers may continue with foreground ownership when the command supports it."
-                        .to_string(),
-                ]),
-            );
-            if let Some(recovery_command) = recovery_command {
-                error = error.with_hint(format!("Next: {recovery_command}"));
+        let prior = read_status()?;
+        match Self::connect_with_admission_guard(Some(admission_guard)) {
+            Ok(client) => Ok(client),
+            Err(error) if prior.reachable && !prior.fresh => {
+                let daemon_identity = prior
+                    .state
+                    .as_ref()
+                    .map(|state| state.build_identity.display.clone());
+                let recovery_command = (prior.freshness.restartable
+                    && prior.freshness.active_jobs == 0)
+                    .then_some("homeboy daemon recover --yes");
+                let mut mismatch = Error::validation_invalid_argument(
+                    "daemon_build_identity",
+                    "controller jobs require a current daemon generation",
+                    daemon_identity.clone(),
+                    None,
+                );
+                if let Some(recovery_command) = recovery_command {
+                    mismatch = mismatch.with_hint(format!("Next: {recovery_command}"));
+                }
+                mismatch.details = json!({
+                    "classification": "controller_job_daemon_build_mismatch",
+                    "daemon_build_identity": daemon_identity,
+                    "invoking_build_identity": build_identity::current().display,
+                    "stale_reason": prior.stale_reason,
+                    "stale_reason_code": prior.freshness.stale_reason_code,
+                    "active_jobs": prior.freshness.active_jobs,
+                    "recovery_command": recovery_command,
+                    "rotation_error": error.message,
+                });
+                Err(mismatch)
             }
-            error.details = json!({
-                "classification": "controller_job_daemon_build_mismatch",
-                "daemon_build_identity": daemon_identity,
-                "invoking_build_identity": build_identity::current().display,
-                "stale_reason": status.stale_reason,
-                "stale_reason_code": status.freshness.stale_reason_code,
-                "active_jobs": status.freshness.active_jobs,
-                "recovery_command": recovery_command,
-            });
-            return Err(error);
+            Err(error) => Err(error),
         }
-        Self::connect_with_admission_guard(Some(admission_guard))
     }
 
     /// Connect to the current daemon build, first applying its canonical idle
@@ -260,6 +260,34 @@ impl LocalControllerJobClient {
         Self::connect_with_admission_guard(None)
     }
 
+    /// Connect to the daemon generation that already owns `job_id`.
+    ///
+    /// Observation and cancellation must retain the job's original generation.
+    /// In particular, they must not call `ensure_running`, which can rotate a
+    /// stale admission daemon to the caller's build.
+    pub fn connect_existing_job(job_id: &str) -> Result<Self> {
+        let endpoint = generation_store::endpoint_for_job(job_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_job_id",
+                "controller job has no recorded daemon generation",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| {
+                Error::internal_unexpected(format!("build local controller-job client: {error}"))
+            })?;
+        Ok(Self {
+            endpoint: format!("http://{}", endpoint.address),
+            client,
+            _admission_guard: None,
+        })
+    }
+
     fn connect_with_admission_guard(admission_guard: Option<File>) -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
@@ -276,12 +304,19 @@ impl LocalControllerJobClient {
         })
     }
 
+    fn endpoint_for_job(&self, job_id: &str) -> Result<String> {
+        Ok(generation_store::endpoint_for_job(job_id)?
+            .map(|endpoint| format!("http://{}", endpoint.address))
+            .unwrap_or_else(|| self.endpoint.clone()))
+    }
+
     /// Persist a cancellation request and return the daemon's current job
     /// projection. The controller continues provider shutdown asynchronously.
     pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
+        let endpoint = self.endpoint_for_job(job_id)?;
         let response = self
             .client
-            .post(format!("{}/controller/jobs/{job_id}/cancel", self.endpoint))
+            .post(format!("{endpoint}/controller/jobs/{job_id}/cancel"))
             .json(&json!({ "reason": reason }))
             .send()
             .map_err(|error| {
@@ -400,7 +435,7 @@ impl LocalControllerJobClient {
                 "local controller job start failed: {value}"
             )));
         }
-        let job =
+        let job: crate::api_jobs::Job =
             serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
                 Error::internal_unexpected("local controller-job start response has no job")
             })?)
@@ -414,9 +449,10 @@ impl LocalControllerJobClient {
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        let endpoint = self.endpoint_for_job(job_id)?;
         let response = self
             .client
-            .get(format!("{}/jobs/{job_id}", self.endpoint))
+            .get(format!("{endpoint}/jobs/{job_id}"))
             .send()
             .map_err(|error| {
                 Error::internal_unexpected(format!("read local controller job `{job_id}`: {error}"))
@@ -435,21 +471,24 @@ impl LocalControllerJobClient {
                 "local controller job status failed: {value}"
             )));
         }
-        serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-            Error::internal_unexpected("local controller-job status response has no job")
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller job".to_string()),
-            )
-        })
+        let job: crate::api_jobs::Job =
+            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
+                Error::internal_unexpected("local controller-job status response has no job")
+            })?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse local controller job".to_string()),
+                )
+            })?;
+        Ok(job)
     }
 
     pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        let endpoint = self.endpoint_for_job(job_id)?;
         let response = self
             .client
-            .post(format!("{}/controller/jobs/{job_id}/start", self.endpoint))
+            .post(format!("{endpoint}/controller/jobs/{job_id}/start"))
             .send()
             .map_err(|error| {
                 Error::internal_unexpected(format!(
@@ -1298,14 +1337,22 @@ fn legacy_lease_repair_error(path: &Path, problem: impl Into<String>) -> Error {
 }
 
 pub fn read_status() -> Result<DaemonStatus> {
-    let path = state_path()?;
+    // The stable registry is the admission authority after a blue-green
+    // handoff. Status reports B while retaining A's route in the registry.
+    let path = (!generation_store::bypassed())
+        .then(generation_store::admitting)
+        .transpose()?
+        .flatten()
+        .map(|endpoint| PathBuf::from(endpoint.state_dir).join("state.json"))
+        .unwrap_or(state_path()?);
     let state_path = path.display().to_string();
-    let state_identity = daemon_state_identity(&path, &paths::daemon_jobs_file()?)?;
+    let jobs_path = path.with_file_name("jobs.json");
+    let state_identity = daemon_state_identity(&path, &jobs_path)?;
     let validation = validate_lease_file(&path)?;
-    let jobs_path = paths::daemon_jobs_file()?;
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
     let active_job_recovery_evidence = job_store.active_daemon_job_recovery_evidence(
-        (validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead))
+        validation
+            .running
             .then(|| {
                 validation
                     .state
@@ -1324,7 +1371,16 @@ pub fn read_status() -> Result<DaemonStatus> {
                 != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
         })
         .count();
-    let process_candidates = control::daemon_process_candidates(&jobs_path)?;
+    let mut process_candidates = control::daemon_process_candidates(&jobs_path)?;
+    if validation.running {
+        if let Some(state) = validation.state.as_ref() {
+            for candidate in &mut process_candidates {
+                if candidate_matches_live_lease(candidate, state, &jobs_path) {
+                    candidate.ownership = DaemonProcessOwnership::Owning;
+                }
+            }
+        }
+    }
     let mut freshness = freshness_report_from_validation(&validation, blocking_active_jobs);
     // A dead lease proves only its recorded PID is gone. It cannot authorize a
     // replacement while another foreground candidate might still own this store.
@@ -1403,6 +1459,22 @@ pub fn read_status() -> Result<DaemonStatus> {
     };
     status.summary = status.render_summary();
     Ok(status)
+}
+
+/// A stale binary can still own the recorded live lease. Promote only the
+/// complete persisted process coordinates; incomplete process inspection stays
+/// ambiguous and therefore cannot authorize mutation.
+fn candidate_matches_live_lease(
+    candidate: &DaemonProcessCandidate,
+    state: &DaemonState,
+    jobs_path: &Path,
+) -> bool {
+    candidate.ownership == DaemonProcessOwnership::Ambiguous
+        && candidate.pid == state.pid
+        && candidate.durable_store_path.as_deref() == jobs_path.to_str()
+        && candidate.bind_endpoint.as_deref() == Some(state.address.as_str())
+        && !state.startup_token.is_empty()
+        && candidate.startup_token.as_deref() == Some(state.startup_token.as_str())
 }
 
 fn has_conflicting_process_candidates(candidates: &[DaemonProcessCandidate]) -> bool {
@@ -1499,8 +1571,13 @@ where
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
     let state = write_state(local_addr)?;
+    generation_store::seed(&state)?;
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
+    // If this process died after the durable job-store admission but before its
+    // registry write or HTTP response, rebuild the binding from the job's
+    // lease. Replays remain idempotent and retain the original owner.
+    rebuild_generation_job_ownership(&job_store)?;
     // A restart cannot resume the thread that owned a pre-spawn reservation.
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
@@ -1521,8 +1598,11 @@ where
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
-    let orchestration_reconciler =
-        spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
+    let orchestration_reconciler = spawn_orchestration_reconciler(
+        job_store.clone(),
+        state.lease_id.clone(),
+        orchestration_shutdown_rx,
+    );
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
     let mut accepted = 0;
@@ -1558,6 +1638,19 @@ where
     let _ = orchestration_reconciler.join();
     let _ = upload_reaper.join();
     serve_result.map(|()| state)
+}
+
+fn rebuild_generation_job_ownership(job_store: &JobStore) -> Result<()> {
+    for job in job_store.list() {
+        let Some(lease_id) = job.daemon_lease_id.as_deref() else {
+            continue;
+        };
+        generation_store::record_job(&job.id.to_string(), lease_id)?;
+        if job.status.is_terminal() {
+            generation_store::mark_job_terminal(&job.id.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Environment variable overriding the completion-notifier poll interval in
@@ -1686,6 +1779,7 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
 /// died stayed `running` forever. Loop Work jobs own controller waits.
 fn spawn_orchestration_reconciler(
     job_store: JobStore,
+    serving_lease_id: String,
     shutdown: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -1695,7 +1789,7 @@ fn spawn_orchestration_reconciler(
             let _ = shutdown.recv();
             return;
         };
-        orchestration_tick_loop(job_store, interval, shutdown)
+        orchestration_tick_loop(job_store, serving_lease_id, interval, shutdown)
     })
 }
 
@@ -1708,6 +1802,7 @@ fn spawn_orchestration_reconciler(
 /// processes the daemon owner lock already guarantees a single ticker.
 fn orchestration_tick_loop(
     job_store: JobStore,
+    serving_lease_id: String,
     interval: std::time::Duration,
     shutdown: mpsc::Receiver<()>,
 ) {
@@ -1723,6 +1818,22 @@ fn orchestration_tick_loop(
         // supervisor died without persisting anything.
         isolated_tick(|| {
             let _ = job_store.reconcile_terminal_linked_daemon_jobs();
+        });
+        // Generation retirement is lifecycle work, not a read-side effect. A
+        // failed lease stop leaves its identity and completed job routes durable
+        // so this existing reconciliation loop can retry on the next pass.
+        isolated_tick(|| {
+            for job in job_store
+                .list()
+                .into_iter()
+                .filter(|job| job.status.is_terminal())
+            {
+                let _ = generation_store::mark_job_terminal(&job.id.to_string());
+            }
+            let _ = generation_store::reconcile_drained_generations(
+                &serving_lease_id,
+                control::stop_drained_generation,
+            );
         });
         if shutdown.recv_timeout(interval).is_ok() {
             return;
@@ -2078,7 +2189,25 @@ where
             Err(err) => error_response(400, err),
         },
         ("POST", "/controller/jobs") => {
-            match with_daemon_job_admission(|| enqueue_controller_job(body, job_store)) {
+            match with_daemon_job_admission(|| {
+                let body = enqueue_controller_job(body, job_store)?;
+                let job_id = body
+                    .pointer("/job/id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        Error::internal_unexpected("controller admission has no job id")
+                    })?;
+                let lease_id = body
+                    .pointer("/job/daemon_lease_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|lease_id| !lease_id.is_empty())
+                    .ok_or_else(|| {
+                        Error::internal_unexpected("controller admission has no daemon lease owner")
+                    })?;
+                heartbeat_lease()?;
+                generation_store::record_job(job_id, lease_id)?;
+                Ok(body)
+            }) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
                 Err(err) => error_response(400, err),
             }
@@ -2227,8 +2356,70 @@ where
         ("POST", path) if path.starts_with("/runner/jobs/") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
+        ("POST", "/v1/control-plane/runs") => {
+            match authorize_control_plane_write(body, &broker_auth) {
+                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
+        ("POST", path) if is_control_plane_reference_registration(path) => {
+            match authorize_control_plane_write(body, &broker_auth) {
+                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
+        ("POST", path) if is_control_plane_event_append(path) => {
+            match authorize_control_plane_write(body, &broker_auth) {
+                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
+}
+
+fn authorize_control_plane_write(
+    body: Option<serde_json::Value>,
+    broker_auth: &remote_runner::BrokerAuthContext,
+) -> Result<Option<serde_json::Value>> {
+    let Some(grant) = broker_auth.authorize(crate::broker_auth::BrokerScope::Submit, None)? else {
+        return Ok(body);
+    };
+    if grant.credential_id == "loopback-open" {
+        return Err(Error::broker_auth_denied(
+            "control-plane writes require a paired credential with submit scope",
+            None,
+            vec!["Pair a controller credential before mutating durable work.".to_string()],
+        ));
+    }
+    let mut body = body.unwrap_or_else(|| json!({}));
+    let object = body.as_object_mut().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "body",
+            "control-plane submission request body must be a JSON object",
+            None,
+            None,
+        )
+    })?;
+    object.insert(
+        "actor".to_string(),
+        serde_json::Value::String(format!("broker:{}", grant.credential_id)),
+    );
+    Ok(Some(body))
+}
+
+fn is_control_plane_reference_registration(path: &str) -> bool {
+    matches!(
+        http_api::route(HttpMethod::Post, path),
+        Ok(http_api::HttpEndpoint::ControlPlaneRunReferenceRegister { .. })
+    )
+}
+
+fn is_control_plane_event_append(path: &str) -> bool {
+    matches!(
+        http_api::route(HttpMethod::Post, path),
+        Ok(http_api::HttpEndpoint::ControlPlaneRunEventAppend { .. })
+    )
 }
 
 /// Read-only proof that a loopback endpoint is this daemon, bound to a fresh
@@ -3243,7 +3434,7 @@ fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
     let legacy: LegacyExecRequest = serde_json::from_value(body).map_err(|err| {
         Error::validation_invalid_argument(
             "body",
-            format!("invalid legacy exec request body: {err}"),
+            format!("invalid exec request body (legacy transport): {err}"),
             None,
             None,
         )
@@ -4372,6 +4563,78 @@ mod tests {
         RunnerExecPrepareRequest,
     };
 
+    #[test]
+    fn network_control_plane_submission_binds_actor_to_submit_credential() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut store = crate::broker_auth::BrokerAuthStore::default();
+            let minted = store
+                .pair(
+                    "controller-credential",
+                    "controller-a",
+                    std::collections::BTreeSet::from([crate::broker_auth::BrokerScope::Submit]),
+                )
+                .expect("pair");
+            store.save().expect("auth store");
+            let authenticated = remote_runner::BrokerAuthContext {
+                token: Some(minted.token),
+                loopback_bind: true,
+                trusted_local: false,
+            };
+            let authorized =
+                authorize_control_plane_write(Some(json!({ "actor": "spoofed" })), &authenticated)
+                    .expect("authorized")
+                    .expect("body");
+            assert_eq!(authorized["actor"], "broker:controller-credential");
+
+            let unauthenticated = remote_runner::BrokerAuthContext {
+                token: None,
+                loopback_bind: true,
+                trusted_local: false,
+            };
+            authorize_control_plane_write(Some(json!({})), &unauthenticated)
+                .expect_err("missing bearer token");
+
+            let mut smoke_store = crate::broker_auth::BrokerAuthStore::default();
+            smoke_store.allow_unauthenticated_loopback = true;
+            smoke_store.save().expect("smoke auth store");
+            authorize_control_plane_write(Some(json!({})), &unauthenticated)
+                .expect_err("loopback smoke grant cannot submit durable work");
+        });
+    }
+
+    #[test]
+    fn control_plane_reference_registration_paths_are_write_scoped() {
+        for path in [
+            "/v1/control-plane/runs/run-1/artifacts",
+            "/v1/control-plane/runs/run-1/artifacts/",
+            "/v1/control-plane/runs/run-1/evidence",
+            "/v1//control-plane/runs/run-1/evidence",
+            "/v1/control-plane/runs/run-1/external-references",
+        ] {
+            assert!(is_control_plane_reference_registration(path));
+        }
+        assert!(!is_control_plane_reference_registration(
+            "/v1/control-plane/runs/run-1/artifacts/patch-1"
+        ));
+        assert!(!is_control_plane_reference_registration(
+            "/v1/control-plane/runs/run-1/tasks"
+        ));
+    }
+
+    #[test]
+    fn control_plane_event_append_paths_are_write_scoped_after_normalization() {
+        for path in [
+            "/v1/control-plane/runs/run-1/events",
+            "/v1/control-plane/runs/run-1/events/",
+            "/v1//control-plane/runs/run-1/events",
+        ] {
+            assert!(is_control_plane_event_append(path));
+        }
+        assert!(!is_control_plane_event_append(
+            "/v1/control-plane/runs/run-1/events/retention"
+        ));
+    }
+
     /// Round-trip the envelope through the exact functions that build it on the
     /// wire, then read it with the client's reader.
     ///
@@ -4396,6 +4659,156 @@ mod tests {
             controller_job_response(&wire).expect("reader recovers the written job")["id"],
             "written-by-the-daemon"
         );
+    }
+
+    #[test]
+    fn existing_job_connection_uses_the_draining_generation_for_status_and_cancellation() {
+        crate::test_support::with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
+            let owner_address = listener
+                .local_addr()
+                .expect("fake daemon address")
+                .to_string();
+            let job_id = Uuid::new_v4();
+            let (requests_tx, requests_rx) = mpsc::channel();
+            let server = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().expect("accept fake daemon request");
+                    let mut request = [0_u8; 4096];
+                    let length = stream.read(&mut request).expect("read fake daemon request");
+                    let request_line = std::str::from_utf8(&request[..length])
+                        .expect("decode fake daemon request")
+                        .lines()
+                        .next()
+                        .expect("request line")
+                        .to_string();
+                    requests_tx.send(request_line).expect("record request");
+                    let job = json!({
+                        "id": job_id,
+                        "operation": "test",
+                        "status": "running",
+                        "created_at_ms": 1,
+                        "updated_at_ms": 1,
+                        "event_count": 0,
+                        "artifacts": [],
+                        "daemon_lease_id": "draining",
+                    });
+                    let body = json!({
+                        "success": true,
+                        "data": { "body": { "job": job } },
+                    })
+                    .to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    )
+                    .expect("respond from fake daemon");
+                    stream.flush().expect("flush fake daemon response");
+                }
+            });
+            let state =
+                |lease_id: &str,
+                 address: &str,
+                 build_identity: crate::build_identity::BuildIdentity| {
+                    DaemonState {
+                        schema: DAEMON_LEASE_SCHEMA.to_string(),
+                        lease_id: lease_id.to_string(),
+                        startup_token: "test".to_string(),
+                        address: address.to_string(),
+                        pid: 1,
+                        state_path: crate::paths::daemon_state_file()
+                            .expect("state path")
+                            .display()
+                            .to_string(),
+                        started_at: "now".to_string(),
+                        last_seen_at: "now".to_string(),
+                        build_identity,
+                        binary_sha256: None,
+                        runtime_paths: DaemonRuntimeSnapshot {
+                            loaded_at: "now".to_string(),
+                            paths: Vec::new(),
+                        },
+                    }
+                };
+            let draining_identity = crate::build_identity::BuildIdentity {
+                version: "0.370.0".to_string(),
+                git_commit: Some("old".to_string()),
+                git_dirty: None,
+                display: "homeboy 0.370.0+old".to_string(),
+            };
+            let admission_identity = crate::build_identity::BuildIdentity {
+                version: "0.370.1".to_string(),
+                git_commit: Some("new".to_string()),
+                git_dirty: None,
+                display: "homeboy 0.370.1+new".to_string(),
+            };
+            let draining = state("draining", &owner_address, draining_identity.clone());
+            generation_store::seed(&draining).expect("seed draining generation");
+            generation_store::record_job(&job_id.to_string(), "draining").expect("record job");
+            let admission = state("admission", "127.0.0.1:1002", admission_identity.clone());
+            generation_store::activate(&admission).expect("activate new generation");
+
+            let client = LocalControllerJobClient::connect_existing_job(&job_id.to_string())
+                .expect("connect existing job");
+
+            assert_eq!(client.endpoint, format!("http://{owner_address}"));
+            assert_eq!(
+                client.status(&job_id.to_string()).expect("read old job").id,
+                job_id
+            );
+            assert_eq!(
+                client
+                    .cancel(&job_id.to_string(), "test cancellation")
+                    .expect("cancel old job")
+                    .id,
+                job_id
+            );
+            server.join().expect("stop fake daemon");
+            assert_eq!(
+                requests_rx.recv().expect("status request"),
+                format!("GET /jobs/{job_id} HTTP/1.1")
+            );
+            assert_eq!(
+                requests_rx.recv().expect("cancellation request"),
+                format!("POST /controller/jobs/{job_id}/cancel HTTP/1.1")
+            );
+            assert_eq!(
+                generation_store::admitting()
+                    .expect("read admission generation")
+                    .expect("admission generation")
+                    .lease_id,
+                "admission"
+            );
+            assert_eq!(
+                generation_store::generations()
+                    .expect("read generations")
+                    .into_iter()
+                    .find(|endpoint| endpoint.lease_id == "draining")
+                    .expect("draining generation")
+                    .build_identity,
+                draining_identity.display
+            );
+            assert_eq!(
+                generation_store::admitting()
+                    .expect("read admission generation")
+                    .expect("admission generation")
+                    .build_identity,
+                admission_identity.display
+            );
+            let state_path = crate::paths::daemon_state_file().expect("state path");
+            assert!(!state_path.exists());
+            let error = match LocalControllerJobClient::connect_existing_job("missing-job") {
+                Ok(_) => panic!("missing job owner must fail closed"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.code,
+                crate::error::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(!state_path.exists());
+        });
     }
 
     /// `LocalControllerJobClient::status` polls the read-only `GET /jobs/<id>`
@@ -4536,7 +4949,12 @@ mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
             let job_store = JobStore::default();
             let handle = std::thread::spawn(move || {
-                super::orchestration_tick_loop(job_store, Duration::from_secs(300), rx);
+                super::orchestration_tick_loop(
+                    job_store,
+                    "test-serving-lease".to_string(),
+                    Duration::from_secs(300),
+                    rx,
+                );
             });
 
             std::thread::sleep(Duration::from_millis(50));
@@ -4548,6 +4966,50 @@ mod tests {
                 start.elapsed() < Duration::from_secs(10),
                 "shutdown must not wait out the poll interval, took {:?}",
                 start.elapsed()
+            );
+        });
+    }
+
+    #[test]
+    fn restart_rebuilds_existing_job_ownership_from_the_durable_lease() {
+        crate::test_support::with_isolated_home(|_| {
+            let old = DaemonState {
+                schema: DAEMON_LEASE_SCHEMA.to_string(),
+                lease_id: "old-lease".to_string(),
+                startup_token: "old".to_string(),
+                address: "127.0.0.1:1001".to_string(),
+                pid: 1,
+                state_path: paths::daemon_state_file()
+                    .expect("state path")
+                    .display()
+                    .to_string(),
+                started_at: "now".to_string(),
+                last_seen_at: "now".to_string(),
+                build_identity: build_identity::current(),
+                binary_sha256: None,
+                runtime_paths: DaemonRuntimeSnapshot {
+                    loaded_at: "now".to_string(),
+                    paths: Vec::new(),
+                },
+            };
+            let replacement = DaemonState {
+                lease_id: "replacement-lease".to_string(),
+                address: "127.0.0.1:1002".to_string(),
+                ..old.clone()
+            };
+            generation_store::seed(&old).expect("seed old generation");
+            generation_store::activate(&replacement).expect("activate replacement");
+
+            let store = JobStore::default().with_daemon_lease(old.lease_id.clone());
+            let job = store.create("restart-recovery");
+            rebuild_generation_job_ownership(&store).expect("rebuild durable ownership");
+
+            assert_eq!(
+                generation_store::endpoint_for_job(&job.id.to_string())
+                    .expect("route job")
+                    .expect("old owner")
+                    .lease_id,
+                old.lease_id
             );
         });
     }
@@ -6859,7 +7321,7 @@ fn write_http_response(mut stream: TcpStream, response: &HttpResponse) -> std::i
     };
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response.status_code,
         status_text,
         body.len(),

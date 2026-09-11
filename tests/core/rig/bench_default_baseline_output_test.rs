@@ -177,6 +177,7 @@ fn default_baseline_failure_summary_marks_implicit_baseline() {
                 diagnostics: Vec::new(),
             }),
             diagnostics: Vec::new(),
+            persisted_run: None,
         },
         RigBenchEntry {
             rig_id: "studio-bfb".to_string(),
@@ -188,6 +189,7 @@ fn default_baseline_failure_summary_marks_implicit_baseline() {
             rig_state: None,
             failure: None,
             diagnostics: Vec::new(),
+            persisted_run: None,
         },
     ];
     let (mut output, _) = aggregate_comparison("studio".to_string(), 10, entries);

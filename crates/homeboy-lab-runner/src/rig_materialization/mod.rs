@@ -1534,20 +1534,7 @@ mod tests {
         assert!(status.success(), "initialize git checkout");
     }
 
-    fn git(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_core::test_support::git_command_output as git;
 
     fn local_runner() -> super::super::Runner {
         super::super::Runner {

@@ -91,6 +91,7 @@ fn direct_submission(command: Vec<&str>, submission_key: &str) -> serde_json::Va
             envelope: request.execution_envelope(),
             workspace_claim_binding: None,
             workspace_owner_lease: None,
+            credential_delivery: None,
         },
         runner: None,
         raw_exec: false,

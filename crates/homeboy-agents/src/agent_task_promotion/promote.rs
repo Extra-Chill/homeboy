@@ -48,7 +48,7 @@ pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_conte
 use super::tests::FakePromotionWorkspaceProvider;
 use super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+    AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionSource,
     AgentTaskPromotionStatus, AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
     AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
@@ -133,14 +133,14 @@ pub(crate) fn with_gate_supervision<T>(
     })
 }
 
-pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
+pub fn promote(options: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
     promote_with_checkpoint(options, |_| Ok(()))
 }
 
 /// Promote a patch while recording the recoverable post-apply boundary before
 /// dependency materialization or verification is attempted.
 pub fn promote_with_checkpoint(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     // One promotion is one unit of work, so the store it records against
@@ -165,7 +165,7 @@ pub fn promote_with_checkpoint(
 }
 
 pub(crate) fn promote_with_checkpoint_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -187,7 +187,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
 /// The reverse apply check proves the original artifact remains in the candidate
 /// before any gate result is trusted.
 pub fn resume_promoted_patch(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
@@ -207,7 +207,7 @@ pub fn resume_promoted_patch(
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -226,7 +226,7 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
 /// Re-run corrected gates against an already-applied candidate while preserving
 /// all candidate, base, target, source, and artifact resume validation.
 pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     gate_workspace: Option<&Path>,
@@ -245,7 +245,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
 }
 
 fn resume_promoted_patch_internal<'a>(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -374,7 +374,7 @@ struct PatchArtifactAdmission {
 fn patch_artifact_admission(
     artifact: &AgentTaskArtifact,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PatchArtifactAdmission> {
     let path = resolve_artifact_path(
@@ -403,7 +403,7 @@ fn patch_artifact_admission(
 
 pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     let artifact = select_patch_artifact(outcome, options.artifact_id.as_deref())?;
@@ -412,7 +412,7 @@ pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
 }
 
 fn resume_promoted_patch_admission(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -457,7 +457,7 @@ fn resume_promoted_patch_admission(
 }
 
 fn validate_resume_provenance(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
 ) -> Result<()> {
@@ -503,7 +503,7 @@ fn validate_resume_provenance(
 }
 
 fn validate_resume_candidate(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     outcome: &AgentTaskOutcome,
@@ -704,7 +704,7 @@ fn verify_patch_is_present(
 #[cfg(test)]
 // Provider-injection seam: production promotes through `promote`.
 pub(crate) fn promote_with_provider(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
 ) -> Result<AgentTaskPromotionReport> {
     promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
@@ -713,7 +713,7 @@ pub(crate) fn promote_with_provider(
 #[cfg(test)]
 // Checkpoint seam reached only by the promotion test shards.
 pub(super) fn promote_with_provider_and_checkpoint(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -728,7 +728,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
@@ -739,7 +739,7 @@ pub(super) fn promote_with_provider_in_observation_store(
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -849,7 +849,7 @@ fn verify_promotion_gate(
 }
 
 fn promote_with_provider_and_checkpoint_internal(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
@@ -1558,7 +1558,7 @@ pub(crate) fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
 }
 
 fn has_recoverable_candidate_provenance(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     artifact: &AgentTaskArtifact,
 ) -> bool {
@@ -1604,7 +1604,7 @@ struct RecoverableCandidatePromotionAdmission {
 fn recoverable_candidate_promotion_admission(
     source: &Value,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<RecoverableCandidatePromotionAdmission> {
     let artifact = select_recoverable_patch_artifact(outcome, options, observation_store)?;
@@ -1630,7 +1630,7 @@ fn recoverable_candidate_promotion_admission(
 }
 
 pub(crate) fn preflight_recoverable_candidate_promotion_in_observation_store(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     validate_workspace_handle(&options.to_worktree)?;
@@ -1682,14 +1682,7 @@ mod declared_base_tests {
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git runs")
-            .success());
-    }
+    use homeboy_core::test_support::run_git_command as git;
 
     fn git_output(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -1817,6 +1810,30 @@ mod declared_base_tests {
         assert_eq!(error.details["git_base_preflight"]["timeout_ms"], 100);
     }
 
+    /// An SSH credential failure is transport evidence in its own right. It
+    /// used to be classified only because the remote host string contained
+    /// `proxy`, so the same failure to any other host was misreported as an
+    /// invalid base ref.
+    #[test]
+    fn ssh_credential_failure_is_transport_without_a_proxy_hostname() {
+        assert!(is_git_transport_failure(
+            "git@github.example: Permission denied (publickey).\nfatal: Could not read from remote repository."
+        ));
+        assert!(is_git_transport_failure(
+            "sign_and_send_pubkey: signing failed for ECDSA from agent: agent refused operation"
+        ));
+        assert!(is_git_transport_failure("Host key verification failed."));
+    }
+
+    /// A hostname is not evidence. A genuinely invalid ref must stay a
+    /// validation failure even when the remote is named `proxy.example.test`.
+    #[test]
+    fn a_proxy_hostname_alone_is_not_transport_evidence() {
+        assert!(!is_git_transport_failure(
+            "fatal: couldn't find remote ref refs/heads/nope on proxy.example.test"
+        ));
+    }
+
     #[test]
     fn materialized_workspace_is_the_lab_execution_checkout() {
         assert!(materialized_promotion_workspace_in_context(None)
@@ -1833,7 +1850,7 @@ mod declared_base_tests {
 }
 
 fn promote_committed_changes(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
     source_kind: &str,
@@ -2054,7 +2071,7 @@ fn promote_committed_changes(
 /// Retain the controller-generated committed delta before its producer path can
 /// be cleaned up. Only an existing controller run may own this projection.
 pub(super) fn retain_committed_changes_artifact(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     patch: &str,
     sha256: &str,
@@ -2116,7 +2133,7 @@ pub(super) fn retain_committed_changes_artifact(
 }
 
 fn run_promotion_gates(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
     gate_workspace: Option<&Path>,
@@ -2312,7 +2329,7 @@ fn run_promotion_gates(
 }
 
 fn run_declared_promotion_test(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     index: usize,
     plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
@@ -2357,7 +2374,7 @@ fn run_declared_promotion_test(
     result
 }
 
-fn gate_workspace_path(options: &AgentTaskPromotionOptions, worktree_path: &Path) -> PathBuf {
+fn gate_workspace_path(options: &AgentTaskPromotionRequest, worktree_path: &Path) -> PathBuf {
     options
         .source_worktree_path
         .as_ref()
@@ -2400,16 +2417,27 @@ fn gate_setup_outcome_failure(
     classification: &str,
     outcome: &homeboy_core::deps::DependencyHydrationOutcome,
 ) -> Error {
+    let mut bounded_outcome = outcome.clone();
+    bounded_outcome.cwd = bounded_setup_error_text(&bounded_outcome.cwd);
+    bounded_outcome.stdout = bounded_setup_error_text(&bounded_outcome.stdout);
+    bounded_outcome.stderr = bounded_setup_error_text(&bounded_outcome.stderr);
+    let logs = [
+        (!bounded_outcome.stdout.is_empty()).then(|| format!("stdout: {}", bounded_outcome.stdout)),
+        (!bounded_outcome.stderr.is_empty()).then(|| format!("stderr: {}", bounded_outcome.stderr)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Error::dependency_step_failed(
         "promotion.gate_setup",
         outcome.provider_id.clone(),
         outcome.exit_code,
-        Vec::new(),
+        logs,
         Vec::new(),
         Some(outcome.command.join(" ")),
         Some(serde_json::json!({
             "classification": classification,
-            "outcome": outcome,
+            "outcome": bounded_outcome,
             "retry_action": "retry_dependency_hydration",
         })),
     )
@@ -2565,7 +2593,7 @@ fn git_output(path: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn run_promotion_gate(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     index: usize,
     command: &str,
@@ -2700,7 +2728,7 @@ fn finish_promotion_gate_run_dir(run_dir: &homeboy_core::engine::run_dir::RunDir
 fn promotion_source(
     source_kind: &str,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
 ) -> AgentTaskPromotionSource {
     AgentTaskPromotionSource {
         kind: source_kind.to_string(),
@@ -2871,20 +2899,27 @@ fn capture_declared_base_with_git_and_timeout(
             )
         })?
         .to_string();
-    let fetch = run_declared_base_git(
+    let fetch = homeboy_core::git::with_remote_tracking_authority_until(
         worktree_path,
-        git,
-        &[
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &sha,
-        ],
-        environment,
-        base_ref,
-        "fetch",
-        timeout,
+        "fetch declared promotion base",
+        std::time::Instant::now() + timeout,
+        |remaining| {
+            run_declared_base_git(
+                worktree_path,
+                git,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    &sha,
+                ],
+                environment,
+                base_ref,
+                "fetch",
+                remaining,
+            )
+        },
     )?;
     if !fetch.status.success() {
         return Err(declared_base_git_failure(
@@ -3050,6 +3085,12 @@ fn declared_base_transport_error(
     error
 }
 
+/// Classify a base-preflight failure as transport rather than a bad ref.
+///
+/// Every needle names diagnostic evidence emitted by Git, SSH, or the TLS
+/// stack. A bare `proxy` needle used to match here, which classified any
+/// failure whose remote host merely contained that word — including a local
+/// credential failure that is transport-related for unrelated reasons.
 fn is_git_transport_failure(stderr: &str) -> bool {
     let stderr = stderr.to_ascii_lowercase();
     [
@@ -3058,10 +3099,24 @@ fn is_git_transport_failure(stderr: &str) -> bool {
         "could not resolve host",
         "connection timed out",
         "connection refused",
+        "connection closed",
+        "connection reset",
         "network is unreachable",
-        "proxy",
-        "tls",
-        "ssl",
+        "no route to host",
+        "broken pipe",
+        "proxy connect",
+        "proxy error",
+        "proxy authentication",
+        "proxycommand",
+        "tls handshake",
+        "ssl certificate",
+        "ssl connect error",
+        "permission denied (publickey",
+        "could not read from remote repository",
+        "authentication failed",
+        "host key verification failed",
+        "agent refused operation",
+        "sign_and_send_pubkey",
     ]
     .iter()
     .any(|needle| stderr.contains(needle))
@@ -3169,7 +3224,7 @@ fn promotion_notification_with_gate_summary(
     reason = "report construction keeps durable promotion evidence explicit"
 )]
 fn post_apply_report(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     patch_artifact: AgentTaskPromotionArtifactRef,
@@ -3404,7 +3459,7 @@ pub(crate) fn select_patch_artifact(
 /// not turn one patch into a false review choice.
 fn select_recoverable_patch_artifact(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     let canonical =
@@ -3457,7 +3512,7 @@ pub struct CanonicalRecoverablePatchArtifacts {
 /// materialization, including controller projections and hydrated runner bytes.
 pub fn canonical_recoverable_patch_artifacts(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     // One call is one unit of work, so the store resolves once here rather
     // than at each projection lookup inside (#7505).
@@ -3467,7 +3522,7 @@ pub fn canonical_recoverable_patch_artifacts(
 
 pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)
@@ -3475,7 +3530,7 @@ pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
 
 fn canonical_recoverable_patch_artifacts_internal(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     let mut candidates = outcome

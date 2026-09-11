@@ -1,0 +1,16 @@
+{
+  "artifact": "legacy-resource-lifecycle",
+  "resource_lifecycle": {
+    "owner": "homeboy-test",
+    "run_id": "run-1",
+    "runner_id": "runner-1",
+    "path": "/tmp/homeboy/run-1/workspace",
+    "kind": "workspace",
+    "ttl": "2020-01-01T00:00:00Z",
+    "cleanup_policy": "delete_after_ttl",
+    "evidence_retention": "manifest",
+    "cleanup_intent": "dry_run",
+    "cleanup_command": "homeboy runs resources --run-id run-1 --cleanup-plan",
+    "status": "active"
+  }
+}

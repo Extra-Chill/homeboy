@@ -30,6 +30,8 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             homeboy_path,
             daemon,
             concurrency_limit,
+            runner_exec_wait_timeout_secs,
+            cancel_on_wait_timeout,
             artifact_policy,
         } => map_registry(add(RunnerAddInput {
             json,
@@ -42,6 +44,8 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 homeboy_path,
                 daemon,
                 concurrency_limit,
+                runner_exec_wait_timeout_secs,
+                cancel_on_wait_timeout,
                 artifact_policy,
                 ..RunnerSettings::default()
             },
@@ -52,6 +56,8 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             homeboy_path,
             daemon,
             concurrency_limit,
+            runner_exec_wait_timeout_secs,
+            cancel_on_wait_timeout,
             artifact_policy,
         } => map_registry(enable(
             &server_id,
@@ -60,6 +66,8 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 homeboy_path,
                 daemon,
                 concurrency_limit,
+                runner_exec_wait_timeout_secs,
+                cancel_on_wait_timeout,
                 artifact_policy,
                 ..RunnerSettings::default()
             },
@@ -512,6 +520,18 @@ pub(super) fn render_compact_exec_output(output: &RunnerExecOutput) -> String {
     rendered.push_str(&format!("Runner: {}\n", output.runner_id));
     rendered.push_str(&format!("Remote cwd: {}\n", output.remote_cwd));
     rendered.push_str(&format!("Exit status: {}\n", output.exit_code));
+    if output.is_in_flight() {
+        rendered
+            .push_str("Status: remote job still in flight; remote exit status is unavailable\n");
+        if let Some(action) = output.execution_record.as_ref().and_then(|record| {
+            record
+                .next_actions
+                .iter()
+                .find(|action| action.label == "runner_job_follow")
+        }) {
+            rendered.push_str(&format!("Follow: {}\n", action.command.join(" ")));
+        }
+    }
     if let Some(job_id) = output.job_id.as_deref() {
         rendered.push_str(&format!("Job: {job_id}\n"));
     }

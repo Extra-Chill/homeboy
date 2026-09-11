@@ -30,6 +30,7 @@ struct MockBackend {
     pr_lookup_complete: bool,
     publication_observed_after_pr_lookup: bool,
     existing_pr: Option<AgentTaskPrRef>,
+    merged_pr: Option<AgentTaskPrRef>,
     create_error: bool,
     push_error: bool,
     identity_error: bool,
@@ -292,6 +293,15 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     ) -> Result<Option<AgentTaskPrRef>> {
         self.pr_lookup_complete = true;
         Ok(self.existing_pr.clone())
+    }
+
+    fn find_merged_pr(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Result<Option<AgentTaskPrRef>> {
+        Ok(self.merged_pr.clone())
     }
 
     fn verify_remote_candidate(
@@ -1094,6 +1104,35 @@ fn updates_existing_pr_for_same_branch() {
     assert_eq!(report.pr_number, Some(77));
     assert!(backend.updated);
     assert!(!backend.created);
+}
+
+#[test]
+fn recovers_a_merged_pr_without_republishing() {
+    let mut backend = MockBackend {
+        candidate_state: Some(AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        }),
+        merged_pr: Some(AgentTaskPrRef {
+            number: 76,
+            url: "https://github.com/Extra-Chill/homeboy/pull/76".to_string(),
+            is_draft: false,
+        }),
+        ..Default::default()
+    };
+
+    let report = finalize_pr_with_backend(options(), &mut backend).expect("merged receipt");
+
+    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.pr_action, "already_merged");
+    assert_eq!(report.pr_number, Some(76));
+    assert_eq!(
+        report.finalization_outcome.publication_action,
+        "already_merged"
+    );
+    assert!(report.finalization_outcome.published);
+    assert!(!backend.created && !backend.updated);
+    assert_eq!(backend.publication_binding_calls, 1);
 }
 
 #[test]
@@ -2776,7 +2815,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
         .to_string();
         std::fs::write(outcome.path(), &source).expect("write adoption outcome");
         let promotion = crate::agent_task_promotion::promote_with_checkpoint(
-            crate::agent_task_promotion::AgentTaskPromotionOptions {
+            crate::agent_task_promotion::AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some(run_id.to_string()),
                 source_path: Some(outcome.path().to_path_buf()),

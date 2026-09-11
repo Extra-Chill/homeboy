@@ -17,6 +17,7 @@ use homeboy_core::resource_lifecycle_index::{
     ResourceLifecycle, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
 };
 
+use self::snapshots::workspace_snapshots_for_runner;
 use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
 };
@@ -1245,8 +1246,8 @@ pub fn hydrate_prepared_workspace_source_snapshot(
     if !remote_path.starts_with(&prepared_root) {
         return Ok(());
     }
-    let (snapshots, _) = workspace_snapshots(
-        &runner.id,
+    let (snapshots, _) = workspace_snapshots_for_runner(
+        runner,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
@@ -1411,8 +1412,8 @@ fn compatible_incremental_snapshot(
     excludes: &[String],
     controller_manifest: &super::snapshot::WorkspaceContentManifest,
 ) -> Result<Option<(RunnerWorkspaceSnapshotEntry, SnapshotManifestDelta)>> {
-    let (snapshots, _) = workspace_snapshots(
-        &runner.id,
+    let (snapshots, _) = workspace_snapshots_for_runner(
+        runner,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
@@ -1631,6 +1632,32 @@ pub fn prune_workspaces(
     options: RunnerWorkspacePruneOptions,
 ) -> Result<(RunnerWorkspacePruneOutput, i32)> {
     let runner = load(runner_id)?;
+    prune_workspaces_for_runner(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        &runner,
+        options,
+    )
+}
+
+/// [`prune_workspaces`] against an explicitly injected root.
+///
+/// Resolving the runner ambiently while pruning an injected root would reap one
+/// installation's workspaces on another's behalf (#14362).
+#[allow(dead_code)]
+pub fn prune_workspaces_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerWorkspacePruneOptions,
+) -> Result<(RunnerWorkspacePruneOutput, i32)> {
+    let runner = load_in_roots(roots, runner_id)?;
+    prune_workspaces_for_runner(roots, &runner, options)
+}
+
+fn prune_workspaces_for_runner(
+    roots: &homeboy_core::paths::PathRoots,
+    runner: &crate::Runner,
+    options: RunnerWorkspacePruneOptions,
+) -> Result<(RunnerWorkspacePruneOutput, i32)> {
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace_root",
@@ -1662,8 +1689,8 @@ pub fn prune_workspaces(
     let mut scan_complete = true;
     let receipt_path = if options.converge {
         Some(prune_convergence_receipt_path_in_roots(
-            homeboy_core::paths::PathRoots::from_environment()?.data(),
-            runner_id,
+            roots.data(),
+            &runner.id,
             workspace_root,
         ))
     } else {
@@ -2303,6 +2330,7 @@ pub(crate) fn workspace_resource_lifecycle(
         cleanup_command: run_id
             .map(|run_id| format!("homeboy runs resources --run-id {run_id} --cleanup-plan")),
         status: ResourceLifecycleResourceStatus::Active,
+        migration_provenance: None,
     }
 }
 
@@ -4526,6 +4554,7 @@ fn remove_local_workspace_with_lifecycle(root: &Path, path: &Path) -> Result<()>
         cleanup_intent: Default::default(),
         cleanup_command: None,
         status: ResourceLifecycleResourceStatus::CleanupPending,
+        migration_provenance: None,
     };
     let cleanup_path = ResourceLifecycle::cleanup_path(root, &resource).map_err(|reason| {
         Error::validation_invalid_argument(

@@ -67,6 +67,18 @@ pub struct ResumeArgs {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Args, Debug)]
+pub struct PlacementUpdateArgs {
+    /// Durable queued Cook ID whose unexecuted placement will be changed.
+    pub run_id: String,
+    /// Record the operator's confirmation of this execution-route change.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Stable key used to replay this placement update without changing it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
+}
+
 #[cfg_attr(test, derive(Default))]
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
@@ -207,6 +219,21 @@ mod tests {
         assert_eq!(args.run_id, "run-a");
         assert_eq!(args.artifact.as_deref(), Some("/trusted/homeboy"));
         assert!(args.source.is_none());
+    }
+
+    #[test]
+    fn placement_update_requires_explicit_local_confirmation() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "placement-update",
+            "cook-a",
+            "--confirm",
+        ])
+        .expect("local placement update parses");
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Local);
     }
 
     #[test]
@@ -686,8 +713,15 @@ pub struct PromoteArgs {
     /// Replay the exact gate policy from the source run's durable Cook recipe.
     /// Homeboy-generated review commands use this reference so private gate
     /// programs remain outside reviewer-facing command output.
-    #[arg(long = "gates-from-cook-recipe")]
+    #[arg(
+        long = "gates-from-cook-recipe",
+        conflicts_with = "gates_from_resume_contract"
+    )]
     pub gates_from_cook_recipe: bool,
+    /// Replay the exact gate policy from the source run's durable promotion
+    /// resume contract without exposing private gate programs in command output.
+    #[arg(long = "gates-from-resume-contract")]
+    pub gates_from_resume_contract: bool,
     /// Verification gate configuration to run before promotion.
     #[command(flatten)]
     pub gates: VerifyGateArgs,
@@ -836,6 +870,9 @@ pub struct VerifyReplacementArgs {
     /// Explicit operator authorization for the replacement proof recorded by this command.
     #[arg(long, value_name = "TEXT")]
     pub authorize_external_proof: String,
+    /// Explicit operator authorization to rerun gates after an interrupted replacement execution. Homeboy still refuses while the original operation lease is live.
+    #[arg(long, value_name = "TEXT")]
+    pub authorize_interrupted_rerun: Option<String>,
     /// Verification gate configuration for the replacement candidate.
     #[command(flatten)]
     pub gates: VerifyGateArgs,

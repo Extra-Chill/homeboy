@@ -72,9 +72,7 @@ impl RunnerEvidenceProvider for RunnerEvidence {
                         runner_id: job.runner_id,
                         job_id: job.job_id,
                         status: job.status.as_str().to_string(),
-                        lifecycle_state: job.lifecycle_state,
                         stale_reason: job.stale_reason,
-                        retryable: job.retryable,
                     })
                     .collect(),
             })

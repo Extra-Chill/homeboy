@@ -178,6 +178,35 @@ is parsed from standard Homeboy JSON error envelopes (`error.details.field`,
 `error.field`, or `contract_field`) when present; otherwise it is omitted and the
 raw execution evidence remains under `execution`.
 
+### Controller runner wait
+
+These controller-only variables are resolved before a runner command is
+submitted; workload settings inside the remote command cannot change them.
+
+| Variable | Runner setting | Meaning |
+|----------|----------------|---------|
+| `HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS` | `runner_exec_wait_timeout_secs` | Per-run whole-second wait override. Unset falls back to the runner setting, then 1200 seconds. `0` returns after durable handoff. |
+| `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT` | `cancel_on_wait_timeout` | Truthy values (`1`, `true`, `yes`, `on`) request best-effort cancellation after expiry. Otherwise the runner setting applies. |
+| `HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION` | `require_exact_homeboy_version` | Truthy values require an exact controller and runner Homeboy version. |
+| `HOMEBOY_REQUIRE_FRESH_RUNTIME_OVERLAY` | `require_fresh_runtime_overlay` | Truthy values reject a provably stale runtime overlay. |
+
+When the wait expires after acceptance, the runner job and its durable run IDs
+remain authoritative. Homeboy reports an in-flight handoff with
+`homeboy runner job logs <runner> <job> --follow` when cancellation is disabled,
+fails, or returns a nonterminal job. If cancellation returns a terminal job,
+Homeboy projects that terminal non-success result instead of claiming the remote
+command continues. Unset `cancel_on_wait_timeout` cancels agent-task workloads
+and leaves other workloads in flight; set it explicitly to override that default.
+
+## Runner execution record identity
+
+`homeboy/runner-execution-record/v1` uses `mirror_run_id` as its sole durable
+Homeboy observation/run identity. Newly written records omit `remote_run_id`.
+Readers accept historical records containing only `remote_run_id` or both keys,
+normalize the former into `mirror_run_id`, and prefer `mirror_run_id` when the
+two values differ. This does not change provider-facing remote run IDs or
+control-plane location IDs, which have separate semantics.
+
 ## Detached handoff evidence
 
 Detached Lab offload handoffs return a `homeboy/runner-exec-handoff/v1`

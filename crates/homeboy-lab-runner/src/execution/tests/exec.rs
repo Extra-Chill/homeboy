@@ -273,6 +273,23 @@ fn explicit_refresh_allows_an_idle_stale_daemon_after_reconnect() {
 }
 
 #[test]
+fn explicit_refresh_keeps_retained_count_disagreement_fenced() {
+    let mut status = stale_direct_daemon_status();
+    status.active_job_state = RunnerActiveJobState::Unavailable;
+    status.active_job_source = None;
+    status.active_job_error = Some(crate::RunnerActiveJobError {
+        code: "retained_active_job_count_inconsistent".to_string(),
+        message: "the retained admission generation disagrees".to_string(),
+    });
+    status.daemon_freshness = Some(authoritative_drained_freshness());
+
+    assert!(!allows_idle_stale_daemon_refresh(
+        &explicit_refresh_options(),
+        &status,
+    ));
+}
+
+#[test]
 fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
     let options = explicit_refresh_options();
     let mut active = stale_direct_daemon_status();

@@ -1,4 +1,7 @@
 pub(crate) mod binding;
+#[cfg(test)]
+mod test_support;
+
 mod content_manifest;
 mod effect;
 mod execution;
@@ -31,9 +34,9 @@ mod version_overrides;
 pub use types::sha256_file;
 pub use types::{
     compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
-    DeployConfig, DeployOrchestrationResult, DeploySummary, MultiDeployResult, MultiDeploySummary,
-    PreparedDeployArtifact, PreparedDeployProjection, ProjectDeployResult, ReleaseState,
-    ReleaseStateStatus,
+    DeployConfig, DeployControlPlaneLineage, DeployOrchestrationResult, DeploySummary,
+    MultiDeployResult, MultiDeploySummary, PreparedDeployArtifact, PreparedDeployProjection,
+    ProjectDeployResult, ReleaseState, ReleaseStateStatus,
 };
 // `homeboy status` classifies a component's release state from cached git data.
 pub use planning::calculate_release_state;
@@ -612,22 +615,31 @@ pub fn run_multi(
         Some(run)
     };
     let checkpoint_run_id = lifecycle_run.as_ref().map(|run| run.id.clone());
+    let control_plane_lineage = config
+        .prepared_projection
+        .as_ref()
+        .and_then(|projection| projection.control_plane.as_ref());
+    let artifact_sha256 = config
+        .prepared_artifact
+        .as_ref()
+        .map(|artifact| artifact.sha256.as_str());
     let mut aggregate_observation = checkpoint_run_id
         .as_deref()
         .map(|id| {
             if config.resume_run_id.is_some() {
-                lifecycle::DeployObservation::start("multi", &identity.source)
+                lifecycle::DeployObservation::resume_with_control_plane_in_roots(&roots, id)
             } else {
-                lifecycle::DeployObservation::start_with_id(Some(id), "multi", &identity.source)
+                lifecycle::DeployObservation::start_with_control_plane_in_roots(
+                    &roots,
+                    Some(id),
+                    "multi",
+                    &identity.source,
+                    control_plane_lineage,
+                    artifact_sha256,
+                )
             }
         })
         .transpose()?;
-    if let (Some(aggregate), Some(prior_checkpoint)) = (
-        aggregate_observation.as_mut(),
-        config.resume_run_id.as_deref(),
-    ) {
-        aggregate.link_resume(prior_checkpoint)?;
-    }
     let deploy_run_id = aggregate_observation
         .as_ref()
         .map(|run| run.run_id().to_string());
@@ -873,6 +885,7 @@ pub fn run_multi(
     let total_projects = project_results.len() as u32;
 
     if let Some(aggregate) = aggregate_observation.as_mut() {
+        aggregate.project_target_tasks(&project_results)?;
         aggregate.finish(
             if failed == 0 {
                 homeboy_core::observation::RunStatus::Pass
@@ -1223,6 +1236,7 @@ mod tests {
                 expected_version: Some("1.2.3".to_string()),
                 prepared_projection: Some(PreparedDeployProjection {
                     components: BTreeMap::from([("site:plugin".to_string(), component)]),
+                    control_plane: None,
                 }),
                 prepared_artifact: Some(PreparedDeployArtifact {
                     component_id: "plugin".to_string(),
@@ -1319,6 +1333,7 @@ mod tests {
                         ("first:plugin".to_string(), component(&first_source)),
                         ("second:plugin".to_string(), component(&second_source)),
                     ]),
+                    control_plane: None,
                 }),
                 prepared_artifact: Some(PreparedDeployArtifact {
                     component_id: "plugin".to_string(),

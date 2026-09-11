@@ -2339,7 +2339,12 @@ fn provider_readiness_exhausted_outcome(
         .readiness_skips
         .iter()
         .filter_map(|skip| skip.classification.as_deref())
-        .collect::<Vec<_>>();
+        .fold(Vec::new(), |mut classifications, classification| {
+            if !classifications.contains(&classification) {
+                classifications.push(classification);
+            }
+            classifications
+        });
     let retryable = scheduled.readiness_skips.iter().any(|skip| skip.retryable);
     let failure_classification = if classifications.contains(&"timeout") {
         AgentTaskFailureClassification::Timeout
@@ -2347,11 +2352,10 @@ fn provider_readiness_exhausted_outcome(
         AgentTaskFailureClassification::RateLimited
     } else if classifications.contains(&"transient_failure") {
         AgentTaskFailureClassification::Transient
-    } else if classifications
-        .iter()
-        .any(|classification| matches!(*classification, "account" | "auth_failure"))
-    {
+    } else if classifications.contains(&"account") {
         AgentTaskFailureClassification::ProviderAccountBlocked
+    } else if classifications.contains(&"auth_failure") {
+        AgentTaskFailureClassification::ProviderCredentialsExhausted
     } else if classifications.contains(&"capability") {
         AgentTaskFailureClassification::CapabilityMissing
     } else {

@@ -97,13 +97,65 @@ A useful headless UI can be built from this read/query surface:
   `GET /runs/:id/artifacts/:artifact_id/content`, and `GET /runs/:id/findings`
   for persisted evidence
 - `GET /audit/runs` and `GET /bench/runs` for analysis-specific run history
-- `GET /v1/control-plane/capabilities` and `GET /v1/control-plane/runs/:id`
-  for the typed orchestration service. Capabilities advertise only the
-  operations wired in this build. Run retrieval and `homeboy agent-task status`
-  are pure reads; live runner refresh and durable repair belong to the explicit
-  reconciliation operation. The run route accepts exact run ids; mission/Cook
-  ids belong to the mission resource rather than acting as run aliases. A run
-  is not a job — the job *supervises* the run, so
+- `GET /v1/control-plane/capabilities`, `GET /v1/control-plane/missions`,
+  `GET /v1/control-plane/missions/:id`, `GET /v1/control-plane/runs`,
+  `POST /v1/control-plane/runs`, `GET /v1/control-plane/runs/:id`,
+  `GET /v1/control-plane/runs/:id/tasks`, and
+  `GET /v1/control-plane/runs/:id/tasks/:task_id`, plus nested attempt list and
+  detail routes below each task, for the
+  typed orchestration service. Mission and run discovery accept bounded
+  `limit` values and opaque keyset cursors. Run discovery accepts an optional
+  typed `mission` filter, and continuation cursors are bound to that filter.
+  Tasks are addressed within their parent run because persisted task names are
+  run-local; task pagination cursors are likewise bound to the run.
+  Provider attempts use their durable `{run}:{task}:{attempt}` owner identity;
+  attempt cursors bind to both parent identities.
+  New provider reservations persist a distinct canonical execution identity and
+  expose it through nested execution list/detail routes below the attempt.
+  Runner jobs, provider sessions, and process IDs remain external references;
+  records predating the execution identity remain visible with no inferred
+  execution resource.
+  Run-scoped `/artifacts`, `/evidence`, and `/external-references` routes expose
+  list, detail, and `POST` registration operations. Automatic lifecycle
+  artifact/evidence pointers and explicitly registered references share one
+  typed read model with content-derived automatic identities. Registrations are
+  bounded, actor-attributed, and exactly replayable by a persisted digest of the
+  idempotency key. Reference URLs are query-redacted and stripped of fragments
+  before persistence and projection; replay keys are not exposed by reads.
+  Network writes require the same paired broker `submit` scope as run submission.
+  `POST /v1/control-plane/runs/:id/events` appends caller-owned events to a
+  dedicated durable ledger. The controller assigns the event ID and monotonic
+  run-local sequence, persists only a digest of the idempotency key, validates
+  nested identities against the run graph, and redacts bounded payloads and
+  references before persistence. Replays return the original event, including
+  after its payload ages out of the retained read window; conflicting reuse of
+  a key is rejected. Synthesized `agent-task logs` remain a separate legacy
+  projection rather than being frozen into this forward-only ledger.
+  Control-plane actions append one `action.accepted` event before invoking the
+  delegated effect and one terminal `action.succeeded`,
+  `action.already_satisfied`, or `action.failed` event after persisting the
+  immutable acknowledgement. Matching action replays return that acknowledgement
+  without appending duplicate events; conflicting intent is rejected before an
+  event or effect. Internal action event identities are reserved from caller-owned
+  append requests. Compact receipts suppress the redacted legacy action-log
+  projection even after event payload retention expires.
+  Event pages reject non-monotonic, duplicate, or cross-run streams. Their
+  opaque cursors are bound to one run; the adjacent `/events/retention` resource
+  reports the earliest and latest retained sequence without changing the strict
+  v1 page shape. A cursor older than that window returns the typed
+  `cursor_expired` error with HTTP `410 Gone`.
+  The mission index is forward-only:
+  canonical mission ownership is indexed transactionally with each new run
+  projection after the index schema is installed. HTTP submission requires broker `submit` scope,
+  binds the durable actor to that credential, and queues a controller plan
+  already staged under its canonical run ID. Provider, model, runner, and plan
+  payloads remain adapter-owned, and claimed execution stays off the serial
+  HTTP request loop. Capabilities advertise only the operations wired in this
+  build. Discovery, exact retrieval, and `homeboy agent-task status` are pure
+  reads; live runner refresh and durable repair belong to the explicit
+  reconciliation operation. The exact route accepts run ids; mission/Cook ids
+  belong to the mission resource rather than acting as run aliases. A run is
+  not a job — the job *supervises* the run, so
   watching and cancelling stay on the controller-job surface below.
 - `GET /jobs`, `GET /jobs/:id`, `GET /jobs/:id/events`, and
   `POST /jobs/:id/cancel` for long-running work. Cook and fanout are both

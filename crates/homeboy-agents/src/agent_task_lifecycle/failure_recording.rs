@@ -873,6 +873,9 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
     if error.details["pre_execution_phase"] == "gate_toolchain_preflight" {
         return AgentTaskFailureClassification::CapabilityMissing;
     }
+    if error.code == homeboy_core::ErrorCode::ResourceCapacityReserve {
+        return AgentTaskFailureClassification::Capacity;
+    }
     if error.retryable == Some(true) {
         AgentTaskFailureClassification::Transient
     } else {
@@ -1358,13 +1361,6 @@ pub(crate) fn record_aggregate_in_store(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let aggregate_path = lifecycle_store.aggregate_path(&record.run_id);
-    apply_aggregate_to_record(
-        record,
-        plan,
-        aggregate,
-        aggregate_path.display().to_string(),
-    );
     let mut retained_roots = Vec::new();
     let roots: Vec<PathBuf> = plan
         .tasks
@@ -1407,8 +1403,14 @@ pub(crate) fn record_aggregate_in_store(
         &aggregate.outcomes,
     )?;
     crate::controller_scratch::finalize_run_at(&lifecycle_store.data_root(), &record.run_id)?;
-    lifecycle_store.write_aggregate_and_record(record, aggregate)?;
-    record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
+    apply_aggregate_transition_in_store(
+        lifecycle_store,
+        AgentTaskAggregateTransition {
+            record,
+            plan,
+            aggregate,
+        },
+    )?;
     // The Cook index this completion updates belongs to the same store the
     // aggregate was just committed into. Resolving it ambiently made this
     // rooted function write its substantive-candidate pointer into whatever

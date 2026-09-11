@@ -484,6 +484,7 @@ fn agent_task_failure_classifications() -> Vec<String> {
         AgentTaskFailureClassification::ProviderCredentialsExhausted,
         AgentTaskFailureClassification::PolicyDenied,
         AgentTaskFailureClassification::CapabilityMissing,
+        AgentTaskFailureClassification::Capacity,
         AgentTaskFailureClassification::InvalidInput,
         AgentTaskFailureClassification::ExecutionFailed,
         AgentTaskFailureClassification::Unknown,

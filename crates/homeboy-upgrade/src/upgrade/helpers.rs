@@ -2598,8 +2598,14 @@ fn home_dir_for_user(user: &str) -> Option<PathBuf> {
 /// fetch. Returns `None` when the count can't be determined (no upstream, not a
 /// repo, fetch failed). Best-effort and read-only — never mutates the worktree.
 fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
-    // Read-only fetch to learn upstream state without touching the worktree.
-    let _ = git::run_git(git_root, &["fetch", "origin"], "git fetch origin");
+    // Fetch updates shared remote-tracking refs even though it leaves the worktree unchanged.
+    let _ = git::fetch_remote_tracking_refs_until(
+        git_root,
+        &["fetch", "origin"],
+        "git fetch origin",
+        &[],
+        std::time::Instant::now() + Duration::from_secs(30),
+    );
     let count = git::run_git(
         git_root,
         &["rev-list", "--count", "HEAD..@{upstream}"],

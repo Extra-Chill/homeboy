@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use crate::upgrade::planning::resolve_binary_on_path_var;
 
 #[test]
 fn test_verify_upgrade_with_retry() {
@@ -61,26 +62,47 @@ fn explicit_binary_upgrade_requires_the_selected_release_version() {
 
 #[cfg(unix)]
 #[test]
-fn explicit_binary_upgrade_reads_the_captured_destination_not_path() {
+fn binary_upgrade_verifies_the_path_active_destination_after_launcher_replacement() {
     use std::os::unix::fs::PermissionsExt;
 
-    // #11152: the installer replaces `command -v homeboy` before this process
-    // returns. Verification must execute that captured path, even when another
-    // Homeboy binary shadows it later on PATH.
+    // A promoted binary can replace a symlinked launcher. The old launcher path
+    // is then gone, but a fresh PATH lookup reaches the installed executable.
     let directory = tempfile::tempdir().expect("tempdir");
-    let destination = directory.path().join("homeboy");
-    std::fs::write(&destination, "#!/bin/sh\nprintf 'homeboy 0.326.0\\n'\n").expect("stale binary");
-    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755))
-        .expect("make stale binary executable");
+    let launcher_dir = directory.path().join("launcher");
+    let installed_dir = directory.path().join("installed");
+    std::fs::create_dir_all(&launcher_dir).expect("launcher directory");
+    std::fs::create_dir_all(&installed_dir).expect("installed directory");
+    let launcher = launcher_dir.join("homeboy");
+    let installed = installed_dir.join("homeboy");
+    std::fs::write(&installed, "#!/bin/sh\nprintf 'homeboy 0.326.0\\n'\n")
+        .expect("old installed binary");
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755))
+        .expect("make old installed binary executable");
+    std::os::unix::fs::symlink(&installed, &launcher).expect("launcher symlink");
 
-    let (success, observed) =
-        verify_binary_upgrade_with_retry(&destination, "0.326.1", 1, Duration::ZERO, |_| {});
+    // Model the installer's promotion: publish the replacement, then retire the
+    // launcher it had used before the promotion.
+    std::fs::write(&installed, "#!/bin/sh\nprintf 'homeboy 0.326.1\\n'\n")
+        .expect("replacement binary");
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755))
+        .expect("make replacement binary executable");
+    std::fs::remove_file(&launcher).expect("retire replaced launcher");
+    let path_var = format!("{}:{}", launcher_dir.display(), installed_dir.display());
 
-    assert!(!success, "the stale captured target must fail verification");
+    let (success, observed, destination) = verify_binary_upgrade_with_retry_at(
+        "0.326.1",
+        1,
+        Duration::ZERO,
+        || resolve_binary_on_path_var(&path_var),
+        |_| {},
+    );
+
+    assert!(success, "the promoted PATH destination must verify");
     assert_eq!(
         observed.and_then(|info| info.version).as_deref(),
-        Some("0.326.0")
+        Some("0.326.1")
     );
+    assert_eq!(destination.as_deref(), Some(installed.as_path()));
 }
 
 #[test]

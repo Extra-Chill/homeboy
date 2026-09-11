@@ -489,16 +489,88 @@ pub fn compact_command_result_output(stream: &str) -> Option<String> {
     {
         lines.push(format!("Job: {job_id}"));
     }
-    if let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) {
-        lines.push(format!("Summary: {}", compact_line(summary)));
-    }
+    append_result_summary_lines(&value, &mut lines);
     append_result_outcome_lines(&value, &mut lines);
+    append_result_reference_lines(&value, &mut lines);
     if value.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
         if let Some(cause) = command_result_root_cause(&value) {
             lines.push(format!("Root cause: {}", compact_line(&cause)));
         }
     }
     Some(bound_terminal_output(lines.join("\n")))
+}
+
+fn append_result_summary_lines(value: &serde_json::Value, lines: &mut Vec<String>) {
+    const MAX_SUMMARY_LINES: usize = 12;
+    let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let mut summary_lines = summary.lines().filter(|line| !line.trim().is_empty());
+    let lines_to_render = summary_lines
+        .by_ref()
+        .take(MAX_SUMMARY_LINES)
+        .collect::<Vec<_>>();
+    let summary_truncated = summary_lines.next().is_some();
+    match lines_to_render.as_slice() {
+        [] => {}
+        [line] => lines.push(format!("Summary: {}", compact_line(line))),
+        lines_to_render => {
+            lines.push("Summary:".to_string());
+            lines.extend(
+                lines_to_render
+                    .iter()
+                    .map(|line| format!("  {}", line.trim())),
+            );
+            if summary_truncated {
+                lines.push("  [summary truncated]".to_string());
+            }
+        }
+    }
+}
+
+fn append_result_reference_lines(value: &serde_json::Value, lines: &mut Vec<String>) {
+    const MAX_REFERENCES: usize = 8;
+    let primary_run_id = value
+        .get("run")
+        .and_then(|run| run.get("id"))
+        .and_then(serde_json::Value::as_str);
+    let mut run_count = 0;
+    if let Some(runs) = value
+        .get("refs")
+        .and_then(|refs| refs.get("runs"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for run in runs {
+            let Some(run_id) = run.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if Some(run_id) == primary_run_id {
+                continue;
+            }
+            lines.push(format!("Run ref: {run_id}"));
+            run_count += 1;
+            if run_count == MAX_REFERENCES {
+                break;
+            }
+        }
+    }
+    let mut artifact_count = 0;
+    if let Some(artifacts) = value.get("artifacts").and_then(serde_json::Value::as_array) {
+        for artifact in artifacts {
+            let Some(id) = artifact.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let label = artifact
+                .get("semantic_key")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("artifact");
+            lines.push(format!("Artifact ref: {label} ({id})"));
+            artifact_count += 1;
+            if artifact_count == MAX_REFERENCES {
+                break;
+            }
+        }
+    }
 }
 
 fn append_result_outcome_lines(value: &serde_json::Value, lines: &mut Vec<String>) {
@@ -1480,6 +1552,33 @@ mod tests {
         assert!(stdout.contains("Evidence: homeboy runs show fuzz-1"));
         assert!(stdout.len() <= COMPACT_COMMAND_RESULT_LIMIT_BYTES);
         assert!(!stdout.contains("\"campaign\""));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn terminal_projection_keeps_structured_summary_and_references_bounded() {
+        let nested = r#"{
+            "schema":"homeboy/command-result/v3",
+            "command":"bench",
+            "success":true,
+            "status":"succeeded",
+            "run":{"id":"bench-baseline"},
+            "refs":{"runs":[{"id":"bench-baseline"},{"id":"bench-candidate"}]},
+            "summary":"Bench comparison\nResult: PASS\nComparison means:\n  visual/baseline: mean_ms=12\n  visual/candidate: mean_ms=14\nRuns:\n  baseline: bench-baseline\n  candidate: bench-candidate",
+            "artifacts":[{"id":"baseline-diff","semantic_key":"baseline/visual/diff"},{"id":"candidate-diff","semantic_key":"candidate/visual/diff"}],
+            "data":{"large":"this remains in the output artifact"}
+        }"#;
+
+        let (stdout, stderr) =
+            compact_lab_terminal_output(nested, "", Some("homeboy-lab"), 0, None, false);
+
+        assert!(stdout.contains("Comparison means:"));
+        assert!(stdout.contains("visual/baseline: mean_ms=12"));
+        assert!(stdout.contains("Run: bench-baseline"));
+        assert!(stdout.contains("Run ref: bench-candidate"));
+        assert!(stdout.contains("Artifact ref: baseline/visual/diff (baseline-diff)"));
+        assert!(stdout.len() <= COMPACT_COMMAND_RESULT_LIMIT_BYTES);
+        assert!(!stdout.contains("this remains in the output artifact"));
         assert!(stderr.is_empty());
     }
 

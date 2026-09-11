@@ -157,6 +157,10 @@ pub struct CleanupArtifactsArgs {
         value_parser = parse_positive_usize
     )]
     pub limit: Option<usize>,
+    /// Resume repository-worktree artifact inventory at the cursor returned by
+    /// an earlier bounded pass.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
     /// Only reclaim artifacts from worktrees whose branch is already merged
     /// into its upstream. Preserves in-progress cooks' build dirs.
     #[arg(long)]
@@ -378,6 +382,21 @@ mod tests {
         assert_eq!(args.sort, CleanupArtifactsSortArg::Size);
         assert_eq!(args.limit, Some(7));
         assert!(args.merged_only);
+
+        let parsed = CleanupParserTest::parse_from([
+            "cleanup",
+            "artifacts",
+            "--all-worktrees",
+            "--cursor",
+            "{\"root\":\"/repo\",\"worktree\":\"/repo/next\"}",
+        ]);
+        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
+            panic!("expected cleanup artifacts command");
+        };
+        assert_eq!(
+            args.cursor.as_deref(),
+            Some("{\"root\":\"/repo\",\"worktree\":\"/repo/next\"}")
+        );
 
         let parsed = CleanupParserTest::parse_from([
             "cleanup",

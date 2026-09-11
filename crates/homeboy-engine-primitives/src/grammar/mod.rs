@@ -317,6 +317,121 @@ mod tests {
         assert_eq!(lines[4].region, Region::Code);
     }
 
+    /// PHP-style grammar mirroring real-world extension configs where the doc
+    /// prefix (`/**`) is a prefix of the block-comment opener (`/*`).
+    fn php_docblock_grammar() -> Grammar {
+        Grammar {
+            language: LanguageMeta {
+                id: "php".to_string(),
+                extensions: vec!["php".to_string()],
+                import_parser: None,
+            },
+            comments: CommentSyntax {
+                line: vec!["//".to_string(), "#".to_string()],
+                block: vec![("/*".to_string(), "*/".to_string())],
+                doc: vec!["/**".to_string()],
+            },
+            strings: StringSyntax {
+                quotes: vec!["\"".to_string(), "'".to_string()],
+                escape: "\\".to_string(),
+                multiline: vec![],
+            },
+            blocks: BlockSyntax::default(),
+            contract: None,
+            fingerprint: FingerprintGrammar::default(),
+            patterns: {
+                let mut p = HashMap::new();
+                p.insert(
+                    "method".to_string(),
+                    ConceptPattern {
+                        regex: r"(?:(?:public|protected|private|static|abstract|final)\s+)*function\s+(\w+)\s*\(([^)]*)\)".to_string(),
+                        captures: captures(&[("name", 1), ("params", 2)]),
+                        context: "any".to_string(),
+                        skip_comments: true,
+                        skip_strings: true,
+                        require_capture: None,
+                    },
+                );
+                p.insert(
+                    "namespace".to_string(),
+                    ConceptPattern {
+                        regex: r"^\s*namespace\s+([\w\\]+)\s*;".to_string(),
+                        captures: captures(&[("name", 1)]),
+                        context: "top_level".to_string(),
+                        skip_comments: true,
+                        skip_strings: true,
+                        require_capture: None,
+                    },
+                );
+                p
+            },
+        }
+    }
+
+    #[test]
+    fn docblock_opener_wins_over_doc_line_prefix() {
+        // Regression test for #14527.
+        //
+        // A `/**` doc-block opener must not be consumed as a line comment by
+        // the doc-prefix check. When it was, the block state never opened, the
+        // docblock interior was classified as code, and prose apostrophes
+        // ("doesn't", "file's") opened phantom multi-line strings that
+        // swallowed the namespace and method declarations that followed.
+        let grammar = php_docblock_grammar();
+        let content = "<?php\n/**\n * Docblock prose with an apostrophe: doesn't.\n *\n * @package X\\Y\n */\n\nnamespace X\\Y;\n";
+        let lines = walk_lines(content, &grammar);
+
+        assert_eq!(
+            lines[1].region,
+            Region::BlockComment,
+            "`/**` opens a block comment"
+        );
+        assert_eq!(lines[2].region, Region::BlockComment);
+        assert_eq!(lines[3].region, Region::BlockComment);
+        assert_eq!(
+            lines[5].region,
+            Region::BlockComment,
+            "`*/` line is block comment"
+        );
+        assert_eq!(lines[7].region, Region::Code, "namespace line is code");
+    }
+
+    #[test]
+    fn namespace_after_docblock_with_apostrophes_is_extracted() {
+        // Regression test for #14527 (real-world case: data-machine-events
+        // inc/Abilities/AbilityCategories.php declared exactly the expected
+        // namespace, yet the audit reported "Missing namespace declaration"
+        // because the docblock above it was misparsed).
+        let grammar = php_docblock_grammar();
+        let content = "<?php\n/**\n * Centralized registration.\n *\n * Follows the same pattern as the core's AbilityCategories.\n *\n * @package DataMachineEvents\\Abilities\n */\n\nnamespace DataMachineEvents\\Abilities;\n\nclass AbilityCategories {}\n";
+
+        let symbols = extract(content, &grammar);
+        let ns = namespace(&symbols);
+
+        assert_eq!(
+            ns.as_deref(),
+            Some("DataMachineEvents\\Abilities"),
+            "Namespace declared after a docblock containing apostrophes should be extracted"
+        );
+    }
+
+    #[test]
+    fn method_after_docblock_with_apostrophes_is_extracted() {
+        // Regression test for #14527 (real-world case: CLI command docblocks
+        // contain WP-CLI option prose with apostrophes; the method signature
+        // after the docblock was swallowed by a phantom string state).
+        let grammar = php_docblock_grammar();
+        let content = "<?php\nclass CheckDuplicatesCommand {\n    /**\n     * Check for duplicate events that weren't caught during import.\n     *\n     * @param array $args Positional arguments.\n     */\n    public function __invoke( array $args ): void {\n        $scope = $args['scope'] ?? 'upcoming';\n    }\n}\n";
+
+        let symbols = extract(content, &grammar);
+        let names = method_names(&symbols);
+
+        assert!(
+            names.contains(&"__invoke".to_string()),
+            "Method declared after a docblock containing apostrophes should be extracted. Got: {names:?}"
+        );
+    }
+
     #[test]
     fn depth_skips_braces_in_strings() {
         let content = "let x = \"{ not a block }\";\nlet y = 1;\n";

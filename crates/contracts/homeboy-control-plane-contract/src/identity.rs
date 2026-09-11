@@ -65,17 +65,20 @@ opaque_identity!(
     TaskId
 );
 opaque_identity!(
-    /// The attempt identity encoded by a run id. The opaque string is the run
-    /// id itself; the attempt *number* lives on [`crate::ResolvedIdentities`].
+    /// One task-scoped attempt identity.
     AttemptId
 );
 opaque_identity!(
-    /// A runner-job / execution identity.
+    /// One canonical execution identity persisted beneath an attempt.
     ExecutionId
 );
 opaque_identity!(
     /// A provider session identity.
     ProviderSessionId
+);
+opaque_identity!(
+    /// One run-scoped artifact, evidence, or external-reference identity.
+    ReferenceId
 );
 opaque_identity!(
     /// Stable identity of one event in a run stream.
@@ -84,6 +87,22 @@ opaque_identity!(
 opaque_identity!(
     /// Opaque resume cursor returned by an event page.
     EventCursor
+);
+opaque_identity!(
+    /// Opaque continuation cursor returned by a run discovery page.
+    RunCursor
+);
+opaque_identity!(
+    /// Opaque continuation cursor returned by a mission discovery page.
+    MissionCursor
+);
+opaque_identity!(
+    /// Opaque continuation cursor returned by a run-scoped task page.
+    TaskCursor
+);
+opaque_identity!(
+    /// Opaque continuation cursor returned by a task-scoped attempt page.
+    AttemptCursor
 );
 
 /// Why an identity newtype could not be constructed.

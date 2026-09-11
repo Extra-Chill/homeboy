@@ -1153,6 +1153,103 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     Ok(updated.unwrap_or(current))
 }
 
+/// Authorize one queued Cook admission to replay locally without creating a new
+/// Cook. The admission parent remains the canonical mission/run identity; only
+/// its unconsumed replay route changes. A claimed replay, materializing child,
+/// or any provider execution has crossed the ownership boundary and is refused.
+pub fn update_unmaterialized_cook_placement_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    placement: &str,
+    actor: &str,
+) -> Result<AgentTaskRunRecord> {
+    if placement != "local" {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "queued Cook placement updates currently require explicit local placement",
+            Some(placement.to_string()),
+            None,
+        ));
+    }
+    let cook_id = sanitize_run_id(cook_id);
+    store.with_config_lock(|| {
+        let updated = store.mutate_record_locked_without_terminal_projection(&cook_id, |record| {
+            let execution_started = record.metadata["provider_executions"]
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+                || store.read_cook_index(&cook_id).is_ok()
+                || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
+                    .as_str()
+                    .is_some_and(|run_id| store.read_record(run_id).is_ok());
+            let admission = &mut record.metadata["unmaterialized_cook_admission"];
+            if record.state.is_terminal()
+                || !admission.is_object()
+                || execution_started
+                || matches!(
+                    admission["lease"]["state"].as_str(),
+                    Some("claimed" | "consumed" | "materializing")
+                )
+            {
+                return false;
+            }
+            let Some(argv) = admission["binding"]["replay_intent"]["argv"].as_array_mut() else {
+                return false;
+            };
+            let mut found = false;
+            let mut index = 0;
+            while index < argv.len() {
+                if argv[index] == "--placement" {
+                    if let Some(value) = argv.get_mut(index + 1) {
+                        *value = json!("local");
+                        found = true;
+                        break;
+                    }
+                    return false;
+                }
+                if argv[index]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("--placement="))
+                {
+                    argv[index] = json!("--placement=local");
+                    found = true;
+                    break;
+                }
+                index += 1;
+            }
+            if !found {
+                argv.insert(1, json!("--placement=local"));
+            }
+            admission["binding"]["placement"]["requested"] = json!("local");
+            admission["binding"]["placement"]["local_fallback"] = json!(true);
+            admission["state"] = json!("queued");
+            admission["reason"] = json!("explicit local placement authorized");
+            admission["retry"]["next_attempt_at"] = json!(chrono::Utc::now().to_rfc3339());
+            record.metadata["placement_update"] = json!({
+                "schema": "homeboy/unmaterialized-cook-placement-update/v1",
+                "placement": "local",
+                "actor": homeboy_core::redaction::redact_string(actor),
+                "confirmed_at": now_timestamp(),
+                "preserved_identity": true,
+            });
+            record.updated_at = Some(now_timestamp());
+            true
+        })?;
+        if let Some(updated) = updated {
+            return Ok(updated);
+        }
+        let current = store.read_record(&cook_id)?;
+        if current.metadata["placement_update"]["placement"] == "local" {
+            return Ok(current);
+        }
+        Err(Error::validation_invalid_argument(
+            "placement",
+            "placement update requires an unexecuted queued Cook admission with no active replay ownership",
+            Some(cook_id),
+            None,
+        ))
+    })
+}
+
 /// Read the durable cancellation fence from an explicitly rooted store.
 ///
 /// The fence is a field on the handoff parent record, not a separate marker
@@ -2600,6 +2697,18 @@ where
         metadata["activity_context"] = context.clone();
         metadata["activity_contexts"] = json!(activity_contexts);
     }
+    // Discovery is a read over lifecycle records, so retain the branch scope
+    // carried by the submitted plan instead of depending on later worktree
+    // materialization metadata.
+    if let Some(branch) = plan.tasks.first().and_then(|task| {
+        task.workspace.branch.as_deref().or_else(|| {
+            task.metadata
+                .get("logical_workspace_branch")
+                .and_then(Value::as_str)
+        })
+    }) {
+        metadata["branch"] = json!(branch);
+    }
     let acceptance_requirement = plan
         .metadata
         .get("acceptance")
@@ -2651,6 +2760,10 @@ where
     if let Some(invalidation) = plan.metadata.get("execution_placement_invalidated") {
         metadata["execution_placement_invalidated"] = invalidation.clone();
     }
+    if let Some(fanout) = plan.metadata.get("fanout") {
+        canonical_fanout_mission(&plan.metadata)?;
+        metadata["fanout"] = fanout.clone();
+    }
     // Surface controller-owned worktree convergence in the run record as well
     // as the immutable plan, so status and resumed execution retain the same
     // reviewer-facing evidence.
@@ -2667,6 +2780,9 @@ where
     if let Some(resolution) = homeboy_core::notification_route::current_resolution() {
         resolution.insert_into_metadata(&mut metadata);
     }
+    let replaces_control_plane_submission = submission_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.contains_key("control_plane_submission"));
     if let Some(submission_metadata) = submission_metadata {
         metadata
             .as_object_mut()
@@ -2713,6 +2829,24 @@ where
     let mut pre_execution_recovery = false;
     let mut pre_execution_runtime_recovery = false;
     if let Ok(existing) = lifecycle_store.read_record(&run_id) {
+        let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
+        let submitted_fanout = canonical_fanout_mission(&record.metadata)?;
+        if existing_fanout.is_some()
+            && submitted_fanout.is_some()
+            && existing_fanout != submitted_fanout
+        {
+            return Err(Error::validation_invalid_argument(
+                "fanout.id",
+                "an existing run cannot be rebound to a different fanout mission",
+                Some(run_id.clone()),
+                None,
+            ));
+        }
+        if submitted_fanout.is_none() {
+            if let Some(fanout) = existing.metadata.get("fanout") {
+                record.metadata["fanout"] = fanout.clone();
+            }
+        }
         pre_execution_recovery =
             crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                 &existing,
@@ -2737,6 +2871,11 @@ where
         ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
+            }
+        }
+        if !replaces_control_plane_submission {
+            if let Some(value) = existing.metadata.get("control_plane_submission") {
+                record.metadata["control_plane_submission"] = value.clone();
             }
         }
         if pre_execution_recovery {
@@ -3493,6 +3632,7 @@ pub fn reserve_provider_execution_in_store(
                 "owner_pid": std::process::id(),
                 "owner_linux_starttime_ticks": homeboy_core::process::linux_process_starttime_ticks(std::process::id()).ok().flatten(),
                 "owner_identity": format!("{run_id}:{execution_key}"),
+                "execution_identity": format!("{run_id}:{execution_key}:execution"),
             }));
             let consumed = executions.len();
             metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
@@ -3751,35 +3891,6 @@ pub fn take_cook_controller_failure_in_store(
     })?;
     let _ = record;
     Ok(removed)
-}
-
-/// Persist cross-store compensation before atomically removing the controller
-/// failure. The caller's intention write runs under the same config lock as the
-/// SQLite mutation, so a crash can never erase the diagnostic without first
-/// leaving enough durable information to restore it.
-pub(crate) fn prepare_cook_controller_failure_rearm_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    persist_intention: impl FnOnce(Option<&Value>) -> Result<()>,
-) -> Result<Option<Value>> {
-    let run_id = sanitize_run_id(run_id);
-    lifecycle_store.with_config_lock(|| {
-        let record = lifecycle_store.read_record(&run_id)?;
-        let diagnostic = record.metadata.get("cook_controller_failure").cloned();
-        persist_intention(diagnostic.as_ref())?;
-        if diagnostic.is_some() {
-            lifecycle_store.mutate_record_locked_without_terminal_projection(
-                &run_id,
-                |record| {
-                    record
-                        .ensure_metadata_object()
-                        .remove("cook_controller_failure");
-                    true
-                },
-            )?;
-        }
-        Ok(diagnostic)
-    })
 }
 
 pub fn record_cook_progress_with_activity_in_store(
@@ -5393,17 +5504,26 @@ pub fn reconcile_status_in_store(
                                         .as_deref()
                                         .unwrap_or("already_queued_or_completed")
                                 };
-                                record.ensure_metadata_object().insert(
-                                    "cook_continuation_scheduler".to_string(),
-                                    json!({
-                                        "status": status,
-                                        "cook_id": cook_id,
-                                        "run_id": run_id,
-                                        "coordinator_build_identity": coordinator_build_identity,
-                                        "candidate": candidate,
-                                    }),
-                                );
-                                lifecycle_store.write_record(&record)?;
+                                // The enqueue above already wrote continuation
+                                // state onto the durable record. Writing this
+                                // in-memory copy back would erase it, so the
+                                // scheduler status is applied to the stored
+                                // record and then re-read.
+                                let scheduler = json!({
+                                    "status": status,
+                                    "cook_id": cook_id,
+                                    "run_id": run_id,
+                                    "coordinator_build_identity": coordinator_build_identity,
+                                    "candidate": candidate,
+                                });
+                                lifecycle_store.mutate_record(&run_id, |stored| {
+                                    stored.ensure_metadata_object().insert(
+                                        "cook_continuation_scheduler".to_string(),
+                                        scheduler.clone(),
+                                    );
+                                    true
+                                })?;
+                                record = lifecycle_store.read_record(&run_id)?;
                             }
                             Err(error) => {
                                 record.ensure_metadata_object().insert(
@@ -7029,28 +7149,6 @@ pub(crate) fn select_cook_candidate_in_store(
 ) -> Result<AgentTaskCookCandidateSelection> {
     let index = lifecycle_store.read_cook_index(&sanitize_run_id(cook_id))?;
     select_cook_candidate_from_index(cook_id, index, Some(lifecycle_store))
-}
-
-pub fn select_cook_candidate_from_attempts(
-    cook_id: &str,
-    attempts: Vec<AgentTaskCookIndexAttempt>,
-) -> Result<AgentTaskCookCandidateSelection> {
-    let latest_run_id = attempts
-        .last()
-        .map(|attempt| attempt.run_id.clone())
-        .unwrap_or_default();
-    select_cook_candidate_from_index(
-        cook_id,
-        AgentTaskCookIndex {
-            schema: schemas::COOK_INDEX.to_string(),
-            cook_id: cook_id.to_string(),
-            latest_run_id,
-            latest_substantive_candidate: None,
-            cancellation_fence: None,
-            attempts,
-        },
-        None,
-    )
 }
 
 fn select_cook_candidate_from_index(

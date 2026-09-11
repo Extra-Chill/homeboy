@@ -1542,36 +1542,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    struct XdgGuard {
-        prior: Option<String>,
-    }
-
     struct EnvVarGuard {
         name: &'static str,
         prior: Option<String>,
-    }
-
-    impl XdgGuard {
-        fn unset() -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::remove_var("XDG_DATA_HOME");
-            Self { prior }
-        }
-
-        fn set(value: &std::path::Path) -> Self {
-            let prior = std::env::var("XDG_DATA_HOME").ok();
-            std::env::set_var("XDG_DATA_HOME", value);
-            Self { prior }
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
     }
 
     impl EnvVarGuard {
@@ -1944,7 +1917,7 @@ mod tests {
     #[test]
     fn test_observation_start_persists_run_record() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
 
             let observation = start_test_observation("homeboy", home.path(), &args, "test", None)
@@ -1986,7 +1959,7 @@ mod tests {
     #[test]
     fn test_observation_keeps_run_dir_out_of_initial_metadata() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
 
@@ -2008,7 +1981,7 @@ mod tests {
     #[test]
     fn injected_artifact_store_failure_terminalizes_collection_and_cleans_scratch() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let runner = ObservedWorkflowRunner::create("test homeboy").expect("runner");
             let scratch_path = runner.run_dir().path().to_path_buf();
@@ -2107,7 +2080,7 @@ mod tests {
     #[test]
     fn test_observation_persists_test_failures_and_analysis_clusters() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let observation = start_test_observation("homeboy", home.path(), &args, "test", None)
                 .expect("observation should start");
@@ -2194,7 +2167,7 @@ mod tests {
     #[test]
     fn test_observation_attaches_validation_command_output() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
             let stdout = homeboy::core::validation_progress::write_command_artifact(
@@ -2269,7 +2242,7 @@ mod tests {
     #[test]
     fn failing_test_persists_declared_artifacts_and_records_missing_provenance() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
             let files = run_dir.path().join("files");
@@ -2437,7 +2410,7 @@ mod tests {
     #[test]
     fn delayed_passing_counts_only_pass_when_the_runner_succeeded() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
 
             for (runner_exit_code, expected_status, expected_exit_code) in
@@ -2592,7 +2565,7 @@ mod tests {
     #[test]
     fn interrupted_test_observation_persists_parseable_partial_child_evidence() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
             let run_dir = RunDir::create().expect("run dir");
             std::fs::write(
@@ -2667,7 +2640,8 @@ mod tests {
         with_isolated_home(|home| {
             let bad_data_home = home.path().join("not-a-dir");
             fs::write(&bad_data_home, "file blocks observation dir").expect("write marker");
-            let _xdg = XdgGuard::set(&bad_data_home);
+            let _xdg =
+                homeboy_core::test_support::EnvVarGuard::set("XDG_DATA_HOME", &bad_data_home);
             let _data_dir =
                 EnvVarGuard::set(homeboy::core::paths::HOMEBOY_DATA_DIR_ENV, &bad_data_home);
 

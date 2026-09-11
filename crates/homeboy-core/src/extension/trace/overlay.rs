@@ -316,7 +316,6 @@ fn unquote_numstat_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::process::Command;
 
     use homeboy_core::engine::run_dir::RunDir;
     use homeboy_core::test_support::with_isolated_home;
@@ -435,17 +434,5 @@ mod tests {
         );
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as git;
 }

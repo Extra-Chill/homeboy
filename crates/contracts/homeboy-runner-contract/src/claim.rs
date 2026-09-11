@@ -7,6 +7,15 @@ use crate::{
     WorkspaceClaimProtocol, WorkspaceOwnerLease, WorkspaceOwnerLeaseProtocol,
 };
 
+/// Reference to controller-owned credentials held only in broker memory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerCredentialDeliveryDescriptor {
+    pub delivery_id: String,
+    pub env_names: Vec<String>,
+    pub expires_at_ms: u64,
+}
+
 pub const RUNNER_API_CLAIM_REQUEST_SCHEMA: &str = "homeboy/runner-api-claim-request/v1";
 pub const RUNNER_API_CLAIM_RESPONSE_SCHEMA: &str = "homeboy/runner-api-claim-response/v1";
 
@@ -71,6 +80,8 @@ pub struct RunnerApiClaimedExecution {
     pub workspace_claim_protocol: Option<WorkspaceClaimProtocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_owner_lease_protocol: Option<WorkspaceOwnerLeaseProtocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_delivery: Option<RunnerCredentialDeliveryDescriptor>,
 }
 
 #[cfg(test)]
@@ -121,6 +132,7 @@ mod tests {
                     execution_protocol: Some(RunnerJobExecutionProtocol::current()),
                     workspace_claim_protocol: None,
                     workspace_owner_lease_protocol: None,
+                    credential_delivery: None,
                 },
             },
         };

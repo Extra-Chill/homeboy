@@ -484,19 +484,7 @@ fn local_file_dependency_error(offenders: &[LocalFileDependency]) -> Error {
 mod tests {
     use super::*;
 
-    fn run_git(dir: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn init_repo(dir: &Path) {
         run_git(dir, &["init", "--quiet"]);

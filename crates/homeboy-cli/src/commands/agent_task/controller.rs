@@ -390,7 +390,7 @@ fn loop_work_projection(controller: &Value) -> Value {
     else {
         return Value::Null;
     };
-    match homeboy::core::daemon::LocalControllerJobClient::connect()
+    match homeboy::core::daemon::LocalControllerJobClient::connect_existing_job(job_id)
         .and_then(|client| client.status(job_id))
     {
         Ok(job) => serde_json::json!({
@@ -420,7 +420,8 @@ fn cancel_loop_work(
     else {
         return Ok(Value::Null);
     };
-    let job = homeboy::core::daemon::LocalControllerJobClient::connect()?.cancel(job_id, reason)?;
+    let job = homeboy::core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?
+        .cancel(job_id, reason)?;
     Ok(serde_json::json!({
         "job_id": job_id,
         "status": job.status,

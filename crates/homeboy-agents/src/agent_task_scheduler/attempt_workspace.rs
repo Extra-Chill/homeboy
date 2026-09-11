@@ -1285,12 +1285,5 @@ mod tests {
         );
     }
 
-    fn git(cwd: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {:?} failed with {status}", args);
-    }
+    use homeboy_core::test_support::run_git_command as git;
 }

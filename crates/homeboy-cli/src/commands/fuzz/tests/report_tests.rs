@@ -97,6 +97,7 @@ fn fuzz_campaign_contract_surfaces_extension_metadata() {
         env: Vec::new(),
         runtime_helpers: Vec::new(),
         workloads: Vec::new(),
+        workload_json_probes: Vec::new(),
         case_artifact: Some("failing-case".to_string()),
         corpus_artifacts: vec!["corpus".to_string()],
         seed: Some("manifest-seed".to_string()),

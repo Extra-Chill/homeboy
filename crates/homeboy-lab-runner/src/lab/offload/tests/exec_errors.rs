@@ -85,8 +85,6 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
             claim_expires_in_ms: None,
             durable_run_id: Some(run_id.to_string()),
             stale_reason: None,
-            lifecycle_state: Some("running".to_string()),
-            retryable: Some(false),
             artifact_refs: Vec::new(),
         });
 

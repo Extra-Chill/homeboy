@@ -73,6 +73,17 @@ pub struct RunnerSettings {
     pub daemon: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_limit: Option<usize>,
+    /// Maximum seconds the controller waits for an accepted runner job. Unset
+    /// retains the twenty-minute default; zero detaches immediately. The
+    /// `HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS` env var overrides this for one run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_exec_wait_timeout_secs: Option<u64>,
+    /// Whether an accepted remote runner job is cancelled when the controller
+    /// stops waiting. Unset cancels agent-task workloads and preserves other
+    /// accepted work. The
+    /// `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT` env var can enable this for one run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_on_wait_timeout: Option<bool>,
     /// Bounds a child which emits only runner-wrapper heartbeats. Zero disables
     /// this safeguard for workloads whose semantic progress cannot be observed.
     #[serde(default, skip_serializing_if = "HeartbeatOnlyStallPolicy::is_default")]

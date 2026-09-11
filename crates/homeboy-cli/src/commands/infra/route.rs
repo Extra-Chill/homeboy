@@ -1854,6 +1854,9 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
         &self,
         request: &serde_json::Value,
     ) -> homeboy::core::Result<serde_json::Value> {
+        if request["binding"]["placement"]["requested"] == "local" {
+            return Ok(serde_json::json!({ "state": "eligible", "runner_id": "local" }));
+        }
         crate::cli_runtime::select_unmaterialized_cook_runner(request)
     }
 
@@ -1912,7 +1915,7 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
         // `--runner` is a pin and conflicts with explicit placement. Required
         // Lab placement already selects a ready runner during replay, retaining
         // the operator's durable request instead of rewriting it as Auto.
-        if placement != homeboy::cli_surface::Placement::Lab {
+        if placement == homeboy::cli_surface::Placement::Auto {
             args.splice(0..0, ["--runner".to_string(), runner_id.to_string()]);
         }
         let worker_log = Path::new(&intent.input_manifest.path)
@@ -2557,15 +2560,6 @@ fn decode_cook_dispatch_field<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn cook_attempt_source_path<'a>(
-    derived_cook_baseline: Option<&'a DerivedCookBaselineCapability>,
-    controller_source_path: Option<&'a Path>,
-) -> Option<&'a Path> {
-    derived_cook_baseline
-        .map(|capability| capability.canonical_path())
-        .or(controller_source_path)
-}
-
 impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
     for LabCookAttemptDispatcher
 {
@@ -2604,8 +2598,25 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // Preserve the controller's canonical decision across ordinary retry,
         // continuation, and fanout replay. A derived baseline is the declared
         // pre-staging transition where a changed candidate may replace it.
-        let source_path =
-            cook_attempt_source_path(derived_cook_baseline, self.source_path.as_deref());
+        let source_path = plan
+            .tasks
+            .first()
+            .and_then(|task| {
+                task.metadata
+                    .pointer("/cook_continuation_workspace/candidate_source_root")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(PathBuf::from)
+            .or_else(|| {
+                derived_cook_baseline.map(|capability| capability.canonical_path().to_path_buf())
+            })
+            .or_else(|| {
+                plan.tasks
+                    .first()
+                    .and_then(|task| task.workspace.root.as_deref())
+                    .map(PathBuf::from)
+            })
+            .or_else(|| self.source_path.clone());
         let task = plan
             .tasks
             .first()
@@ -2617,7 +2628,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             &self.placement_decision,
             &self.runner_id,
             &task,
-            source_path,
+            source_path.as_deref(),
         )?;
         // The capability has already bound the promoted artifact and exact
         // baseline to this retry; only its evidence crosses the Lab boundary.
@@ -2708,7 +2719,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     // A retry's baseline is controller-owned capability, not plan
                     // data. Stage that exact clean checkout; never substitute the
                     // controller's original workspace during nested Lab dispatch.
-                    source_path,
+                    source_path: source_path.as_deref(),
                     expected_source_snapshot_identity: None,
                     verified_cook_baseline: verified_cook_baseline.as_ref(),
                     job_overrides: self.job_overrides.clone(),
@@ -3770,30 +3781,11 @@ fn materialize_agent_task_retry_handoff(
             },
             validate_generic_lab_command_replay_workspace,
         )?;
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Err(Error::validation_invalid_argument(
-            "retry",
-            acknowledgement
-                .message
-                .unwrap_or_else(|| "retry action failed".to_string()),
-            Some(retry.run_id.clone()),
-            None,
-        ));
-    }
-    if !acknowledgement.result.data["runnable"]
-        .as_bool()
-        .unwrap_or(false)
-    {
+    let retry_result = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
+    if !retry_result.runnable {
         return Ok(None);
     }
-    let record: agent_task_lifecycle::AgentTaskRunRecord =
-        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("decode retry action result for Lab handoff".to_string()),
-            )
-        })?;
+    let record = retry_result.record;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     if let Some(replay) = generic_lab_command_replay(&plan)? {
         let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);

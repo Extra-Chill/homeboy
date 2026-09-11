@@ -3681,14 +3681,7 @@ mod tests {
         scratch
     }
 
-    fn run_git(cwd: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?}");
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     /// Build a source repository with one pushed commit on `main` plus a
     /// linked attempt worktree detached at that commit, exactly the shape

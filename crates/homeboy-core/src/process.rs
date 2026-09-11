@@ -430,6 +430,32 @@ pub fn pid_is_running(pid: u32) -> bool {
     homeboy_engine_primitives::command::process_is_running(pid)
 }
 
+/// Best-effort identity of the host on which local process evidence is valid.
+/// Callers hash this value before persistence; it is a scope boundary, not an
+/// authentication credential.
+pub fn host_identity() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let mut buffer = [0u8; 256];
+        if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+            return None;
+        }
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        return String::from_utf8(buffer[..length].to_vec())
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+    }
+
+    #[cfg(not(unix))]
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
 /// The result of checking a persisted local process identity.
 ///
 /// A PID is not sufficient ownership evidence because operating systems can

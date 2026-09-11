@@ -325,6 +325,9 @@ fn readiness(runner: &Runner, snapshot: RunnerAdmissionSnapshot) -> RunnerReadin
     if !snapshot.summary.admission_blocking_job_ids.is_empty() {
         reasons.push("retained_job_owners".to_string());
     }
+    if snapshot.summary.retained_job_inconsistency.is_some() {
+        reasons.push("retained_active_job_count_inconsistent".to_string());
+    }
     if snapshot.summary.stale_job_count > 0 {
         reasons.push("stale_jobs".to_string());
     }

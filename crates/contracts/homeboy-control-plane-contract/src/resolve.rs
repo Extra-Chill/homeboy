@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::identity::{validate_opaque, AttemptId, ExecutionId, MissionId, RunId, TaskId};
+use crate::identity::{validate_opaque, ExecutionId, MissionId, RunId, TaskId};
 
 /// Which persisted identity string is being resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub enum IdentityKind {
     CookId,
     RunId,
     TaskId,
-    RunnerJobId,
+    ExecutionId,
     FanoutPortfolioId,
 }
 
@@ -24,7 +24,7 @@ impl IdentityKind {
             Self::CookId => "cook id",
             Self::RunId => "run id",
             Self::TaskId => "task id",
-            Self::RunnerJobId => "runner job id",
+            Self::ExecutionId => "execution id",
             Self::FanoutPortfolioId => "fanout portfolio id",
         }
     }
@@ -41,8 +41,7 @@ impl fmt::Display for IdentityKind {
 pub struct ResolvedIdentities {
     pub mission: Option<MissionId>,
     pub run: Option<RunId>,
-    pub attempt: Option<AttemptId>,
-    pub attempt_number: Option<u32>,
+    pub cook_attempt_number: Option<u32>,
     pub task: Option<TaskId>,
     pub execution: Option<ExecutionId>,
 }
@@ -82,7 +81,7 @@ pub fn resolve(kind: IdentityKind, value: &str) -> Result<ResolvedIdentities, Re
         IdentityKind::CookId | IdentityKind::FanoutPortfolioId => resolve_grouping(kind, value),
         IdentityKind::RunId => resolve_run(value),
         IdentityKind::TaskId => resolve_task(value),
-        IdentityKind::RunnerJobId => resolve_execution(value),
+        IdentityKind::ExecutionId => resolve_execution(value),
     }
 }
 
@@ -97,8 +96,7 @@ fn resolve_grouping(kind: IdentityKind, value: &str) -> Result<ResolvedIdentitie
     Ok(ResolvedIdentities {
         mission: Some(MissionId::from_validated(value)),
         run: None,
-        attempt: None,
-        attempt_number: None,
+        cook_attempt_number: None,
         task: None,
         execution: None,
     })
@@ -114,8 +112,7 @@ fn resolve_run(value: &str) -> Result<ResolvedIdentities, ResolveError> {
     Ok(ResolvedIdentities {
         mission: Some(MissionId::from_validated(parts.mission)),
         run: Some(RunId::from_validated(value)),
-        attempt: Some(AttemptId::from_validated(value)),
-        attempt_number: Some(parts.attempt_number),
+        cook_attempt_number: Some(parts.attempt_number),
         task: None,
         execution: None,
     })
@@ -126,20 +123,18 @@ fn resolve_task(value: &str) -> Result<ResolvedIdentities, ResolveError> {
     Ok(ResolvedIdentities {
         mission: None,
         run: None,
-        attempt: None,
-        attempt_number: None,
+        cook_attempt_number: None,
         task: Some(TaskId::from_validated(value)),
         execution: None,
     })
 }
 
 fn resolve_execution(value: &str) -> Result<ResolvedIdentities, ResolveError> {
-    require_opaque(IdentityKind::RunnerJobId, value)?;
+    require_opaque(IdentityKind::ExecutionId, value)?;
     Ok(ResolvedIdentities {
         mission: None,
         run: None,
-        attempt: None,
-        attempt_number: None,
+        cook_attempt_number: None,
         task: None,
         execution: Some(ExecutionId::from_validated(value)),
     })
@@ -203,7 +198,7 @@ mod tests {
         "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874-transport-retry";
 
     #[test]
-    fn agent_task_run_id_resolves_mission_run_and_attempt_number() {
+    fn agent_task_run_id_resolves_mission_run_and_cook_attempt_number() {
         let resolved = resolve(IdentityKind::RunId, AGENT_TASK_RUN).expect("run");
         assert_eq!(
             resolved.mission.as_ref().map(|id| id.as_str()),
@@ -213,11 +208,7 @@ mod tests {
             resolved.run.as_ref().map(|id| id.as_str()),
             Some(AGENT_TASK_RUN)
         );
-        assert_eq!(
-            resolved.attempt.as_ref().map(|id| id.as_str()),
-            Some(AGENT_TASK_RUN)
-        );
-        assert_eq!(resolved.attempt_number, Some(1));
+        assert_eq!(resolved.cook_attempt_number, Some(1));
         assert!(resolved.task.is_none());
         assert!(resolved.execution.is_none());
     }
@@ -234,7 +225,7 @@ mod tests {
             Some(DETACHED_RUN)
         );
         assert!(DETACHED_RUN.ends_with("-transport-retry"));
-        assert_eq!(resolved.attempt_number, Some(1));
+        assert_eq!(resolved.cook_attempt_number, Some(1));
         assert_eq!(
             run_parts(DETACHED_RUN).map(|parts| parts.mission),
             Some(DETACHED_COOK)
@@ -250,8 +241,7 @@ mod tests {
                 Some(cook_id)
             );
             assert!(resolved.run.is_none());
-            assert!(resolved.attempt.is_none());
-            assert!(resolved.attempt_number.is_none());
+            assert!(resolved.cook_attempt_number.is_none());
         }
     }
 
@@ -263,23 +253,24 @@ mod tests {
             resolved.mission.as_ref().map(|id| id.as_str()),
             Some("production-interface")
         );
-        assert!(resolved.attempt_number.is_none());
+        assert!(resolved.cook_attempt_number.is_none());
     }
 
     #[test]
-    fn task_and_runner_job_ids_resolve_to_their_own_identities() {
+    fn task_and_execution_ids_resolve_to_their_own_identities() {
         let task = resolve(IdentityKind::TaskId, "cook-static-site-importer").expect("task");
         assert_eq!(
             task.task.as_ref().map(|id| id.as_str()),
             Some("cook-static-site-importer")
         );
         assert!(task.mission.is_none());
-        let job = resolve(IdentityKind::RunnerJobId, "accepted-daemon-job").expect("job");
+        let execution =
+            resolve(IdentityKind::ExecutionId, "run-1:task-1:1:execution").expect("execution");
         assert_eq!(
-            job.execution.as_ref().map(|id| id.as_str()),
-            Some("accepted-daemon-job")
+            execution.execution.as_ref().map(|id| id.as_str()),
+            Some("run-1:task-1:1:execution")
         );
-        assert!(job.mission.is_none());
+        assert!(execution.mission.is_none());
     }
 
     #[test]

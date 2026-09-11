@@ -52,15 +52,13 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use homeboy_core::process::{
-    process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
-};
+use homeboy_core::process::ProcessStartIdentity;
 use homeboy_core::Result;
 
 use super::cook::AgentTaskCookBatchControl;
 use super::work_job::{
     register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
-    WorkJobInvocation,
+    WorkJobInvocation, WorkJobPhase,
 };
 use crate::agent_task_batch::{self, AgentTaskBatchState};
 use crate::agent_task_lifecycle;
@@ -97,18 +95,6 @@ pub struct AgentTaskCookBatchJobRequest {
     pub child_start_identity: ProcessStartIdentity,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskCookBatchJobPhase {
-    /// Admitted, not yet supervising.
-    #[default]
-    Queued,
-    /// The daemon is watching a live detached coordinator.
-    Supervising,
-    /// The coordinator ended and the wave's durable outcome was observed.
-    Completed,
-}
-
 /// The durable controller job, including its recovery checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -117,7 +103,7 @@ pub struct AgentTaskCookBatchJob {
     pub idempotency_key: String,
     pub request: AgentTaskCookBatchJobRequest,
     #[serde(default)]
-    pub phase: AgentTaskCookBatchJobPhase,
+    pub phase: WorkJobPhase,
     /// Children observed to have reached a durable terminal state.
     ///
     /// This is the checkpoint that makes a recovered job resume rather than
@@ -157,7 +143,7 @@ impl AgentTaskCookBatchJob {
             // creating a second supervisor for the same coordinator.
             idempotency_key: format!("agent-task-cook-batch:{}", request.batch_id),
             request,
-            phase: AgentTaskCookBatchJobPhase::Queued,
+            phase: WorkJobPhase::Queued,
             observed_terminal_children: BTreeSet::new(),
             declared_children: 0,
             terminal_state: None,
@@ -185,12 +171,12 @@ impl AgentTaskCookBatchJob {
                 "cook batch job idempotency key does not match its immutable request",
             ));
         }
-        if self.phase == AgentTaskCookBatchJobPhase::Completed && self.terminal_state.is_none() {
+        if self.phase == WorkJobPhase::Completed && self.terminal_state.is_none() {
             return Err(invalid_cook_batch_job(
                 "completed cook batch jobs require an observed terminal state",
             ));
         }
-        if self.phase != AgentTaskCookBatchJobPhase::Completed && self.terminal_state.is_some() {
+        if self.phase != WorkJobPhase::Completed && self.terminal_state.is_some() {
             return Err(invalid_cook_batch_job(
                 "only completed cook batch jobs may record a terminal state",
             ));
@@ -283,7 +269,7 @@ impl AgentTaskCookBatchJob {
             Ok(report) => report.batch.state,
             Err(_) => AgentTaskBatchState::Failed,
         });
-        self.phase = AgentTaskCookBatchJobPhase::Completed;
+        self.phase = WorkJobPhase::Completed;
         self.completed_result()
     }
 
@@ -380,12 +366,12 @@ impl WorkJobHandler for CookBatchWorkHandler {
 
     fn prepare(&self, request: Value) -> Result<Value> {
         let mut job = AgentTaskCookBatchJob::parse(request)?;
-        if job.phase != AgentTaskCookBatchJobPhase::Queued || job.terminal_state.is_some() {
+        if job.phase != WorkJobPhase::Queued || job.terminal_state.is_some() {
             return Err(invalid_cook_batch_job(
                 "new cook batch jobs must start queued without a terminal state",
             ));
         }
-        job.phase = AgentTaskCookBatchJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         job.to_checkpoint()
     }
 
@@ -410,7 +396,7 @@ impl WorkJobHandler for CookBatchWorkHandler {
         // not signalled: it is the parent of in-flight cooks, which must use
         // their ordered lifecycle cancellation path to terminalize cleanly.
         let job = AgentTaskCookBatchJob::parse(checkpoint.clone())?;
-        if job.phase == AgentTaskCookBatchJobPhase::Completed {
+        if job.phase == WorkJobPhase::Completed {
             return Ok(());
         }
         stop_batch(&job.request.batch_id)
@@ -462,7 +448,7 @@ impl CookBatchWorkHandler {
     /// coordinator" rather than as death, so supervision can never attribute a
     /// stranger's process to this batch.
     fn supervise(&self, job: &mut AgentTaskCookBatchJob, handle: WorkJobHandle) -> Result<Value> {
-        job.phase = AgentTaskCookBatchJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         job.refresh_observations();
         handle.checkpoint(job.to_checkpoint()?)?;
         handle.progress(job.progress_projection())?;
@@ -500,7 +486,10 @@ impl CookBatchWorkHandler {
                 return job.observe_terminal();
             }
 
-            if !coordinator_is_live(&job.request) {
+            if !super::work_job::supervised_child_is_live(
+                job.request.child_pid,
+                &job.request.child_start_identity,
+            ) {
                 return job.observe_terminal();
             }
 
@@ -527,10 +516,13 @@ pub enum CookBatchJobResumeDisposition {
 
 impl AgentTaskCookBatchJob {
     pub fn resume_disposition(&self) -> CookBatchJobResumeDisposition {
-        if self.phase == AgentTaskCookBatchJobPhase::Completed {
+        if self.phase == WorkJobPhase::Completed {
             return CookBatchJobResumeDisposition::AlreadyComplete;
         }
-        if coordinator_is_live(&self.request) {
+        if super::work_job::supervised_child_is_live(
+            self.request.child_pid,
+            &self.request.child_start_identity,
+        ) {
             return CookBatchJobResumeDisposition::ReadoptLiveCoordinator;
         }
         CookBatchJobResumeDisposition::ObserveTerminalOutcome
@@ -551,19 +543,6 @@ fn child_run_is_terminal(run_id: &str) -> bool {
     agent_task_lifecycle::reconcile_status(run_id)
         .map(|record| record.state.is_terminal())
         .unwrap_or(false)
-}
-
-/// Whether the supervised coordinator is still provably the process we were
-/// handed.
-fn coordinator_is_live(request: &AgentTaskCookBatchJobRequest) -> bool {
-    matches!(
-        process_identity_state_with_start_identity(
-            request.child_pid,
-            None,
-            Some(&request.child_start_identity),
-        ),
-        ProcessIdentityState::Live
-    )
 }
 
 /// Register the cook batch handler with the generic work lifecycle.
@@ -704,7 +683,7 @@ mod tests {
         assert_eq!(job.request.batch_id, "fanout-round-trip");
         assert_eq!(job.request.child_pid, 4242);
         assert_eq!(job.request.child_start_identity, IDENTITY);
-        assert_eq!(job.phase, AgentTaskCookBatchJobPhase::Queued);
+        assert_eq!(job.phase, WorkJobPhase::Queued);
         assert!(job.observed_terminal_children.is_empty());
         assert_eq!(job.terminal_state, None);
 
@@ -770,7 +749,7 @@ mod tests {
         let driver = WorkJobDriver;
         let mut job =
             AgentTaskCookBatchJob::parse(request_of("fanout-public", 4242)).expect("parse request");
-        job.phase = AgentTaskCookBatchJobPhase::Completed;
+        job.phase = WorkJobPhase::Completed;
         job.declared_children = 3;
         job.observed_terminal_children
             .insert("cook-fanout-public-issue-1".to_string());
@@ -836,7 +815,7 @@ mod tests {
     fn resume_never_re_runs_a_completed_job() {
         let mut job = AgentTaskCookBatchJob::parse(request_of("fanout-complete", 4242))
             .expect("parse request");
-        job.phase = AgentTaskCookBatchJobPhase::Completed;
+        job.phase = WorkJobPhase::Completed;
         job.declared_children = 2;
         job.observed_terminal_children
             .insert("cook-fanout-complete-a".to_string());
@@ -862,7 +841,7 @@ mod tests {
     fn resume_observes_rather_than_restarts_a_dead_coordinator() {
         let mut job =
             AgentTaskCookBatchJob::parse(request_of("fanout-dead", 4242)).expect("parse request");
-        job.phase = AgentTaskCookBatchJobPhase::Supervising;
+        job.phase = WorkJobPhase::Supervising;
         // u32::MAX is not a live pid, and the recorded start identity cannot
         // match, so liveness is provably false.
         job.request.child_pid = u32::MAX;
@@ -920,7 +899,7 @@ mod tests {
             let mut checkpoint = driver.prepare(request).expect("prepare work job");
             let mut batch = AgentTaskCookBatchJob::parse(checkpoint["checkpoint"].clone())
                 .expect("parse batch checkpoint");
-            batch.phase = AgentTaskCookBatchJobPhase::Completed;
+            batch.phase = WorkJobPhase::Completed;
             batch.terminal_state = Some(AgentTaskBatchState::Succeeded);
             checkpoint["checkpoint"] = batch.to_checkpoint().expect("serialize completion");
 
@@ -969,11 +948,11 @@ mod tests {
         with_isolated_home(|_| {
             let mut job = AgentTaskCookBatchJob::parse(request_of("fanout-never-started", 4242))
                 .expect("parse request");
-            job.phase = AgentTaskCookBatchJobPhase::Supervising;
+            job.phase = WorkJobPhase::Supervising;
 
             let result = job.observe_terminal().expect("observe terminal");
 
-            assert_eq!(job.phase, AgentTaskCookBatchJobPhase::Completed);
+            assert_eq!(job.phase, WorkJobPhase::Completed);
             assert_eq!(result["terminal_state"], "failed");
         });
     }
@@ -1005,7 +984,7 @@ mod tests {
     fn cancelling_a_completed_job_is_a_no_op() {
         let mut job = AgentTaskCookBatchJob::parse(request_of("fanout-cancel-complete", 4242))
             .expect("parse");
-        job.phase = AgentTaskCookBatchJobPhase::Completed;
+        job.phase = WorkJobPhase::Completed;
         job.terminal_state = Some(AgentTaskBatchState::Succeeded);
 
         CookBatchWorkHandler

@@ -106,12 +106,18 @@ pub struct DependencyHydrationOutcome {
     pub package_root: String,
     pub provider_id: String,
     pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwd: String,
     pub reason: String,
     pub duration_ms: u64,
     pub termination: DependencyHydrationTermination,
     pub status: DependencyHydrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr: String,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +161,15 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
+    hydrate_declared_dependencies_unlocked(path, workspace, package_root, policy)
+}
+
+fn hydrate_declared_dependencies_unlocked(
+    path: &Path,
+    workspace: &str,
+    package_root: &str,
+    policy: &DependencyHydrationPolicy,
+) -> Result<Vec<DependencyHydrationOutcome>> {
     let path_arg = path.display().to_string();
     let Ok(mut component) = component::resolve_effective(None, Some(&path_arg), None) else {
         return Ok(Vec::new());
@@ -189,26 +204,26 @@ pub fn hydrate_declared_dependencies(
             let reusable_command = crate::redaction::redact_argv(&reusable.command.argv());
             let reusable_reason = crate::redaction::redact_string(&reusable.reusable_reason);
             stale_reason = crate::redaction::redact_string(&reusable.stale_reason);
-            let execution = match assessment {
-                Ok(execution) => execution,
-                Err(termination) => {
-                    outcomes.push(hydration_outcome(
-                        workspace,
-                        package_root,
-                        provider_id,
-                        reusable_command,
-                        "reusable_state_assessment_failed".to_string(),
-                        started.elapsed(),
-                        termination,
-                        DependencyHydrationStatus::Failed,
-                        None,
-                    ));
-                    break;
-                }
-            };
+            if assessment.termination != DependencyHydrationTermination::Completed {
+                outcomes.push(hydration_outcome(
+                    workspace,
+                    package_root,
+                    provider_id,
+                    reusable_command,
+                    reusable.command.cwd.display().to_string(),
+                    "reusable_state_assessment_failed".to_string(),
+                    started.elapsed(),
+                    assessment.termination,
+                    DependencyHydrationStatus::Failed,
+                    assessment.exit_code,
+                    assessment.stdout,
+                    assessment.stderr,
+                ));
+                break;
+            }
             if reusable
                 .reusable_exit_codes
-                .contains(&execution.exit_code.unwrap_or(-1))
+                .contains(&assessment.exit_code.unwrap_or(-1))
                 && declared_outputs_ready(path, &plan.outputs)
             {
                 outcomes.push(hydration_outcome(
@@ -216,11 +231,14 @@ pub fn hydrate_declared_dependencies(
                     package_root,
                     provider_id,
                     install_command,
+                    plan.install.cwd.display().to_string(),
                     reusable_reason,
                     started.elapsed(),
                     DependencyHydrationTermination::NotStarted,
                     DependencyHydrationStatus::Reused,
                     None,
+                    String::new(),
+                    String::new(),
                 ));
                 continue;
             }
@@ -230,11 +248,14 @@ pub fn hydrate_declared_dependencies(
                 package_root,
                 provider_id,
                 install_command,
+                plan.install.cwd.display().to_string(),
                 "provider_declared_outputs_ready".to_string(),
                 started.elapsed(),
                 DependencyHydrationTermination::NotStarted,
                 DependencyHydrationStatus::Reused,
                 None,
+                String::new(),
+                String::new(),
             ));
             continue;
         }
@@ -246,24 +267,24 @@ pub fn hydrate_declared_dependencies(
             elapsed_ms: started.elapsed().as_millis(),
             last_progress_ms_ago: None,
         });
-        let execution =
-            match run_hydration_command(&plan.install, &provider_id, "installing", policy) {
-                Ok(execution) => execution,
-                Err(termination) => {
-                    outcomes.push(hydration_outcome(
-                        workspace,
-                        package_root,
-                        provider_id,
-                        install_command,
-                        stale_reason,
-                        started.elapsed(),
-                        termination,
-                        DependencyHydrationStatus::Failed,
-                        None,
-                    ));
-                    break;
-                }
-            };
+        let execution = run_hydration_command(&plan.install, &provider_id, "installing", policy);
+        if execution.termination != DependencyHydrationTermination::Completed {
+            outcomes.push(hydration_outcome(
+                workspace,
+                package_root,
+                provider_id,
+                install_command,
+                plan.install.cwd.display().to_string(),
+                stale_reason,
+                started.elapsed(),
+                execution.termination,
+                DependencyHydrationStatus::Failed,
+                execution.exit_code,
+                execution.stdout,
+                execution.stderr,
+            ));
+            break;
+        }
         let exit_code = execution.exit_code;
         if !exit_code.is_some_and(|code| plan.install_success_exit_codes.contains(&code)) {
             outcomes.push(hydration_outcome(
@@ -271,11 +292,14 @@ pub fn hydrate_declared_dependencies(
                 package_root,
                 provider_id,
                 install_command,
+                plan.install.cwd.display().to_string(),
                 stale_reason,
                 started.elapsed(),
                 DependencyHydrationTermination::ExitFailure,
                 DependencyHydrationStatus::Failed,
                 exit_code,
+                execution.stdout,
+                execution.stderr,
             ));
             break;
         }
@@ -285,11 +309,14 @@ pub fn hydrate_declared_dependencies(
                 package_root,
                 provider_id,
                 install_command,
+                plan.install.cwd.display().to_string(),
                 "provider_declared_outputs_missing_after_install".to_string(),
                 started.elapsed(),
                 DependencyHydrationTermination::OutputValidationFailed,
                 DependencyHydrationStatus::Failed,
                 exit_code,
+                execution.stdout,
+                execution.stderr,
             ));
             break;
         }
@@ -298,11 +325,14 @@ pub fn hydrate_declared_dependencies(
             package_root,
             provider_id,
             install_command,
+            plan.install.cwd.display().to_string(),
             stale_reason,
             started.elapsed(),
             DependencyHydrationTermination::Completed,
             DependencyHydrationStatus::Succeeded,
             exit_code,
+            String::new(),
+            String::new(),
         ));
     }
 
@@ -311,6 +341,9 @@ pub fn hydrate_declared_dependencies(
 
 struct HydrationCommandExecution {
     exit_code: Option<i32>,
+    termination: DependencyHydrationTermination,
+    stdout: String,
+    stderr: String,
 }
 
 fn run_hydration_command(
@@ -318,9 +351,14 @@ fn run_hydration_command(
     provider_id: &str,
     phase: &str,
     policy: &DependencyHydrationPolicy,
-) -> std::result::Result<HydrationCommandExecution, DependencyHydrationTermination> {
+) -> HydrationCommandExecution {
     if (policy.is_cancelled)() {
-        return Err(DependencyHydrationTermination::Cancelled);
+        return HydrationCommandExecution {
+            exit_code: None,
+            termination: DependencyHydrationTermination::Cancelled,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
     }
     let declared_program = Path::new(&command.program);
     let resolved_program =
@@ -337,12 +375,17 @@ fn run_hydration_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     homeboy_engine_primitives::command::isolate_process_tree(&mut process);
-    let mut child = process
-        .spawn()
-        .map_err(|_| DependencyHydrationTermination::SpawnFailed)?;
+    let Ok(mut child) = process.spawn() else {
+        return HydrationCommandExecution {
+            exit_code: None,
+            termination: DependencyHydrationTermination::SpawnFailed,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+    };
     let progress = Arc::clone(&policy.on_progress);
     let cancellation = Arc::clone(&policy.is_cancelled);
-    let output =
+    let Ok(output) =
         homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_progress(
             &mut child,
             DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES,
@@ -355,15 +398,26 @@ fn run_hydration_command(
                 Ok(())
             },
         )
-        .map_err(|_| DependencyHydrationTermination::SpawnFailed)?;
+    else {
+        return HydrationCommandExecution {
+            exit_code: None,
+            termination: DependencyHydrationTermination::SpawnFailed,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+    };
     use homeboy_engine_primitives::command::SupervisedCommandTermination;
-    match output.termination {
-        SupervisedCommandTermination::Completed => Ok(HydrationCommandExecution {
-            exit_code: output.output.status.code(),
-        }),
-        SupervisedCommandTermination::Cancelled => Err(DependencyHydrationTermination::Cancelled),
-        SupervisedCommandTermination::TimedOut => Err(DependencyHydrationTermination::TimedOut),
-        SupervisedCommandTermination::NoProgress => Err(DependencyHydrationTermination::NoProgress),
+    let termination = match output.termination {
+        SupervisedCommandTermination::Completed => DependencyHydrationTermination::Completed,
+        SupervisedCommandTermination::Cancelled => DependencyHydrationTermination::Cancelled,
+        SupervisedCommandTermination::TimedOut => DependencyHydrationTermination::TimedOut,
+        SupervisedCommandTermination::NoProgress => DependencyHydrationTermination::NoProgress,
+    };
+    HydrationCommandExecution {
+        exit_code: output.output.status.code(),
+        termination,
+        stdout: crate::redaction::redact_string(&String::from_utf8_lossy(&output.output.stdout)),
+        stderr: crate::redaction::redact_string(&String::from_utf8_lossy(&output.output.stderr)),
     }
 }
 
@@ -405,11 +459,14 @@ fn hydration_outcome(
     package_root: &str,
     provider_id: String,
     command: Vec<String>,
+    cwd: String,
     reason: String,
     duration: Duration,
     termination: DependencyHydrationTermination,
     status: DependencyHydrationStatus,
     exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
 ) -> DependencyHydrationOutcome {
     DependencyHydrationOutcome {
         schema: DEPENDENCY_HYDRATION_SCHEMA.to_string(),
@@ -417,11 +474,14 @@ fn hydration_outcome(
         package_root: package_root.to_string(),
         provider_id,
         command,
+        cwd: crate::redaction::redact_string(&cwd),
         reason: crate::redaction::redact_string(&reason),
         duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         termination,
         status,
         exit_code,
+        stdout,
+        stderr,
     }
 }
 
@@ -1062,9 +1122,9 @@ mod tests {
                 "ecosystem":"nodejs",
                 "project_signals":{"root_files":["package.json"]},
                 "package_managers":[
-                    {"id":"pnpm","selection":{"priority":1,"files":["pnpm-lock.yaml"]},"commands":{"install":{"command":"pnpm install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
-                    {"id":"yarn","selection":{"priority":2,"files":["yarn.lock"]},"commands":{"install":{"command":"yarn install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
-                    {"id":"npm","selection":{"priority":3,"files":["package-lock.json"],"default":true},"commands":{"install":{"command":"npm ci"}},"outputs":[{"path":"node_modules","kind":"directory"}]}
+                    {"id":"pnpm","selection":{"priority":1,"files":["pnpm-lock.yaml"]},"commands":{"install":{"command":"pnpm install --frozen-lockfile"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"yarn","selection":{"priority":2,"files":["yarn.lock"]},"commands":{"install":{"command":"yarn install --frozen-lockfile"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"npm","selection":{"priority":3,"files":["package-lock.json"],"default":true},"commands":{"install":{"command":"npm ci"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]}
                 ]
             }"#,
         )
@@ -1189,7 +1249,11 @@ mod tests {
                 ("npm", "package-lock.json"),
             ] {
                 let project = tempfile::tempdir().expect("node project");
-                std::fs::write(project.path().join("package.json"), "{}").expect("package");
+                std::fs::write(
+                    project.path().join("package.json"),
+                    r#"{"name":"fixture","dependencies":{"fixture-dependency":"1.0.0"}}"#,
+                )
+                .expect("package");
                 std::fs::write(project.path().join(lockfile), "").expect("lockfile");
 
                 let plan = dependency_install_plan(project.path()).expect("detected node plan");
@@ -1223,6 +1287,30 @@ mod tests {
                     },
                 ]
             );
+        });
+    }
+
+    #[test]
+    fn adapter_hydration_skips_explicitly_dependency_free_project() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+            let project = tempfile::tempdir().expect("node project");
+            std::fs::write(
+                project.path().join("package.json"),
+                r#"{"name":"dependency-free-fixture","private":true}"#,
+            )
+            .expect("package");
+
+            let outcomes = hydrate_declared_dependencies(
+                project.path(),
+                "destination_gate_workspace",
+                "",
+                &DependencyHydrationPolicy::default(),
+            )
+            .expect("dependency-free package needs no hydration");
+
+            assert!(outcomes.is_empty());
+            assert!(!project.path().join("node_modules").exists());
         });
     }
 
@@ -1313,6 +1401,7 @@ mod tests {
             progress: Some(homeboy_engine_primitives::command::CommandProgress {
                 phase: "building".to_string(),
                 current: Some("shared-component".to_string()),
+                ..Default::default()
             }),
             output_tail: String::new(),
         };
@@ -1457,6 +1546,35 @@ mod tests {
     }
 
     #[test]
+    fn failed_declared_install_retains_bounded_command_evidence() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","printf 'install output'; printf 'install failure' >&2; exit 23"]}}}"#,
+            )
+            .expect("provider manifest");
+
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &hydration_policy(
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(Mutex::new(Vec::new())),
+                ),
+            )
+            .expect("failed hydration outcome");
+
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Failed);
+            assert_eq!(outcomes[0].exit_code, Some(23));
+            assert_eq!(outcomes[0].cwd, root.path().display().to_string());
+            assert_eq!(outcomes[0].stdout, "install output");
+            assert_eq!(outcomes[0].stderr, "install failure");
+        });
+    }
+
+    #[test]
     fn cancellation_stops_declared_install() {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
@@ -1492,7 +1610,7 @@ mod tests {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
                 root.path().join("install-fixture"),
-                "#!/bin/sh\nprintf ready > prepared.state\n",
+                "#!/bin/sh\nprintf 'fixture-secret-value'\nprintf ready > prepared.state\n",
             )
             .expect("fixture installer");
             use std::os::unix::fs::PermissionsExt;

@@ -158,9 +158,18 @@ worker command and the output directory is enough to understand the result.
 
 Set the controller's `artifact_origin.public_base_url` only when its persisted
 artifacts are served from a stable HTTPS origin. With that controller setting,
-Homeboy can derive canonical reviewer links for fetchable run artifacts. The
+Homeboy derives canonical reviewer links for fetchable run artifacts. The
 legacy `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` remains a controller-process
 compatibility input; setting it on a runner has no effect on reviewer links.
+
+The controller cannot prove a reviewer can retrieve a URL: its network path,
+credentials, DNS, and redirect policy can differ from the reviewer seat. Treat
+the configured origin as an operator assertion. Before adding terminal-time URL
+validation or withholding, deployment evidence must include a bounded check
+from the reviewer network that follows the production redirect policy and
+verifies the final URL returns the expected artifact bytes, length, and SHA-256.
+The evidence must also define a shared concurrency and deadline budget so a
+terminal response cannot wait once per artifact.
 
 If the controller origin is absent, evidence remains valid but non-public: reviewers use
 `homeboy runs artifact get <run-id> <artifact-id> -o <path>` or CI-provided

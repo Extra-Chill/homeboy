@@ -24,24 +24,6 @@ fn test_store() -> homeboy::core::observation::ObservationStore {
 
 /// Restore `XDG_DATA_HOME` for the test scope so the observation store
 /// resolves under the temporary home created by `with_isolated_home`.
-struct XdgGuard(Option<String>);
-
-impl XdgGuard {
-    fn unset() -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::remove_var("XDG_DATA_HOME");
-        Self(prior)
-    }
-}
-
-impl Drop for XdgGuard {
-    fn drop(&mut self) {
-        match &self.0 {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-}
 
 fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
     NewRunRecord::builder(kind)
@@ -76,7 +58,7 @@ fn install_artifact(
 #[test]
 fn runs_query_projects_select_jsonpath_over_artifact_corpus() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         install_artifact(
             &store,
@@ -128,7 +110,7 @@ fn runs_query_projects_select_jsonpath_over_artifact_corpus() {
 #[test]
 fn runs_query_groups_by_jsonpath_with_count() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         for theme in ["noir", "noir", "vivid"] {
             install_artifact(
@@ -171,7 +153,7 @@ fn runs_query_groups_by_jsonpath_with_count() {
 #[test]
 fn runs_drift_reports_dominant_value_above_threshold() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         for theme in ["noir", "noir", "noir", "vivid"] {
             install_artifact(
@@ -220,7 +202,7 @@ fn runs_drift_reports_dominant_value_above_threshold() {
 #[test]
 fn import_from_gh_actions_requires_gh_specific_arguments() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         // Without --component, --repo, --workflow/--run-id, --artifact-glob, the
         // gh-actions branch must reject with a missing-argument error.
         let err = import_runs(
@@ -240,7 +222,7 @@ fn import_from_gh_actions_requires_gh_specific_arguments() {
 #[test]
 fn import_from_gh_actions_requires_workflow_or_run_id() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let err = import_runs(
             &test_store(),
             RunsImportArgs {
@@ -265,7 +247,7 @@ fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
     let mut source_home_path = String::new();
 
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         source_home_path = home.path().display().to_string();
         let store = ObservationStore::open_initialized().expect("store");
         let run = install_artifact(
@@ -290,7 +272,7 @@ fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
     });
 
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let (output, _) = import_runs(
             &test_store(),
             RunsImportArgs {
@@ -338,7 +320,7 @@ fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
 #[test]
 fn runs_query_rejects_invalid_jsonpath() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let err = query::runs_query(
             &test_store(),
             query::RunsQueryArgs {
@@ -361,7 +343,7 @@ fn runs_query_rejects_invalid_jsonpath() {
 #[test]
 fn runs_drift_rejects_threshold_outside_unit_interval() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let err = drift::runs_drift(
             &test_store(),
             drift::RunsDriftArgs {

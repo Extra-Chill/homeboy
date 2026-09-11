@@ -813,7 +813,6 @@ pub(super) fn is_excluded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn snapshot_identity_ignores_declared_context_excludes() {
@@ -856,14 +855,7 @@ mod tests {
         );
     }
 
-    fn git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("run git");
-        assert!(output.status.success(), "git {args:?} failed");
-    }
+    use homeboy_core::test_support::run_git_command as git;
 }
 
 pub(crate) fn materialize_snapshot(
@@ -2263,15 +2255,28 @@ pub(super) fn snapshot_input_manifest(
 }
 
 /// Materialize every required manifest entry into one private staging tree.
-/// The returned directory is kept alive through transfer, making the staging
-/// output the sole tar input after validation succeeds.
+/// The returned guard keeps the staging output and its cleanup owner alive
+/// through transfer, making it the sole tar input after validation succeeds.
+#[derive(Debug)]
+pub(super) struct SnapshotStage {
+    path: PathBuf,
+    _scratch_stage: Option<tempfile::TempDir>,
+    _runtime_owner: Option<homeboy_core::engine::temp::RuntimeTempOwner>,
+}
+
+impl SnapshotStage {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn materialize_snapshot_stage(
     local_path: &Path,
     excludes: &[String],
     manifest: &SnapshotInputManifest,
     scratch: Option<&Path>,
-) -> Result<tempfile::TempDir> {
+) -> Result<SnapshotStage> {
     materialize_snapshot_stage_before(local_path, excludes, manifest, scratch, None)
 }
 
@@ -2281,16 +2286,36 @@ fn materialize_snapshot_stage_before(
     manifest: &SnapshotInputManifest,
     scratch: Option<&Path>,
     deadline: Option<Instant>,
-) -> Result<tempfile::TempDir> {
-    let stage = scratch
-        .map_or_else(tempfile::tempdir, |path| {
-            tempfile::Builder::new()
+) -> Result<SnapshotStage> {
+    let stage = match scratch {
+        Some(path) => {
+            let scratch_stage = tempfile::Builder::new()
                 .prefix("homeboy-snapshot-stage-")
                 .tempdir_in(path)
-        })
-        .map_err(|error| {
-            snapshot_construction_failure("staging", local_path, None, &error.to_string())
-        })?;
+                .map_err(|error| {
+                    snapshot_construction_failure("staging", local_path, None, &error.to_string())
+                })?;
+            SnapshotStage {
+                path: scratch_stage.path().to_path_buf(),
+                _scratch_stage: Some(scratch_stage),
+                _runtime_owner: None,
+            }
+        }
+        None => {
+            let runtime_owner = homeboy_core::engine::temp::RuntimeTempOwner::allocate(
+                "homeboy-snapshot-stage",
+                "workspace_snapshot",
+            )
+            .map_err(|error| {
+                snapshot_construction_failure("staging", local_path, None, &error.to_string())
+            })?;
+            SnapshotStage {
+                path: runtime_owner.path().to_path_buf(),
+                _scratch_stage: None,
+                _runtime_owner: Some(runtime_owner),
+            }
+        }
+    };
     let stage_source = stage.path().join("source");
     fs::create_dir_all(&stage_source).map_err(|error| {
         snapshot_construction_failure(
@@ -2466,9 +2491,10 @@ fn snapshot_construction_failure(
         .unwrap_or(serde_json::Value::Null);
     error.details["reason"] = serde_json::json!(reason);
     error.details["recovery"] = serde_json::json!({
-        "owner": "homeboy_snapshot_staging",
-        "action": "rebuild_snapshot_staging_and_replay_cook",
-        "command": "homeboy agent-task retry <run-id> --run",
+        "owner": "durable_lifecycle",
+        "action": "project_lifecycle_recovery",
+        "reason": "No safe in-place recovery is known until the durable lifecycle owner evaluates this failed snapshot record.",
+        "remediation": "Correct the controller-side snapshot inputs, then start the replacement lifecycle run selected by its owner.",
     });
     error
 }

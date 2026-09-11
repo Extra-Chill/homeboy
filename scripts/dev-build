@@ -11,7 +11,7 @@ if [[ "$target_dir" != /* ]]; then
     target_dir="$root/$target_dir"
 fi
 binary="$target_dir/debug/homeboy"
-expected_commit="$(git rev-parse --short=12 HEAD)"
+expected_commit="$(git rev-parse HEAD)"
 
 if [[ ! -x "$binary" ]]; then
     printf 'expected development binary was not produced: %s\n' "$binary" >&2

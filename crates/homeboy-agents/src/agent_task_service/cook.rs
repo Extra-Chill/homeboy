@@ -32,7 +32,9 @@ use crate::agent_task_promotion::{
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
-use crate::agent_task_timeout::{capture_cook_deadline, expired_cook_deadline, CookDeadline};
+use crate::agent_task_timeout::{
+    capture_cook_deadline, current_cook_deadline, expired_cook_deadline, CookDeadline,
+};
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
@@ -73,7 +75,10 @@ use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
-use super::execution::run_loaded_plan_with_derived_cook_baseline_in_store;
+use super::execution::{
+    run_claimed_loaded_plan_with_derived_cook_baseline_in_store,
+    run_loaded_plan_with_derived_cook_baseline_in_store,
+};
 use super::AgentTaskRunResult;
 
 /// Lease window for a cook promotion operation claim. Long enough that a healthy
@@ -661,6 +666,53 @@ fn report_cook_progress_with_activity(
         }
     }
     Ok(())
+}
+
+/// Run one controller startup phase while keeping its already-admitted Cook
+/// observable. Startup work can block on Git, filesystem capacity, or a shared
+/// base-capture lock, so it receives a bounded durable heartbeat before any
+/// provider execution starts.
+fn run_cook_startup_phase<T>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+    phase: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let started = Instant::now();
+    report_cook_progress(
+        lifecycle_store,
+        observer,
+        cook_id,
+        run_id,
+        phase,
+        1,
+        Some("starting; elapsed=0s"),
+    )?;
+    let (stop, wait) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || loop {
+            match wait.recv_timeout(COOK_HEARTBEAT_INTERVAL) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let detail = format!("still running; elapsed={}s", started.elapsed().as_secs());
+                    let _ = report_cook_progress(
+                        lifecycle_store,
+                        observer,
+                        cook_id,
+                        run_id,
+                        phase,
+                        1,
+                        Some(&detail),
+                    );
+                }
+            }
+        });
+        let result = operation();
+        let _ = stop.send(());
+        result
+    })
 }
 
 /// Durable operation key for finalizing one cook candidate. Keyed by the run id
@@ -1275,12 +1327,8 @@ pub struct AgentTaskCandidateAdoptionOptions {
 
 /// A Cook outcome.
 ///
-/// `Serialize` is written by hand rather than derived so the additive
-/// [`RunLifecycleProjection`] is emitted by *every* producer of this type
-/// without each of the ~30 struct literals that build it having to carry three
-/// more fields it would then be free to compute differently. The projection is
-/// derived from `status` and `disposition`, which are already present, so
-/// there is nothing for a call site to supply and nothing for it to get wrong.
+/// `Serialize` is written by hand so the derived completion projection is
+/// emitted by every producer without duplicating it across report constructors.
 #[derive(Debug, Clone)]
 pub struct AgentTaskCookReport {
     pub schema: &'static str,
@@ -1339,8 +1387,7 @@ pub struct AgentTaskCookCompletion {
     pub next_action: Option<AgentTaskCookRecoveryAction>,
 }
 
-/// The closed-vocabulary classification emitted beside an open `status`
-/// string.
+/// Internal closed-vocabulary classification of an open `status` string.
 ///
 /// # Why a report carries this at all
 ///
@@ -1349,7 +1396,9 @@ pub struct AgentTaskCookCompletion {
 /// contract every *process* caller branches on, but a consumer reading a
 /// persisted report or an HTTP response has no exit code. Without this, such a
 /// consumer receiving `{"status": "moving_base"}` cannot decide success,
-/// completion, or retry at all.
+/// completion, or retry from the Cook document. External consumers use the
+/// canonical control-plane run resource; this projection remains internal to
+/// Cook and batch aggregation.
 ///
 /// # Where each field's authority comes from
 ///
@@ -1409,8 +1458,7 @@ impl serde::Serialize for AgentTaskCookReport {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         /// Mirrors [`AgentTaskCookReport`] field for field, in order, with the
-        /// same `skip_serializing_if` rules, plus the three appended
-        /// projection fields. Borrowed so serialization stays
+        /// same `skip_serializing_if` rules. Borrowed so serialization stays
         /// allocation-free.
         #[derive(serde::Serialize)]
         struct Wire<'a> {
@@ -1445,14 +1493,8 @@ impl serde::Serialize for AgentTaskCookReport {
             failure_context: Option<&'a AgentTaskCookFailureContext>,
             #[serde(skip_serializing_if = "Option::is_none")]
             completion: Option<AgentTaskCookCompletion>,
-            // Additive. `status` above is unchanged and remains the field
-            // callers match on.
-            lifecycle_status: RunLifecycleStatus,
-            terminal: bool,
-            retryable: bool,
         }
 
-        let lifecycle = self.lifecycle();
         let completion = self.completion();
         let wire = Wire {
             schema: self.schema,
@@ -1473,9 +1515,6 @@ impl serde::Serialize for AgentTaskCookReport {
             moving_base_recovery: self.moving_base_recovery.as_ref(),
             failure_context: self.failure_context.as_ref(),
             completion,
-            lifecycle_status: lifecycle.lifecycle_status,
-            terminal: lifecycle.terminal,
-            retryable: lifecycle.retryable,
         };
         serde::Serialize::serialize(&wire, serializer)
     }
@@ -1919,10 +1958,7 @@ impl From<&Error> for AgentTaskCookCellError {
 
 /// One child's outcome inside a batch.
 ///
-/// `Serialize` is hand-written for the same reason as [`AgentTaskCookReport`]:
-/// the lifecycle projection is derived from fields already present, so it is
-/// emitted for every producer instead of being a fourth thing a call site can
-/// forget or contradict.
+/// `Serialize` preserves the existing omission rules for optional fields.
 #[derive(Debug, Clone)]
 pub struct AgentTaskCookBatchCellReport {
     pub cook_id: String,
@@ -1967,12 +2003,8 @@ impl serde::Serialize for AgentTaskCookBatchCellReport {
             result: Option<&'a AgentTaskCookReport>,
             #[serde(skip_serializing_if = "Option::is_none")]
             error: Option<&'a AgentTaskCookCellError>,
-            lifecycle_status: RunLifecycleStatus,
-            terminal: bool,
-            retryable: bool,
         }
 
-        let lifecycle = self.lifecycle();
         let wire = Wire {
             cook_id: &self.cook_id,
             initial_run_id: &self.initial_run_id,
@@ -1980,9 +2012,6 @@ impl serde::Serialize for AgentTaskCookBatchCellReport {
             exit_code: self.exit_code,
             result: self.result.as_ref(),
             error: self.error.as_ref(),
-            lifecycle_status: lifecycle.lifecycle_status,
-            terminal: lifecycle.terminal,
-            retryable: lifecycle.retryable,
         };
         serde::Serialize::serialize(&wire, serializer)
     }
@@ -2069,12 +2098,8 @@ impl serde::Serialize for AgentTaskCookBatchReport {
             cancelled: usize,
             timed_out: usize,
             cooks: &'a [AgentTaskCookBatchCellReport],
-            lifecycle_status: RunLifecycleStatus,
-            terminal: bool,
-            retryable: bool,
         }
 
-        let lifecycle = self.lifecycle();
         let wire = Wire {
             schema: self.schema,
             batch_id: &self.batch_id,
@@ -2087,9 +2112,6 @@ impl serde::Serialize for AgentTaskCookBatchReport {
             cancelled: self.cancelled,
             timed_out: self.timed_out,
             cooks: &self.cooks,
-            lifecycle_status: lifecycle.lifecycle_status,
-            terminal: lifecycle.terminal,
-            retryable: lifecycle.retryable,
         };
         serde::Serialize::serialize(&wire, serializer)
     }
@@ -2202,17 +2224,19 @@ mod run_lifecycle_projection_tests {
         }
     }
 
-    /// The whole point: the raw, open status is untouched and the closed
-    /// classification arrives beside it.
     #[test]
-    fn a_cook_report_emits_the_projection_without_changing_status() {
-        let value = serde_json::to_value(report("durable_failure", CookDisposition::Terminal))
-            .expect("serialize");
+    fn a_cook_report_omits_the_retired_lifecycle_projection() {
+        let report = report("durable_failure", CookDisposition::Terminal);
+        let lifecycle = report.lifecycle();
+        let value = serde_json::to_value(report).expect("serialize");
 
         assert_eq!(value["status"], "durable_failure");
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], true);
-        assert_eq!(value["retryable"], true);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(lifecycle.terminal);
+        assert!(lifecycle.retryable);
+        assert!(value.get("lifecycle_status").is_none());
+        assert!(value.get("terminal").is_none());
+        assert!(value.get("retryable").is_none());
         // Unchanged fields must still be present and still be skipped when
         // absent, exactly as the derived implementation did.
         assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
@@ -2227,14 +2251,14 @@ mod run_lifecycle_projection_tests {
     /// however its status string reads.
     #[test]
     fn terminality_follows_the_declared_disposition_not_the_status_string() {
-        let value = serde_json::to_value(report("durable_failure", CookDisposition::InFlight))
-            .expect("serialize");
+        let report = report("durable_failure", CookDisposition::InFlight);
+        let lifecycle = report.lifecycle();
 
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], false);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(!lifecycle.terminal);
         assert_eq!(
-            value["retryable"], false,
-            "a Cook a durable owner still carries must never be advertised as retryable"
+            lifecycle.retryable, false,
+            "a Cook a durable owner still carries must never be treated as retryable"
         );
     }
 
@@ -2242,31 +2266,34 @@ mod run_lifecycle_projection_tests {
     /// classification, never a manufactured failure — while `terminal` still
     /// arrives, because the exit declared it.
     #[test]
-    fn an_unreadable_status_reports_unknown_but_still_reports_terminality() {
-        let value = serde_json::to_value(report("moving_base", CookDisposition::Terminal))
-            .expect("serialize");
+    fn an_unreadable_status_classifies_unknown_but_retains_terminality() {
+        let report = report("moving_base", CookDisposition::Terminal);
+        let lifecycle = report.lifecycle();
+        let value = serde_json::to_value(report).expect("serialize");
 
         assert_eq!(value["status"], "moving_base");
-        assert_eq!(value["lifecycle_status"], "unknown");
-        assert_eq!(value["terminal"], true);
-        assert_eq!(value["retryable"], false);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Unknown);
+        assert!(lifecycle.terminal);
+        assert!(!lifecycle.retryable);
     }
 
     /// A cell that carries a child report defers to that report's declared
     /// disposition rather than re-deriving anything.
     #[test]
     fn a_batch_cell_defers_to_its_childs_declared_disposition() {
-        let value = serde_json::to_value(cell(
+        let cell = cell(
             "durable_failure",
             Some(report("durable_failure", CookDisposition::InFlight)),
-        ))
-        .expect("serialize");
+        );
+        let lifecycle = cell.lifecycle();
+        let value = serde_json::to_value(cell).expect("serialize");
 
         assert_eq!(value["status"], "durable_failure");
         assert_eq!(value["exit_code"], 1);
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], false);
-        assert_eq!(value["result"]["terminal"], false);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(!lifecycle.terminal);
+        assert!(value.get("lifecycle_status").is_none());
+        assert!(value["result"].get("terminal").is_none());
     }
 
     /// A child that failed before producing any Cook report has no declared
@@ -2274,11 +2301,14 @@ mod run_lifecycle_projection_tests {
     /// in-flight reading.
     #[test]
     fn a_batch_cell_without_a_child_report_classifies_from_status_alone() {
-        let value = serde_json::to_value(cell("failed", None)).expect("serialize");
+        let cell = cell("failed", None);
+        let lifecycle = cell.lifecycle();
+        let value = serde_json::to_value(cell).expect("serialize");
 
-        assert_eq!(value["lifecycle_status"], "failed");
-        assert_eq!(value["terminal"], true);
-        assert_eq!(value["retryable"], true);
+        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert!(lifecycle.terminal);
+        assert!(lifecycle.retryable);
+        assert!(value.get("lifecycle_status").is_none());
         assert!(value.get("result").is_none());
     }
 
@@ -2322,7 +2352,7 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
-    fn a_batch_report_emits_the_projection_beside_its_status() {
+    fn a_batch_report_omits_the_retired_lifecycle_projection() {
         let report = AgentTaskCookBatchReport {
             schema: "homeboy/agent-task-cook-batch/v1",
             batch_id: "batch-projection".to_string(),
@@ -2338,14 +2368,18 @@ mod run_lifecycle_projection_tests {
         };
 
         let value = serde_json::to_value(&report).expect("serialize");
+        let lifecycle = report.lifecycle();
 
         assert_eq!(value["status"], "partial_failure");
-        assert_eq!(value["lifecycle_status"], "partial_failure");
-        assert_eq!(value["terminal"], true);
         assert_eq!(
-            value["retryable"], false,
-            "a partially failed batch must not be advertised as blanket-retryable"
+            lifecycle.lifecycle_status,
+            RunLifecycleStatus::PartialFailure
         );
+        assert!(lifecycle.terminal);
+        assert!(!lifecycle.retryable);
+        assert!(value.get("lifecycle_status").is_none());
+        assert!(value.get("terminal").is_none());
+        assert!(value.get("retryable").is_none());
     }
 
     #[test]
@@ -2621,20 +2655,6 @@ mod cell_error_envelope_tests {
     }
 }
 
-/// Resolves a generic dispatch command once, before a typed cook is scheduled.
-/// Callers compile workflow policy into the command and cook options; this
-/// routine owns the shared dispatch compilation boundary.
-pub fn compile_cook_attempt(
-    options: CookRequest,
-    dispatch: AgentTaskDispatchCommand,
-) -> Result<CookRequest> {
-    compile_cook_attempt_with_readiness_cache(
-        options,
-        dispatch,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )
-}
-
 /// Compile a Cook with a caller-owned runtime-readiness cache. Batch callers
 /// share this cache so identical provider/runtime/model verdicts probe once.
 pub fn compile_cook_attempt_with_readiness_cache(
@@ -2654,6 +2674,68 @@ pub fn compile_cook_attempt_with_readiness_cache(
 /// Compile a Cook against one caller-supplied provider catalog. This keeps the
 /// preflight and plan construction on the same provider snapshot.
 pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
+    options: CookRequest,
+    dispatch: AgentTaskDispatchCommand,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+    readiness_cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
+) -> Result<CookRequest> {
+    let mut options = compile_cook_attempt_static_with_catalog_and_readiness_cache(
+        options,
+        dispatch,
+        catalog,
+        readiness_cache,
+    )?;
+    // Admission receives the Cook's already-resolved absolute deadline. The
+    // provider readiness owner applies it to cache waits and its process tree.
+    if let Some(deadline) = current_cook_deadline() {
+        let deadline_unix_ms = options
+            .identity
+            .initial_plan
+            .options
+            .execution_budget
+            .deadline_unix_ms
+            .map_or(deadline.deadline_unix_ms(), |existing| {
+                existing.min(deadline.deadline_unix_ms())
+            });
+        options
+            .identity
+            .initial_plan
+            .options
+            .execution_budget
+            .deadline_unix_ms = Some(deadline_unix_ms);
+    }
+    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &options.identity.initial_plan,
+        catalog,
+        readiness_cache,
+    ) {
+        Ok(selected_plan) => {
+            catalog.validate_selected_models(&selected_plan)?;
+            catalog.enforce_runtime_preflight_checks_for_plan(&selected_plan)?;
+            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
+                &selected_plan,
+                catalog.providers(),
+            )?;
+            super::execution::preflight_plan_secret_env(&selected_plan)?;
+            options.identity.initial_plan = selected_plan;
+            options.ai_disclosure.ai_model = options
+                .identity
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.executor.model())
+                .map(str::to_string);
+        }
+        Err(error) if error.retryable == Some(true) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(options)
+}
+
+/// Compile deterministic Cook inputs without invoking provider-owned live
+/// readiness. Preview callers use this inside their static planner before a
+/// separate provider-owned admission receives the Cook deadline.
+pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
     mut options: CookRequest,
     dispatch: AgentTaskDispatchCommand,
     catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
@@ -2692,32 +2774,14 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             &request,
             |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
         )?;
-    // The shared verdict considers the ordered rotation routes with their
-    // effective model/config before Cook can consume a provider execution.
-    // Persist the selected route and forward cursor without reducing the durable
-    // rotation policy. Deterministic exhaustion still fails compilation;
-    // retryable exhaustion reaches runtime with the fresh, unbound plan.
-    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    catalog.validate_selected_models(&options.identity.initial_plan)?;
+    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
         &options.identity.initial_plan,
-        catalog,
-        readiness_cache,
-    ) {
-        Ok(selected_plan) => {
-            catalog.validate_selected_models(&selected_plan)?;
-            catalog.enforce_runtime_preflight_checks_for_plan(&selected_plan)?;
-            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-                &selected_plan,
-                catalog.providers(),
-            )?;
-            super::execution::preflight_plan_secret_env(&selected_plan)?;
-            options.identity.initial_plan = selected_plan;
-        }
-        Err(error) if error.retryable == Some(true) => {}
-        Err(error) => return Err(error),
-    }
-    // Finalization disclosure is derived from the compiled provider invocation,
-    // not a pre-resolution CLI value. The plan is persisted in the recipe and
-    // remains authoritative across continuation.
+        catalog.providers(),
+    )?;
+    super::execution::preflight_plan_secret_env(&options.identity.initial_plan)?;
+    // Static compilation preserves the resolved provider identity. Live
+    // admission later selects a rotation and proves runtime readiness.
     options.ai_disclosure.ai_model = options
         .identity
         .initial_plan
@@ -2910,6 +2974,7 @@ pub fn run_cook_batch_with_control(
                                 &batch_id,
                                 &cell.initial_run_id,
                                 child_finalization_value(&cell),
+                                child_terminal_state(&cell),
                             ) {
                                 // Cleanup cannot consume a successful outcome
                                 // until its batch checkpoint is durable.
@@ -3226,6 +3291,7 @@ where
             batch_id,
             &child.run_id,
             child_finalization_value(&cell),
+            child_terminal_state(&cell),
         )?;
         cells.push(cell);
     }
@@ -3436,19 +3502,37 @@ where
 ///
 /// `error` follows [`AgentTaskCookBatchCellReport::error`] and is therefore now
 /// an object rather than a string; `error.message` carries the text the field
-/// used to hold. `status` and `exit_code` are unchanged, and
-/// `lifecycle_status`/`terminal`/`retryable` are added so an owner reading only
-/// this checkpoint can classify the child without loading its report.
+/// used to hold. `status` and `exit_code` are unchanged. Canonical lifecycle is
+/// persisted directly on the batch child rather than duplicated in this JSON.
 fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
-    let lifecycle = cell.lifecycle();
     serde_json::json!({
         "resumed_at": chrono::Utc::now().to_rfc3339(),
         "exit_code": cell.exit_code,
         "status": cell.status,
-        "lifecycle_status": lifecycle.lifecycle_status,
-        "terminal": lifecycle.terminal,
-        "retryable": lifecycle.retryable,
         "error": cell.error,
+    })
+}
+
+fn child_terminal_state(
+    cell: &AgentTaskCookBatchCellReport,
+) -> Option<crate::agent_task_lifecycle::AgentTaskRunState> {
+    let lifecycle = cell.lifecycle();
+    if !lifecycle.terminal {
+        return None;
+    }
+    use crate::agent_task_lifecycle::AgentTaskRunState;
+    Some(match lifecycle.lifecycle_status {
+        RunLifecycleStatus::Succeeded => AgentTaskRunState::Succeeded,
+        RunLifecycleStatus::CandidateRecoverable => AgentTaskRunState::CandidateRecoverable,
+        RunLifecycleStatus::PartialRecoverable => AgentTaskRunState::PartialRecoverable,
+        RunLifecycleStatus::PartialFailure => AgentTaskRunState::PartialFailure,
+        RunLifecycleStatus::Cancelled => AgentTaskRunState::Cancelled,
+        RunLifecycleStatus::Failed | RunLifecycleStatus::TimedOut | RunLifecycleStatus::Stale => {
+            AgentTaskRunState::Failed
+        }
+        RunLifecycleStatus::Queued | RunLifecycleStatus::Running | RunLifecycleStatus::Unknown => {
+            return None
+        }
     })
 }
 
@@ -4442,19 +4526,6 @@ pub fn terminal_review_form_continuation_is_eligible(
     Ok(retryable_review_form_terminal_failure(record, &aggregate))
 }
 
-pub fn terminal_review_form_continuation_is_eligible_readonly(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    plan: &AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<bool> {
-    let aggregate = lifecycle_store.read_aggregate_readonly(&record.run_id).ok();
-    terminal_review_form_continuation_is_eligible_for_observation_readonly(
-        plan,
-        record,
-        aggregate.as_ref(),
-    )
-}
-
 pub fn terminal_review_form_continuation_is_eligible_for_observation_readonly(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -4472,18 +4543,6 @@ pub fn terminal_review_form_continuation_is_eligible_for_observation_readonly(
         aggregate
             .is_some_and(|aggregate| retryable_review_form_terminal_failure(record, aggregate)),
     )
-}
-
-/// Validate the read-only admission boundary for a reconstructed continuation.
-/// This deliberately stops before recipe/lifecycle materialization, transport
-/// preparation, provider dispatch, and finalization.
-pub fn preflight_cook_continuation_admission(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &CookRequest,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<Vec<&'static str>> {
-    let aggregate = lifecycle_store.read_aggregate_readonly(&record.run_id).ok();
-    preflight_cook_continuation_admission_for_observation(options, record, aggregate.as_ref())
 }
 
 pub fn preflight_cook_continuation_admission_for_observation(
@@ -5366,6 +5425,34 @@ fn run_cook_spine(
             Value::String(options.identity.initial_run_id.clone());
         error
     })?;
+    // Admission completed the recipe/lifecycle saga. Verify the exact record
+    // before publishing it, then make the handle visible before any local
+    // workspace, base, or capacity work can block the foreground client.
+    let materialized_run = lifecycle_store.read_record(&options.identity.initial_run_id)?;
+    if materialized_run.run_id != options.identity.initial_run_id {
+        return Err(Error::internal_unexpected(
+            "materialized Cook lifecycle record does not match its initial run id",
+        ));
+    }
+    report_cook_progress(
+        lifecycle_store,
+        durable_observer,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        "durable_identity",
+        1,
+        None,
+    )?;
+    let notify_component = cook_component(&options);
+    crate::agent_task_notify::cook_started(
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        &options.finalization.title,
+        notify_component.as_deref(),
+        &options.finalization.base,
+        options.retry_policy.max_attempts,
+        &options.ai_disclosure.ai_tool,
+    );
     // Reject a known-invalid managed workspace before base capture reaches its
     // remote. Detached first handoffs have no local source path and remain
     // eligible for runner-owned materialization below.
@@ -5374,11 +5461,20 @@ fn run_cook_spine(
         && (options.provider_transport.attempt_dispatcher.is_none()
             || options.workspace.source_worktree_path.is_some())
     {
-        let workspace_base = validate_cook_workspace_with_adopted_candidate(
-            &options,
-            verification_pending_continuation
-                || (options.workspace.source_worktree_path.is_some()
-                    && !cook_uses_explicit_cwd_workspace(&options)),
+        let workspace_base = run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &options.identity.cook_id,
+            &options.identity.initial_run_id,
+            "workspace_base_preflight",
+            || {
+                validate_cook_workspace_with_adopted_candidate(
+                    &options,
+                    verification_pending_continuation
+                        || (options.workspace.source_worktree_path.is_some()
+                            && !cook_uses_explicit_cwd_workspace(&options)),
+                )
+            },
         )
         .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
@@ -5393,13 +5489,24 @@ fn run_cook_spine(
     }
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.
-    pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options).map_err(
-        |error| {
-            let mut error = error;
-            error.details["cook_materialized_by_invocation"] = Value::Bool(true);
-            error
-        },
-    )?;
+    let cook_id = options.identity.cook_id.clone();
+    let run_id = options.identity.initial_run_id.clone();
+    // Even a runner-owned workspace can wait on this Cook's shared capture
+    // lock, so keep the durable attempt live regardless of whether the
+    // controller has a local path to pin.
+    let base_capture = run_cook_startup_phase(
+        lifecycle_store,
+        durable_observer,
+        &cook_id,
+        &run_id,
+        "workspace_base_capture",
+        || pin_and_persist_initial_cook_workspace_base(store, lifecycle_store, &mut options),
+    );
+    base_capture.map_err(|error| {
+        let mut error = error;
+        error.details["cook_materialized_by_invocation"] = Value::Bool(true);
+        error
+    })?;
     // A persisted recipe can replace the just-validated inputs. Re-check its
     // workspace and candidate topology before it reaches transport preparation
     // or a resumed attempt.
@@ -5411,11 +5518,20 @@ fn run_cook_spine(
         && (options.provider_transport.attempt_dispatcher.is_none()
             || options.workspace.source_worktree_path.is_some())
     {
-        let workspace_base = validate_cook_workspace_with_adopted_candidate(
-            &options,
-            verification_pending_continuation
-                || (options.workspace.source_worktree_path.is_some()
-                    && !cook_uses_explicit_cwd_workspace(&options)),
+        let workspace_base = run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &options.identity.cook_id,
+            &options.identity.initial_run_id,
+            "workspace_base_convergence",
+            || {
+                validate_cook_workspace_with_adopted_candidate(
+                    &options,
+                    verification_pending_continuation
+                        || (options.workspace.source_worktree_path.is_some()
+                            && !cook_uses_explicit_cwd_workspace(&options)),
+                )
+            },
         )
         .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
@@ -5446,21 +5562,17 @@ fn run_cook_spine(
     // controller scratch lease or detached workspace. This includes dependency
     // trees (for example node_modules and vendor), whose inode demand can be
     // decisive even when their byte footprint is small.
-    let _materialization_capacity = options
-        .workspace
-        .source_worktree_path
-        .as_deref()
-        .map(std::path::Path::new)
-        .or_else(|| {
-            options
-                .identity
-                .initial_plan
-                .tasks
-                .first()
-                .and_then(|task| task.workspace.root.as_deref())
-                .map(std::path::Path::new)
+    let _materialization_capacity = cook_startup_workspace(&options)
+        .map(|workspace| {
+            run_cook_startup_phase(
+                lifecycle_store,
+                durable_observer,
+                &options.identity.cook_id,
+                &options.identity.initial_run_id,
+                "workspace_capacity_reservation",
+                || reserve_cook_materialization_capacity(lifecycle_store, workspace),
+            )
         })
-        .map(|workspace| reserve_cook_materialization_capacity(lifecycle_store, workspace))
         .transpose()?;
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.identity.cook_id)?;
     if cook_workspace_lookup_pending(&options.identity.initial_plan) {
@@ -5573,34 +5685,6 @@ fn run_cook_spine(
         }
     }
     record_active_cook_worktree_warning(&options)?;
-    // Durable identity now exists and resolves through the Cook alias. Publish
-    // it before every remaining long controller phase — gate toolchain
-    // preflight, transport preparation, and Lab materialization — so a caller
-    // interrupted at any later point can still answer "what did I just start?"
-    // from the first identity-bearing bytes it received. `provider_ready` used
-    // to be the first identity-bearing observer event, which put the operator
-    // handle behind work that can outlive a client timeout (#10419, #9163).
-    report_cook_progress(
-        lifecycle_store,
-        durable_observer,
-        &options.identity.cook_id,
-        &options.identity.initial_run_id,
-        "durable_identity",
-        1,
-        None,
-    )?;
-    // The same boundary, delivered to the operator's destination: this is the
-    // first moment the cook can be watched, diagnosed, or cancelled by id.
-    let notify_component = cook_component(&options);
-    crate::agent_task_notify::cook_started(
-        &options.identity.cook_id,
-        &options.identity.initial_run_id,
-        &options.finalization.title,
-        notify_component.as_deref(),
-        &options.finalization.base,
-        options.retry_policy.max_attempts,
-        &options.ai_disclosure.ai_tool,
-    );
     if options.gates.has_npm_run_declaration() {
         let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
             .or_else(|| options.workspace.source_worktree_path.clone())
@@ -5705,15 +5789,6 @@ fn run_cook_spine(
             &latest_attempt.run_id,
             &plan,
         )?;
-    }
-    // The recipe alone is resumable input, not a status-addressable run. Publish
-    // the run identity only after initial materialization and a lifecycle read
-    // prove status/log recovery resolves for this exact attempt.
-    let materialized_run = lifecycle_store.read_record(&options.identity.initial_run_id)?;
-    if materialized_run.run_id != options.identity.initial_run_id {
-        return Err(Error::internal_unexpected(
-            "materialized Cook lifecycle record does not match its initial run id",
-        ));
     }
     report_cook_progress(
         lifecycle_store,
@@ -6249,14 +6324,30 @@ fn run_cook_spine(
                                 }
                             }
                         });
-                        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
-                            lifecycle_store,
-                            dispatch_plan,
-                            Some(&run_id),
-                            executor.clone(),
-                            effective_baseline.map(CookFollowUpBaseline::capability),
-                            Some(cook_attempt_harvest_context(&options.harvest_context)),
-                        )
+                        let baseline = effective_baseline.map(CookFollowUpBaseline::capability);
+                        let harvest_context =
+                            Some(cook_attempt_harvest_context(&options.harvest_context));
+                        let result = if lifecycle_store.read_record(&run_id)?.state
+                            == agent_task_lifecycle::AgentTaskRunState::Running
+                        {
+                            run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
+                                lifecycle_store,
+                                dispatch_plan,
+                                &run_id,
+                                executor.clone(),
+                                baseline,
+                                harvest_context,
+                            )
+                        } else {
+                            run_loaded_plan_with_derived_cook_baseline_in_store(
+                                lifecycle_store,
+                                dispatch_plan,
+                                Some(&run_id),
+                                executor.clone(),
+                                baseline,
+                                harvest_context,
+                            )
+                        }
                         .map(|_| ());
                         let _ = heartbeat_stop.send(());
                         result
@@ -7686,14 +7777,24 @@ fn pin_initial_cook_workspace_base(options: &mut CookRequest) -> Result<()> {
     if options.workspace.task_base_sha.is_some() {
         return Ok(());
     }
-    let workspace = options
+    let workspace = cook_startup_workspace(options);
+    let Some(workspace) = workspace.map(Path::to_path_buf) else {
+        return Ok(());
+    };
+    pin_cook_workspace_base_at(options, &workspace)
+}
+
+/// The local tree whose base and projected capacity Cook validates before it
+/// dispatches. A pending runner-owned workspace intentionally has no local path.
+fn cook_startup_workspace(options: &CookRequest) -> Option<&Path> {
+    options
         .workspace
         .source_worktree_path
         .as_deref()
         .or_else(|| {
-            std::path::Path::new(&options.workspace.to_worktree)
+            Path::new(&options.workspace.to_worktree)
                 .is_dir()
-                .then_some(std::path::Path::new(&options.workspace.to_worktree))
+                .then_some(Path::new(&options.workspace.to_worktree))
         })
         .or_else(|| {
             options
@@ -7702,12 +7803,8 @@ fn pin_initial_cook_workspace_base(options: &mut CookRequest) -> Result<()> {
                 .tasks
                 .first()
                 .and_then(|task| task.workspace.root.as_deref())
-                .map(std::path::Path::new)
-        });
-    let Some(workspace) = workspace.map(Path::to_path_buf) else {
-        return Ok(());
-    };
-    pin_cook_workspace_base_at(options, &workspace)
+                .map(Path::new)
+        })
 }
 
 fn pin_and_persist_initial_cook_workspace_base(
@@ -7832,20 +7929,65 @@ fn pin_cook_workspace_base_at(options: &mut CookRequest, workspace: &Path) -> Re
     {
         counter.count.fetch_add(1, Ordering::SeqCst);
     }
-    let Some(base) = crate::agent_task_promotion::capture_declared_base(
-        workspace,
-        Some(&options.finalization.base),
-    )?
-    else {
-        return Ok(());
+    let declared = &options.finalization.base;
+    let pinned = match crate::agent_task_promotion::capture_declared_base(workspace, Some(declared))
+    {
+        Ok(Some(base)) => CookWorkspaceBasePin {
+            base: base.base,
+            sha: base.sha,
+            provenance: "origin_ls_remote",
+            remote_freshness: "checked",
+        },
+        Ok(None) => return Ok(()),
+        // The controller's authenticated transport is not the only authority
+        // for a base that is already present locally. A previously fetched
+        // remote-tracking ref names the exact commit this run would have
+        // pinned, so admit it rather than terminalizing with zero provider
+        // executions. Its unverified freshness is recorded, not hidden.
+        Err(error) if error.retryable == Some(true) => {
+            match local_tracking_cook_base(workspace, declared) {
+                Some(pin) => pin,
+                None => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
     };
-    options.workspace.task_base_sha = Some(base.sha.clone());
+    options.workspace.task_base_sha = Some(pinned.sha.clone());
     options.identity.initial_plan.metadata["cook_workspace_base"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base/v1",
-        "base": base.base,
-        "sha": base.sha,
+        "base": pinned.base,
+        "sha": pinned.sha,
+        "provenance": pinned.provenance,
+        "remote_freshness": pinned.remote_freshness,
     });
     Ok(())
+}
+
+struct CookWorkspaceBasePin {
+    base: String,
+    sha: String,
+    provenance: &'static str,
+    remote_freshness: &'static str,
+}
+
+/// Resolve a declared base from the checkout's existing remote-tracking ref.
+/// This reads only local objects, so it stays available when the controller
+/// cannot authenticate to the remote.
+fn local_tracking_cook_base(workspace: &Path, base: &str) -> Option<CookWorkspaceBasePin> {
+    let reference = format!("refs/remotes/origin/{base}");
+    let sha = homeboy_core::git::output_optional(
+        workspace,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )?;
+    let sha = sha.trim();
+    (sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| {
+        CookWorkspaceBasePin {
+            base: base.to_string(),
+            sha: sha.to_string(),
+            provenance: "local_remote_tracking_ref",
+            remote_freshness: "unverified",
+        }
+    })
 }
 
 fn preflight_cook_workspace_base_ancestry_with_provider(
@@ -7989,16 +8131,26 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
     ) {
         return Ok(resolved.trim().to_string());
     }
-    homeboy_core::git::run_git(
+    homeboy_core::git::with_remote_tracking_authority_until(
         target,
-        &[
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            base_sha,
-        ],
         "materialize prepared Cook base",
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        |remaining| {
+            homeboy_core::git::run_git_with_env_timeout(
+                target,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    base_sha,
+                ],
+                "materialize prepared Cook base",
+                &[],
+                remaining,
+            )
+            .map(|_| ())
+        },
     )?;
     Ok(homeboy_core::git::run_git(
         target,

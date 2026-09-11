@@ -342,16 +342,20 @@ fn persist_bench_artifact(
 }
 
 /// Attach the recorded artifact's observation id, public URL, and validated
-/// viewer links back onto the bench artifact, returning a diagnostic when the
-/// public URL is unreachable.
+/// viewer links back onto the bench artifact. A failed public-alias probe does
+/// not invalidate controller-retained evidence.
 pub fn apply_recorded_bench_artifact_links(
-    scenario_id: &str,
-    run_index: Option<usize>,
-    name: &str,
+    _scenario_id: &str,
+    _run_index: Option<usize>,
+    _name: &str,
     artifact: &mut BenchArtifact,
     record: &ArtifactRecord,
 ) -> Option<BenchDiagnostic> {
     artifact.observation_artifact_id = Some(record.id.clone());
+    // The observation record owns the durable storage type. Source artifacts
+    // may omit or use a domain-specific type, neither of which is a retrieval
+    // contract after promotion.
+    artifact.artifact_type = Some(record.artifact_type.clone());
     let public_url = artifact_links::public_artifact_url(record)?;
     if artifact_links::public_artifact_url_is_reachable_or_legacy(record) {
         artifact.public_url = Some(public_url.clone());
@@ -364,28 +368,7 @@ pub fn apply_recorded_bench_artifact_links(
             .map(|link| link.url.clone());
         None
     } else {
-        let validation = record
-            .metadata_json
-            .get("public_url_validation")
-            .expect("unreachable new artifact has validation metadata");
-        let error = validation
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("public artifact URL was not reachable");
-        Some(bench_artifact_diagnostic(
-                scenario_id,
-                run_index,
-                name,
-                "bench_public_artifact_url_unreachable",
-                format!(
-                    "public artifact URL for bench artifact `{name}` is not reachable; viewer links were not published: {error}"
-                ),
-                serde_json::json!({
-                    "url": validation.get("url").cloned().unwrap_or(serde_json::Value::Null),
-                    "status_code": validation.get("status_code").cloned().unwrap_or(serde_json::Value::Null),
-                    "error": validation.get("error").cloned().unwrap_or(serde_json::Value::Null),
-                }),
-            ))
+        None
     }
 }
 

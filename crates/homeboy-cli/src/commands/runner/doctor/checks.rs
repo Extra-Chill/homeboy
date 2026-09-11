@@ -1,5 +1,6 @@
 use super::*;
 use crate::commands::runner::controller_ancestry::{commits_are_ancestral, CommitAncestry};
+use std::collections::BTreeSet;
 use types::{RunnerCheck, RunnerDoctorStatus, RunnerRepairAction, ToolProbe};
 
 pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
@@ -8,6 +9,20 @@ pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck
             spec.check_id,
             format!("{} is available", spec.command),
             None,
+        )
+    } else if probe.probe_failed {
+        // The lookup never reached a verdict, so neither "found" nor "missing"
+        // is a truthful message. Report the probe failure and hand the operator
+        // the reason instead of a remediation for a tool that may be installed.
+        error(
+            spec.check_id,
+            format!(
+                "{} could not be probed: {}",
+                spec.command,
+                probe_reason(probe)
+            ),
+            Some(PROBE_FAILURE_REMEDIATION.to_string()),
+            probe_details(probe),
         )
     } else if spec.required {
         error(
@@ -25,6 +40,24 @@ pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck
     }
 }
 
+pub(crate) const PROBE_FAILURE_REMEDIATION: &str =
+    "The tool lookup itself failed, so the tool may well be installed. Fix the reported environment or shell error, then re-run doctor.";
+
+fn probe_reason(probe: &ToolProbe) -> &str {
+    probe
+        .error
+        .as_deref()
+        .unwrap_or("the tool lookup failed without a reason")
+}
+
+fn probe_details(probe: &ToolProbe) -> BTreeMap<String, String> {
+    let mut details = BTreeMap::new();
+    if let Some(error) = &probe.error {
+        details.insert("probe_error".to_string(), error.clone());
+    }
+    details
+}
+
 pub(crate) fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerCheck {
     let mut details = BTreeMap::new();
     details.insert("command".to_string(), command.to_string());
@@ -36,6 +69,17 @@ pub(crate) fn required_tool_check(command: &str, probe: &ToolProbe) -> RunnerChe
         ok_with_details(
             format!("tool.required.{command}"),
             format!("Required runner tool {command} is available"),
+            details,
+        )
+    } else if probe.probe_failed {
+        details.extend(probe_details(probe));
+        error(
+            format!("tool.required.{command}"),
+            format!(
+                "Required runner tool {command} could not be probed: {}",
+                probe_reason(probe)
+            ),
+            Some(PROBE_FAILURE_REMEDIATION.to_string()),
             details,
         )
     } else {
@@ -318,8 +362,8 @@ pub(crate) fn lab_offload_status(
     checks: &[RunnerCheck],
     eligible_provider_ids: &[String],
 ) -> (RunnerDoctorStatus, types::RunnerDoctorProviderReadiness) {
-    let mut ready_for = eligible_provider_ids.to_vec();
-    let mut blocked_for = Vec::new();
+    let mut live_auth_ready = BTreeSet::new();
+    let mut blocked = BTreeSet::new();
     let mut has_runner_error = false;
     let mut has_warning = false;
 
@@ -328,6 +372,15 @@ pub(crate) fn lab_offload_status(
             has_warning = true;
         }
         if check.status != RunnerDoctorStatus::Error {
+            if check.status == RunnerDoctorStatus::Ok
+                && check.details.get("readiness_scope").map(String::as_str) == Some("live_auth")
+                && check
+                    .details
+                    .get("provider_id")
+                    .is_some_and(|provider_id| eligible_provider_ids.contains(provider_id))
+            {
+                live_auth_ready.insert(check.details["provider_id"].clone());
+            }
             continue;
         }
         let Some(provider_id) = check.details.get("provider_id") else {
@@ -335,22 +388,38 @@ pub(crate) fn lab_offload_status(
             continue;
         };
         if eligible_provider_ids.iter().any(|id| id == provider_id) {
-            ready_for.retain(|id| id != provider_id);
-            if !blocked_for.contains(provider_id) {
-                blocked_for.push(provider_id.clone());
-            }
+            blocked.insert(provider_id.clone());
         }
     }
 
     if has_runner_error {
-        ready_for.clear();
-        blocked_for = eligible_provider_ids.to_vec();
+        blocked.extend(eligible_provider_ids.iter().cloned());
     }
 
-    let status = if has_runner_error || (!eligible_provider_ids.is_empty() && ready_for.is_empty())
-    {
+    // A failed substrate or auth observation always dominates a successful
+    // probe, including when independently bounded probes complete out of order.
+    let ready_for = eligible_provider_ids
+        .iter()
+        .filter(|id| live_auth_ready.contains(*id) && !blocked.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocked_for = eligible_provider_ids
+        .iter()
+        .filter(|id| blocked.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unverified_for = eligible_provider_ids
+        .iter()
+        .filter(|id| !live_auth_ready.contains(*id) && !blocked.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unverified_remediation = (!unverified_for.is_empty()).then(|| {
+        "Provider authentication is unverified because runner doctor cannot select a model. Run the selected task's normal preflight; doctor never changes credentials.".to_string()
+    });
+
+    let status = if has_runner_error || (!blocked_for.is_empty() && ready_for.is_empty()) {
         RunnerDoctorStatus::Error
-    } else if has_warning {
+    } else if has_warning || !unverified_for.is_empty() {
         RunnerDoctorStatus::Warning
     } else {
         RunnerDoctorStatus::Ok
@@ -360,6 +429,8 @@ pub(crate) fn lab_offload_status(
         types::RunnerDoctorProviderReadiness {
             ready_for,
             blocked_for,
+            unverified_for,
+            unverified_remediation,
         },
     )
 }

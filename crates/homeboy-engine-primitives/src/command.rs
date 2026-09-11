@@ -758,6 +758,12 @@ pub struct CommandProgress {
     pub phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unfinished: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]

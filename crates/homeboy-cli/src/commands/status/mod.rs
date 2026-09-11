@@ -18,7 +18,7 @@ use homeboy::core::scope::{self, Scope};
 use homeboy::runner::runners as runner;
 use homeboy_deploy::ReleaseStateStatus;
 use homeboy_engine_primitives::command::{
-    wait_with_bounded_output_supervised_with_progress, ControllerChildGuard,
+    wait_with_bounded_output_supervised_with_progress, CommandProgress, ControllerChildGuard,
     SupervisedCommandTermination,
 };
 use homeboy_release::release::version;
@@ -50,6 +50,7 @@ use types::{
 
 const STATUS_PROBE_CAPTURE_LIMIT: usize = 1024 * 1024;
 const STATUS_PROBE_HEARTBEAT: Duration = Duration::from_secs(1);
+const GLOBAL_STATUS_PROBE_BUDGET: Duration = Duration::from_secs(25);
 
 pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     if args.full && (requires_component_enrichment(&args) || args.refresh) {
@@ -103,10 +104,10 @@ pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     timer.finish("read_controller_cache");
     log_controller_staleness(&controller);
 
-    // Context reports and registry resolution can block in filesystem or
-    // inventory providers that do not expose cancellation. Put that boundary in
-    // a separately killable process while retaining the parent's controller
-    // observation for a useful partial result.
+    // Context reports, registry resolution, and the global snapshot can block
+    // in filesystem-backed providers that do not expose cancellation. Put that
+    // boundary in a separately killable process while retaining the parent's
+    // controller observation for a useful partial result.
     if requires_isolated_probe(&args) {
         return run_isolated_probe(&args, controller, timer);
     }
@@ -120,7 +121,7 @@ fn run_unisolated(
     mut timer: StatusTimer,
 ) -> CmdResult<StatusResult> {
     if args.global {
-        return global_status(controller);
+        return global_status(controller, &args.global_runners);
     }
 
     // Explicit scope selection. `--path` and `--project` keep their historical
@@ -171,7 +172,20 @@ fn run_unisolated(
 
     if args.full {
         timer.begin("build_full_context");
-        let mut report = context::build_report(args.all, "status")?;
+        let mut report = context::build_report_with_progress(args.all, "status", |progress| {
+            if std::env::var_os("HOMEBOY_STATUS_PROBE_CHILD").is_some() {
+                let progress = CommandProgress {
+                    phase: progress.phase.to_string(),
+                    current: progress.current,
+                    completed: Some(progress.completed),
+                    total: Some(progress.total),
+                    unfinished: progress.unfinished,
+                };
+                if let Ok(progress) = serde_json::to_string(&progress) {
+                    eprintln!("HOMEBOY_PROGRESS {progress}");
+                }
+            }
+        })?;
         timer.finish("build_full_context");
         report.command = "status".to_string();
         return Ok((StatusResult::Full(Box::new(report)), 0));
@@ -234,7 +248,8 @@ fn requires_isolated_probe(args: &StatusArgs) -> bool {
     }
     #[cfg(not(test))]
     {
-        args.full
+        args.global
+            || args.full
             || args.all
             || matches!(args.scope.selection(), Some(scope) if !matches!(scope, Scope::Path { .. }))
     }
@@ -267,7 +282,14 @@ fn run_isolated_probe(
     guard
         .attach(&child)
         .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    // Leave headroom below the command-wide 30-second status deadline for the
+    // parent to kill the child and serialize its partial snapshot.
     let remaining = timer.remaining().unwrap_or(Duration::ZERO);
+    let remaining = args
+        .global
+        .then_some(remaining.min(GLOBAL_STATUS_PROBE_BUDGET))
+        .unwrap_or(remaining);
+    let mut latest_progress = None;
     let supervised = wait_with_bounded_output_supervised_with_progress(
         &mut child,
         STATUS_PROBE_CAPTURE_LIMIT,
@@ -277,7 +299,23 @@ fn run_isolated_probe(
         || false,
         |heartbeat| {
             if let Some(progress) = heartbeat.progress {
-                eprintln!("[status] {PHASE}: {}", progress.phase);
+                latest_progress = Some(progress.clone());
+                let counts = progress
+                    .total
+                    .map(|total| format!(" {}/{}", progress.completed.unwrap_or_default(), total))
+                    .unwrap_or_default();
+                let current = progress
+                    .current
+                    .as_deref()
+                    .map(|current| format!(" {current}"))
+                    .unwrap_or_default();
+                eprintln!(
+                    "[status] {PHASE}: {}{}{} ({}ms)",
+                    progress.phase,
+                    current,
+                    counts,
+                    heartbeat.elapsed.as_millis(),
+                );
             } else {
                 eprintln!(
                     "[status] {PHASE}: waiting ({}ms)",
@@ -296,11 +334,21 @@ fn run_isolated_probe(
                 controller,
                 partial: StatusPartial {
                     reason,
-                    phase: PHASE,
-                    omitted_components: Vec::new(),
+                    phase: status_probe_partial_phase(latest_progress.as_ref()),
+                    omitted_components: latest_progress
+                        .as_ref()
+                        .map(|progress| progress.unfinished.clone())
+                        .unwrap_or_default(),
                     degraded_components: Vec::new(),
                     degraded_component_phases: Vec::new(),
-                    replay_commands: vec![status_probe_replay(args)],
+                    unfinished_probes: latest_progress
+                        .as_ref()
+                        .map(|progress| progress.unfinished.clone())
+                        .unwrap_or_default(),
+                    current_probe: latest_progress
+                        .as_ref()
+                        .and_then(|progress| progress.current.clone()),
+                    replay_commands: status_probe_replay_commands(args, latest_progress.as_ref()),
                 },
                 diagnostic,
             }),
@@ -352,7 +400,11 @@ fn status_probe_argv(args: &StatusArgs) -> Vec<String> {
     if args.scope.workspace {
         argv.push("--workspace".to_string());
     }
+    for runner in &args.global_runners {
+        argv.extend(["--global-runner".to_string(), runner.clone()]);
+    }
     for (enabled, flag) in [
+        (args.global, "--global"),
         (args.full, "--full"),
         (args.uncommitted, "--uncommitted"),
         (args.needs_release, "--needs-release"),
@@ -373,6 +425,51 @@ fn status_probe_argv(args: &StatusArgs) -> Vec<String> {
 
 fn status_probe_replay(args: &StatusArgs) -> String {
     status_probe_argv(args).join(" ")
+}
+
+fn status_probe_replay_commands(
+    args: &StatusArgs,
+    progress: Option<&CommandProgress>,
+) -> Vec<String> {
+    if args.global {
+        return vec![
+            "homeboy daemon status".to_string(),
+            "homeboy runner status --full".to_string(),
+            "homeboy activity".to_string(),
+            "homeboy runs list --limit 100".to_string(),
+            "homeboy component list".to_string(),
+        ];
+    }
+
+    let unfinished = progress
+        .map(|progress| progress.unfinished.as_slice())
+        .unwrap_or_default();
+    if !unfinished.is_empty() {
+        return unfinished
+            .iter()
+            .map(|component_id| format!("homeboy status --component {component_id} --timings"))
+            .collect();
+    }
+    if let Some(progress) = progress {
+        return match progress.phase.as_str() {
+            "resolve_context_target" => vec![
+                "homeboy status --global".to_string(),
+                "homeboy component list".to_string(),
+            ],
+            "build_component_inventory" => vec!["homeboy component list".to_string()],
+            _ => vec![status_probe_replay(args)],
+        };
+    }
+    vec![status_probe_replay(args)]
+}
+
+fn status_probe_partial_phase(progress: Option<&CommandProgress>) -> &'static str {
+    match progress.map(|progress| progress.phase.as_str()) {
+        Some("resolve_context_target") => "resolve_context_target",
+        Some("build_component_inventory") => "build_component_inventory",
+        Some("calculate_release_state") => "calculate_release_state",
+        _ => "probe_context_inventory_scope",
+    }
 }
 
 /// Entry point used only by the private same-binary child protocol.
@@ -420,7 +517,10 @@ const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
 /// fetching component remotes, or probing runner daemons. Counts are capped at
 /// their query boundary and runner inspection is capped independently of the
 /// registered inventory size.
-fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
+fn global_status(
+    controller: ControllerStaleness,
+    requested_runners: &[String],
+) -> CmdResult<StatusResult> {
     let daemon_status = daemon::read_status()?;
     let admitting_work = daemon_status.admits_work();
     let blocker = (!admitting_work).then(|| {
@@ -431,25 +531,59 @@ fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
     });
 
     let registered_runners = runner::list()?;
-    let inspected_runners = registered_runners.len().min(GLOBAL_RUNNER_LIMIT);
-    let mut status_unavailable = 0;
-    let runner_reports = registered_runners
+    let selected_runners = if requested_runners.is_empty() {
+        registered_runners
+            .iter()
+            .map(|runner| runner.id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        requested_runners.to_vec()
+    };
+    let inspected_ids = selected_runners
         .iter()
         .take(GLOBAL_RUNNER_LIMIT)
-        .filter_map(
-            |runner_config| match runner::persisted_status(&runner_config.id) {
-                Ok(report) => Some(report),
-                Err(_) => {
-                    status_unavailable += 1;
-                    None
-                }
-            },
-        )
+        .cloned()
         .collect::<Vec<_>>();
-    let disconnected = runner_reports
+    let omitted_ids = selected_runners
         .iter()
-        .filter(|report| !report.connected)
-        .count();
+        .skip(GLOBAL_RUNNER_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    // All probes share one collection deadline. Each runner receives the
+    // remaining budget, rather than a sequential timeout that multiplies with
+    // inventory size.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    for id in &inspected_ids {
+        let sender = sender.clone();
+        let id = id.clone();
+        std::thread::spawn(move || {
+            let result = homeboy::runner::runner_admission_snapshot_until(&id, deadline)
+                .map(|snapshot| snapshot.status.connected);
+            let _ = sender.send(result);
+        });
+    }
+    drop(sender);
+    let mut disconnected = 0;
+    let mut status_unavailable = 0;
+    for _ in &inspected_ids {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok(Ok(connected)) if !connected => disconnected += 1,
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => status_unavailable += 1,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => status_unavailable += 1,
+        }
+    }
+    let continuation = (!omitted_ids.is_empty()).then(|| {
+        format!(
+            "homeboy status --global{}",
+            omitted_ids
+                .iter()
+                .map(|id| format!(" --global-runner {id}"))
+                .collect::<String>()
+        )
+    });
 
     let activity = ObservationStore::open_readonly()
         .ok()
@@ -495,12 +629,13 @@ fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
             },
             runners: GlobalRunnerStatus {
                 registered: registered_runners.len(),
-                inspected: inspected_runners,
-                omitted: registered_runners.len().saturating_sub(inspected_runners),
+                inspected: inspected_ids.len(),
+                omitted: omitted_ids.len(),
                 disconnected,
                 status_unavailable,
-                freshness_unverified: inspected_runners,
+                freshness_unverified: 0,
                 drill_down: "homeboy runner status --full",
+                continuation,
             },
             activity,
             inventory: GlobalInventoryStatus {
@@ -675,6 +810,8 @@ fn summarize_components(
                 reason: "component_git_probe_degraded",
                 phase: "component_git_probe",
                 omitted_components: Vec::new(),
+                unfinished_probes: Vec::new(),
+                current_probe: None,
                 replay_commands: replay_component_commands(&git_cache.degraded_components, args),
                 degraded_components: sorted_component_ids(git_cache.degraded_components),
                 degraded_component_phases: sorted_degraded_component_phases(
@@ -817,6 +954,8 @@ fn partial_status(
                 degraded_component_phases: sorted_degraded_component_phases(
                     degraded_component_phases,
                 ),
+                unfinished_probes: Vec::new(),
+                current_probe: None,
                 replay_commands,
             }),
             controller,
@@ -958,6 +1097,8 @@ fn run_project_dashboard(
                         .collect(),
                     degraded_components: Vec::new(),
                     degraded_component_phases: Vec::new(),
+                    unfinished_probes: Vec::new(),
+                    current_probe: None,
                     replay_commands: vec![format!(
                         "homeboy status {project_id}{}",
                         replay_status_flags(args)
@@ -1183,6 +1324,8 @@ fn run_project_dashboard(
                     git_cache.degraded_component_phases,
                     &remote_diagnostics,
                 ),
+                unfinished_probes: Vec::new(),
+                current_probe: None,
                 replay_commands: vec![format!(
                     "homeboy status {project_id}{}",
                     replay_status_flags(args)
@@ -1269,6 +1412,7 @@ mod tests {
             docs_only: false,
             all: false,
             global: false,
+            global_runners: Vec::new(),
             outdated: false,
             unreleased: false,
             timings: false,
@@ -1469,6 +1613,87 @@ mod tests {
             Commands::Status(args) => assert!(args.timings),
             _ => panic!("expected status command"),
         }
+    }
+
+    #[test]
+    fn global_probe_replays_the_global_snapshot_and_omitted_subsystems() {
+        let args = parse_status(&["homeboy", "status", "--global"]);
+
+        assert_eq!(status_probe_argv(&args), ["homeboy", "status", "--global"]);
+        assert_eq!(
+            status_probe_replay_commands(&args, None),
+            [
+                "homeboy daemon status",
+                "homeboy runner status --full",
+                "homeboy activity",
+                "homeboy runs list --limit 100",
+                "homeboy component list",
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_out_full_probe_replays_only_unfinished_components() {
+        let args = parse_status(&["homeboy", "status", "--full"]);
+        let progress = CommandProgress {
+            phase: "calculate_release_state".to_string(),
+            current: Some("slow-component".to_string()),
+            completed: Some(2),
+            total: Some(4),
+            unfinished: vec!["slow-component".to_string(), "queued-component".to_string()],
+        };
+
+        assert_eq!(
+            status_probe_replay_commands(&args, Some(&progress)),
+            [
+                "homeboy status --component slow-component --timings",
+                "homeboy status --component queued-component --timings",
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_out_context_target_probe_names_provider_and_avoids_full_replay() {
+        let args = parse_status(&["homeboy", "status", "--full"]);
+        let progress = CommandProgress {
+            phase: "resolve_context_target".to_string(),
+            current: Some("/workspace/blocked".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            status_probe_partial_phase(Some(&progress)),
+            "resolve_context_target"
+        );
+        assert_eq!(
+            status_probe_replay_commands(&args, Some(&progress)),
+            ["homeboy status --global", "homeboy component list"]
+        );
+    }
+
+    #[test]
+    fn status_partial_serializes_exact_unfinished_probe_diagnostics() {
+        let partial = StatusPartial {
+            reason: "status_probe_timeout",
+            phase: "probe_context_inventory_scope",
+            omitted_components: vec!["slow-component".to_string()],
+            degraded_components: Vec::new(),
+            degraded_component_phases: Vec::new(),
+            unfinished_probes: vec!["slow-component".to_string()],
+            current_probe: Some("slow-component".to_string()),
+            replay_commands: vec!["homeboy status --component slow-component --timings".to_string()],
+        };
+
+        let value = serde_json::to_value(partial).expect("serialize partial status");
+        assert_eq!(
+            value["unfinished_probes"],
+            serde_json::json!(["slow-component"])
+        );
+        assert_eq!(value["current_probe"], "slow-component");
+        assert_eq!(
+            value["replay_commands"],
+            serde_json::json!(["homeboy status --component slow-component --timings"])
+        );
     }
 
     #[test]

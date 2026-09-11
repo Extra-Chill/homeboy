@@ -492,6 +492,7 @@ mod tests {
         remote_basename, render_extract_command, DANGEROUS_PATH_SUFFIXES,
     };
     use crate::lifecycle::DeployObservation;
+    use crate::test_support::local_client;
     use homeboy_core::observation::ObservationStore;
     use homeboy_core::server::SshClient;
     use homeboy_extension_contract::DeployVerification;
@@ -502,18 +503,6 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-
-    fn local_client() -> SshClient {
-        SshClient {
-            host: "localhost".to_string(),
-            user: "test".to_string(),
-            port: 22,
-            identity_file: None,
-            auth: None,
-            is_local: true,
-            env: HashMap::new(),
-        }
-    }
 
     fn local_client_with_env(env: HashMap<String, String>) -> SshClient {
         SshClient {

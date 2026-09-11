@@ -41,8 +41,8 @@ pub use promote::{
 pub use run_plan_projection::mirror_agent_task_run_plan_aggregate;
 pub use types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
-    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
+    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionReport,
+    AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
     AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 

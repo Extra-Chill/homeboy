@@ -561,6 +561,12 @@ Extensions declare fuzz workload metadata with a top-level `fuzz` capability blo
 - **`fuzz.workloads[].id`** (string): Stable workload identifier.
 - **`fuzz.workloads[].label`** (string): Optional human-readable workload label.
 - **`fuzz.workloads[].description`** (string): Optional workload description.
+- **`fuzz.workload_json_probes`** (array): Extension-owned JSON declarations that
+  surface a workload when a pointer resolves to a non-empty string. Each probe
+  declares `path` relative to the component root, an RFC 6901 `pointer`, and a
+  stable workload `id`. For example, the Node.js extension declares
+  `package.json` with `/scripts/fuzz`; projects do not duplicate that command in
+  `homeboy.json`.
 - **`fuzz.case_artifact`** (string): Optional generic artifact id or semantic key for the primary replayable case artifact.
 - **`fuzz.corpus_artifacts`** (array): Optional generic artifact ids or semantic keys for persisted corpus artifacts.
 - **`fuzz.seed`** (string): Optional default seed surfaced in `fuzz run` output when the caller did not pass `--seed`.

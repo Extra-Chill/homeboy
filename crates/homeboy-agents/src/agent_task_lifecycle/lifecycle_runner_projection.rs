@@ -387,21 +387,19 @@ fn project_terminal_runner_lifecycle_event_in_store(
     validate_terminal_child_identity(record, snapshot, event)?;
     let aggregate = projected_runner_aggregate(record, &event.aggregate);
     let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
-    let aggregate_path = lifecycle_store
-        .aggregate_path(&record.run_id)
-        .display()
-        .to_string();
-    apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
     record_verified_lab_placement_outcome(record)?;
     // The aggregate is the task result. A successful enclosing daemon job only
     // proves transport completion, not task success.
     record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
-    lifecycle_store.write_aggregate_and_record(record, &aggregate)?;
-    crate::agent_task_lifecycle::record_terminal_artifact_projection_in_store(
+    apply_aggregate_transition_in_store(
         lifecycle_store,
-        record,
-        &aggregate,
-    )
+        AgentTaskAggregateTransition {
+            record,
+            plan: &projection_plan,
+            aggregate: &aggregate,
+        },
+    )?;
+    Ok(())
 }
 
 pub(crate) fn project_persisted_terminal_runner_events(
@@ -459,21 +457,18 @@ pub(crate) fn project_persisted_terminal_runner_events_in_store(
             return Ok(false);
         }
         let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
-        let aggregate_path = lifecycle_store
-            .aggregate_path(&record.run_id)
-            .display()
-            .to_string();
-        apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
         record_verified_lab_placement_outcome(record)?;
         record.ensure_metadata_object().insert(
             "terminal_transport_recovery".to_string(),
             json!("persisted_runner_job_events"),
         );
-        lifecycle_store.write_aggregate_and_record(record, &aggregate)?;
-        crate::agent_task_lifecycle::record_terminal_artifact_projection_in_store(
+        apply_aggregate_transition_in_store(
             lifecycle_store,
-            record,
-            &aggregate,
+            AgentTaskAggregateTransition {
+                record,
+                plan: &projection_plan,
+                aggregate: &aggregate,
+            },
         )?;
         return Ok(true);
     }

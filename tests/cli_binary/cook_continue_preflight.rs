@@ -84,9 +84,14 @@ fn finalized_receipt_fixture(
 
 #[test]
 fn public_continuation_preflight_matches_unscheduled_finalization_receipt_execution() {
+    use homeboy::agents::agent_task_service::{
+        continuation_state_in_store, CookContinuationState, CookRecipeStore,
+    };
+
     let cook_id = "public-finalization-replay";
     let run_id = "public-finalization-replay-attempt-1";
     let (context, lifecycle_store) = finalized_receipt_fixture(cook_id, run_id);
+    let recipe_store = CookRecipeStore::new(context.path_roots());
 
     let output = context
         .command(TestBinary::HomeboyFixture)
@@ -127,10 +132,10 @@ fn public_continuation_preflight_matches_unscheduled_finalization_receipt_execut
             "continuation_claim"
         ]
     );
-    assert!(!context
-        .data_dir()
-        .join("agent-task-cook-continuations")
-        .exists());
+    assert_eq!(
+        continuation_state_in_store(&recipe_store, cook_id, run_id).expect("continuation state"),
+        CookContinuationState::Absent
+    );
     assert!(!lifecycle_store.aggregate_path(run_id).exists());
 
     let execution = context
@@ -149,20 +154,20 @@ fn public_continuation_preflight_matches_unscheduled_finalization_receipt_execut
         });
     assert_eq!(execution_envelope["data"]["status"], report["status"]);
     assert_eq!(execution_envelope["data"]["latest_run_id"], run_id);
-    let queue_root = context.data_dir().join("agent-task-cook-continuations");
-    assert!(queue_root.is_dir());
+    // Continuation state is owned by the lifecycle record: an unscheduled
+    // finalization replay never publishes continuation work at all.
     assert_eq!(
-        std::fs::read_dir(queue_root)
-            .expect("read empty continuation queue")
-            .count(),
-        0
+        continuation_state_in_store(&recipe_store, cook_id, run_id).expect("continuation state"),
+        CookContinuationState::Absent
     );
     assert!(!lifecycle_store.aggregate_path(run_id).exists());
 }
 
 #[test]
 fn public_continuation_preflight_validates_queued_finalization_receipt_dispatcher() {
-    use homeboy::agents::agent_task_service::CookRecipeStore;
+    use homeboy::agents::agent_task_service::{
+        continuation_state_in_store, CookContinuationState, CookRecipeStore,
+    };
 
     let cook_id = "public-queued-finalization-replay";
     let run_id = "public-queued-finalization-replay-attempt-1";
@@ -171,14 +176,10 @@ fn public_continuation_preflight_validates_queued_finalization_receipt_dispatche
     recipe_store
         .enqueue_terminal_continuation(cook_id, run_id)
         .expect("enqueue terminal continuation");
-    let queue_root = context.data_dir().join("agent-task-cook-continuations");
-    let pending = std::fs::read_dir(&queue_root)
-        .expect("read continuation queue")
-        .next()
-        .expect("queued continuation")
-        .expect("read queued continuation")
-        .path();
-    let pending_bytes = std::fs::read(&pending).expect("read queued continuation bytes");
+    assert_eq!(
+        continuation_state_in_store(&recipe_store, cook_id, run_id).expect("continuation state"),
+        CookContinuationState::Pending
+    );
 
     let output = context
         .command(TestBinary::HomeboyFixture)
@@ -203,7 +204,11 @@ fn public_continuation_preflight_validates_queued_finalization_receipt_dispatche
         .expect("preflight phases")
         .iter()
         .any(|phase| phase["phase"] == "transport" && phase["status"] == "passed"));
-    assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes);
+    // Preflight is an observation, so the pending claim survives it untouched.
+    assert_eq!(
+        continuation_state_in_store(&recipe_store, cook_id, run_id).expect("continuation state"),
+        CookContinuationState::Pending
+    );
     assert!(!lifecycle_store.aggregate_path(run_id).exists());
 
     let execution = context
@@ -214,25 +219,24 @@ fn public_continuation_preflight_validates_queued_finalization_receipt_dispatche
     assert_eq!(execution.status.code(), Some(0));
     let execution_envelope: Value = serde_json::from_slice(&execution.stdout).unwrap();
     assert_eq!(execution_envelope["data"]["status"], report["status"]);
-    assert!(!pending.exists());
-    assert!(std::fs::read_dir(&queue_root)
-        .expect("read completed continuation queue")
-        .any(|entry| entry
-            .expect("read completed continuation")
-            .path()
-            .extension()
-            .is_some_and(|extension| extension == "completed")));
+    assert_eq!(
+        continuation_state_in_store(&recipe_store, cook_id, run_id).expect("continuation state"),
+        CookContinuationState::Completed
+    );
     assert!(!lifecycle_store.aggregate_path(run_id).exists());
 }
 
 #[test]
 fn malformed_queued_finalization_dispatcher_fails_preflight_and_execution() {
-    use homeboy::agents::agent_task_service::CookRecipeStore;
+    use homeboy::agents::agent_task_service::{
+        continuation_state_in_store, CookContinuationState, CookRecipeStore,
+    };
 
     let cook_id = "public-malformed-finalization-dispatcher";
     let run_id = "public-malformed-finalization-dispatcher-attempt-1";
     let (context, lifecycle_store) = finalized_receipt_fixture(cook_id, run_id);
-    CookRecipeStore::new(context.path_roots())
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    recipe_store
         .enqueue_terminal_continuation(cook_id, run_id)
         .expect("enqueue terminal continuation");
     let recipe_path = context
@@ -249,17 +253,6 @@ fn malformed_queued_finalization_dispatcher_fails_preflight_and_execution() {
         serde_json::to_vec_pretty(&recipe).expect("encode malformed Cook recipe"),
     )
     .expect("persist malformed Cook recipe");
-    let queue_root = context.data_dir().join("agent-task-cook-continuations");
-    let queued_before = std::fs::read_dir(&queue_root)
-        .expect("read continuation queue")
-        .map(|entry| {
-            let path = entry.expect("read continuation entry").path();
-            (
-                path.file_name().unwrap().to_owned(),
-                std::fs::read(path).expect("read continuation entry"),
-            )
-        })
-        .collect::<Vec<_>>();
 
     let preflight = context
         .command(TestBinary::HomeboyFixture)
@@ -281,17 +274,11 @@ fn malformed_queued_finalization_dispatcher_fails_preflight_and_execution() {
     assert!(preflight_envelope["data"]["phases"]
         .to_string()
         .contains("attempt_dispatch"));
-    let queued_after = std::fs::read_dir(&queue_root)
-        .expect("read continuation queue after preflight")
-        .map(|entry| {
-            let path = entry.expect("read continuation entry").path();
-            (
-                path.file_name().unwrap().to_owned(),
-                std::fs::read(path).expect("read continuation entry"),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(queued_after, queued_before);
+    // A rejected transport must not consume or advance the queued claim.
+    assert_eq!(
+        continuation_state_in_store(&recipe_store, cook_id, run_id).expect("continuation state"),
+        CookContinuationState::Pending
+    );
     assert!(!lifecycle_store.aggregate_path(run_id).exists());
 
     let execution = context

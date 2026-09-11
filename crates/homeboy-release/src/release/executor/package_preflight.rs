@@ -866,19 +866,7 @@ mod tests {
         }]
     }
 
-    fn run_git(repo: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .expect("git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_core::test_support::run_git_command as run_git;
 
     fn write_zip(path: &Path, entries: &[(&str, &str)]) {
         let file = std::fs::File::create(path).expect("zip file");

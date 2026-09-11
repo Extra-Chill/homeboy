@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::store::LocalRunnerJob;
-use super::types::{ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job, JobStatus};
+use super::types::{ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job};
 use crate::redaction::redact_argv_display;
 use crate::runner_execution_envelope::RunnerExecutionEnvelope;
 
@@ -54,8 +54,6 @@ pub(super) fn active_runner_job_summary(
             .or_else(|| envelope_metadata_string(envelope, "run_id"))
             .or_else(|| envelope_metadata_string(envelope, "record_run_id")),
         stale_reason: job.stale_reason.clone(),
-        lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
-        retryable: Some(runner_job_retryable(job)),
         active_child_count: lifecycle
             .as_ref()
             .and_then(|lifecycle| lifecycle.active_child_count)
@@ -107,8 +105,6 @@ pub(super) fn active_daemon_job_summary(job: &Job, now_ms: u64) -> ActiveRunnerJ
             .and_then(|lifecycle| lifecycle.durable_run_id.clone()),
         lifecycle,
         stale_reason: job.stale_reason.clone(),
-        lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
-        retryable: Some(runner_job_retryable(job)),
         active_child_count: None,
         active_cell_count: None,
     }
@@ -152,8 +148,6 @@ pub(super) fn active_local_runner_job_summary(
         lifecycle: lifecycle.clone(),
         durable_run_id: lifecycle.and_then(|lifecycle| lifecycle.durable_run_id),
         stale_reason: job.stale_reason.clone(),
-        lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
-        retryable: Some(runner_job_retryable(job)),
         active_child_count: None,
         active_cell_count: None,
     }
@@ -239,26 +233,4 @@ fn ms_to_rfc3339(ms: u64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
         .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339()
-}
-
-fn runner_job_lifecycle_state(job: &Job) -> &'static str {
-    if job.status == JobStatus::Failed
-        && job.stale_reason.as_deref()
-            == Some("control plane lost before the job reached a terminal status")
-    {
-        "orphaned_after_control_plane_loss"
-    } else if job.stale_reason.is_some() {
-        "stale"
-    } else if matches!(job.status, JobStatus::Queued | JobStatus::Running) {
-        "active"
-    } else {
-        "terminal"
-    }
-}
-
-fn runner_job_retryable(job: &Job) -> bool {
-    matches!(
-        runner_job_lifecycle_state(job),
-        "orphaned_after_control_plane_loss" | "stale"
-    )
 }

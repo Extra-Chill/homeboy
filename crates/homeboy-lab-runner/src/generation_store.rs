@@ -921,6 +921,45 @@ pub(crate) fn terminalize_unleased_candidate_reconciliation(runner_id: &str) -> 
     })
 }
 
+/// An exact live-lease adoption rechecks the observed daemon after its tunnel
+/// health probe. Once that succeeds, an older automatic start replay cannot
+/// safely add information and is terminalized with its replacement evidence.
+pub(crate) fn terminalize_ensure_running_replay_for_live_lease_adoption(
+    runner_id: &str,
+) -> Result<()> {
+    with_rooted_registry_lock(runner_id, |config_root| {
+        let path = replacement_operation_path_in_root(config_root, runner_id);
+        let mut operation: ReplacementOperation =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+            })?)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        let Some(previous_command) = operation.replay_command.as_deref() else {
+            return Ok(());
+        };
+        if operation.kind.as_deref() != Some("ensure-running") {
+            return Ok(());
+        }
+        write_durable_json(
+            &superseded_replacement_path_in_root(config_root, runner_id),
+            &SupersededReplacementEvidence {
+                schema: "homeboy/runner-replacement-operation-supersession/v1",
+                runner_id,
+                operation_id: &operation.operation_id,
+                previous_kind: "ensure-running",
+                previous_replay_command: previous_command,
+                replacement_kind: "live-lease-adoption",
+                replacement_replay_command: "verified exact live-lease adoption",
+                superseded_at: Utc::now().to_rfc3339(),
+            },
+        )?;
+        operation.operation_id = uuid::Uuid::new_v4().to_string();
+        operation.replay_command = None;
+        operation.kind = None;
+        write_durable_json(&path, &operation)
+    })
+}
+
 /// Update an operation journal while the caller holds this runner's registry
 /// lock through [`with_admission_fence`].
 pub(crate) fn record_replacement_operation_replay_locked(
@@ -2380,6 +2419,46 @@ mod tests {
     }
 
     #[test]
+    fn verified_live_lease_adoption_terminalizes_ensure_running_with_evidence() {
+        test_support::with_isolated_home(|_| {
+            let operation_id = replacement_operation("runner-a").expect("operation");
+            record_replacement_operation_replay(
+                "runner-a",
+                "ensure-running",
+                "homeboy daemon ensure-running --replacement-operation-id operation-a",
+            )
+            .expect("ensure-running replay");
+
+            terminalize_ensure_running_replay_for_live_lease_adoption("runner-a")
+                .expect("verified adoption terminalizes stale replay");
+
+            assert!(replacement_operation_replay("runner-a")
+                .expect("replacement replay")
+                .is_none());
+            assert_ne!(
+                replacement_operation("runner-a").expect("replacement operation"),
+                operation_id
+            );
+            let evidence_dir = paths::runner_sessions_dir()
+                .expect("runner sessions")
+                .join("runner-a")
+                .join("superseded-replacements");
+            let evidence = std::fs::read_dir(evidence_dir)
+                .expect("supersession evidence")
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .expect("evidence entries");
+            assert_eq!(evidence.len(), 1);
+            let evidence: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(evidence[0].path()).expect("read supersession evidence"),
+            )
+            .expect("supersession evidence JSON");
+            assert_eq!(evidence["operation_id"], operation_id);
+            assert_eq!(evidence["previous_kind"], "ensure-running");
+            assert_eq!(evidence["replacement_kind"], "live-lease-adoption");
+        });
+    }
+
+    #[test]
     fn legacy_replacement_journal_remains_replayable_after_rebinding() {
         test_support::with_isolated_home(|_| {
             let path = replacement_operation_path("runner-a").expect("journal path");
@@ -3467,8 +3546,6 @@ mod tests {
                     lifecycle: None,
                     durable_run_id: None,
                     stale_reason: None,
-                    lifecycle_state: None,
-                    retryable: None,
                     active_child_count: None,
                     active_cell_count: None,
                 }],

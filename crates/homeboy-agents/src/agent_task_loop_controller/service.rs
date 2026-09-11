@@ -823,16 +823,6 @@ pub fn write_controller(record: &AgentTaskLoopControllerRecord) -> Result<()> {
     write_json(&controller_path(&record.loop_id)?, record)
 }
 
-pub fn apply_external_event(
-    loop_id: &str,
-    event: AgentTaskLoopExternalEvent,
-) -> Result<AgentTaskLoopControllerRecord> {
-    let mut record = load_controller(loop_id)?;
-    record.apply_event(event);
-    write_controller(&record)?;
-    Ok(record)
-}
-
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
     let raw = fs::read_to_string(path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;

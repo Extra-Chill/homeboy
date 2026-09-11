@@ -1364,22 +1364,50 @@ fn run_main_test_workflow_inner(
                     preview
                 };
 
-                let message = format!(
-                    "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
-                    impacted.len(),
-                );
+                // A harness-config change cannot be answered by "add a test":
+                // the changed file decides how tests run, so only executing the
+                // suite proves it still works. Say that instead.
+                let harness_only = impacted
+                    .iter()
+                    .all(|file| crate::extension::test::drift::is_test_harness_config_path(file));
+
+                let message = if harness_only {
+                    format!(
+                        "Changed-scope test gate selected zero tests, but {} test-harness config file(s) changed since {changed_ref}: {impacted_summary}. A harness change is the one change a zero-test run cannot evidence, because the harness itself was never exercised.",
+                        impacted.len(),
+                    )
+                } else {
+                    format!(
+                        "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
+                        impacted.len(),
+                    )
+                };
                 let findings = Some(vec![HomeboyFinding::builder("test", message.clone())
-                    .rule("changed_scope_zero_tests_for_source_change")
+                    .rule(if harness_only {
+                        "changed_scope_zero_tests_for_harness_change"
+                    } else {
+                        "changed_scope_zero_tests_for_source_change"
+                    })
                     .category("test-scope")
                     .severity("error")
                     .build()]);
-                let hints = Some(vec![
-                    format!(
-                        "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
-                        args.component_id
-                    ),
-                    "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
-                ]);
+                let hints = Some(if harness_only {
+                    vec![
+                        format!(
+                            "Run the full suite so the harness change is exercised: homeboy review test {}",
+                            args.component_id
+                        ),
+                        "A green changed-scope run here would only mean no source changed, not that the harness still works.".to_string(),
+                    ]
+                } else {
+                    vec![
+                        format!(
+                            "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
+                            args.component_id
+                        ),
+                        "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
+                    ]
+                });
 
                 return Ok(TestRunWorkflowResult {
                     status: "failed".to_string(),
@@ -3189,6 +3217,75 @@ mod tests {
         });
     }
 
+    /// Release resolves the component from its persisted `homeboy.json`
+    /// (portable discovery or the standalone overlay), not from an in-memory
+    /// fixture. The projection `when` must therefore be satisfied by settings
+    /// declared in the component config file — including when flat extension
+    /// keys sit beside the nested `settings` object, which is the shape
+    /// components like `data-machine-events` ship. (#14449)
+    #[test]
+    fn declared_secret_env_names_resolve_from_persisted_component_extension_settings() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = conditional_secret_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            conditional_test_component(home.path(), source.path(), "remote");
+
+            std::fs::write(
+                source.path().join("homeboy.json"),
+                r#"{
+                    "id": "conditional-secret-consumer",
+                    "extensions": {
+                        "conditional-secret-fixture": {
+                            "toolchain": "fixture",
+                            "settings": {
+                                "service": {
+                                    "mode": "remote",
+                                    "secret_env": {
+                                        "first": "FIRST_PROJECTED_SECRET",
+                                        "second": "SECOND_PROJECTED_SECRET"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .expect("persisted homeboy.json");
+
+            let component = crate::component::portable::try_discover_from_portable(source.path())
+                .expect("portable discovery")
+                .expect("component from persisted config");
+            assert_eq!(
+                component
+                    .extensions
+                    .as_ref()
+                    .and_then(|extensions| extensions
+                        .get("conditional-secret-fixture")
+                        .map(|config| config.settings.contains_key("service"))),
+                Some(true),
+                "fixture must model persisted extension settings"
+            );
+
+            let marker = source.path().join("declared-names-child-ran");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .expect("marker script");
+            let names = crate::extension::test::declared_secret_env_names(&component)
+                .expect("persisted-settings declaration");
+            assert_eq!(
+                names,
+                vec!["FIRST_PROJECTED_SECRET", "SECOND_PROJECTED_SECRET"]
+            );
+            assert!(
+                !marker.exists(),
+                "resolving declared names must not spawn the test child"
+            );
+        });
+    }
+
     #[test]
     fn review_test_missing_projected_secret_fails_before_spawn() {
         homeboy_core::test_support::with_isolated_home(|home| {
@@ -3424,19 +3521,7 @@ mod tests {
     }
     use homeboy_core::test_support::{exec_capable_tempdir, with_isolated_home};
 
-    fn run_git(dir: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use crate::test_support::git_command_output as run_git;
 
     fn clean_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("temp dir");

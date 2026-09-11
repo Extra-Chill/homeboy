@@ -312,6 +312,61 @@ fn unmaterialized_cook_admission_is_typed_secret_free_and_idempotent() {
 }
 
 #[test]
+fn queued_cook_placement_update_preserves_binding_identity_and_refuses_execution_ownership() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "queued-placement-update";
+    seed_unmaterialized_admission_parent(&store, cook_id);
+    record_unmaterialized_cook_admission_in_store(
+        &store,
+        cook_id,
+        json!({
+            "schema": "homeboy/unmaterialized-cook-binding/v1",
+            "request_ref": "request-1",
+            "placement": { "requested": "auto", "local_fallback": false },
+            "replay_intent": { "argv": ["homeboy", "agent-task", "cook"] },
+        }),
+        "blocked_runner_unavailable",
+        "runner unavailable",
+    )
+    .expect("admission");
+
+    let updated =
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "local", "operator")
+            .expect("local placement update");
+    assert_eq!(updated.run_id, cook_id);
+    assert_eq!(
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["request_ref"],
+        "request-1"
+    );
+    assert_eq!(
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["placement"]["requested"],
+        "local"
+    );
+    assert!(
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]["argv"]
+            .as_array()
+            .expect("argv")
+            .iter()
+            .any(|argument| argument == "--placement=local")
+    );
+
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["provider_executions"] = json!([{ "state": "running" }]);
+            true
+        })
+        .expect("record execution ownership");
+    assert!(
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "local", "operator").is_ok(),
+        "the original idempotent update remains replayable"
+    );
+    assert!(
+        update_unmaterialized_cook_placement_in_store(&store, cook_id, "auto", "operator").is_err()
+    );
+}
+
+#[test]
 fn unmaterialized_admission_initial_submission_includes_retry_lineage_metadata() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
@@ -3753,6 +3808,28 @@ fn non_retryable_pre_execution_failure_remains_invalid_input() {
     assert_eq!(outcome.outputs["retryable"], false);
     assert_eq!(outcome.metadata["retryable"], false);
     assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
+}
+
+#[test]
+fn reserve_pressure_pre_execution_failure_is_classified_as_capacity() {
+    let plan = test_plan();
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-reserve-pressure",
+        &plan.tasks[0],
+        "worktree_capacity_admission",
+        &Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+            filesystem: "/worktrees/new-task".to_string(),
+            available_bytes: 90,
+            reserve_bytes: 100,
+            shortfall_bytes: 10,
+        }),
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Capacity)
+    );
+    assert_eq!(outcome.outputs["error_code"], "resource.capacity_reserve");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

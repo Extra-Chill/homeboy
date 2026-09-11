@@ -355,6 +355,7 @@ fn run_command_with_workspace_inner(
         },
         preflight_placement: Default::default(),
         readiness: input.readiness.clone(),
+        control_plane: None,
     };
 
     if options.dry_run {
@@ -403,6 +404,7 @@ fn run_command_with_workspace_inner(
                         deployment: None,
                         continuation_command: None,
                         release_summary: release_summary_for_skipped_plan(),
+                        changelog_history_recovery: None,
                         readiness: None,
                     },
                     workspace: None,
@@ -432,6 +434,7 @@ fn run_command_with_workspace_inner(
                         deployment: None,
                         continuation_command: None,
                         release_summary,
+                        changelog_history_recovery: None,
                         readiness: None,
                     },
                     workspace: None,
@@ -471,6 +474,7 @@ fn run_command_with_workspace_inner(
                     deployment,
                     continuation_command: None,
                     release_summary: release_summary_for_skipped_plan(),
+                    changelog_history_recovery: None,
                     readiness: None,
                 },
                 workspace: None,
@@ -556,6 +560,7 @@ fn run_command_with_workspace_inner(
                 deployment,
                 continuation_command: None,
                 release_summary,
+                changelog_history_recovery: None,
                 readiness: None,
             },
             workspace,
@@ -635,6 +640,7 @@ fn prepared_tag_publish_recovery_decision(
             release_summary: vec![format!(
                 "Prepared tag {tag} exists at HEAD; GitHub Release is missing and should be published"
             )],
+            changelog_history_recovery: None,
             readiness: None,
         }),
         Some(true) | None => None,
@@ -1055,6 +1061,7 @@ pub fn run_batch(
             path_override: None,
             dry_run: input_template.dry_run,
             recover: input_template.recover,
+            repair_changelog_history: input_template.repair_changelog_history.clone(),
             retag: input_template.retag,
             skip_checks: input_template.skip_checks,
             skip_checks_granular: input_template.skip_checks_granular.clone(),
@@ -2451,6 +2458,7 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         path_override: None,
         dry_run: false,
         recover: false,
+        repair_changelog_history: Vec::new(),
         retag: false,
         skip_checks: false,
         skip_checks_granular: Vec::new(),
@@ -2478,5 +2486,6 @@ fn legacy_release_command_input_struct_literal_remains_source_compatible() {
         bump_policy: Default::default(),
         preflight_placement: Default::default(),
         readiness: None,
+        control_plane: None,
     };
 }

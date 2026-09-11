@@ -17,23 +17,7 @@ mod prepare;
 mod redaction;
 mod secret_source;
 
-pub(super) fn ssh_runner() -> Runner {
-    Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: Some("srv".to_string()),
-        workspace_root: Some("/srv/homeboy".to_string()),
-        settings: RunnerSettings {
-            daemon: true,
-            ..Default::default()
-        },
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: RunnerPolicy::default(),
-    }
-}
-
+pub(crate) use crate::test_support::ssh_runner;
 pub(super) fn local_runner(workspace_root: String) -> Runner {
     Runner {
         id: "local".to_string(),

@@ -1,3 +1,4 @@
+use crate::validation::validate_required_field;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
@@ -114,19 +115,6 @@ pub fn validate_resource_cleanup_ownership_metadata(
 
     if let Some(reason) = &metadata.reason {
         validate_required_field(&format!("{field}.reason"), reason)?;
-    }
-
-    Ok(())
-}
-
-fn validate_required_field(field: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            field,
-            "must not be blank",
-            None,
-            None,
-        ));
     }
 
     Ok(())

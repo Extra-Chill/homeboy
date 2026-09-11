@@ -737,4 +737,85 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn resolver_accepts_an_explicit_runner_from_its_authoritative_ready_snapshot() {
+        let input = explicit_runner_input();
+        let policy = explicit_runner_policy("connected_ready", vec!["lab-b".into()], true);
+
+        assert!(resolve_parsed_command_preflight(vec!["fixture".into()], input, policy).is_ok());
+    }
+
+    #[test]
+    fn resolver_rejects_an_explicit_runner_without_ready_inventory_evidence() {
+        let input = explicit_runner_input();
+        let policy = explicit_runner_policy("stale", Vec::new(), false);
+
+        let error = resolve_parsed_command_preflight(vec!["fixture".into()], input, policy)
+            .expect_err("stale runner evidence must fail closed");
+        assert_eq!(error.details["field"], "selected_runner_id");
+    }
+
+    #[test]
+    fn resolver_does_not_admit_a_runner_for_an_unsupported_local_route() {
+        let mut input = explicit_runner_input();
+        input.lab_route = LabRouteIntent::Unsupported;
+        input.placement = PlacementIntent::Auto;
+        let mut policy = explicit_runner_policy("connected_ready", vec!["lab-b".into()], false);
+        policy.lab_readiness = None;
+        policy.selected_runner_id = None;
+        policy.generic_route = GenericRoutePolicySnapshot {
+            command_supports_lab: false,
+            automatic_authorized: false,
+            selected_runner_id: None,
+        };
+
+        assert!(resolve_parsed_command_preflight(vec!["fixture".into()], input, policy).is_ok());
+    }
+
+    fn explicit_runner_input() -> ParsedCommandPreflightInput {
+        ParsedCommandPreflightInput {
+            identity: ParsedCommandIdentity {
+                family: "fixture".into(),
+                operation: vec!["run".into()],
+            },
+            resource_admission: ResourceAdmissionRequirement::Exempt,
+            controller_execution: ControllerExecution::Ordinary,
+            deferred_workload: DeferredWorkloadPolicy::Eligible,
+            placement: PlacementIntent::Lab,
+            runner: RunnerIntent::Explicit("lab-b".into()),
+            runner_normalization: RunnerNormalization::None,
+            lab_route: LabRouteIntent::Supported { automatic: true },
+            provenance: ProvenanceRequirement::None,
+        }
+    }
+
+    fn explicit_runner_policy(
+        state: &str,
+        available_runner_ids: Vec<String>,
+        runner_admitted: bool,
+    ) -> ParsedCommandPolicySnapshot {
+        ParsedCommandPolicySnapshot {
+            resource_admission_evidence: ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness: Some(LabReadinessSnapshot {
+                state: state.into(),
+                selected_runner_id: Some("lab-b".into()),
+                available_runner_ids,
+                reasons: Vec::new(),
+                remediation_commands: Vec::new(),
+                repair_admitted_runner_ids: Vec::new(),
+            }),
+            selected_runner_id: Some("lab-b".into()),
+            generic_route: GenericRoutePolicySnapshot {
+                command_supports_lab: true,
+                automatic_authorized: true,
+                selected_runner_id: Some("lab-b".into()),
+            },
+            deferred_pressure_refusal: false,
+            runner_admitted,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        }
+    }
 }

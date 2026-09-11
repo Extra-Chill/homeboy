@@ -400,6 +400,9 @@ impl AdapterDependencyProvider {
         _context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyProviderHydrationPlan>> {
         let manager = self.adapter.package_manager();
+        if manager.package_identity.is_some() && self.adapter.packages()?.is_empty() {
+            return Ok(None);
+        }
         let Some(install) = manager.commands.install.as_ref() else {
             return Ok(None);
         };

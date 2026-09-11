@@ -37,10 +37,14 @@ pub(crate) fn run_with_plan(
     // provisioning and its finalization record, both plan phases, packaging,
     // cleanup, and the deploy checkpoint. A release therefore cannot package
     // into one home and then record its state against another (#7505).
+    let mut workspace_options = options.clone();
     let component = super::context::load_component(component_id, options)?;
+    let mut control_plane = (!options.dry_run)
+        .then(|| super::control_plane::ReleaseControlPlaneObservation::start(roots, component_id))
+        .transpose()?;
+    workspace_options.control_plane = control_plane.as_ref().map(|run| run.context());
     let mut workspace =
         super::workspace::ReleaseWorkspace::select(roots, &component, options.pipeline.head)?;
-    let mut workspace_options = options.clone();
     workspace_options.path_override = Some(workspace.component.local_path.clone());
     let checkout_guard =
         super::checkout_guard::ReleaseCheckoutGuard::capture(&workspace.component)?;
@@ -65,6 +69,9 @@ pub(crate) fn run_with_plan(
                     "Release completed, but workspace finalization is pending: {error}. Reconcile owner reference `{}`.",
                     output.reconciliation_ref.as_deref().unwrap_or("unavailable")
                 ));
+            }
+            if let Some(control_plane) = control_plane.as_mut() {
+                control_plane.finish(&run)?;
             }
             Ok((plan, run, (output.kind != "in_place").then_some(output)))
         }

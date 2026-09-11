@@ -432,6 +432,54 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         None
     };
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
+    if existing.is_none() {
+        if let Some(merged) = backend.find_merged_pr(&options.path, &options.base, &head)? {
+            let observed_remote_sha =
+                backend.verify_remote_candidate(&options.path, &head, commit_sha)?;
+            if observed_remote_sha != commit_sha {
+                return Err(publication_drift_error(
+                    commit_sha,
+                    &observed_remote_sha,
+                    None,
+                    "no PR mutation performed",
+                ));
+            }
+            let binding = backend.verify_publication_binding(
+                &options.path,
+                &options.base,
+                &head,
+                commit_sha,
+                &changed_files,
+                &merged,
+            )?;
+            if let Err(_error) = validate_publication_binding(&binding, commit_sha, &changed_files)
+            {
+                return Err(publication_drift_error(
+                    commit_sha,
+                    &binding.remote_sha,
+                    Some(&binding.pr_head_sha),
+                    "no PR mutation performed",
+                ));
+            }
+            return Ok(report(
+                &options,
+                intent,
+                &head,
+                "review_ready",
+                "already_merged",
+                Some(merged.number),
+                Some(merged.url),
+                changed_files,
+                Some(proof),
+                commit_required,
+                push_required,
+                Some(git_identity),
+                git_tracking,
+                Some(binding),
+                durable_acceptance,
+            ));
+        }
+    }
     let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;
     intent.target.publication_base_sha = publication_base_sha.clone();
     let base_observation = match publication_base_sha {
@@ -1590,7 +1638,7 @@ fn finalization_outcome(
     committed: bool,
     pushed: bool,
 ) -> AgentTaskPrFinalizationOutcome {
-    let published = matches!(pr_action, "created" | "updated");
+    let published = matches!(pr_action, "created" | "updated" | "already_merged");
     AgentTaskPrFinalizationOutcome {
         schema: AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA.to_string(),
         run_id: intent.run_id.clone(),

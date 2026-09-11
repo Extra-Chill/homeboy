@@ -736,6 +736,66 @@ fn namespace_with_php_reserved_word_segment_is_extracted() {
 }
 
 #[test]
+fn namespace_after_long_docblock_is_extracted() {
+    // Regression test for #14527 (real-world case:
+    // data-machine-events inc/Abilities/AbilityCategories.php).
+    //
+    // The file declares exactly the expected namespace on line 12, after a
+    // long file docblock. The audit reported "Missing namespace declaration"
+    // because the grammar engine consumed the `/**` opener as a line comment
+    // (doc prefix), never opened the block state, and classified the
+    // docblock interior as code — where prose apostrophes opened phantom
+    // multi-line strings that swallowed the namespace line.
+    let Some(grammar) = php_grammar() else {
+        eprintln!("Skipping — wordpress grammar not available");
+        return;
+    };
+
+    let content = "<?php\n/**\n * Ability Categories\n *\n * Centralized registration of Data Machine Events ability categories.\n * Follows the same pattern as Data Machine core's AbilityCategories.\n *\n * @package DataMachineEvents\\Abilities\n * @since 0.29.0\n */\n\nnamespace DataMachineEvents\\Abilities;\n\ndefined( 'ABSPATH' ) || exit;\n\nclass AbilityCategories {\n    public static function register(): void {\n    }\n}\n";
+
+    let fp = fingerprint_from_grammar(content, &grammar, "inc/Abilities/AbilityCategories.php")
+        .expect("fingerprint should succeed");
+
+    assert_eq!(
+        fp.namespace.as_deref(),
+        Some("DataMachineEvents\\Abilities"),
+        "Namespace declared after a long docblock must be extracted. Got: {:?}",
+        fp.namespace
+    );
+}
+
+#[test]
+fn method_after_docblock_with_apostrophes_is_extracted() {
+    // Regression test for #14527 (real-world case: data-machine-events
+    // inc/Cli/Check/CheckDuplicatesCommand.php defines `__invoke` at line 79,
+    // yet the audit reported "Missing method: __invoke").
+    //
+    // WP-CLI command docblocks contain prose with apostrophes ("weren't",
+    // "doesn't"). When the docblock was misparsed as code, each apostrophe
+    // opened a phantom multi-line string that swallowed the method signature
+    // that followed — here the ENTIRE method list came back empty.
+    let Some(grammar) = php_grammar() else {
+        eprintln!("Skipping — wordpress grammar not available");
+        return;
+    };
+
+    let content = "<?php\nnamespace DataMachineEvents\\Cli\\Check;\n\nclass CheckDuplicatesCommand {\n    /**\n     * Check for duplicate events that weren't caught during import.\n     *\n     * ## OPTIONS\n     *\n     * [--scope=<scope>]\n     * : Which events to scan. Doesn't include past events by default.\n     *\n     * @param array $args       Positional arguments.\n     * @param array $assoc_args Named arguments.\n     */\n    public function __invoke( array $args, array $assoc_args ): void {\n        $scope = $assoc_args['scope'] ?? 'upcoming';\n    }\n}\n";
+
+    let fp = fingerprint_from_grammar(
+        content,
+        &grammar,
+        "inc/Cli/Check/CheckDuplicatesCommand.php",
+    )
+    .expect("fingerprint should succeed");
+
+    assert!(
+        fp.methods.contains(&"__invoke".to_string()),
+        "Method declared after a docblock containing apostrophes must be extracted. Got: {:?}",
+        fp.methods
+    );
+}
+
+#[test]
 fn namespace_with_leading_whitespace_is_extracted() {
     // Regression test for #1134 (real-world case).
     //

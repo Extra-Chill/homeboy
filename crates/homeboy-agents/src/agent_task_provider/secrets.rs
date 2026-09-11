@@ -292,6 +292,18 @@ fn effective_provider_default<'a>(
     {
         return provider.provider_defaults.get(name);
     }
+    // A concrete provider/model route is more specific than a provider's sole
+    // fallback account. Do not require credentials for an unrelated fallback
+    // merely because this executor happens to declare only one default.
+    if let Some(model_provider) = request
+        .executor
+        .model
+        .as_deref()
+        .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
+        .filter(|provider| !provider.trim().is_empty())
+    {
+        return provider.provider_defaults.get(model_provider);
+    }
     (provider.provider_defaults.len() == 1)
         .then(|| provider.provider_defaults.values().next())
         .flatten()
@@ -393,6 +405,43 @@ mod tests {
         assert_eq!(
             provider_secret_env(&provider, Some(&request(Value::Null))),
             vec!["ONLY_ACCOUNT_TOKEN"]
+        );
+    }
+
+    #[test]
+    fn selected_model_route_does_not_inherit_an_unrelated_sole_default() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "codex": { "required_secret_env": ["CODEX_TOKEN"] }
+            }
+        }))
+        .expect("provider");
+        let mut request = request(Value::Null);
+        request.executor.model = Some("xai/grok-4.6".to_string());
+
+        assert!(provider_secret_env(&provider, Some(&request)).is_empty());
+        assert!(provider_secret_sources(&provider, Some(&request)).is_empty());
+    }
+
+    #[test]
+    fn selected_model_route_uses_its_matching_provider_default() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "xai": { "required_secret_env": ["XAI_TOKEN"] },
+                "codex": { "required_secret_env": ["CODEX_TOKEN"] }
+            }
+        }))
+        .expect("provider");
+        let mut request = request(Value::Null);
+        request.executor.model = Some("xai/grok-4.6".to_string());
+
+        assert_eq!(
+            provider_secret_env(&provider, Some(&request)),
+            vec!["XAI_TOKEN".to_string()]
         );
     }
 

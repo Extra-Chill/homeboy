@@ -512,9 +512,9 @@ pub(crate) fn recover_recipe_attempt_with_stores(
     )
 }
 
-pub(crate) fn retryable_pre_execution_failure(
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> bool {
+/// Whether a terminal Cook failure may reserve a successor without replaying
+/// provider work from the failed record.
+pub fn retryable_pre_execution_failure(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
     record.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
         || (record.metadata["pre_execution_failure"]["phase"] == "local_retry_supervisor"
             && record.metadata["provider_executions_consumed"]

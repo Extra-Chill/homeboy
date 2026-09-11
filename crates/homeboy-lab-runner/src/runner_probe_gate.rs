@@ -61,7 +61,12 @@ pub const DEFAULT_PROBE_FAILURE_TTL: Duration = Duration::from_secs(5);
 /// Maximum probes in flight to a single runner, across all callers.
 pub const DEFAULT_PROBE_CONCURRENCY: usize = 2;
 /// How long a coalesced caller waits on the in-flight probe before taking over.
+#[cfg(not(test))]
 pub const DEFAULT_PROBE_WAIT: Duration = Duration::from_secs(60);
+/// See [`crate::readonly_probe::DEFAULT_READONLY_PROBE_TIMEOUT`]: a coalesced
+/// wait under test is waiting on a probe that will never answer.
+#[cfg(test)]
+pub const DEFAULT_PROBE_WAIT: Duration = Duration::from_secs(1);
 
 /// Override for [`DEFAULT_PROBE_CACHE_TTL`], in whole seconds. `0` disables
 /// caching while leaving single-flight and the concurrency cap intact.

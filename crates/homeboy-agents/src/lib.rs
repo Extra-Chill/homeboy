@@ -7,6 +7,7 @@
 //! boundary.
 
 pub mod agent_task;
+pub mod agent_task_action_result;
 pub(crate) mod agent_task_aggregate;
 pub mod agent_task_artifacts;
 pub mod agent_task_batch;
@@ -23,7 +24,7 @@ pub mod agent_task_executor_evidence;
 pub(crate) mod agent_task_fanout;
 pub(crate) mod agent_task_fanout_supervisor;
 pub(crate) mod agent_task_finalization;
-pub mod agent_task_gate;
+pub(crate) mod agent_task_gate;
 pub(crate) mod agent_task_gate_executor;
 pub mod agent_task_lifecycle;
 pub mod agent_task_loop_controller;
@@ -40,10 +41,11 @@ pub mod agent_task_prompts;
 pub mod agent_task_provider;
 pub(crate) mod agent_task_review_dossier;
 pub(crate) mod agent_task_runtime_dependency_graph;
-pub mod agent_task_schedule;
+pub(crate) mod agent_task_schedule;
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;
 pub mod agent_task_service;
+pub mod agent_task_submission_service;
 pub mod agent_task_timeout;
 pub(crate) mod agent_task_timeout_artifacts;
 pub mod agent_task_workspace_identity;

@@ -61,6 +61,8 @@ pub enum AgentTaskFailureClassification {
     ProviderCredentialsExhausted,
     PolicyDenied,
     CapabilityMissing,
+    /// Local resource policy refused work before it reached a provider.
+    Capacity,
     InvalidInput,
     ExecutionFailed,
     Unknown,

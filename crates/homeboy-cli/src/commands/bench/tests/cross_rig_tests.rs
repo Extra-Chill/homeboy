@@ -1,4 +1,6 @@
 use super::*;
+use crate::cli_surface::Cli;
+use clap::Parser;
 
 #[test]
 fn cross_rig_run_passes_selector_to_each_rig() {
@@ -28,6 +30,133 @@ fn cross_rig_run_passes_selector_to_each_rig() {
             }
             _ => panic!("expected comparison output"),
         }
+    });
+}
+
+#[test]
+fn cross_rig_output_lifts_run_and_artifact_refs() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_a = tempfile::TempDir::new().expect("component a");
+        let component_b = tempfile::TempDir::new().expect("component b");
+        write_rig(home, "rig-a", "studio", component_a.path());
+        write_rig(home, "rig-b", "studio", component_b.path());
+        for rig_id in ["rig-a", "rig-b"] {
+            let path = home
+                .path()
+                .join(".config/homeboy/rigs")
+                .join(format!("{rig_id}.json"));
+            let mut rig: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read rig"))
+                    .expect("parse rig");
+            rig["bench_workloads"] = serde_json::json!({});
+            std::fs::write(&path, serde_json::to_string(&rig).expect("serialize rig"))
+                .expect("write rig");
+        }
+        let mut args = run_args(
+            None,
+            vec!["rig-a".to_string(), "rig-b".to_string()],
+            vec!["visual".to_string()],
+        );
+        args.run.runs = 2;
+
+        let (output, exit_code) = run(args).expect("cross-rig visual bench should run");
+        let payload = serde_json::to_value(output).expect("serialize bench output");
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(payload.clone()),
+            exit_code,
+            "bench",
+            None,
+        );
+        let value = serde_json::to_value(envelope).expect("serialize command result");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["run"]["kind"], "bench");
+        assert_eq!(value["refs"]["runs"].as_array().map(Vec::len), Some(2));
+        assert!(
+            value["artifacts"]
+                .as_array()
+                .is_some_and(|artifacts| artifacts.len() >= 2),
+            "expected promoted visual artifact references: {value}"
+        );
+        for artifact in value["artifacts"].as_array().expect("artifact refs") {
+            assert!(artifact["id"].as_str().is_some_and(|id| !id.is_empty()));
+            assert!(
+                artifact["uri"].as_str().is_some_and(
+                    |uri| uri.starts_with("homeboy://run/") && uri.contains("/artifact/")
+                )
+            );
+        }
+        for rig in payload["payload"]["rigs"]
+            .as_array()
+            .expect("comparison rigs")
+        {
+            let artifacts = rig["artifacts"].as_array().expect("rig artifacts");
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact["name"] == "visual_result"
+                        && artifact["type"] == "file"),
+                "expected persisted untyped file type: {rig}"
+            );
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|artifact| artifact["name"] == "visual_url" && artifact["type"] == "url"),
+                "expected persisted URL type: {rig}"
+            );
+        }
+
+        let artifact_actions = value["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .filter(|action| action["kind"] == "artifacts")
+            .collect::<Vec<_>>();
+        assert!(
+            !artifact_actions.is_empty(),
+            "expected artifact actions: {value}"
+        );
+        for action in &artifact_actions {
+            let command = action["command"].as_str().expect("artifact command");
+            Cli::try_parse_from(shlex::split(command).expect("shell-safe command"))
+                .expect("advertised artifact command must parse");
+        }
+        assert!(
+            artifact_actions.iter().any(|action| action["command"]
+                .as_str()
+                .is_some_and(|command| command.contains(" runs artifact preview "))),
+            "expected directory preview action: {value}"
+        );
+        assert!(
+            artifact_actions
+                .iter()
+                .filter(|action| action["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(" runs artifact get ")))
+                .count()
+                >= 4,
+            "expected file and URL get actions for both rigs: {value}"
+        );
+
+        let summary = crate::commands::bench_summary::render_bench_summary(&payload)
+            .expect("compact comparison summary");
+        assert!(summary.contains("Comparison means:\n"), "{summary}");
+        assert!(summary.contains("Runs:\n"), "{summary}");
+        let artifact_commands = summary
+            .lines()
+            .filter_map(|line| line.split_once(": homeboy ").map(|(_, command)| command))
+            .filter(|command| command.starts_with("runs artifact "));
+        for command in artifact_commands {
+            let command = format!("homeboy {command}");
+            Cli::try_parse_from(shlex::split(&command).expect("shell-safe command"))
+                .expect("advertised summary command must parse");
+        }
+        assert!(summary.contains("runs artifact preview"), "{summary}");
+        assert!(
+            summary.matches("runs artifact get").count() >= 4,
+            "{summary}"
+        );
     });
 }
 
@@ -62,6 +191,13 @@ fn cross_rig_json_summary_omits_full_results_payload() {
                 assert!(value["rigs"][0].get("results").is_none());
                 assert!(value["rigs"][0].get("artifacts").is_none());
                 assert!(value["rigs"][0].get("rig_state").is_none());
+                assert!(value["rigs"][0]["persisted_run"]["run_id"].is_string());
+                assert_eq!(
+                    value["_homeboy_actionable"]["refs"]["runs"]
+                        .as_array()
+                        .map(Vec::len),
+                    Some(2)
+                );
             }
             _ => panic!("expected comparison summary output"),
         }

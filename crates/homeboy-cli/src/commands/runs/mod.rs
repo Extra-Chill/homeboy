@@ -7,6 +7,9 @@
 //! - per-concern submodules (`bench`, `bundle`, `compare`, ...) own the rest.
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod artifact_index_tests;
 mod bench;
 mod bundle;

@@ -26,6 +26,8 @@ pub mod report;
 pub mod run;
 mod span_summary;
 pub mod spans;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::component::Component;

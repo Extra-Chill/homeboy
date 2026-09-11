@@ -393,6 +393,14 @@ pub(super) fn fuzz_workloads(
                 .into_iter()
                 .map(|path| fuzz_workload_from_path(extension_id, &path)),
         );
+
+        if let Ok(manifest) = homeboy_core::extension::catalog::load_extension(extension_id) {
+            workloads.extend(manifest.fuzz.as_ref().into_iter().flat_map(|fuzz| {
+                fuzz.workload_json_probes
+                    .iter()
+                    .filter_map(|probe| json_probe_workload(component, extension_id, probe))
+            }));
+        }
     }
 
     if let Some(extensions) = component.extensions.as_ref() {
@@ -412,6 +420,27 @@ pub(super) fn fuzz_workloads(
     }
 
     workloads
+}
+
+fn json_probe_workload(
+    component: &homeboy::core::component::Component,
+    extension_id: &str,
+    probe: &homeboy_extension_contract::fuzz_config::FuzzWorkloadJsonProbe,
+) -> Option<FuzzWorkloadOutput> {
+    let path = Path::new(&component.local_path).join(&probe.path);
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
+    (!value.pointer(&probe.pointer)?.as_str()?.trim().is_empty()).then_some(())?;
+    Some(FuzzWorkloadOutput {
+        id: probe.id.clone(),
+        label: probe.label.clone(),
+        description: probe.description.clone(),
+        source: format!(
+            "extension:{extension_id}:json:{}#{}",
+            probe.path, probe.pointer
+        ),
+        manifest_path: None,
+    })
 }
 
 pub(super) fn fuzz_execution_inputs(
@@ -497,6 +526,10 @@ pub(super) fn select_workload<'a>(
     let first = path_workloads.next();
     if first.is_some() && path_workloads.next().is_none() {
         return Ok(first);
+    }
+
+    if workloads.len() == 1 {
+        return Ok(workloads.first());
     }
 
     if workloads.len() > 1 {

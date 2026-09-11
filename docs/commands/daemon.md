@@ -13,11 +13,18 @@ homeboy daemon <COMMAND>
 - `start` — start the local daemon in the background
 - `serve` — run the daemon in the foreground
 - `stop` — gracefully stop the background daemon recorded in the state file
-- `status` — show daemon state, active-job recovery evidence, and selected local address
+- `status` — show bounded daemon health, active jobs, blockers, and recovery actions; use `--full` for complete evidence
 - `recover` — resolve and run the right recovery from the current status report
 - `broker-config` — render a deployable reverse-runner broker service recipe
 
 ## Recovery dispatch
+
+`homeboy daemon status` is a bounded operator projection by default. It reports
+daemon liveness, reachability, build freshness, active-job summaries,
+replacement blockers, and exact authorized recovery commands. It summarizes
+unrelated process candidates by count and includes only ownership-relevant
+coordinates. Use `homeboy daemon status --full` to inspect the complete state,
+candidate command lines, runtime-path, termination, and job-recovery evidence.
 
 `homeboy daemon status` already computes the repair its own evidence
 authorizes and reports it as `freshness.repair_plan`. `homeboy daemon recover`

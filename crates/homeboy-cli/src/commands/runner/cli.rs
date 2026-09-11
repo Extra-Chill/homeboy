@@ -30,6 +30,15 @@ impl RunnerArgs {
     pub(crate) fn compact_doctor_stdout(&self) -> bool {
         matches!(&self.command, RunnerCommand::Doctor { full: false, .. })
     }
+
+    pub(crate) fn compact_job_list_stdout(&self) -> bool {
+        matches!(
+            &self.command,
+            RunnerCommand::Job {
+                command: RunnerJobCommand::List { json: false, .. }
+            }
+        )
+    }
 }
 
 #[derive(Subcommand)]
@@ -71,6 +80,14 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         concurrency_limit: Option<usize>,
 
+        /// Seconds the controller waits for an accepted runner job; zero detaches immediately
+        #[arg(long)]
+        runner_exec_wait_timeout_secs: Option<u64>,
+
+        /// Cancel an in-flight remote job when the controller wait expires
+        #[arg(long)]
+        cancel_on_wait_timeout: Option<bool>,
+
         /// Artifact retention/copying policy label for future execution commands
         #[arg(long)]
         artifact_policy: Option<String>,
@@ -95,6 +112,14 @@ pub(super) enum RunnerCommand {
         /// Maximum concurrent workflows this server should accept
         #[arg(long)]
         concurrency_limit: Option<usize>,
+
+        /// Seconds the controller waits for an accepted runner job; zero detaches immediately
+        #[arg(long)]
+        runner_exec_wait_timeout_secs: Option<u64>,
+
+        /// Cancel an in-flight remote job when the controller wait expires
+        #[arg(long)]
+        cancel_on_wait_timeout: Option<bool>,
 
         /// Artifact retention/copying policy label for future execution commands
         #[arg(long)]
@@ -681,7 +706,7 @@ pub(super) enum RunnerBrokerCommand {
 
 #[derive(Subcommand)]
 pub(super) enum RunnerJobCommand {
-    /// List live daemon jobs and retained durable job projections
+    /// List live daemon jobs
     List {
         /// Runner ID
         runner_id: String,
@@ -697,6 +722,14 @@ pub(super) enum RunnerJobCommand {
         /// Include only observed terminal jobs
         #[arg(long, conflicts_with_all = ["active", "queued"])]
         terminal: bool,
+
+        /// Include observed terminal jobs and retained durable projections
+        #[arg(long, visible_alias = "retained")]
+        all: bool,
+
+        /// Emit the complete structured JSON response instead of the compact table
+        #[arg(long)]
+        json: bool,
 
         /// Include only jobs owned by this daemon generation
         #[arg(long)]
@@ -905,6 +938,8 @@ mod tests {
                         active: true,
                         queued: false,
                         terminal: false,
+                        all: false,
+                        json: false,
                         ..
                     }
                 }
@@ -914,6 +949,9 @@ mod tests {
             "homeboy", "runner", "job", "list", "lab", "--active", "--queued"
         ])
         .is_err());
+        assert!(
+            Cli::try_parse_from(["homeboy", "runner", "job", "list", "lab", "--retained"]).is_ok()
+        );
     }
 
     #[test]

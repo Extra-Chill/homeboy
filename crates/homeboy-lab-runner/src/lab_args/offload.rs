@@ -201,6 +201,9 @@ pub(crate) fn rewrite_lab_offload_args(
         if arg.starts_with("--placement=") {
             continue;
         }
+        if arg == "--detach-after-handoff" || arg.starts_with("--detach-after-handoff=") {
+            continue;
+        }
         if arg == "--output" {
             let _ = iter.next();
             if let Some(path) = remote_output_file {
@@ -381,6 +384,9 @@ pub(crate) fn rewrite_runner_resident_lab_offload_args(
             continue;
         }
         if arg.starts_with("--placement=") {
+            continue;
+        }
+        if arg == "--detach-after-handoff" || arg.starts_with("--detach-after-handoff=") {
             continue;
         }
         if arg == "--output" {

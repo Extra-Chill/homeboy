@@ -389,6 +389,7 @@ pub fn aggregate_comparison_with_axes(
             hints: Some(hints),
             reports: BenchComparisonReports { side_by_side },
             default_baseline_expansion: None,
+            actionable: None,
         },
         exit_code,
     )

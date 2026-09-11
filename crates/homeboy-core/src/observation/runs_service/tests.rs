@@ -9,25 +9,6 @@ use crate::test_support::with_isolated_home;
 use serde_json::Value;
 use std::sync::{mpsc, Mutex};
 
-struct XdgGuard(Option<String>);
-
-impl XdgGuard {
-    fn unset() -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::remove_var("XDG_DATA_HOME");
-        Self(prior)
-    }
-}
-
-impl Drop for XdgGuard {
-    fn drop(&mut self) {
-        match &self.0 {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-}
-
 fn sample_run(kind: &str) -> NewRunRecord {
     NewRunRecord::builder(kind)
         .component_id("homeboy")
@@ -43,7 +24,7 @@ fn sample_run(kind: &str) -> NewRunRecord {
 #[test]
 fn require_run_returns_validation_error_for_missing_run() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let err = require_run(&store, "missing-run").expect_err("missing");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
@@ -54,7 +35,7 @@ fn require_run_returns_validation_error_for_missing_run() {
 #[test]
 fn terminal_retention_is_dry_run_by_default_and_deletes_owned_lifecycle_on_apply() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let terminal = store
             .start_run(sample_run("agent-task"))
@@ -141,7 +122,7 @@ fn terminal_retention_is_dry_run_by_default_and_deletes_owned_lifecycle_on_apply
 #[test]
 fn terminal_retention_counts_only_the_runs_it_actually_deleted() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
 
         // Two aged terminal runs. One holds an artifact that cleanup must
@@ -225,7 +206,7 @@ fn missing_run_guidance_prints_runner_routed_retrieval_commands() {
 #[test]
 fn list_artifacts_for_run_enriches_url_artifact_links() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store.start_run(sample_run("bench")).expect("run");
         store
@@ -247,7 +228,7 @@ fn list_artifacts_for_run_enriches_url_artifact_links() {
 #[test]
 fn load_run_with_artifacts_uses_the_resolved_canonical_run_id() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(
@@ -277,7 +258,7 @@ fn load_run_with_artifacts_uses_the_resolved_canonical_run_id() {
 #[test]
 fn resolve_artifact_for_run_rejects_unknown_artifact_id() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store.start_run(sample_run("bench")).expect("run");
         let err = resolve_artifact_for_run(&store, &run.id, "missing-artifact")
@@ -293,7 +274,7 @@ fn resolve_artifact_for_run_rejects_unknown_artifact_id() {
 #[test]
 fn resolve_artifact_for_run_unknown_id_lists_available_names() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store.start_run(sample_run("bench")).expect("run");
         let source = home.path().join("bench-results.json");
@@ -317,7 +298,7 @@ fn resolve_artifact_for_run_unknown_id_lists_available_names() {
 #[test]
 fn copy_local_file_artifact_writes_bytes_and_reports_metadata() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store.start_run(sample_run("bench")).expect("run");
         let source = home.path().join("bench-results.json");
@@ -597,7 +578,7 @@ fn match_run_label_resolves_label_from_command_id_and_metadata() {
 #[test]
 fn resolve_run_id_or_label_returns_local_run_id_unchanged() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store.start_run(sample_run("bench.matrix")).expect("run");
         let resolved = resolve_run_id_or_label(&store, &run.id).expect("resolve existing run id");
@@ -608,7 +589,7 @@ fn resolve_run_id_or_label_returns_local_run_id_unchanged() {
 #[test]
 fn require_run_resolves_requested_run_id_metadata_alias() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(
@@ -699,7 +680,7 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
         .expect("provider test lock");
 
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let label = "runner-exec-review-homeboy-lab-terminal-job";
         let run = RunRecord {
@@ -763,7 +744,7 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
 #[test]
 fn list_artifacts_for_run_resolves_requested_run_id_alias() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(
@@ -792,7 +773,7 @@ fn list_artifacts_for_run_resolves_requested_run_id_alias() {
 #[test]
 fn require_run_rejects_ambiguous_requested_run_id_alias() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let first = store
             .start_run(
@@ -862,7 +843,7 @@ fn lab_labeled_run(id: &str, kind: &str, label: &str, job_id: &str) -> RunRecord
 #[test]
 fn require_run_resolves_lab_label_to_caller_across_mirrors() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let caller = lab_labeled_run("caller", "fuzz", "shared-label", "job-1");
         store.upsert_imported_run(&caller).expect("caller");
@@ -880,7 +861,7 @@ fn require_run_resolves_lab_label_to_caller_across_mirrors() {
 #[test]
 fn require_run_keeps_unrelated_lab_label_collision_ambiguous() {
     with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let caller = lab_labeled_run("caller", "fuzz", "shared-label", "job-1");
         let collision = lab_labeled_run("collision", "fuzz", "shared-label", "job-2");

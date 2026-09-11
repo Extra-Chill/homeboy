@@ -403,16 +403,13 @@ pub(crate) fn conflict_guidance(ctx: &ConflictContext<'_>, message: &str) -> Str
 }
 
 pub(super) fn fetch_remote_branch(path: &str, remote: &str, branch: &str) -> Result<()> {
-    let output = run_git(path, &["fetch", remote, branch])?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "git fetch {} {}: {}",
-            remote,
-            branch,
-            stderr.trim()
-        )));
-    }
+    homeboy_core::git::fetch_remote_tracking_refs_until(
+        Path::new(path),
+        &["fetch", remote, branch],
+        &format!("git fetch {remote} {branch}"),
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )?;
     Ok(())
 }
 
@@ -530,16 +527,13 @@ pub(crate) fn url_matches(a: &str, b: &str) -> bool {
 }
 
 pub(super) fn fetch_sha(path: &str, remote: &str, sha: &str) -> Result<()> {
-    let output = run_git(path, &["fetch", remote, sha])?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "git fetch {} {}: {}",
-            remote,
-            sha,
-            stderr.trim()
-        )));
-    }
+    homeboy_core::git::fetch_remote_tracking_refs_until(
+        Path::new(path),
+        &["fetch", remote, sha],
+        &format!("git fetch {remote} {sha}"),
+        &[],
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    )?;
     Ok(())
 }
 

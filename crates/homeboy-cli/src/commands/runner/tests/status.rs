@@ -83,6 +83,7 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
         live_daemon_job_count: 0,
         retained_durable_job_count: 0,
         unresolved_retained_projection_count: 0,
+        retained_job_inconsistency: None,
         admission_blocking_job_ids: Vec::new(),
         unresolved_job_owners: Vec::new(),
         unresolved_generation_ids: Vec::new(),
@@ -446,6 +447,18 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
         serialized["data"]["reconciliation"]["retry_predicate"],
         "an authoritative active-job view is available"
     );
+    assert_eq!(
+        serialized["diagnostics"]["code"],
+        "runner.reconcile.admission_unavailable"
+    );
+    assert_eq!(
+        serialized["diagnostics"]["details"]["remaining_blocker"],
+        serialized["data"]["reconciliation"]["remaining_blocker"]
+    );
+    assert_eq!(
+        serialized["next_actions"][0]["command"],
+        "homeboy runner status homeboy-lab --full"
+    );
 }
 
 #[test]
@@ -521,8 +534,6 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             lifecycle: None,
             durable_run_id: Some("run-123".to_string()),
             stale_reason: None,
-            lifecycle_state: Some("active".to_string()),
-            retryable: Some(false),
             active_child_count: None,
             active_cell_count: None,
         }],
@@ -549,8 +560,6 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             claim_expires_in_ms: Some(29_500),
             durable_run_id: Some("run-123".to_string()),
             stale_reason: None,
-            lifecycle_state: Some("active".to_string()),
-            retryable: Some(false),
             artifact_refs: Vec::new(),
         }],
         active_job_count: 1,
@@ -582,9 +591,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
 
     let mut orphan = report.active_runner_jobs[0].clone();
     orphan.job_id = "orphaned-child-run-run-123".to_string();
-    orphan.lifecycle_state = Some("recoverable_orphan".to_string());
     orphan.stale_reason = Some("child_run_running_without_active_runner_job".to_string());
-    orphan.retryable = Some(true);
     report.active_runner_jobs.clear();
     report.active_jobs.clear();
     report.active_job_count = 0;
@@ -764,8 +771,6 @@ fn unknown_owner_has_reconcile_guidance_but_no_logs_or_cancel_command() {
         lifecycle: None,
         durable_run_id: None,
         stale_reason: Some("daemon_freshness_count_exceeds_typed_jobs".to_string()),
-        lifecycle_state: Some("unknown_owner".to_string()),
-        retryable: Some(false),
         active_child_count: None,
         active_cell_count: None,
     };

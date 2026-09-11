@@ -12,6 +12,7 @@ use homeboy_core::git::{
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
+use std::path::Path;
 
 pub struct RealAgentTaskPrFinalizationBackend;
 
@@ -131,16 +132,25 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn resolve_base(&mut self, path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
         let reference = format!("refs/homeboy/finalization/base/{base}");
-        let output = std::process::Command::new("git")
-            .args([
-                "fetch",
-                "--no-tags",
-                "origin",
-                &format!("refs/heads/{base}:{reference}"),
-            ])
-            .current_dir(path)
-            .output()
-            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        let output = homeboy_core::git::with_remote_tracking_authority_until(
+            Path::new(path),
+            "fetch requested finalization base",
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            |remaining| {
+                homeboy_core::git::run_git_output_with_env_timeout(
+                    Path::new(path),
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "origin",
+                        &format!("refs/heads/{base}:{reference}"),
+                    ],
+                    "fetch requested finalization base",
+                    &[],
+                    remaining,
+                )
+            },
+        )?;
         if !output.status.success() {
             return Err(Error::validation_invalid_argument(
                 "base",
@@ -181,17 +191,24 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             ],
         )
         .or_else(|_| {
-            let fetch = std::process::Command::new("git")
-                .args([
-                    "fetch",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "origin",
-                    verified_base_sha,
-                ])
-                .current_dir(path)
-                .output()
-                .map_err(|error| Error::git_command_failed(error.to_string()))?;
+            let fetch = homeboy_core::git::with_remote_tracking_authority_until(
+                Path::new(path),
+                "materialize verified finalization base",
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+                |remaining| homeboy_core::git::run_git_output_with_env_timeout(
+                    Path::new(path),
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        "origin",
+                        verified_base_sha,
+                    ],
+                    "materialize verified finalization base",
+                    &[],
+                    remaining,
+                ),
+            )?;
             if !fetch.status.success() {
                 return Err(Error::validation_invalid_argument(
                     "verified_base_sha",
@@ -472,6 +489,29 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         }))
     }
 
+    fn find_merged_pr(
+        &mut self,
+        path: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<Option<AgentTaskPrRef>> {
+        let output = pr_find(
+            None,
+            PrFindOptions {
+                base: Some(base.to_string()),
+                head: Some(head.to_string()),
+                state: PrState::Merged,
+                limit: 10,
+                path: Some(path.to_string()),
+            },
+        )?;
+        Ok(output.items.into_iter().next().map(|item| AgentTaskPrRef {
+            number: item.number,
+            url: item.url,
+            is_draft: item.is_draft,
+        }))
+    }
+
     fn verify_remote_candidate(
         &mut self,
         path: &str,
@@ -739,10 +779,20 @@ fn remote_head_is_ancestor_of_candidate(path: &str, remote_head: &str, local_hea
     // Best-effort: bring the remote-only commit into the local object database
     // so ancestry can be evaluated. Ignore failure; the ancestry check below
     // fails closed when the object is unavailable.
-    let _ = std::process::Command::new("git")
-        .args(["fetch", "--no-tags", "origin", remote_head])
-        .current_dir(path)
-        .output();
+    let _ = homeboy_core::git::with_remote_tracking_authority_until(
+        Path::new(path),
+        "materialize finalization remote head",
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        |remaining| {
+            homeboy_core::git::run_git_output_with_env_timeout(
+                Path::new(path),
+                &["fetch", "--no-tags", "origin", remote_head],
+                "materialize finalization remote head",
+                &[],
+                remaining,
+            )
+        },
+    );
     std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", remote_head, local_head])
         .current_dir(path)
@@ -1012,14 +1062,7 @@ mod remote_base_tests {
     use super::*;
     use std::process::Command;
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("git runs")
-            .success());
-    }
+    use homeboy_core::test_support::run_git_command as git;
 
     fn repo() -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("temp repo");

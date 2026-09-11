@@ -254,22 +254,9 @@ fn scp_file_atomic(
 #[cfg(test)]
 mod tests {
     use super::{process_output_result, scp_file, upload_directory, upload_file};
-    use homeboy_core::server::SshClient;
-    use std::collections::HashMap;
+    use crate::test_support::local_client;
     use std::fs;
     use std::process::Command;
-
-    fn local_client() -> SshClient {
-        SshClient {
-            host: "localhost".to_string(),
-            user: "test".to_string(),
-            port: 22,
-            identity_file: None,
-            auth: None,
-            is_local: true,
-            env: HashMap::new(),
-        }
-    }
 
     #[test]
     fn test_upload_directory() {

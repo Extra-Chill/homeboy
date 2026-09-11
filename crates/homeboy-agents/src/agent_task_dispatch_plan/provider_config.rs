@@ -32,7 +32,7 @@ pub(crate) fn dispatch_provider_config(
     component: &Option<String>,
     workspace: Option<&DispatchWorkspaceTarget>,
     client_context: &Value,
-) -> Result<Value> {
+) -> Result<(Value, bool)> {
     let mut config = Value::Object(defaults::load_config().settings.into_iter().collect());
     if let Some(spec) = &request.core.provider_config {
         let raw = read_text_spec(spec, "provider-config")?;
@@ -71,6 +71,9 @@ pub(crate) fn dispatch_provider_config(
         ));
     }
     let map = config.as_object_mut().expect("provider config object");
+    // This is true only when the client context below is inserted by Homeboy.
+    // A caller or configured default may supply an independent provider context.
+    let generated_client_context = !map.contains_key("client_context");
     map.entry("repo".to_string())
         .or_insert_with(|| serde_json::json!(repo));
     map.entry("component_id".to_string())
@@ -91,7 +94,7 @@ pub(crate) fn dispatch_provider_config(
     map.entry("task_url".to_string())
         .or_insert_with(|| serde_json::json!(request.task_url));
 
-    Ok(config)
+    Ok((config, generated_client_context))
 }
 
 pub(crate) fn dispatch_component_contracts(

@@ -375,8 +375,6 @@ pub(crate) fn runner_execution_record_constants() -> RunnerExecutionRecordConsta
             "status".to_string(),
             "job_id".to_string(),
             "local_run_id".to_string(),
-            "remote_run_id".to_string(),
-            "agent_task_run_id".to_string(),
             "mirror_run_id".to_string(),
             "materialized_paths".to_string(),
             "artifact_refs".to_string(),

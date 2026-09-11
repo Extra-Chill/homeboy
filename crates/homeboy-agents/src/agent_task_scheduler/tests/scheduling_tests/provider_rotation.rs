@@ -507,6 +507,70 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn fallback_client_context_clears_generated_fanout_readiness_provenance() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].metadata = json!({
+            "provider_readiness_generated_fanout_context": true
+        });
+        plan.tasks[0].executor.config = json!({
+            "client_context": {"fanout": {"cook_id": "generated-child"}}
+        });
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: Some("fallback-backend".to_string()),
+            provider_config: json!({
+                "client_context": {"account": "caller-owned-fallback"}
+            }),
+            ..Default::default()
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed[1].executor.config["client_context"]["account"],
+            "caller-owned-fallback"
+        );
+        assert_eq!(
+            observed[1].metadata["provider_readiness_generated_fanout_context"],
+            false
+        );
+    }
+
+    #[test]
+    fn fallback_without_client_context_retains_generated_fanout_readiness_provenance() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].metadata = json!({
+            "provider_readiness_generated_fanout_context": true
+        });
+        plan.tasks[0].executor.config = json!({
+            "client_context": {"fanout": {"cook_id": "generated-child"}}
+        });
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: Some("fallback-backend".to_string()),
+            provider_config: json!({"provider": "fallback-provider"}),
+            ..Default::default()
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed[1].metadata["provider_readiness_generated_fanout_context"],
+            true
+        );
+    }
+
+    #[test]
     fn timeout_candidate_converges_before_failed_rotation() {
         retained_timeout_candidate_converges_before_rotation();
     }
@@ -1222,6 +1286,60 @@ mod provider_rotation_tests {
         assert_eq!(
             outcome.metadata["provider_readiness_exhaustion"]["retryable"],
             true
+        );
+    }
+
+    #[test]
+    fn readiness_exhaustion_normalizes_auth_failures_as_credential_rejections() {
+        struct RejectedCredentials;
+
+        impl AgentTaskExecutorAdapter for RejectedCredentials {
+            fn provider_route_readiness(
+                &self,
+                _request: &AgentTaskRequest,
+            ) -> ProviderRouteReadiness {
+                ProviderRouteReadiness {
+                    ready: false,
+                    state: "credentials_unusable".to_string(),
+                    reason: "configured credentials were rejected".to_string(),
+                    reset_at: None,
+                    classification: Some("auth_failure".to_string()),
+                    retryable: false,
+                    remediation: Some("repair provider credentials".to_string()),
+                    cache_identity: None,
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: None,
+                }
+            }
+
+            fn execute(
+                &self,
+                _request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                panic!("rejected credentials must not dispatch")
+            }
+        }
+
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(RejectedCredentials)).run(plan);
+        let outcome = &aggregate.outcomes[0];
+
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
+        );
+        assert_eq!(
+            outcome.metadata["provider_readiness_exhaustion"]["classifications"],
+            json!(["auth_failure"])
+        );
+        assert_eq!(
+            outcome.metadata["provider_readiness_routing"]["skipped"][0]["state"],
+            "credentials_unusable"
         );
     }
 

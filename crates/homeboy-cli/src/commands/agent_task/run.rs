@@ -14,7 +14,6 @@ use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord;
 use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
@@ -28,8 +27,9 @@ use homeboy::core::Error;
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, PromotionProviderArgs,
-    ResumeArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs, ValidatePlanArgs,
+    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, PlacementUpdateArgs,
+    PromotionProviderArgs, ResumeArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs,
+    ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::validate_gate_contracts;
@@ -758,6 +758,12 @@ fn finalize_cook_preview_replay(
                 .to_string(),
         );
     }
+    if preview_placement_policy_from_argv(&replay.argv)["requested"] != "local" {
+        replay.requires.push(
+            "runner placement admission is deferred; replay revalidates connected runner readiness before execution"
+                .to_string(),
+        );
+    }
     replay
 }
 
@@ -1056,12 +1062,16 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
     // Resource and Lab inventory are live execution inputs. Reading either here
     // made a read-only preview wait on the same unavailable control plane it was
     // intended to diagnose. Execution revalidates this admission after preview.
+    if policy["requested"] == "local" {
+        return policy;
+    }
     policy["admission"] = serde_json::json!({
         "schema": "homeboy/cook-preview-placement-admission/v1",
         "state": "indeterminate",
         "revalidate_before_execution": true,
         "blockers": [],
         "deferred_to": "execution_placement_admission",
+        "replay_prerequisite": "connected runner readiness is revalidated before execution",
     });
     policy
 }
@@ -1212,6 +1222,10 @@ mod preview_tests {
             !replay.argv.iter().any(|part| part == "--preview"),
             "{replay:?}"
         );
+        assert!(replay
+            .requires
+            .iter()
+            .any(|requirement| requirement.contains("runner placement admission is deferred")));
         Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
     }
 
@@ -1274,7 +1288,7 @@ mod preview_tests {
         std::fs::write(&credential, r#"{"token":"fallback-token"}"#).expect("credential");
         std::fs::write(
             &readiness,
-            "const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
         )
         .expect("readiness script");
         let catalog = provider::AgentTaskProviderCatalog {
@@ -2027,6 +2041,41 @@ mod preview_tests {
     }
 
     #[test]
+    fn local_preview_omits_runner_admission_and_replay_prerequisites() {
+        let args = cook(&[
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+        ]);
+        let replay = finalize_cook_preview_replay(
+            [
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "implement the issue",
+            ]
+            .into_iter()
+            .map(str::to_string),
+            &args,
+        );
+        let policy = preview_placement_policy_with_admission(&replay.argv);
+
+        assert!(policy.get("admission").is_none());
+        assert!(!replay
+            .requires
+            .iter()
+            .any(|requirement| requirement.contains("runner placement admission")));
+    }
+
+    #[test]
     fn read_only_evidence_projection_uses_the_controller_store() {
         crate::test_support::with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
@@ -2077,6 +2126,58 @@ mod preview_tests {
             homeboy::core::ErrorCode::ValidationInvalidArgument
         );
         assert_eq!(error.details["field"], "provider-evidence");
+    }
+
+    #[test]
+    fn preview_and_execution_reject_missing_task_url_for_absent_provider_worktree() {
+        crate::test_support::with_isolated_home(|_| {
+            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("workspace repository")
+                .display()
+                .to_string();
+            let handle = "homeboy@feature-missing-task-url";
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement the issue",
+                "--repo",
+                "homeboy",
+                "--workspace",
+                &repository,
+                "--base",
+                "main",
+                "--head",
+                "feature/missing-task-url",
+                "--to-worktree",
+                &handle,
+                "--no-finalize",
+            ]);
+
+            let preview = resolve_cook_preview_destination(args.clone())
+                .expect_err("preview rejects the missing creation requirement");
+            let execution = provision_cook_destination(&args)
+                .expect_err("execution rejects before durable Cook admission");
+
+            assert_eq!(preview.code, execution.code, "preview: {preview:?}");
+            assert_eq!(preview.message, execution.message);
+            let missing = preview.details["args"]
+                .as_array()
+                .expect("missing-argument details");
+            assert!(missing.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|value| value.contains("--task-url") && value.contains(handle))
+            }));
+            assert!(agent_task_lifecycle::list_records()
+                .expect("read lifecycle records")
+                .is_empty());
+        });
     }
 
     #[test]
@@ -2339,6 +2440,25 @@ where
                 reconstruct_dispatcher,
             );
         }
+        return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
+    }
+    if record.state.is_terminal()
+        && agent_task_service_direct::retryable_pre_execution_failure(&record)
+    {
+        if !args.rearm {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "rearm",
+                "a retryable pre-execution Cook failure requires --rearm to reserve a durable successor attempt",
+                Some(run_id),
+                None,
+            ));
+        }
+        // A failed readiness or transport check did not reach provider work.
+        // Reserve its replacement through the retry owner rather than rerunning
+        // the terminal record. The normal queue owner then dispatches the
+        // successor, preserving append-only Cook lineage and budget.
+        let retry = agent_task_service::retry(&record.run_id, None, false, false)?;
+        let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
     if execute_queued_attempt && record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
@@ -3557,6 +3677,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     // Preserve the native provisioning intent until Cook has durably admitted
     // its recipe and exact lifecycle owner. Ensure is forbidden before that
     // point.
+    preflight_missing_cook_provider_workspace(args, to_worktree)?;
     Ok(serde_json::json!({
         "action": "lookup_pending",
         "kind": "native",
@@ -3572,6 +3693,48 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "cleanup_policy": "remove_on_success",
         },
     }))
+}
+
+/// Resolve the native provider identity without creating a worktree. Preview
+/// and execution both use this check, so a field required only for creation is
+/// rejected before either reports a viable deferred destination.
+fn preflight_missing_cook_provider_workspace(
+    args: &AgentTaskCookArgs,
+    handle: &str,
+) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionPlan> {
+    let intent = cook_provider_provision_intent(args, handle)?;
+    if intent.task_url.is_none() {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            format!("--task-url is required to create missing provider worktree `{handle}`"),
+        ]));
+    }
+    homeboy::core::worktree_provider::plan_worktree_provision(&intent)
+}
+
+fn cook_provider_provision_intent(
+    args: &AgentTaskCookArgs,
+    handle: &str,
+) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionIntent> {
+    Ok(homeboy::core::worktree_provider::WorktreeProvisionIntent {
+        handle: handle.to_string(),
+        repo: cook_provision_repository(args).ok_or_else(|| {
+            homeboy::core::Error::validation_missing_argument(vec![
+                "--repo <repo> is required to create a missing --to-worktree destination"
+                    .to_string(),
+            ])
+        })?,
+        base: args
+            .base
+            .clone()
+            .expect("Cook base is resolved before provider preflight"),
+        head: args.head.clone().ok_or_else(|| {
+            homeboy::core::Error::validation_missing_argument(vec![
+                "--head <branch> is required to create a missing --to-worktree destination"
+                    .to_string(),
+            ])
+        })?,
+        task_url: args.dispatch.task_url.clone(),
+    })
 }
 
 /// The exact declaration used both by preview planning and live provider
@@ -3855,27 +4018,8 @@ pub(super) fn resolve_cook_preview_destination(
         validate_cook_destination_identity(&args, &path)?;
         path
     } else {
-        let intent = homeboy::core::worktree_provider::WorktreeProvisionIntent {
-            handle: handle.clone(),
-            repo: cook_provision_repository(&args).ok_or_else(|| {
-                homeboy::core::Error::validation_missing_argument(vec![
-                    "--repo <repo> is required to create a missing --to-worktree destination"
-                        .to_string(),
-                ])
-            })?,
-            base: args
-                .base
-                .clone()
-                .expect("Cook base is resolved before preview"),
-            head: args.head.clone().ok_or_else(|| {
-                homeboy::core::Error::validation_missing_argument(vec![
-                    "--head <branch> is required to create a missing --to-worktree destination"
-                        .to_string(),
-                ])
-            })?,
-            task_url: args.dispatch.task_url.clone(),
-        };
-        let plan = homeboy::core::worktree_provider::plan_worktree_provision(&intent)?;
+        let intent = cook_provider_provision_intent(&args, &handle)?;
+        let plan = preflight_missing_cook_provider_workspace(&args, &handle)?;
         let destination = match plan {
             homeboy::core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
             | homeboy::core::worktree_provider::WorktreeProvisionPlan::Planned(destination) => {
@@ -8154,9 +8298,46 @@ pub(super) fn resume(args: ResumeArgs) -> CmdResult<Value> {
     )
 }
 
+pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
+    if !homeboy::core::resource_policy_context::captured_context()
+        .is_some_and(|context| context.local_override)
+    {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "placement update requires explicit --placement local authorization",
+            None,
+            None,
+        ));
+    }
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        &args.run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::PlacementUpdate,
+            idempotency_key: args
+                .idempotency_key
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema:
+                    homeboy_control_plane_contract::CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA
+                        .to_string(),
+                data: json!({ "placement": "local" }),
+            },
+            confirmed: args.confirm,
+        },
+    )?;
+    Ok((
+        serde_json::to_value(acknowledgement)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        0,
+    ))
+}
+
 pub(super) fn run_resume_with_executor(
     run_id: String,
-    full: bool,
+    _full: bool,
     idempotency_key: Option<String>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
@@ -8176,44 +8357,19 @@ pub(super) fn run_resume_with_executor(
             },
             executor,
         )?;
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Err(Error::validation_invalid_argument(
-            "resume",
-            acknowledgement
-                .message
-                .unwrap_or_else(|| "resume action failed".to_string()),
-            Some(run_id),
-            None,
-        ));
-    }
-    if acknowledgement.result.schema == "homeboy/unmaterialized-cook-resume/v1" {
-        let exit_code = if acknowledgement.result.data["terminal"] == true {
-            2
-        } else {
-            0
-        };
-        return Ok((acknowledgement.result.data, exit_code));
-    }
-    let aggregate: AgentTaskAggregate = serde_json::from_value(
-        acknowledgement.result.data["aggregate"].clone(),
-    )
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("decode resume action result".to_string()),
-        )
-    })?;
-    let exit_code = acknowledgement.result.data["exit_code"]
-        .as_i64()
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or(0);
+    let exit_code = match homeboy::agents::agent_task_action_result::resume(&acknowledgement)? {
+        homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
+            exit_code,
+            ..
+        } => exit_code,
+        homeboy::agents::agent_task_action_result::ResumeActionResult::UnmaterializedCook {
+            terminal,
+            ..
+        } => i32::from(terminal) * 2,
+    };
     Ok((
-        if full {
-            aggregate_value_with_failure_reasons(&aggregate)
-        } else {
-            super::status::compact_aggregate_summary(&aggregate, Some(&run_id))
-        },
+        serde_json::to_value(acknowledgement)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
         exit_code,
     ))
 }
@@ -8299,29 +8455,10 @@ where
             confirmed: true,
         },
     )?;
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Err(Error::validation_invalid_argument(
-            "retry",
-            acknowledgement
-                .message
-                .unwrap_or_else(|| "retry action failed".to_string()),
-            Some(args.run_id),
-            None,
-        ));
-    }
-    let record: AgentTaskRunRecord =
-        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("decode retry action result".to_string()),
-            )
-        })?;
-    let execute = args.run
-        && acknowledgement.result.data["runnable"]
-            .as_bool()
-            .unwrap_or(false);
+    let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
+    let execute = args.run && retry.runnable;
     if execute {
+        let record = retry.record;
         if record.metadata["cook_id"].is_string() {
             return continue_cook_with_queued_execution(
                 CookContinueArgs {
@@ -8345,10 +8482,11 @@ where
         }
         return run_submitted_with_executor(record.run_id, None, executor);
     }
-    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
-    value["action_acknowledgement"] = json!(acknowledgement.acknowledgement);
-    value["idempotency_key"] = json!(acknowledgement.idempotency_key);
-    Ok((value, 0))
+    Ok((
+        serde_json::to_value(acknowledgement)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        0,
+    ))
 }
 
 #[cfg(test)]

@@ -33,6 +33,13 @@
 //!   metadata-backed durable runtime-temp owner so cleanup can classify
 //!   child-created bytes after the invocation exits.
 //!
+//!   The alias keeps the *handed-out* string short; it cannot make the target
+//!   short. Workloads routinely `realpath()` `$TMPDIR` before binding a socket
+//!   under it, so the durable owner is itself named for the short id and the
+//!   budget is enforced against the resolved path (#14384). When the data
+//!   volume is too deep to host even that, the owner is allocated directly
+//!   under this root and no alias is created.
+//!
 //! There is no `s/a` subdir layer — that would burn `sockaddr_un` budget for
 //! no isolation gain since the invocation is already 1:1 with a single
 //! workload run. Workloads that need internal subdirs under STATE_DIR can
@@ -188,15 +195,54 @@ fn current_uid() -> libc::uid_t {
     unsafe { libc::getuid() }
 }
 
+/// Resolve `path` to the form the kernel will actually see.
+///
+/// A budget check on an unresolved path is decorative: the workload binds
+/// against whatever `realpath()` returns, not against the string Homeboy
+/// handed it. `/tmp` is a symlink to `/private/tmp` on macOS, and any
+/// operator-supplied root can sit behind a symlink on any platform, so the
+/// unresolved and resolved lengths routinely differ.
+///
+/// The path being checked usually does not exist yet — callers deliberately
+/// enforce the budget *before* creating directories so they fail fast. So
+/// this canonicalizes the deepest ancestor that does exist and re-appends the
+/// components below it, which is exact for the only thing that can change a
+/// path's length: a symlink in an existing prefix.
+pub fn canonical_budget_path(path: &Path) -> PathBuf {
+    let mut suffix = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(resolved) = cursor.canonicalize() {
+            let mut out = resolved;
+            for component in suffix.iter().rev() {
+                out.push(component);
+            }
+            return out;
+        }
+        let Some(parent) = cursor.parent() else {
+            return path.to_path_buf();
+        };
+        let Some(name) = cursor.file_name() else {
+            return path.to_path_buf();
+        };
+        suffix.push(name.to_os_string());
+        cursor = parent;
+    }
+}
+
 /// Verify that handing out `path` leaves room for a realistic
 /// workload-relative socket name within the `sockaddr_un` budget.
+///
+/// The check is applied to [`canonical_budget_path`] of `path`, because that
+/// is the string a workload gets from `realpath()` and passes to `bind()`.
 ///
 /// Fails fast with a clear error message that names `sockaddr_un`, the
 /// platform-specific limit, the actual headroom available, and the override
 /// env var when the platform budget cannot accommodate at least
 /// [`SOCKET_HEADROOM_BYTES`] beyond `path`'s length.
 pub fn enforce_path_budget(path: &Path) -> Result<()> {
-    let path_str = path.to_string_lossy();
+    let canonical = canonical_budget_path(path);
+    let path_str = canonical.to_string_lossy();
     let path_len = path_str.len();
     // +1 reserves the path-separator byte before the workload's filename.
     let needed = path_len
@@ -204,12 +250,21 @@ pub fn enforce_path_budget(path: &Path) -> Result<()> {
         .saturating_add(SOCKET_HEADROOM_BYTES);
     if needed > SUN_PATH_CAPACITY {
         let headroom = SUN_PATH_CAPACITY.saturating_sub(path_len).saturating_sub(1);
+        // Name the unresolved path too when it differs, so an operator reading
+        // this error can see that the length came from resolving a symlink and
+        // not from the string Homeboy appears to be handing out.
+        let requested = path.to_string_lossy();
+        let subject = if requested == path_str {
+            format!("path: {path_str}")
+        } else {
+            format!("path: {requested} resolves to {path_str}")
+        };
         return Err(Error::internal_unexpected(format!(
             "Homeboy invocation runtime path exceeds the platform sockaddr_un budget: \
              path is {path_len} bytes, leaving {headroom} bytes of headroom for a downstream \
              socket name, but Homeboy guarantees at least {SOCKET_HEADROOM_BYTES} bytes of \
              headroom under the {SUN_PATH_CAPACITY}-byte sun_path capacity. Set \
-             {HOMEBOY_INVOCATION_RUNTIME_DIR_ENV} to a shorter root (path: {path_str})."
+             {HOMEBOY_INVOCATION_RUNTIME_DIR_ENV} to a shorter root ({subject})."
         )));
     }
     Ok(())
@@ -288,6 +343,62 @@ mod tests {
     fn budget_accepts_short_path() {
         let path = PathBuf::from("/tmp/hb-501/abc1234567/state");
         enforce_path_budget(&path).expect("short path fits");
+    }
+
+    /// The budget must be measured against what `realpath()` returns.
+    ///
+    /// #14384: `TMPDIR` was a 25-byte symlink to a 120-byte target. Checking
+    /// the link kept the guarantee green while every workload that
+    /// canonicalized its temp root — anything binding a socket under it — got
+    /// a path no socket could live at.
+    #[cfg(unix)]
+    #[test]
+    fn budget_measures_the_resolved_path_not_the_link() {
+        let _guard = home_env_guard();
+        let dir = tempfile::tempdir_in("/tmp").expect("short tempdir");
+        let target = dir.path().join("d".repeat(90));
+        std::fs::create_dir(&target).expect("long target");
+        let link = dir.path().join("s");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        // The literal string is nowhere near the limit — this is exactly the
+        // shape that used to pass while handing out an unusable directory.
+        assert!(link.as_os_str().len() + 1 + SOCKET_HEADROOM_BYTES <= SUN_PATH_CAPACITY);
+
+        let error = enforce_path_budget(&link).expect_err("the resolved target must not pass");
+        let message = error.to_string();
+        assert!(message.contains("sockaddr_un"));
+        assert!(
+            message.contains("resolves to"),
+            "the error must name both the requested and resolved paths: {message}"
+        );
+        assert_eq!(canonical_budget_path(&link), target.canonicalize().unwrap());
+    }
+
+    /// The check runs before the directory exists, which is the whole point of
+    /// failing fast, so resolution has to work on a path that is not there yet.
+    #[cfg(unix)]
+    #[test]
+    fn canonical_path_resolves_an_existing_prefix_under_a_missing_suffix() {
+        let _guard = home_env_guard();
+        let dir = tempfile::tempdir_in("/tmp").expect("short tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("real dir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let resolved = canonical_budget_path(&link.join("absent").join("deeper"));
+        assert_eq!(
+            resolved,
+            real.canonicalize().unwrap().join("absent").join("deeper"),
+            "the existing prefix resolves and the missing suffix is preserved"
+        );
+    }
+
+    #[test]
+    fn canonical_path_returns_the_input_when_nothing_resolves() {
+        let path = PathBuf::from("/homeboy-nonexistent-root-14384/a/b");
+        assert_eq!(canonical_budget_path(&path), path);
     }
 
     #[cfg(unix)]

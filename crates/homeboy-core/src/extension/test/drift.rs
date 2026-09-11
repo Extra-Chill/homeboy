@@ -536,6 +536,43 @@ pub fn is_source_relevant_change(opts: &DriftOptions, path: &str) -> bool {
     matches_any_pattern(path, &opts.source_patterns)
         || matches_any_pattern(path, &opts.test_patterns)
         || is_test_path(path)
+        || is_test_harness_config_path(path)
+}
+
+/// True when `path` configures how tests are discovered, provisioned, or run.
+///
+/// These files are config by extension, so no source pattern matches them and
+/// the docs/config fallback treats them as inert. That made a change to the
+/// test harness itself select zero tests and pass, which is the one change for
+/// which a green run proves the least: the harness was never exercised.
+///
+/// Deliberately narrow. Only the files that define test execution qualify, not
+/// configuration generally — a component's application config stays inert.
+pub fn is_test_harness_config_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+
+    // CI workflow definitions own dependency pins, provisioning, and which
+    // suites execute at all.
+    if lower.contains(".github/workflows/") {
+        return true;
+    }
+
+    // Homeboy's own component manifest declares suites, runtime settings, and
+    // validation dependencies.
+    if file_name == "homeboy.json" {
+        return true;
+    }
+
+    // Test runner configuration: phpunit.xml(.dist), jest/vitest/playwright
+    // configs, and the PHP/JS test bootstraps they reference.
+    file_name.starts_with("phpunit")
+        && (file_name.ends_with(".xml") || file_name.ends_with(".xml.dist"))
+        || file_name.starts_with("jest.config.")
+        || file_name.starts_with("vitest.config.")
+        || file_name.starts_with("playwright.config.")
+        || file_name == "phpunit.xml"
+        || file_name == "phpunit.xml.dist"
 }
 
 /// Documentation, config, and other non-source file suffixes/paths that are
@@ -612,7 +649,7 @@ impl DriftOptions {
 /// unconfigured component still flags real source changes instead of silently
 /// passing a zero-test scope. (#8927)
 pub fn is_source_relevant_change_unconfigured(path: &str) -> bool {
-    is_test_path(path) || !is_docs_or_config_path(path)
+    is_test_path(path) || is_test_harness_config_path(path) || !is_docs_or_config_path(path)
 }
 
 /// Defined symbol names (fn/struct/enum/trait/method/class) added and removed
@@ -1041,21 +1078,8 @@ fn looks_like_path(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn run_git(root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as run_git;
 
     #[test]
     fn extract_method_rename() {
@@ -1298,10 +1322,15 @@ mod tests {
         assert!(!is_source_relevant_change_unconfigured("docs/guide.md"));
         assert!(!is_source_relevant_change_unconfigured("Cargo.toml"));
         assert!(!is_source_relevant_change_unconfigured("Cargo.lock"));
-        assert!(!is_source_relevant_change_unconfigured(
+        assert!(!is_source_relevant_change_unconfigured("LICENSE"));
+
+        // A CI workflow was previously asserted irrelevant alongside docs.
+        // It is not inert: it decides which suites run and against what, so a
+        // zero-test pass on a workflow change evidences nothing about the
+        // change itself. See test_harness_config_is_source_relevant.
+        assert!(is_source_relevant_change_unconfigured(
             ".github/workflows/ci.yml"
         ));
-        assert!(!is_source_relevant_change_unconfigured("LICENSE"));
     }
 
     #[test]
@@ -1323,6 +1352,67 @@ mod tests {
             inline_tests: false,
         };
         assert!(!empty.has_usable_patterns());
+    }
+
+    #[test]
+    fn test_harness_config_is_source_relevant() {
+        // Config by extension, so no source pattern matches these and the
+        // docs/config fallback treated them as inert. A change here previously
+        // selected zero tests and passed without exercising the harness.
+        for path in [
+            ".github/workflows/homeboy.yml",
+            ".github/workflows/booking-attachment-mysql.yml",
+            "homeboy.json",
+            "phpunit.xml.dist",
+            "phpunit-booking-mysql.xml.dist",
+            "jest.config.js",
+            "vitest.config.ts",
+        ] {
+            assert!(
+                is_test_harness_config_path(path),
+                "expected {path} to be treated as test-harness config"
+            );
+            assert!(
+                is_source_relevant_change_unconfigured(path),
+                "expected {path} to be source-relevant without drift patterns"
+            );
+        }
+
+        // Ordinary docs and application config stay inert, so a docs-only
+        // change still passes with a legitimate no-test scope.
+        for path in [
+            "README.md",
+            "docs/CHANGELOG.md",
+            "composer.lock",
+            "package.json",
+            "src/config/app-settings.json",
+            ".editorconfig",
+        ] {
+            assert!(
+                !is_test_harness_config_path(path),
+                "expected {path} not to be treated as test-harness config"
+            );
+        }
+    }
+
+    #[test]
+    fn harness_config_is_relevant_even_with_source_patterns_configured() {
+        // The configured path matches against source/test globs, which a .yml
+        // or .xml.dist file never satisfies. Without the harness check a
+        // workflow-only change is invisible to the zero-test gate.
+        let opts = DriftOptions {
+            root: PathBuf::from("/tmp"),
+            since: "HEAD".to_string(),
+            source_patterns: vec!["**/*.php".to_string()],
+            test_patterns: vec!["tests/**/*Test.php".to_string()],
+            inline_tests: false,
+        };
+        assert!(is_source_relevant_change(
+            &opts,
+            ".github/workflows/homeboy.yml"
+        ));
+        assert!(is_source_relevant_change(&opts, "phpunit-managed.xml.dist"));
+        assert!(!is_source_relevant_change(&opts, "README.md"));
     }
 
     #[test]
@@ -1611,19 +1701,7 @@ mod workspace_layout_tests {
     use super::*;
     use homeboy_extension_contract::TestDriftConfig;
 
-    fn run_git(root: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use crate::test_support::run_git_command as run_git;
 
     fn rust_extension_options_at(root: &Path) -> DriftOptions {
         DriftOptions::from_config(

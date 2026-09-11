@@ -1214,26 +1214,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_agent_task_run_id_deserializes_as_run_id() {
-        let refs: ActivityCrossRefs = serde_json::from_value(serde_json::json!({
-            "agent_task_run_id": "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751",
-            "runner_job_id": "accepted-daemon-job"
-        }))
-        .expect("deserialize legacy refs");
-        assert_eq!(
-            refs.run_id.as_deref(),
-            Some("agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751")
-        );
-        assert_eq!(refs.runner_job_id.as_deref(), Some("accepted-daemon-job"));
-        let serialized = serde_json::to_value(&refs).expect("serialize");
-        assert!(serialized.get("agent_task_run_id").is_none());
-        assert_eq!(
-            serialized["run_id"],
-            "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751"
-        );
-    }
-
-    #[test]
     fn daemon_job_activity_collection_does_not_reconcile_running_jobs() {
         with_isolated_home(|_| {
             let path = paths::daemon_jobs_file().expect("jobs path");

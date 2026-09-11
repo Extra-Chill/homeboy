@@ -223,10 +223,6 @@ pub struct RunnerJob {
     pub durable_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<RunnerArtifactRef>,
 }
@@ -252,8 +248,6 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
             claim_expires_in_ms: job.claim_expires_in_ms,
             durable_run_id: job.durable_run_id.clone(),
             stale_reason: job.stale_reason.clone(),
-            lifecycle_state: job.lifecycle_state.clone(),
-            retryable: job.retryable,
             artifact_refs: Vec::new(),
         }
     }
@@ -294,8 +288,6 @@ impl RunnerJob {
             claim_expires_in_ms: None,
             durable_run_id: None,
             stale_reason: job.stale_reason.clone(),
-            lifecycle_state: job.stale_reason.as_ref().map(|_| "stale".to_string()),
-            retryable: job.stale_reason.as_ref().map(|_| true),
             artifact_refs: job
                 .artifacts
                 .iter()
@@ -570,6 +562,22 @@ pub struct RunnerUnresolvedJobOwner {
     pub observed_active_job_count: Option<usize>,
 }
 
+/// A direct daemon observation disagrees with the durable authoritative count
+/// retained by its admission generation. Neither source can be discarded by a
+/// read-only status request, so the lifecycle remains fenced until bounded
+/// reconciliation settles the ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunnerRetainedJobInconsistency {
+    pub code: &'static str,
+    pub generation: String,
+    pub direct_daemon_active_job_count: usize,
+    pub authoritative_active_job_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_active_job_count: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub job_ids: Vec<String>,
+}
+
 impl Serialize for RunnerStatusReport {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -693,7 +701,9 @@ pub struct RunnerAdmissionSummary {
     /// Whether the runner can admit a new workload now: connected, fresh, and
     /// not otherwise blocked.
     pub accepting_jobs: bool,
-    /// Live active-job count from the selected daemon.
+    /// Governing active-job count for admission. This is the selected daemon's
+    /// live count unless it conflicts with an authoritative retained admission
+    /// generation count, in which case the retained count fences admission.
     pub active_job_count: usize,
     /// Jobs currently observed by the selected daemon.
     pub live_daemon_job_count: usize,
@@ -706,6 +716,10 @@ pub struct RunnerAdmissionSummary {
     /// healthy validated admission owner because they cannot be deduplicated
     /// safely with known jobs.
     pub unresolved_retained_projection_count: usize,
+    /// Typed disagreement between direct daemon state and authoritative durable
+    /// admission state. It is retained rather than silently choosing zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_job_inconsistency: Option<RunnerRetainedJobInconsistency>,
     /// Bounded durable identities from authoritative old generations that block
     /// admission until they drain or reconcile.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -810,6 +824,16 @@ impl RunnerStatusReport {
                 .push("daemon_freshness_unavailable".to_string());
             availability.accepts_jobs = false;
         }
+        if self
+            .active_job_error
+            .as_ref()
+            .is_some_and(|error| error.code == "retained_active_job_count_inconsistent")
+        {
+            availability
+                .reasons
+                .push("retained_active_job_count_inconsistent".to_string());
+            availability.accepts_jobs = false;
+        }
         // A runner whose freshness was never established is named, not fenced.
         // The reason travels with the availability record so an operator can
         // see *why* it was deprioritized without it dropping out of service.
@@ -823,8 +847,8 @@ impl RunnerStatusReport {
     ///
     /// `draining_generation_count` is supplied by the caller from the same
     /// generation inventory used for the detail view, so the summary and detail
-    /// derive from one source. `active_job_count` remains the selected daemon's
-    /// live count; authoritative old-generation activity controls fencing.
+    /// derive from one source. A disagreement with the authoritative admission
+    /// generation retains that ledger count as the governing summary value.
     pub fn admission_summary(&self, draining_generation_count: usize) -> RunnerAdmissionSummary {
         self.admission_summary_with_generations(&[], &[], draining_generation_count)
     }
@@ -851,6 +875,28 @@ impl RunnerStatusReport {
             .flat_map(|owner| owner.job_ids.iter())
             .collect::<BTreeSet<_>>()
             .len();
+        let retained_job_inconsistency = (self.active_job_source
+            == Some(RunnerActiveJobSource::DirectDaemon))
+        .then(|| {
+            generations.iter().find(|generation| {
+                generation.admission_owner
+                    && generation.active_job_count_authoritative
+                    && generation.active_job_count != self.active_job_count
+            })
+        })
+        .flatten()
+        .map(|generation| RunnerRetainedJobInconsistency {
+            code: "direct_daemon_authoritative_ledger_disagreement",
+            generation: generation.generation.clone(),
+            direct_daemon_active_job_count: self.active_job_count,
+            authoritative_active_job_count: generation.active_job_count,
+            observed_active_job_count: generation.observed_active_job_count,
+            job_ids: owners
+                .iter()
+                .find(|owner| owner.generation == generation.generation)
+                .map(|owner| owner.job_ids.iter().take(20).cloned().collect())
+                .unwrap_or_default(),
+        });
         let unresolved_generations = generations
             .iter()
             .filter(|generation| {
@@ -905,15 +951,20 @@ impl RunnerStatusReport {
         // active-job count. Admission and rotation remain fail-closed until a
         // current job view is available.
         let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
+        let governing_active_job_count = retained_job_inconsistency
+            .as_ref()
+            .map(|inconsistency| inconsistency.authoritative_active_job_count)
+            .unwrap_or(self.active_job_count);
         let accepting_jobs = connected
             && daemon_fresh
             && daemon_compatible
             && active_jobs_available
-            && blocking_generation.is_none();
+            && blocking_generation.is_none()
+            && retained_job_inconsistency.is_none();
         let safe_to_rotate = connected
             && self.rotation_evidence_is_unambiguous()
             && active_jobs_available
-            && self.active_job_count == 0
+            && governing_active_job_count == 0
             && unresolved_generation.is_none();
         let daemon_build_identity = self
             .session
@@ -928,19 +979,24 @@ impl RunnerStatusReport {
         // Terminal ownership uncertainty dominates every retained-generation
         // projection. Reconciliation mutates the ledger and cannot become an
         // implicit fallback when the daemon owner itself is not established.
-        let next_action = (!self
-            .daemon_freshness
+        let next_action = retained_job_inconsistency
             .as_ref()
-            .is_some_and(DaemonFreshnessReport::has_terminal_recovery_ownership_blocker))
-        .then(|| {
-            self.admission_action().or_else(|| {
-                unresolved_generation
+            .map(|_| reconcile_action(&self.runner_id))
+            .or_else(|| {
+                (!self
+                    .daemon_freshness
                     .as_ref()
-                    .map(|_| reconcile_action(&self.runner_id))
+                    .is_some_and(DaemonFreshnessReport::has_terminal_recovery_ownership_blocker))
+                .then(|| {
+                    self.admission_action().or_else(|| {
+                        unresolved_generation
+                            .as_ref()
+                            .map(|_| reconcile_action(&self.runner_id))
+                    })
+                })
+                .flatten()
             })
-        })
-        .flatten()
-        .map(|action| action.render_command());
+            .map(|action| action.render_command());
 
         RunnerAdmissionSummary {
             runner_id: self.runner_id.clone(),
@@ -948,10 +1004,11 @@ impl RunnerStatusReport {
             daemon_fresh,
             daemon_compatible,
             accepting_jobs,
-            active_job_count: self.active_job_count,
+            active_job_count: governing_active_job_count,
             live_daemon_job_count,
             retained_durable_job_count,
             unresolved_retained_projection_count,
+            retained_job_inconsistency,
             admission_blocking_job_ids,
             unresolved_job_owners,
             unresolved_generation_ids,
@@ -1515,6 +1572,81 @@ mod status_serialization_tests {
     }
 
     #[test]
+    fn admission_summary_known_configured_drift_preserves_drained_owners_and_recovers() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.370.1".to_string(),
+            "0.371.0".to_string(),
+            Some("homeboy 0.370.1+0732665ce13b8a70cbf8915b1c9c1ddc0fd5eb09".to_string()),
+            Some("homeboy 0.371.0+d1a1a6d2092f250780ccf40a57a12becff2a164f".to_string()),
+        ));
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            restartable: false,
+            lease_id: Some("known-lease".to_string()),
+            pid: Some(1234),
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
+            ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: Some("0.370.1".to_string()),
+            daemon_build_identity: Some(
+                "homeboy 0.370.1+0732665ce13b8a70cbf8915b1c9c1ddc0fd5eb09".to_string(),
+            ),
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: vec![crate::daemon_repair::action_step(
+                crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                crate::daemon_repair::refresh_homeboy_action_for_ref(
+                    "homeboy-lab",
+                    Some("d1a1a6d2092f250780ccf40a57a12becff2a164f"),
+                ),
+            )],
+        });
+        let generations = (0..4)
+            .map(|index| RunnerDaemonGenerationStatus {
+                generation: format!("lease-draining-{index}"),
+                admission_owner: false,
+                drain_state: crate::RollingDrainState::Draining,
+                active_job_count: 0,
+                observed_active_job_count: Some(0),
+                active_job_count_authoritative: true,
+                job_owner_count: 6,
+                run_owner_count: 6,
+                artifact_owner_count: 0,
+                homeboy_build_identity: None,
+                remote_daemon_lease_id: Some(format!("lease-draining-{index}")),
+                remote_daemon_address: None,
+                local_url: None,
+            })
+            .collect::<Vec<_>>();
+        let owners = (0..4)
+            .map(|index| RunnerGenerationJobOwners {
+                generation: format!("lease-draining-{index}"),
+                job_ids: (0..6).map(|job| format!("durable-{index}-{job}")).collect(),
+            })
+            .collect::<Vec<_>>();
+
+        let summary = report.admission_summary_with_generations(&generations, &owners, 4);
+
+        assert!(!summary.accepting_jobs);
+        assert!(summary.safe_to_rotate);
+        assert_eq!(summary.active_job_count, 0);
+        assert_eq!(summary.draining_generation_count, 4);
+        assert_eq!(summary.retained_durable_job_count, 24);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some(
+                "homeboy runner refresh-homeboy homeboy-lab --ref d1a1a6d2092f250780ccf40a57a12becff2a164f --reconnect"
+            )
+        );
+    }
+
+    #[test]
     fn admission_summary_missing_or_unclassified_freshness_is_not_safe_to_rotate() {
         let mut missing_report = base_report();
         missing_report.active_job_state = RunnerActiveJobState::Available;
@@ -1596,6 +1728,68 @@ mod status_serialization_tests {
         assert_eq!(
             summary.next_action.as_deref(),
             Some("homeboy runner reconcile homeboy-lab")
+        );
+    }
+
+    #[test]
+    fn connected_admission_owner_retained_count_disagreement_fails_closed() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
+        report.daemon_freshness = Some(fresh_daemon_freshness());
+        // The direct daemon and `/jobs` both report no work, while the durable
+        // admitting generation retains one authoritative job.
+        report.active_job_count = 0;
+        report.active_job_error = Some(RunnerActiveJobError {
+            code: "retained_active_job_count_inconsistent".to_string(),
+            message: "selected daemon reports 0 active job(s), but its authoritative generation ledger retains 1"
+                .to_string(),
+        });
+        let generations = vec![RunnerDaemonGenerationStatus {
+            generation: "lease-current".to_string(),
+            admission_owner: true,
+            drain_state: crate::RollingDrainState::Admitting,
+            active_job_count: 1,
+            observed_active_job_count: Some(0),
+            active_job_count_authoritative: true,
+            job_owner_count: 1,
+            run_owner_count: 0,
+            artifact_owner_count: 0,
+            homeboy_build_identity: None,
+            remote_daemon_lease_id: Some("lease-current".to_string()),
+            remote_daemon_address: None,
+            local_url: None,
+        }];
+        let owners = vec![RunnerGenerationJobOwners {
+            generation: "lease-current".to_string(),
+            job_ids: vec!["job-retained".to_string()],
+        }];
+
+        let summary = report.admission_summary_with_generations(&generations, &owners, 0);
+
+        assert_eq!(summary.active_job_count, 1);
+        assert_eq!(summary.live_daemon_job_count, 0);
+        assert!(!summary.accepting_jobs);
+        assert!(!summary.safe_to_rotate);
+        let availability = report.admission_availability(None);
+        assert!(!availability.accepts_jobs);
+        assert!(availability
+            .reasons
+            .contains(&"retained_active_job_count_inconsistent".to_string()));
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner reconcile homeboy-lab")
+        );
+        assert_eq!(
+            summary.retained_job_inconsistency,
+            Some(RunnerRetainedJobInconsistency {
+                code: "direct_daemon_authoritative_ledger_disagreement",
+                generation: "lease-current".to_string(),
+                direct_daemon_active_job_count: 0,
+                authoritative_active_job_count: 1,
+                observed_active_job_count: Some(0),
+                job_ids: vec!["job-retained".to_string()],
+            })
         );
     }
 
@@ -1907,9 +2101,9 @@ impl RunnerStaleDaemonWarning {
     /// Recovery commands safe to publish to an operator or machine consumer.
     ///
     /// Persisted command text is evidence, not authority. A refresh is exposed
-    /// only when its typed immutable ref equals the observed daemon commit or
-    /// git proves it is a descendant; unknown and divergent histories have no
-    /// mutating recovery recommendation.
+    /// only when its typed immutable ref is the observed configured job binary
+    /// and it cannot request a downgrade. Refresh promotion then validates that
+    /// exact target against the runner's authoritative source checkout.
     pub fn safe_recovery_commands(&self) -> Vec<String> {
         self.safe_recovery_actions()
             .into_iter()
@@ -1921,8 +2115,8 @@ impl RunnerStaleDaemonWarning {
     /// published command projection. Callers must not reconstruct actions from
     /// persisted command text.
     pub(crate) fn safe_recovery_actions(&self) -> Vec<ExecutableAction> {
-        let Some(active) = self
-            .active_daemon_control_plane_build_identity
+        let Some(configured) = self
+            .job_command_binary_build_identity
             .as_deref()
             .and_then(build_identity_commit)
         else {
@@ -1935,7 +2129,8 @@ impl RunnerStaleDaemonWarning {
                     .args
                     .windows(2)
                     .find_map(|args| (args[0] == "--ref").then(|| args[1].as_str()))?;
-                (target == active || commits_are_ancestral(&active, target)).then(|| action.clone())
+                (target == configured && !action.args.iter().any(|arg| arg == "--allow-downgrade"))
+                    .then(|| action.clone())
             })
             .collect()
     }
@@ -2377,10 +2572,13 @@ fn recovery_ref(
         // replaced with the initiating controller's unrelated commit.
         Some(identity) => homeboy_upgrade::upgrade::parse_build_identity_display(identity)
             .filter(|identity| identity.git_dirty != Some(true))
-            .and_then(|identity| identity.git_commit),
-        None if initiating_identity.git_dirty != Some(true) => {
-            initiating_identity.git_commit.clone()
-        }
+            .and_then(|identity| identity.git_commit)
+            .filter(|commit| is_immutable_build_commit(commit)),
+        None if initiating_identity.git_dirty != Some(true) => initiating_identity
+            .git_commit
+            .as_deref()
+            .filter(|commit| is_immutable_build_commit(commit))
+            .map(str::to_string),
         None => None,
     }
 }
@@ -2389,13 +2587,13 @@ fn build_identity_commit(identity: &str) -> Option<String> {
     homeboy_upgrade::upgrade::parse_build_identity_display(identity)
         .filter(|identity| identity.git_dirty != Some(true))
         .and_then(|identity| identity.git_commit)
+        .filter(|commit| is_immutable_build_commit(commit))
 }
 
-fn commits_are_ancestral(older: &str, newer: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", older, newer])
-        .output()
-        .is_ok_and(|output| output.status.success())
+/// A Homeboy build display carries a Git object ID, not an arbitrary Git ref.
+/// The short form is accepted because product builds embed abbreviated SHAs.
+fn is_immutable_build_commit(commit: &str) -> bool {
+    (7..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn same_homeboy_version(left: &str, right: &str) -> bool {

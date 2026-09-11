@@ -1,0 +1,7 @@
+{
+  "schema": "homeboy/control-plane-event-page/v1",
+  "run": "run-fixture-1",
+  "events": [],
+  "next_cursor": "opaque-cursor-1",
+  "has_more": true
+}

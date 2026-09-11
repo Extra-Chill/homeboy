@@ -37,5 +37,28 @@ pub use types::{
     LeaselessOrphanJobDiagnostics, RunnerJobLogSnapshot, RunnerJobProjection, RunnerJobSource,
 };
 
+/// Read-only projection for inspecting one durable daemon job without exposing
+/// the store's private request payload or mutating lifecycle state.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DaemonJobInspection {
+    pub job: Job,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_durable_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_identity: Option<DaemonJobChildIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_disposition: Option<String>,
+    /// Driver-owned checkpoint retained for explicit full evidence requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DaemonJobChildIdentity {
+    pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_group_id: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests;

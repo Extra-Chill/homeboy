@@ -1,0 +1,9 @@
+{
+  "schema": "homeboy/control-plane-result/v1",
+  "ok": false,
+  "error": {
+    "class": "cursor_expired",
+    "retryable": false,
+    "message": "cursor expired"
+  }
+}

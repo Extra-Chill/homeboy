@@ -1,4 +1,5 @@
 use homeboy_engine_primitives::content_hash;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -7,6 +8,7 @@ use base64::Engine;
 use homeboy_core::api_jobs::{Job, RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
+use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_runner_contract::{
     RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse, WorkspaceOwnerLease,
@@ -34,6 +36,7 @@ pub(super) fn exec_via_reverse_broker(
     command: Vec<String>,
     env: HashMap<String, String>,
     secret_env_names: Vec<String>,
+    secret_env_plan: SecretEnvPlan,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     path_materialization_plan: Option<PathMaterializationPlan>,
@@ -59,7 +62,34 @@ pub(super) fn exec_via_reverse_broker(
     });
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
-    let mut env = env;
+    let controller_credential_delivery = {
+        // SecretEnvPlan is intentionally name-only. The materialization plan is
+        // the durable ownership authority, so an ambient controller value never
+        // overrides a runner-owned reference with the same name.
+        let controller_owned = secret_env_plan
+            .env_materialization
+            .as_ref()
+            .map(|plan| {
+                plan.secret_refs
+                    .iter()
+                    .filter(|secret| secret.owner.as_deref() == Some("controller"))
+                    .map(|secret| secret.name.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let env: BTreeMap<_, _> = redaction_env
+            .iter()
+            .filter(|(name, _)| controller_owned.contains(name.as_str()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        (!env.is_empty()).then_some(homeboy_runner_contract::RunnerCredentialDelivery { env })
+    };
+    // Durable reverse-runner jobs cannot persist inline secret values
+    // (`reject_inline_durable_secret_env`). Strip every planned secret name —
+    // including provider credential requirements and env-name aliases — so the
+    // stored envelope carries references only, and the worker rehydrates the
+    // values from runner-owned sources after replay (Extra-Chill/homeboy#14382).
+    let mut env = strip_durable_secret_env_values(env, &secret_env_plan);
     // Snapshot the configured command binary into the durable job. A later
     // daemon refresh must not redirect work that has already been accepted.
     if !env.contains_key("HOMEBOY_COMMAND") {
@@ -88,6 +118,7 @@ pub(super) fn exec_via_reverse_broker(
         cwd: cwd.clone(),
         env,
         secret_env_names,
+        secret_env_plan: Some(secret_env_plan),
         capture_patch,
         source_snapshot: source_snapshot.clone(),
         path_materialization_plan: path_materialization_plan.clone(),
@@ -164,12 +195,15 @@ pub(super) fn exec_via_reverse_broker(
         envelope,
         workspace_claim_binding: None,
         workspace_owner_lease: workspace_owner_lease.clone(),
+        credential_delivery: controller_credential_delivery,
     };
     if detach_after_handoff {
         if let Some(run_id) = run_id.as_deref() {
+            let mut durable_submission = submission.clone();
+            durable_submission.credential_delivery = None;
             homeboy_agents::agent_task_lifecycle::record_lab_offload_submission_envelope(
                 run_id,
-                &submission,
+                &durable_submission,
             )?;
         }
     }
@@ -376,7 +410,8 @@ pub(super) fn exec_via_reverse_broker(
         },
         || Ok(()),
         |_, _| Ok(()),
-    );
+    )
+    .map(RunnerExecCompletion::into_output);
 }
 
 /// Preserve file-backed argv values past controller cleanup. Values are content
