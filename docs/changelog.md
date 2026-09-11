@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.372.3] - 2026-09-11
+
+### Changed
+- Name the blocker when a GitHub Release lookup cannot be answered
+- Push the release branch and its tag atomically
+
 ## [0.372.2] - 2026-09-11
 
 ### Fixed
