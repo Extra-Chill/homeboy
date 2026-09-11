@@ -91,7 +91,11 @@ else { fs.appendFileSync('${commandLog}', args.join(' ') + '\\n'); if (process.e
 	assert.equal(fs.readFileSync(path.join(data, 'history.json'), 'utf8'), 'history');
 	assert.equal(fs.existsSync(path.join(data, 'snapshot')), true);
 	assert.equal(fs.existsSync(commandLog), false);
-	assert.throws(() => handleRequest({ schema: SCHEMA, operation: 'reclaim', generation: inventory.generation, reclaim_targets: [target('scratch:task-active')] }, options), /stale/);
+	// An active scratch item is refused because it is active, not because an
+	// unrelated inventory generation moved underneath the request (#2832).
+	const activeReceipt = handleRequest({ schema: SCHEMA, operation: 'reclaim', generation: inventory.generation, reclaim_targets: [target('scratch:task-active')] }, options);
+	assert.deepEqual(activeReceipt.reclaimed_item_ids, [], 'an active scratch item is never reclaimed');
+	assert.equal(fs.existsSync(active), true, 'an active scratch item stays on disk');
 	assert.throws(() => handleRequest({ schema: SCHEMA, operation: 'reclaim', generation: 'bad', reclaim_targets: Array.from({ length: 1001 }, () => ({ id: 'x', reclaim_token: 'x' })) }, options), /ceiling/);
 	assert.throws(() => handleRequest({ schema: SCHEMA, operation: 'inventory', extra: true }, options), /valid/);
 	fs.writeFileSync(configPath, JSON.stringify({ command, temp_roots: [temp], data_roots: [temp] }));

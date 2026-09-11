@@ -30,7 +30,6 @@ function handleRequest(request, options = {}) {
 	const config = retentionConfig(options.env || process.env, options);
 	const inventory = inventoryFor(config, options);
 	if (request.operation === 'inventory') return inventory;
-	if (request.generation !== inventory.generation) throw new Error('OpenCode storage inventory generation is stale.');
 	const byId = new Map(inventory.items.map((item) => [item.id, item]));
 	const reclaimed = [];
 	let reclaimedBytes = 0;
@@ -97,7 +96,7 @@ function inventoryFor(config, options) {
 	const generation = digest(JSON.stringify({ roots: roots.map((root) => [root.id, fingerprint(root.path)]), items: items.map((item) => [item.id, item.state]) }));
 	return {
 		schema: SCHEMA, provider_id: PROVIDER_ID, generation, roots,
-		items: items.map(({ _path, _workspace, _session_id, state, ...item }) => ({ ...item, reclaim_token: digest(`${generation}:${item.id}:${state}`) })), unknown_bytes: unknownBytes,
+		items: items.map(({ _path, _workspace, _session_id, state, ...item }) => ({ ...item, reclaim_token: reclaimToken(item.id, state, _path) })), unknown_bytes: unknownBytes,
 		...(incomplete.length ? { completeness: { complete: false, incomplete_roots: incomplete } } : {}),
 	};
 }
@@ -247,6 +246,14 @@ function inside(candidate, root) { if (!candidate || !root) return false; const 
 function overlaps(one, two) { return inside(one, two) || inside(two, one); }
 function hasOverlappingRoots(roots) { return roots.some((root, index) => roots.slice(index + 1).some((other) => overlaps(root, other))); }
 function fingerprint(candidate) { try { const stat = fs.lstatSync(candidate); return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`; } catch { return 'missing'; } }
+// Bind a reclaim token to the item it authorizes — that item's identity, its
+// retention state, and its own on-disk fingerprint — rather than to a digest
+// of the whole inventory. A retention root is written continuously by normal
+// agent activity, so a root-wide generation changes between inventory and
+// reclaim and rejected every request, including ones targeting items that
+// never moved (#2832). An item whose own directory changed since inventory
+// still fails this check and is left alone.
+function reclaimToken(id, state, candidate) { return digest(`${id}:${state}:${fingerprint(candidate)}`); }
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value); }
 function ageDays(value, now = Date.now()) { const time = typeof value === 'number' ? value : Date.parse(value); return Number.isFinite(time) && time <= now ? Math.floor((now - time) / 86_400_000) : 0; }

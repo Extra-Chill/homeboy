@@ -32,8 +32,12 @@ else if (args === 'session list --format json') process.stdout.write(JSON.string
 	assert.ok(inventory.completeness.incomplete_roots.some((entry) => entry.reason === 'depth_limit'));
 	assert.ok(inventory.unknown_bytes < 10_001 + 1, 'bounded unknown byte total is explicitly a lower bound');
 	const target = inventory.items.find((item) => item.id === 'scratch:nested');
+	// Unrelated churn under the retention root no longer rejects a reclaim; the
+	// session-referenced item below is protected on its own merits (#2832).
 	fs.writeFileSync(path.join(temp, 'generation-change'), 'x');
-	assert.throws(() => handleRequest({ schema: SCHEMA, operation: 'reclaim', generation: inventory.generation, reclaim_targets: [{ id: target.id, reclaim_token: target.reclaim_token }] }, { env }), /stale/);
+	const afterChurn = handleRequest({ schema: SCHEMA, operation: 'reclaim', generation: inventory.generation, reclaim_targets: [{ id: target.id, reclaim_token: target.reclaim_token }] }, { env });
+	assert.deepEqual(afterChurn.reclaimed_item_ids, [], 'a session-referenced item stays protected through unrelated root churn');
+	assert.equal(fs.existsSync(nested), true, 'the referenced scratch directory stays on disk');
 	fs.writeFileSync(config, JSON.stringify({ command, temp_roots: [temp, path.join(temp, 'a')], data_roots: [data] }));
 	assert.throws(() => handleRequest({ schema: SCHEMA, operation: 'inventory' }, { env }), /same storage class/);
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
