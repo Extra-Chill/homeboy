@@ -169,7 +169,12 @@ impl RunnerFileTransfer {
                     Error::internal_unexpected(format!("build runner file HTTP client: {err}"))
                 })?;
                 let broker_token = broker_auth::broker_submit_token_for_runner(&runner.id)?;
-                if broker {
+                if !broker && broker_token.is_none() && runner.server_id.is_some() {
+                    // The direct daemon tunnel is controller-owned, but /files/*
+                    // is broker-token protected. Use the configured SSH authority
+                    // when this runner was never paired with a broker credential.
+                    direct_ssh_file_channel(runner)?
+                } else if broker {
                     RunnerFileChannel::BrokerHttp {
                         client,
                         endpoint_url,
@@ -183,12 +188,7 @@ impl RunnerFileTransfer {
                     }
                 }
             }
-            RunnerFileTransferCapability::DirectSsh { server_id } => {
-                let server = server::load(&server_id)?;
-                let mut client = SshClient::from_server(&server, &server_id)?;
-                client.env.extend(runner.env.clone());
-                RunnerFileChannel::DirectSsh(client)
-            }
+            RunnerFileTransferCapability::DirectSsh { .. } => direct_ssh_file_channel(runner)?,
             RunnerFileTransferCapability::Unsupported { .. } => unreachable!("checked above"),
         };
         let transfer = RunnerFileTransfer {
@@ -604,6 +604,21 @@ impl RunnerFileTransfer {
             "atomic": true,
         })
     }
+}
+
+fn direct_ssh_file_channel(runner: &Runner) -> Result<RunnerFileChannel> {
+    let server_id = runner.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "server_id",
+            "SSH runner file transfer requires server_id",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    let server = server::load(server_id)?;
+    let mut client = SshClient::from_server(&server, server_id)?;
+    client.env.extend(runner.env.clone());
+    Ok(RunnerFileChannel::DirectSsh(client))
 }
 
 fn private_evidence_snapshot(
@@ -1148,6 +1163,25 @@ mod tests {
                 broker: false,
             }
         );
+    }
+
+    #[test]
+    fn direct_daemon_without_a_broker_token_uses_ssh_for_files() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            server::create(
+                &serde_json::json!({ "id": "srv", "host": "localhost", "user": "test" })
+                    .to_string(),
+                false,
+            )
+            .expect("create SSH server");
+            let mut runner = runner(RunnerKind::Ssh);
+            runner.server_id = Some("srv".to_string());
+
+            assert!(matches!(
+                direct_ssh_file_channel(&runner),
+                Ok(RunnerFileChannel::DirectSsh(_))
+            ));
+        });
     }
 
     #[test]
