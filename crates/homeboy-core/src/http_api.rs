@@ -1989,10 +1989,13 @@ fn api_stale_running_reason_at(
         match remote_status {
             Some("queued" | "running") => return None,
             Some("succeeded" | "failed" | "cancelled") => return Some("runner_job_terminal"),
-            // A missing job or unavailable probe does not erase a recent
-            // runner-backed observation. It does, however, lose its exemption
-            // after the same bounded 24-hour window used by CLI reconciliation.
-            _ if api_runner_evidence_expired(run, now) => {
+            // A probe that answers without naming an active or terminal job —
+            // `not_found`, say — is evidence the exemption no longer describes
+            // anything, so it expires after the same bounded 24-hour window CLI
+            // reconciliation uses. An absent probe is not that evidence: with no
+            // answer at all, the record's own active remote status stands and a
+            // read must not retire it.
+            Some(_) if api_runner_evidence_expired(run, now) => {
                 return Some("runner_backed_run_exceeded_exemption")
             }
             _ => return None,
