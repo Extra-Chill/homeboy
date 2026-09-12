@@ -65,7 +65,10 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
     }
 
     fn linked_durable_run_state(&self, run_id: &str) -> Option<DaemonLinkedDurableRunState> {
-        let record = crate::agent_task_lifecycle::exact_record(run_id).ok()?;
+        let lifecycle_store =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .ok()?;
+        let record = lifecycle_store.read_record_bounded(run_id).ok()?;
         if record.state.is_terminal() {
             Some(DaemonLinkedDurableRunState::Terminal)
         } else {
