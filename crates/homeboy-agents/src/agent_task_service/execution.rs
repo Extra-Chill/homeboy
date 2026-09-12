@@ -1146,6 +1146,21 @@ pub fn terminal_transport_recovery_required(run_id: &str) -> bool {
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
+    terminal_run_result_for_record(record)
+}
+
+/// Read terminal evidence without consulting runner authority. Daemon job
+/// reconciliation calls this while runner status itself is being resolved.
+pub(crate) fn persisted_terminal_run_result(
+    run_id: &str,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    terminal_run_result_for_record(record)
+}
+
+fn terminal_run_result_for_record(
+    record: agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
