@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.1] - 2026-09-12
+
+### Fixed
+- resolve packaged result parser assets
+
 ## [3.48.0] - 2026-09-12
 
 ### Added
