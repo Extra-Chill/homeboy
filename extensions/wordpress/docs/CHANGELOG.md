@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.47.2] - 2026-09-12
+
+### Fixed
+- keep changed scopes out of the wordpress smoke selection
+- run manifest wordpress smokes in full suite
+
 ## [3.47.1] - 2026-09-10
 
 ### Changed
