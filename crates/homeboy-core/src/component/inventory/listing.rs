@@ -262,6 +262,25 @@ pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
     registered_by_id_core(None, id)
 }
 
+/// Resolve the standalone registration for an unscoped component operation.
+///
+/// Project attachments intentionally take precedence in [`registered_by_id`],
+/// because they carry project-owned deployment configuration. Callers that
+/// select a repository outside a project scope instead need the component's
+/// durable primary registration.
+pub fn registered_primary_by_id(id: &str) -> Result<Option<Component>> {
+    crate::engine::identifier::validate_component_id(id)?;
+    load_standalone_component_core(None, id)
+}
+
+/// List standalone component registrations without project attachments.
+///
+/// This preserves the durable component identity for unscoped operations while
+/// [`registered`] and [`registered_by_id`] retain project attachment precedence.
+pub fn registered_primary() -> Result<Vec<Component>> {
+    load_standalone_components_core(None)
+}
+
 /// [`registered_by_id`] against an already-resolved config root (#7505).
 pub fn registered_by_id_in_root(config_root: &Path, id: &str) -> Result<Option<Component>> {
     registered_by_id_core(Some(config_root), id)
