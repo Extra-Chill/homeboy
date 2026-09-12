@@ -456,7 +456,7 @@ fn controller_death_guard_loop(
             unsafe { libc::_exit(0) };
         }
         if read < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
             unsafe { libc::_exit(1) };
@@ -470,12 +470,28 @@ fn controller_death_guard_loop(
         if read == 0 {
             controller_death_cleanup(process_group);
         }
-        if read < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+        if read < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             unsafe {
                 libc::_exit(1);
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn write_u32_nul(buf: &mut [u8; 12], mut value: u32) -> *const libc::c_char {
+    buf[11] = 0;
+    if value == 0 {
+        buf[10] = b'0';
+        return buf[10..].as_ptr().cast();
+    }
+    let mut i = 11;
+    while value > 0 {
+        i -= 1;
+        buf[i] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    buf[i..].as_ptr().cast()
 }
 
 /// The death watcher is already a single-threaded fork child. Exec a standalone
@@ -496,6 +512,7 @@ trap 'rm -f "$state" "$snapshot"' EXIT
 discover() {
   /bin/ps -axo pid=,ppid=,lstart= > "$snapshot"
   /usr/bin/awk -v root="$root" '
+    BEGIN { split("", owned) }
     FILENAME==ARGV[1] { owned[$1 FS $2 FS $3 FS $4 FS $5 FS $6]=1; next }
     { pid=$1; ppid=$2; ident=$3 FS $4 FS $5 FS $6 FS $7; row[pid]=ident; parent[pid]=ppid }
     END {
@@ -533,7 +550,9 @@ discover
 "#,
         "\0"
     );
-    let root = std::ffi::CString::new(root_pid.to_string()).expect("pid has no NUL");
+    // This fork child must not allocate before exec: another thread may have held malloc's lock.
+    let mut root_buf = [0u8; 12];
+    let root = write_u32_nul(&mut root_buf, root_pid);
     unsafe {
         libc::execl(
             c"/bin/sh".as_ptr(),
@@ -541,7 +560,7 @@ discover
             c"-c".as_ptr(),
             SCRIPT.as_ptr().cast::<libc::c_char>(),
             c"homeboy-child-guard".as_ptr(),
-            root.as_ptr(),
+            root,
             std::ptr::null::<libc::c_char>(),
         );
         libc::kill(-(root_pid as libc::pid_t), libc::SIGKILL);
