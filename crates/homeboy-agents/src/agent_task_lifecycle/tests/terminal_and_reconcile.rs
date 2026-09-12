@@ -1563,6 +1563,183 @@ fn typed_pre_provider_runner_failure_snapshot(
     snapshot
 }
 
+fn pre_provider_cancellation_snapshot() -> homeboy_core::api_jobs::RunnerJobLogSnapshot {
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Cancelled;
+    snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+    snapshot.events = vec![
+        homeboy_core::api_jobs::JobEvent {
+            sequence: 1,
+            job_id: snapshot.job.id,
+            kind: JobEventKind::Status,
+            timestamp_ms: 1,
+            message: Some("remote runner job queued".to_string()),
+            data: Some(json!({ "status": "queued" })),
+        },
+        homeboy_core::api_jobs::JobEvent {
+            sequence: 2,
+            job_id: snapshot.job.id,
+            kind: JobEventKind::Status,
+            timestamp_ms: 2,
+            message: Some("cancel requested via HTTP API".to_string()),
+            data: Some(json!({ "status": "cancelled" })),
+        },
+    ];
+    snapshot.job.event_count = snapshot.events.len();
+    snapshot
+}
+
+#[test]
+fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotently() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let run_id = "cook-14599-attempt-cancelled-before-provider";
+    let mut record = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+    )
+    .expect("accepted detached handoff");
+    let snapshot = pre_provider_cancellation_snapshot();
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("verified pre-provider cancellation projects");
+    let first = record.clone();
+
+    assert_eq!(record.state, AgentTaskRunState::Cancelled);
+    assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(record.metadata["runner_job_status"], "cancelled");
+    assert_eq!(
+        record.metadata["runner_result_synchronization"]["state"],
+        "projected"
+    );
+    assert_eq!(record.metadata["runner_handoff"]["state"], "terminal");
+    assert_eq!(record.metadata["runner_job_events"], json!(snapshot.events));
+    assert!(lifecycle_store.read_aggregate(run_id).is_err());
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("terminal cancellation replay is a no-op");
+    assert_eq!(record, first);
+    assert_eq!(
+        reconcile_status_in_store(
+            &lifecycle_store,
+            run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("terminal status")
+        .record
+        .state,
+        AgentTaskRunState::Cancelled
+    );
+}
+
+#[test]
+fn pre_provider_cancellation_rejects_mismatched_job_without_mutating_record() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: "cook-14599-mismatched-job",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+    )
+    .expect("accepted detached handoff");
+    let before = record.clone();
+    let mut snapshot = pre_provider_cancellation_snapshot();
+    snapshot.job.id =
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000999").expect("job id");
+    for event in &mut snapshot.events {
+        event.job_id = snapshot.job.id;
+    }
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect_err("mismatched job is rejected");
+    assert_eq!(record, before);
+    assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
+}
+
+#[test]
+fn cancellation_after_runner_start_stays_pending_without_an_inner_aggregate() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: "cook-14599-cancelled-after-start",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+    )
+    .expect("accepted detached handoff");
+    let mut snapshot = pre_provider_cancellation_snapshot();
+    snapshot.events.insert(
+        1,
+        homeboy_core::api_jobs::JobEvent {
+            sequence: 2,
+            job_id: snapshot.job.id,
+            kind: JobEventKind::Status,
+            timestamp_ms: 2,
+            message: Some("runner job started".to_string()),
+            data: Some(json!({ "status": "running" })),
+        },
+    );
+    snapshot.events[2].sequence = 3;
+    snapshot.job.event_count = snapshot.events.len();
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("ambiguous terminal transport stays pending");
+    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(
+        record.metadata["runner_result_synchronization"]["state"],
+        "pending"
+    );
+    assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
+}
+
+#[test]
+fn truncated_cancellation_history_stays_pending_without_an_inner_aggregate() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: "cook-14599-truncated-cancellation-history",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+    )
+    .expect("accepted detached handoff");
+    let mut snapshot = pre_provider_cancellation_snapshot();
+    snapshot.job.event_count = 3;
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("truncated terminal transport stays pending");
+    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(
+        record.metadata["runner_result_synchronization"]["state"],
+        "pending"
+    );
+    assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
+}
+
 #[test]
 fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
