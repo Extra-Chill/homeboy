@@ -94,11 +94,12 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
     }
 
     let working_dir = source_path.to_string_lossy();
-    let explicit_cargo_target = component
-        .env
-        .get("CARGO_TARGET_DIR")
-        .cloned()
-        .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
+    // A component's declared `CARGO_TARGET_DIR`, and any value inherited from
+    // this process, describe the environment a child runs in — not a target the
+    // operator chose for this invocation. Honouring either would let two
+    // managed runs of the same component serialize on one Cargo lock, which is
+    // the contention this managed lease exists to remove. A caller-owned
+    // explicit target is passed by callers that genuinely own one.
     let cargo_target = component
         .managed_execution
         .shared_cargo_target
@@ -106,7 +107,7 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
             homeboy_core::cleanup::acquire_managed_cargo_target(
                 &format!("component:{}", component.id),
                 source_path,
-                explicit_cargo_target.as_deref(),
+                None,
             )
         })
         .transpose()?;
