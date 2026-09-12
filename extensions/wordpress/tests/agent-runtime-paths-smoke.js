@@ -51,6 +51,21 @@ assert.equal(
 	installedRuntimeFile
 );
 
+// The active isolated config root binds the materialized shared asset directly.
+assert.equal(
+	resolveAgentRuntimeFile('wp-codebox/lib/selection.js', {
+		env: { HOMEBOY_AGENT_RUNTIMES_DIR: path.join(homeboyRoot, 'agent-runtimes') },
+	}),
+	installedRuntimeFile
+);
+assert.throws(
+	() => resolveAgentRuntimeFile('wp-codebox/lib/selection.js', {
+		env: { HOMEBOY_AGENT_RUNTIMES_DIR: path.join(root, 'missing-runtimes') },
+	}),
+	(error) => error.code === 'HOMEBOY_AGENT_RUNTIME_FILE_MISSING'
+		&& error.message.includes('HOMEBOY_AGENT_RUNTIMES_DIR is explicitly bound')
+);
+
 // Both layouts are probed for every candidate extension root, installed first.
 assert.deepEqual(agentRuntimeRoots({ extensionRoot: installedExtension }), [
 	path.join(homeboyRoot, 'agent-runtimes'),

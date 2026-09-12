@@ -40,6 +40,11 @@ const EXTENSION_ROOT = path.resolve(__dirname, '..', '..');
  */
 function agentRuntimeRoots(options = {}) {
 	const env = options.env || process.env;
+	if (!options.extensionRoot && env.HOMEBOY_AGENT_RUNTIMES_DIR) {
+		// Homeboy materializes this shared asset from the active isolated config
+		// root. An explicit binding must not fall through to another installation.
+		return [path.resolve(env.HOMEBOY_AGENT_RUNTIMES_DIR)];
+	}
 	const extensionRoots = [];
 
 	if (options.extensionRoot) {
@@ -78,9 +83,11 @@ function resolveAgentRuntimeFile(relativePath, options = {}) {
 		return resolved;
 	}
 
+	const explicitRoot = !options.extensionRoot && (options.env || process.env).HOMEBOY_AGENT_RUNTIMES_DIR;
 	const error = new Error(
 		[
 			`Homeboy WordPress extension could not resolve shared agent runtime file '${relativePath}'.`,
+			...(explicitRoot ? [`HOMEBOY_AGENT_RUNTIMES_DIR is explicitly bound to '${path.resolve(explicitRoot)}' but does not contain the requested asset.`] : []),
 			'Probed:',
 			...probed.map((candidate) => `  - ${candidate}`),
 			"Shared agent runtimes are declared in homeboy-extension-root.json and install beside the extensions directory (<homeboy>/agent-runtimes), not inside it. The installed extension payload is incomplete.",

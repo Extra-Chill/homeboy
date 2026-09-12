@@ -12,19 +12,27 @@ set -euo pipefail
 WORDPRESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOSITORY_ROOT="$(cd "${WORDPRESS_ROOT}/.." && pwd)"
 FIXTURE_ROOT="$(mktemp -d)"
+FIXTURE_ROOT="$(cd "${FIXTURE_ROOT}" && pwd -P)"
 trap 'rm -rf "$FIXTURE_ROOT"' EXIT
 
-HOMEBOY_ROOT="${FIXTURE_ROOT}/config/homeboy"
+HOMEBOY_ROOT="${FIXTURE_ROOT}/config/homeboy-2508-snapshot"
 EXTENSION_DIR="${HOMEBOY_ROOT}/extensions/wordpress"
-mkdir -p "${EXTENSION_DIR}" "${HOMEBOY_ROOT}/extensions/scripts"
+SHARED_LIB_DIR="${HOMEBOY_ROOT}/extensions/scripts/lib"
+AGENT_RUNTIMES_DIR="${HOMEBOY_ROOT}/agent-runtimes"
+HASHED_SOURCE_DIR="${FIXTURE_ROOT}/source-snapshots/2508-a1b2c3/wordpress"
+mkdir -p "${EXTENSION_DIR}" "${SHARED_LIB_DIR}"
 cp -R "${WORDPRESS_ROOT}/scripts" "${EXTENSION_DIR}/scripts"
 cp -R "${WORDPRESS_ROOT}/lib" "${EXTENSION_DIR}/lib"
 cp "${WORDPRESS_ROOT}/wordpress.json" "${EXTENSION_DIR}/wordpress.json"
-cp -R "${REPOSITORY_ROOT}/agent-runtimes" "${HOMEBOY_ROOT}/agent-runtimes"
+cp -R "${REPOSITORY_ROOT}/scripts/lib/." "${SHARED_LIB_DIR}/"
+cp -R "${REPOSITORY_ROOT}/agent-runtimes" "${AGENT_RUNTIMES_DIR}"
 cp -R "${REPOSITORY_ROOT}/agent-task-contracts" "${HOMEBOY_ROOT}/agent-task-contracts"
 cp -R "${REPOSITORY_ROOT}/dependency-adapters" "${HOMEBOY_ROOT}/dependency-adapters"
 cp -R "${REPOSITORY_ROOT}/runtime-agent-ci" "${HOMEBOY_ROOT}/runtime-agent-ci"
-ln -s "${REPOSITORY_ROOT}/scripts/lib" "${HOMEBOY_ROOT}/extensions/scripts/lib"
+mkdir -p "${HASHED_SOURCE_DIR}"
+cp -R "${WORDPRESS_ROOT}/scripts" "${HASHED_SOURCE_DIR}/scripts"
+cp -R "${WORDPRESS_ROOT}/lib" "${HASHED_SOURCE_DIR}/lib"
+cp "${WORDPRESS_ROOT}/wordpress.json" "${HASHED_SOURCE_DIR}/wordpress.json"
 
 # Every step below asserts its own outcome, including exit status. Leaving
 # errexit on would abort on a probe that is *expected* to fail and discard the
@@ -40,7 +48,7 @@ fail() {
 # would let these probes resolve against the caller's extension instead of the
 # fixture. Unset it wherever the point is what a script's own location finds.
 fixture_node() {
-    env -u HOMEBOY_EXTENSION_PATH node "$@"
+    env -u HOMEBOY_EXTENSION_PATH -u HOMEBOY_AGENT_RUNTIMES_DIR node "$@"
 }
 
 # Resolution is the invariant under test, so assert the resolved paths directly
@@ -94,8 +102,9 @@ case "$adapter_output" in
     *) fail "Expected installed PHPUnit adapter to reach its environment validation, got: ${adapter_output}" ;;
 esac
 
-# The result parser sources the WP Codebox adapters from the shared tree; when
-# it cannot, wp-codebox-json silently degrades and a shard reports no counts.
+# The parser source is a copied hashed snapshot, outside the active config tree.
+# Core binds its separately materialized shared assets into that source runtime.
+# Without those bindings, wp-codebox-json silently degrades and reports no counts.
 mkdir -p "${FIXTURE_ROOT}/artifacts/files"
 cat > "${FIXTURE_ROOT}/artifacts/files/test-results.json" <<'JSON'
 {"schema":"wp-codebox/test-results/v1","summary":{"total":3,"passed":2,"failed":1,"skipped":0}}
@@ -106,13 +115,89 @@ homeboy_write_test_results() {
 }
 EOF
 parse_output="$(HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${FIXTURE_ROOT}/write-test-results.sh" \
-    HOMEBOY_EXTENSION_PATH="${EXTENSION_DIR}" \
-    bash "${EXTENSION_DIR}/scripts/test/parse-test-results.sh" \
+    HOMEBOY_EXTENSION_PATH="${HASHED_SOURCE_DIR}" \
+    HOMEBOY_SHARED_LIB_DIR="${SHARED_LIB_DIR}" \
+    HOMEBOY_AGENT_RUNTIMES_DIR="${AGENT_RUNTIMES_DIR}" \
+    bash "${HASHED_SOURCE_DIR}/scripts/test/parse-test-results.sh" \
         "${FIXTURE_ROOT}/artifacts" wp-codebox-json 2>&1)"
 case "$parse_output" in
     *"total=3 passed=2 failed=1 skipped=0"*) ;;
-    *) fail "Expected installed result parser to report WP Codebox counts, got: ${parse_output}" ;;
+    *) fail "Expected hashed-source result parser to report WP Codebox counts, got: ${parse_output}" ;;
 esac
+
+# An explicit core-supplied generic adapter is sufficient by itself. In
+# particular, the parser must not try to discover a checkout-adjacent shared
+# library before honoring this binding.
+printf '%s\n' 'OK (2 tests, 2 assertions)' > "${FIXTURE_ROOT}/phpunit-output.txt"
+explicit_adapter_output="$(HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${FIXTURE_ROOT}/write-test-results.sh" \
+    HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS="${SHARED_LIB_DIR}/test-result-adapters.sh" \
+    HOMEBOY_SHARED_LIB_DIR="${FIXTURE_ROOT}/missing-shared-lib" \
+    bash "${HASHED_SOURCE_DIR}/scripts/test/parse-test-results.sh" \
+        "${FIXTURE_ROOT}/phpunit-output.txt" phpunit 2>&1)"
+case "$explicit_adapter_output" in
+    *"total=2 passed=2 failed=0 skipped=0"*) ;;
+    *) fail "Expected explicit generic result adapter to bypass shared library discovery, got: ${explicit_adapter_output}" ;;
+esac
+
+# A core binding can include unrelated agent runtimes without making generic
+# PHPUnit parsing depend on the optional WP Codebox runtime.
+UNRELATED_RUNTIMES_DIR="${FIXTURE_ROOT}/unrelated-agent-runtimes"
+mkdir -p "${UNRELATED_RUNTIMES_DIR}/opencode"
+generic_bound_output="$(HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${FIXTURE_ROOT}/write-test-results.sh" \
+    HOMEBOY_SHARED_LIB_DIR="${SHARED_LIB_DIR}" \
+    HOMEBOY_AGENT_RUNTIMES_DIR="${UNRELATED_RUNTIMES_DIR}" \
+    bash "${HASHED_SOURCE_DIR}/scripts/test/parse-test-results.sh" \
+        "${FIXTURE_ROOT}/phpunit-output.txt" phpunit 2>&1)"
+case "$generic_bound_output" in
+    *"total=2 passed=2 failed=0 skipped=0"*) ;;
+    *) fail "Expected generic parser to ignore a bound runtime root without WP Codebox, got: ${generic_bound_output}" ;;
+esac
+missing_wp_codebox_output="$(HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${FIXTURE_ROOT}/write-test-results.sh" \
+    HOMEBOY_SHARED_LIB_DIR="${SHARED_LIB_DIR}" \
+    HOMEBOY_AGENT_RUNTIMES_DIR="${UNRELATED_RUNTIMES_DIR}" \
+    bash "${HASHED_SOURCE_DIR}/scripts/test/parse-test-results.sh" \
+        "${FIXTURE_ROOT}/artifacts" wp-codebox-json 2>&1)"
+missing_wp_codebox_status=$?
+[ "$missing_wp_codebox_status" -ne 0 ] || fail "Expected requested WP Codebox adapter to reject a runtime root without WP Codebox"
+case "$missing_wp_codebox_output" in
+    *"HOMEBOY_AGENT_RUNTIMES_DIR is explicitly bound"*"wp-codebox/scripts/lib/test-result-adapters.sh"*) ;;
+    *) fail "Expected a clear missing WP Codebox adapter diagnostic, got: ${missing_wp_codebox_output}" ;;
+esac
+
+# The copied failure parser receives the same artifact directory and must retain
+# the WP Codebox failure identity instead of treating the installed snapshot as
+# an unparseable zero-result run.
+python3 - "${FIXTURE_ROOT}/artifacts/files/test-results.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["suites"] = [{
+    "name": "phpunit",
+    "failures": [{
+        "test_id": "Example\\ParserTest::test_failure_identity",
+        "message": "Expected parser identity",
+        "failure_type": "AssertionFailedError",
+        "file": "/tmp/component/tests/ParserTest.php",
+        "line": 42,
+    }],
+}]
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+FAILURES_FILE="${FIXTURE_ROOT}/failures.json"
+HOMEBOY_TEST_FAILURES_FILE="${FAILURES_FILE}" \
+    bash "${HASHED_SOURCE_DIR}/scripts/test/parse-test-failures.sh" "${FIXTURE_ROOT}/artifacts" "/tmp/component"
+python3 - "${FAILURES_FILE}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["total"] == 3 and payload["passed"] == 2, payload
+assert payload["failures"][0]["test_id"] == "Example\\ParserTest::test_failure_identity", payload
+PY
 
 # WordPress-owned runtime selection remains available without the experimental
 # shared runtime. Wrappers that still consume shared runtimes must name what is
