@@ -9,6 +9,13 @@ const SCHEMA = 'homeboy/external-storage-retention/v1';
 const PROVIDER_ID = 'opencode.external-storage-retention';
 const CONFIG_ENV = 'HOMEBOY_OPENCODE_RETENTION_CONFIG';
 const MARKER = '.homeboy-opencode-retention.json';
+const CARGO_TARGET_PREFIX = 'cargo-target:';
+// The signature Cargo writes into CACHEDIR.TAG in every target directory.
+const CACHEDIR_TAG_SIGNATURE = 'Signature: 8a477f597d28d172789f06886806bc55';
+const CARGO_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+const MAX_CARGO_WALK_DEPTH = 6;
+const CARGO_WALK_SKIP = new Set(['.git', 'node_modules', 'vendor']);
+const GIT_PROBE_TIMEOUT_MS = 10_000;
 const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_CONFIG_BYTES = 256 * 1024;
 const MAX_TARGETS = 1000;
@@ -90,14 +97,15 @@ function inventoryFor(config, options) {
 	const sessionDiscovery = discoverSessions(config, roots, options, new Set(markerDiscovery.items.map((entry) => entry._session_id).filter(Boolean)));
 	for (const marker of markerDiscovery.items) marker.referenced = Boolean(marker._session_id && sessionDiscovery.ids.has(marker._session_id));
 	const protectedItems = discoverProtected(config, roots);
+	const cargoDiscovery = discoverCargoTargets(config, options, new Set([...markerDiscovery.items, ...sessionDiscovery.items].map((entry) => entry._path).filter(Boolean)));
 	// Scratch is discovered before session rows so a busy session store cannot
 	// starve signed terminal scratch from the bounded inventory.
-	const items = [...markerDiscovery.items, ...sessionDiscovery.items, ...protectedItems].slice(0, MAX_ITEMS);
+	const items = [...markerDiscovery.items, ...sessionDiscovery.items, ...protectedItems, ...cargoDiscovery.items].slice(0, MAX_ITEMS);
 	const known = new Set(items.map((item) => item._path).filter(Boolean));
 	const unknown = roots.map((root) => unknownBytesBelow(root.path, known));
 	const unknownBytes = unknown.reduce((total, value) => total + value.bytes, 0);
 	const measuredItems = items.map((entry) => ({ entry, measurement: walkBytes(entry._path) }));
-	const incomplete = [...markerDiscovery.incomplete, ...unknown.flatMap((value, index) => value.reasons.map((reason) => ({ root_id: roots[index].id, reason, observed_entries: value.entries, observed_bytes: value.bytes })) ), ...measuredItems.flatMap(({ entry, measurement }) => measurement.reasons.map((reason) => ({ root_id: entry.root_id, reason: `item_${reason}`, observed_entries: measurement.entries, observed_bytes: measurement.bytes })) )];
+	const incomplete = [...markerDiscovery.incomplete, ...cargoDiscovery.incomplete, ...unknown.flatMap((value, index) => value.reasons.map((reason) => ({ root_id: roots[index].id, reason, observed_entries: value.entries, observed_bytes: value.bytes })) ), ...measuredItems.flatMap(({ entry, measurement }) => measurement.reasons.map((reason) => ({ root_id: entry.root_id, reason: `item_${reason}`, observed_entries: measurement.entries, observed_bytes: measurement.bytes })) )];
 	const generation = digest(JSON.stringify({ roots: roots.map((root) => [root.id, fingerprint(root.path)]), items: items.map((item) => [item.id, item.state]) }));
 	return {
 		schema: SCHEMA, provider_id: PROVIDER_ID, generation, roots,
@@ -149,7 +157,126 @@ function discoverProtected(config, roots) {
 }
 
 function nativeReclaim(itemToReclaim, config, options) {
+	if (itemToReclaim.id.startsWith(CARGO_TARGET_PREFIX)) return reclaimCargoTarget(itemToReclaim.id, config, options);
 	if (itemToReclaim.class === 'scratch') return reclaimScratch(itemToReclaim.id, config, options);
+	return null;
+}
+
+// Cargo target directories accumulate under the temp root faster than any
+// manual sweep clears them, and nothing owned them: an explicitly chosen
+// target is caller-owned to Homeboy core, so it is never reclaimed there
+// (#2838). A target that lives inside a root this provider already owns is
+// different — it is reproducible by definition, and Cargo stamps every target
+// with its own CACHEDIR.TAG signature, so it can be identified by content
+// rather than by the directory name.
+// Cargo targets sit shallow, while a temp root holds deep, enormous trees.
+// A depth-first walk spends its whole entry budget inside the first subtree it
+// enters and never reaches them, so search breadth-first, never descend into a
+// target once identified, and skip trees that cannot contain build output.
+function cargoTargetDirectories(root) {
+	const queue = [[root, 0]]; const targets = []; let entries = 0; const reasons = new Set();
+	while (queue.length) {
+		if (entries >= MAX_WALK_ENTRIES) { reasons.add('entry_limit'); break; }
+		const [current, depth] = queue.shift(); entries += 1;
+		let stat;
+		try { stat = fs.lstatSync(current); } catch { reasons.add('read_error'); continue; }
+		if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+		if (isCargoTargetDirectory(current)) { targets.push(current); continue; }
+		if (depth >= MAX_CARGO_WALK_DEPTH) { reasons.add('depth_limit'); continue; }
+		for (const entry of safeEntries(current, MAX_WALK_ENTRIES - entries)) {
+			if (entry.isDirectory() && !CARGO_WALK_SKIP.has(entry.name)) queue.push([path.join(current, entry.name), depth + 1]);
+		}
+	}
+	return { targets, entries, reasons: [...reasons] };
+}
+
+function discoverCargoTargets(config, options, known) {
+	const items = []; const incomplete = [];
+	const now = options.now || Date.now();
+	for (const root of config.temp_roots) {
+		const discovery = cargoTargetDirectories(root);
+		for (const reason of discovery.reasons) incomplete.push({ root_id: rootIdFor(root, config), reason: `cargo_${reason}`, observed_entries: discovery.entries, observed_bytes: 0 });
+		for (const candidate of discovery.targets) {
+			if (known.has(candidate)) continue;
+			if (!containedInRoot(candidate, root)) continue;
+			if (containsTrackedFiles(candidate)) continue;
+			const id = `${CARGO_TARGET_PREFIX}${digest(candidate).slice(0, 32)}`;
+			const measurement = walkBytes(candidate);
+			for (const reason of measurement.reasons) incomplete.push({ root_id: rootIdFor(root, config), reason: `cargo_target_${reason}`, observed_entries: measurement.entries, observed_bytes: measurement.bytes });
+			items.push(item(id, rootIdFor(root, config), 'scratch', candidate, true, cargoTargetActive(candidate, now), false, cargoTargetAgeDays(candidate, now), fingerprint(candidate), measurement.bytes));
+		}
+	}
+	return { items, incomplete };
+}
+
+// Cargo writes this exact signature into `CACHEDIR.TAG` in every target
+// directory. Matching on it, rather than on a directory named `target`, is
+// what keeps a tracked fixture that merely looks like build output safe.
+function isCargoTargetDirectory(candidate) {
+	const tag = path.join(candidate, 'CACHEDIR.TAG');
+	if (!safeAbsoluteDirectory(candidate) || !safeRegularFile(tag)) return false;
+	try { return fs.readFileSync(tag, 'utf8').includes(CACHEDIR_TAG_SIGNATURE); } catch { return false; }
+}
+
+// A directory holding git-tracked content is never disposable, whatever it is
+// named and whatever it contains. A previous name-matching sweep on a real
+// host deleted 548 tracked fixture files that lived under a directory called
+// `target`; this predicate is the guard against repeating that.
+function containsTrackedFiles(candidate) {
+	const result = spawnSync('git', ['-C', candidate, 'ls-files', '--error-unmatch', '.'], { encoding: 'utf8', timeout: GIT_PROBE_TIMEOUT_MS, maxBuffer: MAX_COMMAND_BYTES });
+	if (result.error && result.error.code === 'ETIMEDOUT') return true;
+	if (typeof result.status !== 'number') return true;
+	return result.status === 0 && Boolean((result.stdout || '').trim());
+}
+
+// Cargo holds `.cargo-lock` for the duration of a build. Treat a held lock, or
+// any recent write, as an active target so a running build is never disturbed.
+function cargoTargetActive(candidate, now) {
+	const lock = path.join(candidate, '.cargo-lock');
+	if (safeRegularFile(lock)) {
+		try { if (now - fs.lstatSync(lock).mtimeMs < CARGO_ACTIVE_WINDOW_MS) return true; } catch { return true; }
+	}
+	return now - cargoTargetLastWrite(candidate) < CARGO_ACTIVE_WINDOW_MS;
+}
+
+function cargoTargetAgeDays(candidate, now) { return ageDays(cargoTargetLastWrite(candidate), now); }
+
+function cargoTargetLastWrite(candidate) {
+	let latest = 0;
+	for (const entry of [candidate, path.join(candidate, 'debug'), path.join(candidate, 'release'), path.join(candidate, 'CACHEDIR.TAG')]) {
+		try { latest = Math.max(latest, fs.lstatSync(entry).mtimeMs); } catch { /* absent profiles are not evidence */ }
+	}
+	return latest;
+}
+
+function containedInRoot(candidate, root) {
+	try { return inside(fs.realpathSync(candidate), fs.realpathSync(root)) && !fs.lstatSync(candidate).isSymbolicLink(); } catch { return false; }
+}
+
+function rootIdFor(root, config) {
+	const index = config.temp_roots.indexOf(root);
+	return index >= 0 ? `temp-${index}` : 'unmanaged';
+}
+
+// Re-verify every safety condition against the filesystem at reclaim time.
+// The inventory that produced this id may be seconds or minutes old.
+function reclaimCargoTarget(id, config, options) {
+	const now = options.now || Date.now();
+	for (const root of config.temp_roots) {
+		for (const candidate of cargoTargetDirectories(root).targets) {
+			if (`${CARGO_TARGET_PREFIX}${digest(candidate).slice(0, 32)}` !== id) continue;
+			if (!isCargoTargetDirectory(candidate) || !containedInRoot(candidate, root)) return null;
+			if (containsTrackedFiles(candidate) || cargoTargetActive(candidate, now)) return null;
+			const bytes = walkBytes(candidate).bytes;
+			const quarantine = path.join(path.dirname(candidate), `.${path.basename(candidate)}.homeboy-reclaim-${crypto.randomUUID()}`);
+			try {
+				fs.renameSync(candidate, quarantine);
+				if (!isCargoTargetDirectory(quarantine)) { fs.renameSync(quarantine, candidate); return null; }
+				fs.rmSync(quarantine, { recursive: true, force: false });
+				return { bytes };
+			} catch { return null; }
+		}
+	}
 	return null;
 }
 
