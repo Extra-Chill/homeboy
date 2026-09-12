@@ -888,12 +888,9 @@ mod tests {
                 "backend": "claude-code",
                 "capabilities": ["cli_runtime", "provider_owned_auth"],
                 "invocation": { "argv": ["claude-code"] },
-                "provider_defaults": {
-                    "claude-code": {
-                        "secret_env": [required.clone()],
-                        "required_secret_env": [required.clone()]
-                    }
-                }
+                "secret_env_requirements": [{
+                    "env": [required.clone()]
+                }]
             }))
             .expect("provider fixture")],
             ..Default::default()

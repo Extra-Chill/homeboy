@@ -70,21 +70,19 @@ fn provider_default_secret_sources_resolve_required_env_without_duplicate_mappin
 }
 
 #[test]
-fn provider_secret_sources_for_providers_include_default_json_sources() {
+fn provider_secret_sources_for_providers_include_unconditional_json_sources() {
     let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
-    provider.provider_defaults.insert(
-        "example-oauth".to_string(),
-        json!({
-            "secret_env": ["EXAMPLE_PROVIDER_ACCESS_TOKEN"],
-            "secret_env_sources": {
-                "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
-                    "source": "json-file",
-                    "path": "~/.example-provider/auth.json",
-                    "field": "tokens.access_token"
-                }
+    provider.secret_env_requirements = serde_json::from_value(json!([{
+        "env": ["EXAMPLE_PROVIDER_ACCESS_TOKEN"],
+        "secret_env_sources": {
+            "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
+                "source": "json-file",
+                "path": "~/.example-provider/auth.json",
+                "field": "tokens.access_token"
             }
-        }),
-    );
+        }
+    }]))
+    .expect("unconditional secret sources");
 
     let sources = provider_secret_sources_for_providers(&[provider]);
 
@@ -153,7 +151,7 @@ fn provider_default_secret_sources_accept_nested_json_sources() {
 }
 
 #[test]
-fn provider_default_secret_sources_feed_secret_readiness_status() {
+fn unconditional_secret_sources_feed_secret_readiness_status() {
     let temp = tempfile::tempdir().expect("tempdir");
     let auth_path = temp.path().join("provider-auth.json");
     fs::write(
@@ -168,18 +166,17 @@ fn provider_default_secret_sources_feed_secret_readiness_status() {
     .expect("write auth");
     let access = format!("HOMEBOY_TEST_ACCESS_{}", uuid::Uuid::new_v4());
     let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
-    provider.provider_defaults.insert(
-        "example-oauth".to_string(),
-        json!({
-            "secret_env_sources": {
-                access.clone(): {
-                    "source": "json-file",
-                    "path": auth_path,
-                    "field": "tokens.access_token"
-                }
+    provider.secret_env_requirements = serde_json::from_value(json!([{
+        "env": [access.clone()],
+        "secret_env_sources": {
+            access.clone(): {
+                "source": "json-file",
+                "path": auth_path,
+                "field": "tokens.access_token"
             }
-        }),
-    );
+        }
+    }]))
+    .expect("unconditional secret sources");
     let fallback_sources = provider_secret_sources_for_providers(&[provider]);
 
     let status =

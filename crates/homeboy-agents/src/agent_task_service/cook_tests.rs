@@ -4894,7 +4894,7 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                     providers: vec![serde_json::from_value(serde_json::json!({
                         "id": "credential.provider",
                         "backend": "credential",
-                        "provider_defaults": { "credential": { "required_secret_env": [missing_credential] } }
+                        "secret_env_requirements": [{ "env": [missing_credential] }]
                     })).expect("credential provider")],
                     ..Default::default()
                 },
