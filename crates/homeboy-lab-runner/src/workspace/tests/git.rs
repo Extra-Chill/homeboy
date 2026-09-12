@@ -149,6 +149,7 @@ fn changed_since_private_origin_without_controller_closure_falls_back_to_snapsho
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         };
         let sync_result = sync_workspace("lab-local-git-bundle", sync_options.clone());
@@ -318,6 +319,7 @@ fn changed_since_promisor_base_without_controller_closure_falls_back_to_snapshot
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         );
@@ -492,6 +494,7 @@ fn git_materialization_ignores_generated_homeboy_output_but_refuses_source_dirty
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
             )
@@ -568,6 +571,7 @@ fn controller_routed_git_sync_materializes_bundle_for_public_remote() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -666,6 +670,7 @@ fn controller_routed_git_sync_rejects_shallow_source_checkout() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -747,6 +752,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )

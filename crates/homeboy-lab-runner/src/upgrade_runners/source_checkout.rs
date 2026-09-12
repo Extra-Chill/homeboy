@@ -181,6 +181,7 @@ pub fn materialize_runner_source_path(runner: &Runner, source_path: &Path) -> Re
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         },
     )?;
@@ -205,6 +206,7 @@ pub fn materialize_explicit_runner_source_path(
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         },
     )?;

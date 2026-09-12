@@ -1074,6 +1074,7 @@ fn sync_options(path: String, run_id: Option<String>) -> RunnerWorkspaceSyncOpti
         git_fetch_refs: Vec::new(),
         snapshot_includes: Vec::new(),
         allow_dirty_lab_workspace: false,
+        validation_dependency_ids: None,
         run_isolation_token: run_id,
     }
 }

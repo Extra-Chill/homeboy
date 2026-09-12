@@ -3132,6 +3132,35 @@ fn annotate_cook_controller_preparation_error(mut error: Error, runner_id: &str)
     )
 }
 
+fn inject_effective_validation_dependency_setting(
+    settings: &crate::commands::utils::args::SettingArgs,
+    profile_values: &[(String, serde_json::Value)],
+    mut args: Vec<String>,
+) -> homeboy::core::Result<Vec<String>> {
+    let Some(value) = settings.effective_json_override("validation_dependencies", profile_values)
+    else {
+        return Ok(args);
+    };
+    let metadata = serde_json::to_string(&value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize effective validation dependency setting".to_string()),
+        )
+    })?;
+    let insertion = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    args.splice(
+        insertion..insertion,
+        [
+            "--homeboy-validation-dependencies-json".to_string(),
+            metadata,
+        ],
+    );
+    Ok(args)
+}
+
 fn inline_portable_settings_profiles(
     cli: &Cli,
     args: &[String],
@@ -3150,7 +3179,7 @@ fn inline_portable_settings_profiles(
         _ => return Ok(args.to_vec()),
     };
     if settings.settings_json_file.is_empty() {
-        return Ok(args.to_vec());
+        return inject_effective_validation_dependency_setting(settings, &[], args.to_vec());
     }
 
     let profile_values = settings.settings_profile_json_overrides()?;
@@ -3195,7 +3224,7 @@ fn inline_portable_settings_profiles(
             Error::internal_unexpected("settings profile normalization lost the portable command")
         })?;
     let mut portable_profile_args = Vec::with_capacity(profile_values.len() * 2);
-    for (key, value) in profile_values {
+    for (key, value) in &profile_values {
         let value = serde_json::to_string(&value).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -3206,7 +3235,7 @@ fn inline_portable_settings_profiles(
         portable_profile_args.push(format!("{key}={value}"));
     }
     rewritten.splice(insertion..insertion, portable_profile_args);
-    Ok(rewritten)
+    inject_effective_validation_dependency_setting(settings, &profile_values, rewritten)
 }
 
 fn credential_shaped_setting_key(key: &str, value: &serde_json::Value) -> Option<String> {

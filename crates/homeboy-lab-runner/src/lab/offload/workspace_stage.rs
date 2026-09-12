@@ -243,6 +243,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         request.allow_dirty_lab_workspace,
     )?;
     let mut offload_args = materialization_planner.args;
+    let validation_dependency_ids = materialization_planner.validation_dependency_ids;
     verify_cook_workspace_attestations_in_args(&offload_args, source_path)?;
     let extra_workspaces = materialization_planner.extra_workspaces;
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
@@ -274,6 +275,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         git_fetch_refs: git_fetch_refs.clone(),
         snapshot_includes: Vec::new(),
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        validation_dependency_ids,
         run_isolation_token: run_isolation_token.clone(),
     };
     // Compatible snapshots are mutable runner workspaces, not shared immutable
