@@ -1265,12 +1265,9 @@ mod preview_tests {
                     "id": "declared.agent-task-executor",
                     "backend": "declared",
                     "invocation": { "argv": ["true"] },
-                    "provider_defaults": {
-                        "declared": {
-                            "secret_env": [required.clone()],
-                            "required_secret_env": [required],
-                        },
-                    },
+                    "secret_env_requirements": [{
+                        "env": [required]
+                    }],
                 }))
                 .expect("declared provider"),
             ],
@@ -1281,32 +1278,15 @@ mod preview_tests {
     }
 
     #[test]
-    fn backend_preview_readiness_injects_sole_default_fallback_credentials() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let credential = root.path().join("credential.json");
-        let readiness = root.path().join("readiness.js");
-        std::fs::write(&credential, r#"{"token":"fallback-token"}"#).expect("credential");
-        std::fs::write(
-            &readiness,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
-        )
-        .expect("readiness script");
+    fn backend_preview_does_not_select_unrelated_account_default_credentials() {
         let catalog = provider::AgentTaskProviderCatalog {
             providers: vec![serde_json::from_value(serde_json::json!({
-                "id": "fallback.agent-task-executor",
-                "backend": "fallback",
+                "id": "sample-runtime.agent-task-executor",
+                "backend": "sample-runtime",
                 "invocation": { "argv": ["true"] },
-                "readiness_invocation": { "argv": ["node", readiness] },
                 "provider_defaults": {
-                    "only": {
-                        "required_secret_env": ["PREVIEW_FALLBACK_TOKEN"],
-                        "secret_env_sources": {
-                            "PREVIEW_FALLBACK_TOKEN": {
-                                "source": "json-file",
-                                "path": credential,
-                                "field": "token"
-                            }
-                        }
+                    "unused-account": {
+                        "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"]
                     }
                 }
             }))
@@ -1314,7 +1294,42 @@ mod preview_tests {
             ..Default::default()
         };
 
-        assert_eq!(ready_cook_backends(&catalog), vec!["fallback"]);
+        assert_eq!(ready_cook_backends(&catalog), vec!["sample-runtime"]);
+    }
+
+    #[test]
+    fn backend_preview_readiness_injects_unconditional_declared_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credential = root.path().join("credential.json");
+        let readiness = root.path().join("readiness.js");
+        std::fs::write(&credential, r#"{"token":"required-token"}"#).expect("credential");
+        std::fs::write(
+            &readiness,
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_REQUIRED_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='required-token',classification:token==='required-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
+        )
+        .expect("readiness script");
+        let catalog = provider::AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "sample-runtime.agent-task-executor",
+                "backend": "sample-runtime",
+                "invocation": { "argv": ["true"] },
+                "readiness_invocation": { "argv": ["node", readiness] },
+                "secret_env_requirements": [{
+                    "env": ["PREVIEW_REQUIRED_TOKEN"],
+                    "secret_env_sources": {
+                        "PREVIEW_REQUIRED_TOKEN": {
+                            "source": "json-file",
+                            "path": credential,
+                            "field": "token"
+                        }
+                    }
+                }]
+            }))
+            .expect("provider")],
+            ..Default::default()
+        };
+
+        assert_eq!(ready_cook_backends(&catalog), vec!["sample-runtime"]);
     }
 
     #[test]

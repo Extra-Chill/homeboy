@@ -3364,12 +3364,9 @@ mod tests {
             "id": "claude-code.agent-task-executor",
             "backend": "claude-code",
             "capabilities": ["cli_runtime", "provider_owned_auth"],
-            "provider_defaults": {
-                "claude-code": {
-                    "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
-                    "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
-                }
-            }
+            "secret_env_requirements": [{
+                "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+            }]
         }))
         .expect("provider fixture")
     }
@@ -4008,18 +4005,15 @@ mod tests {
                 "id": "claude-code.agent-task-executor",
                 "backend": "claude-code",
                 "capabilities": ["cli_runtime", "provider_owned_auth"],
-                "provider_defaults": {
-                    "claude-code": {
-                        "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
-                        "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
-                        "secret_env_sources": {
-                            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
-                                "source": "env",
-                                "env_var": "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
-                            }
+                "secret_env_requirements": [{
+                    "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                    "secret_env_sources": {
+                        "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
+                            "source": "env",
+                            "env_var": "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
                         }
                     }
-                }
+                }]
             }))
             .expect("provider fixture");
             let mut args = providers_args();
@@ -4067,12 +4061,9 @@ mod tests {
             let requiring: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
                 "id": "claude-code.agent-task-executor",
                 "backend": "claude-code",
-                "provider_defaults": {
-                    "claude-code": {
-                        "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
-                        "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
-                    }
-                }
+                "secret_env_requirements": [{
+                    "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+                }]
             }))
             .expect("requiring provider");
             let sourced: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
@@ -4206,10 +4197,10 @@ mod tests {
             unavailable.backend = "unavailable".to_string();
             let credential = format!("HOMEBOY_ROTATED_FALLBACK_{}", uuid::Uuid::new_v4());
             let mut fallback = provider("fallback.provider", "fallback");
-            fallback.provider_defaults.insert(
-                "fallback".to_string(),
-                serde_json::json!({ "required_secret_env": [credential.clone()] }),
-            );
+            fallback.secret_env_requirements = serde_json::from_value(serde_json::json!([{
+                "env": [credential.clone()]
+            }]))
+            .expect("secret env requirements");
             let catalog = provider_catalog(vec![unavailable, fallback]);
             let route =
                 agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
@@ -4297,18 +4288,16 @@ mod tests {
             "id": "owned-auth.provider",
             "backend": "owned-auth",
             "capabilities": ["cli_runtime", "provider_owned_auth"],
-            "provider_defaults": {
-                "owned-auth": {
-                    "required_secret_env": ["HOMEBOY_TEST_OWNED_AUTH_TOKEN"],
-                    "secret_env_sources": {
-                        "HOMEBOY_TEST_OWNED_AUTH_TOKEN": {
-                            "source": "json-file",
-                            "path": auth.path(),
-                            "field": "token"
-                        }
+            "secret_env_requirements": [{
+                "env": ["HOMEBOY_TEST_OWNED_AUTH_TOKEN"],
+                "secret_env_sources": {
+                    "HOMEBOY_TEST_OWNED_AUTH_TOKEN": {
+                        "source": "json-file",
+                        "path": auth.path(),
+                        "field": "token"
                     }
                 }
-            }
+            }]
         }))
         .expect("provider fixture");
         let catalog = provider_catalog(vec![provider.clone()]);

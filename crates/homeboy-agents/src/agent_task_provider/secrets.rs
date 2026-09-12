@@ -180,11 +180,11 @@ pub(super) fn provider_secret_sources(
     sources
 }
 
-/// Every secret source a provider declares for itself, independent of any
-/// dispatch request: its unconditional `secret_env_requirements` sources plus
-/// a sole provider default, which is the same implicit-default rule scheduling
-/// uses. Multiple account defaults remain request-scoped; merging them here
-/// would let map iteration choose an arbitrary source for a shared env name.
+/// Every secret source a provider declares independently of any dispatch
+/// request: unconditional `secret_env_requirements` sources only.
+/// Account-scoped `provider_defaults` stay request-scoped through
+/// `provider_secret_sources(provider, Some(request))`. Overlaying a sole unused
+/// account here would let an unselected source replace an unconditional one.
 ///
 /// This is the single source-resolution path behind `agent-task auth status`,
 /// `agent-task providers --secret-env`, and provider credential readiness
@@ -198,13 +198,7 @@ pub(super) fn provider_secret_sources(
 pub(super) fn provider_declared_secret_sources(
     provider: &AgentTaskExecutorProvider,
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let mut sources = provider_secret_sources(provider, None);
-    if provider.provider_defaults.len() == 1 {
-        if let Some(provider_default) = provider.provider_defaults.values().next() {
-            sources.extend(provider_config_secret_sources(provider_default));
-        }
-    }
-    sources
+    provider_secret_sources(provider, None)
 }
 
 fn secret_source_map_from_extra(
@@ -292,21 +286,17 @@ fn effective_provider_default<'a>(
     {
         return provider.provider_defaults.get(name);
     }
-    // A concrete provider/model route is more specific than a provider's sole
-    // fallback account. Do not require credentials for an unrelated fallback
-    // merely because this executor happens to declare only one default.
-    if let Some(model_provider) = request
+    // Provider defaults are route-scoped. Only a request that names the default
+    // via executor.config.provider or a provider/model route may inherit that
+    // default's credentials. An unused alternative must not become mandatory
+    // merely because the executor declares exactly one account.
+    request
         .executor
         .model
         .as_deref()
         .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
         .filter(|provider| !provider.trim().is_empty())
-    {
-        return provider.provider_defaults.get(model_provider);
-    }
-    (provider.provider_defaults.len() == 1)
-        .then(|| provider.provider_defaults.values().next())
-        .flatten()
+        .and_then(|model_provider| provider.provider_defaults.get(model_provider))
 }
 
 fn requirement_matches_request(when: Option<&Value>, request: Option<&AgentTaskRequest>) -> bool {
@@ -392,7 +382,46 @@ mod tests {
     }
 
     #[test]
-    fn sole_default_required_secret_is_effective_without_an_explicit_provider() {
+    fn unused_account_source_does_not_override_unconditional_source() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "secret_env_requirements": [{
+                "env": ["SHARED_TOKEN"],
+                "secret_env_sources": {
+                    "SHARED_TOKEN": {"source": "env", "env_var": "UNCONDITIONAL_SOURCE"}
+                }
+            }],
+            "provider_defaults": {
+                "unused-account": {
+                    "required_secret_env": ["SHARED_TOKEN"],
+                    "secret_env_sources": {
+                        "SHARED_TOKEN": {"source": "env", "env_var": "UNUSED_ACCOUNT_SOURCE"}
+                    }
+                }
+            }
+        }))
+        .expect("provider");
+
+        assert_eq!(
+            provider_declared_secret_sources(&provider)["SHARED_TOKEN"]
+                .env_var
+                .as_deref(),
+            Some("UNCONDITIONAL_SOURCE")
+        );
+        assert_eq!(
+            provider_secret_sources(
+                &provider,
+                Some(&request(serde_json::json!({"provider": "unused-account"})))
+            )["SHARED_TOKEN"]
+                .env_var
+                .as_deref(),
+            Some("UNUSED_ACCOUNT_SOURCE")
+        );
+    }
+
+    #[test]
+    fn unselected_sole_default_is_not_required() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "test.provider",
             "backend": "test",
@@ -402,9 +431,77 @@ mod tests {
         }))
         .expect("provider");
 
+        assert!(provider_secret_env(&provider, Some(&request(Value::Null))).is_empty());
+        assert!(provider_secret_sources(&provider, Some(&request(Value::Null))).is_empty());
+    }
+
+    #[test]
+    fn dispatch_secret_plan_omits_unrelated_sole_default_credentials() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "capabilities": ["provider_owned_auth"],
+            "provider_defaults": {
+                "unused-account": { "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"] }
+            }
+        }))
+        .expect("provider");
+        let mut task = request(Value::Null);
+        task.executor.selector = Some("test.provider".to_string());
+        let plan = AgentTaskPlan::new("secret-selection", vec![task]);
+
+        assert!(
+            provider_runner_secret_env_for_plan_with_providers(&plan, &[provider.clone()])
+                .is_empty()
+        );
+        assert!(provider_secret_env_plan(&provider, &plan.tasks[0])
+            .secret_env_names()
+            .is_empty());
+    }
+
+    #[test]
+    fn dispatch_secret_plan_enforces_selected_declared_credentials() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "used-account": { "required_secret_env": ["USED_ACCOUNT_TOKEN"] },
+                "unused-account": { "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"] }
+            }
+        }))
+        .expect("provider");
+        let mut task = request(serde_json::json!({"provider": "used-account"}));
+        task.executor.selector = Some("test.provider".to_string());
+        let plan = AgentTaskPlan::new("secret-selection-selected", vec![task]);
+
         assert_eq!(
-            provider_secret_env(&provider, Some(&request(Value::Null))),
-            vec!["ONLY_ACCOUNT_TOKEN"]
+            provider_runner_secret_env_for_plan_with_providers(&plan, &[provider.clone()]),
+            vec!["USED_ACCOUNT_TOKEN".to_string()]
+        );
+        assert_eq!(
+            provider_secret_env_plan(&provider, &plan.tasks[0]).secret_env_names(),
+            vec!["USED_ACCOUNT_TOKEN".to_string()]
+        );
+    }
+
+    #[test]
+    fn dispatch_secret_plan_enforces_unconditional_secret_requirements() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "secret_requirements": [{ "name": "REQUIRED_TOKEN" }],
+            "provider_defaults": {
+                "unused-account": { "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"] }
+            }
+        }))
+        .expect("provider");
+        let mut task = request(Value::Null);
+        task.executor.selector = Some("test.provider".to_string());
+        let plan = AgentTaskPlan::new("secret-selection-required", vec![task]);
+
+        assert_eq!(
+            provider_runner_secret_env_for_plan_with_providers(&plan, &[provider]),
+            vec!["REQUIRED_TOKEN".to_string()]
         );
     }
 
