@@ -236,12 +236,26 @@ fn restore_checkout_after_failed_run(
         let restored = evidence.restored;
         let recovery_action =
             (!restored).then(|| format!("homeboy release {} --apply", run.component_id));
-        let tag_state = if run.result.steps.iter().any(|step| {
-            step.step_type == "git.tag" && matches!(step.status, ReleaseStepStatus::Success)
-        }) {
-            "local_tag_created"
-        } else {
-            "not_created"
+        // Restoring HEAD discards the release commit, which leaves any tag this
+        // run created pointing at an object no longer reachable from the branch.
+        // Reporting that as `local_tag_created` and stopping is what made the
+        // next release refuse to run at all: it saw a tag ahead of the source
+        // version and unreachable from HEAD, and declined to reconcile an
+        // orphaned release identity. Rollback owns undoing what the run did, so
+        // delete the tag here rather than leaving an operator to find it (#14577).
+        let tag_state = match created_local_tag(run) {
+            Some(tag) => match homeboy_core::git::delete_local_tag(checkout_guard.path(), &tag) {
+                Ok(output) if output.success => "deleted",
+                // A tag that survives is the operator's problem to see, not to
+                // discover later through an unrelated failure.
+                _ => {
+                    run.result.warnings.push(format!(
+                        "Release rollback could not delete local tag {tag}; delete it before the next release: git tag -d {tag}"
+                    ));
+                    "local_tag_retained"
+                }
+            },
+            None => "not_created",
         };
         run.result.rollback = Some(ReleaseRollbackEvidence {
             status: if restored { "restored" } else { "interrupted" }.to_string(),
@@ -274,6 +288,24 @@ fn restore_checkout_after_failed_run(
     Ok(())
 }
 
+/// The tag this run created, if it created one.
+///
+/// A tag step that skipped because the tag already existed and pointed at HEAD
+/// did not create anything, so rollback must leave that tag alone.
+fn created_local_tag(run: &ReleaseRun) -> Option<String> {
+    run.result
+        .steps
+        .iter()
+        .filter(|step| {
+            step.step_type == "git.tag" && matches!(step.status, ReleaseStepStatus::Success)
+        })
+        .filter_map(|step| step.data.as_ref())
+        .find(|data| data.get("skipped").and_then(serde_json::Value::as_bool) != Some(true))
+        .and_then(|data| data.get("tag"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 fn release_was_pushed(steps: &[ReleaseStepResult]) -> bool {
     steps.iter().any(|step| {
         step.step_type == "git.push" && matches!(step.status, ReleaseStepStatus::Success)
@@ -282,8 +314,136 @@ fn release_was_pushed(steps: &[ReleaseStepResult]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::release_was_pushed;
-    use crate::release::types::{ReleaseStepResult, ReleaseStepStatus};
+    use super::{release_was_pushed, restore_checkout_after_failed_run};
+    use crate::release::checkout_guard::ReleaseCheckoutGuard;
+    use crate::release::types::{
+        ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+    };
+    use homeboy_core::component::Component;
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        run_git(dir, &["init", "-q", "--initial-branch", "main"]);
+        run_git(dir, &["config", "user.email", "homeboy@example.com"]);
+        run_git(dir, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(dir.join("file.txt"), "main\n").expect("write");
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "Initial commit"]);
+        temp
+    }
+
+    fn tag_step(data: serde_json::Value) -> ReleaseStepResult {
+        ReleaseStepResult {
+            id: "git.tag".to_string(),
+            step_type: "git.tag".to_string(),
+            status: ReleaseStepStatus::Success,
+            data: Some(data),
+            ..Default::default()
+        }
+    }
+
+    fn failed_run(steps: Vec<ReleaseStepResult>) -> ReleaseRun {
+        ReleaseRun {
+            component_id: "fixture".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps,
+                status: ReleaseStepStatus::Failed,
+                warnings: Vec::new(),
+                summary: None,
+                phase_timings: None,
+                rollback: None,
+            },
+        }
+    }
+
+    /// Rolling back discards the release commit, so a tag this run created is
+    /// left pointing at an unreachable object. Leaving it behind made the next
+    /// release refuse to start at all, seeing a tag ahead of the source version
+    /// and unreachable from HEAD.
+    #[test]
+    fn rollback_deletes_the_tag_the_failed_run_created() {
+        let temp = init_repo();
+        let dir = temp.path();
+        let original_head = git_stdout(dir, &["rev-parse", "HEAD"]);
+        let guard = ReleaseCheckoutGuard::capture(&Component {
+            id: "fixture".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        })
+        .expect("capture")
+        .expect("git repo");
+
+        // Stand in for the release: a version commit, then its tag.
+        std::fs::write(dir.join("file.txt"), "released\n").expect("write");
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "release: v1.2.3"]);
+        run_git(dir, &["tag", "-a", "v1.2.3", "-m", "Release v1.2.3"]);
+        assert_eq!(git_stdout(dir, &["tag", "-l", "v1.2.3"]), "v1.2.3");
+
+        let mut run = failed_run(vec![tag_step(serde_json::json!({"tag": "v1.2.3"}))]);
+        restore_checkout_after_failed_run(Some(&guard), &mut run).expect("rollback");
+
+        assert_eq!(git_stdout(dir, &["rev-parse", "HEAD"]), original_head);
+        assert_eq!(
+            git_stdout(dir, &["tag", "-l", "v1.2.3"]),
+            "",
+            "a rolled-back release must not leave its tag behind to block the next one"
+        );
+        let rollback = run.result.rollback.expect("rollback evidence");
+        assert_eq!(rollback.tag_state, "deleted");
+    }
+
+    /// A tag the run found already pointing at HEAD is not the run's to remove.
+    #[test]
+    fn rollback_keeps_a_tag_the_run_did_not_create() {
+        let temp = init_repo();
+        let dir = temp.path();
+        run_git(dir, &["tag", "-a", "v1.2.3", "-m", "Pre-existing"]);
+        let guard = ReleaseCheckoutGuard::capture(&Component {
+            id: "fixture".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        })
+        .expect("capture")
+        .expect("git repo");
+
+        let mut run = failed_run(vec![tag_step(
+            serde_json::json!({"tag": "v1.2.3", "skipped": true}),
+        )]);
+        restore_checkout_after_failed_run(Some(&guard), &mut run).expect("rollback");
+
+        assert_eq!(
+            git_stdout(dir, &["tag", "-l", "v1.2.3"]),
+            "v1.2.3",
+            "rollback must not delete a tag that existed before the release ran"
+        );
+        let rollback = run.result.rollback.expect("rollback evidence");
+        assert_eq!(rollback.tag_state, "not_created");
+    }
 
     #[test]
     fn published_push_prevents_checkout_rollback_after_deploy_failure() {

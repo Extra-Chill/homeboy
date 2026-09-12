@@ -1356,6 +1356,47 @@ fn cook_batch_child_failure_digest(
     })
 }
 
+/// Report a release that stopped short of publication without failing a step.
+///
+/// The operator needs the state it reached and the command that finishes it,
+/// both of which the release already computed.
+fn incomplete_release_digest(data: &Value) -> Option<CommandFailureDigest> {
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("incomplete");
+    let continuation = data.get("continuation_command").and_then(Value::as_str);
+    let tag = data.get("tag").and_then(Value::as_str);
+    let summary = match (tag, continuation) {
+        (Some(tag), Some(command)) => format!(
+            "Release is incomplete ({status}) at tag {tag}; publication has not run. Continue with: {}",
+            bounded_text(command, 400)
+        ),
+        (None, Some(command)) => format!(
+            "Release is incomplete ({status}); publication has not run. Continue with: {}",
+            bounded_text(command, 400)
+        ),
+        (Some(tag), None) => {
+            format!("Release is incomplete ({status}) at tag {tag}; publication has not run.")
+        }
+        (None, None) => format!("Release is incomplete ({status}); publication has not run."),
+    };
+    Some(CommandFailureDigest {
+        summary,
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions: continuation
+            .map(|command| {
+                CommandNextAction::new("finish the release", command)
+                    .with_kind(CommandNextActionKind::Repair)
+            })
+            .into_iter()
+            .collect(),
+        retryable: None,
+    })
+}
+
 /// Lift the first failed release step into the bounded command envelope. The
 /// complete plan and step payload remain available under `data` for inspection.
 fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
@@ -1364,7 +1405,15 @@ fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
     }
 
     if data.get("schema").and_then(Value::as_str) == Some("homeboy/release-operator-summary/v1") {
-        let failure = data.get("failure")?;
+        // A release can end incomplete without any step failing: `--recover`
+        // finishes git state, then reports that publication still has to run.
+        // `failure` is null there, and treating that as a failed step rendered
+        // "release step unknown (unknown) failed: release step failed without a
+        // reported error" over a release that knew its own next command (#14577).
+        let failure = match data.get("failure").filter(|failure| !failure.is_null()) {
+            Some(failure) => failure,
+            None => return incomplete_release_digest(data),
+        };
         let step = failure
             .get("step")
             .and_then(Value::as_str)
@@ -3015,6 +3064,94 @@ mod tests {
                 "{step} must not recommend a plan-only dry run"
             );
         }
+    }
+
+    /// `--recover` finishes git state and then reports, by design, that
+    /// publication still has to run. No step failed, so `failure` is null. This
+    /// is the payload that used to render "release step unknown (unknown)
+    /// failed: release step failed without a reported error" while the release
+    /// was holding the one command that finishes it.
+    fn recovered_incomplete_payload() -> Value {
+        json!({
+            "schema": "homeboy/release-operator-summary/v1",
+            "command": "release",
+            "exit_code": 4,
+            "component": "demo",
+            "status": "git_recovered",
+            "phase": "recover",
+            "tag": "v1.2.3",
+            "failure": Value::Null,
+            "continuation_command": "homeboy release demo --head --apply",
+        })
+    }
+
+    #[test]
+    fn incomplete_release_reports_its_continuation_command() {
+        let digest = release_failure_digest(&recovered_incomplete_payload()).expect("digest");
+
+        assert!(
+            !digest.summary.contains("without a reported error"),
+            "a release that stopped short of publication is not an unexplained step failure: {}",
+            digest.summary
+        );
+        assert!(
+            !digest.summary.contains("unknown"),
+            "the release knows its state; it must not be reported as unknown: {}",
+            digest.summary
+        );
+        assert!(
+            digest.summary.contains("git_recovered") && digest.summary.contains("v1.2.3"),
+            "the operator needs the state and tag actually reached: {}",
+            digest.summary
+        );
+
+        let action = digest
+            .next_actions
+            .first()
+            .expect("an incomplete release must hand back the command that finishes it");
+        assert_eq!(action.command, "homeboy release demo --head --apply");
+    }
+
+    /// The continuation command is the whole point of the digest, so it has to
+    /// survive the projection that builds the envelope, not just the type.
+    #[test]
+    fn incomplete_release_without_continuation_still_explains_itself() {
+        let mut payload = recovered_incomplete_payload();
+        payload["continuation_command"] = Value::Null;
+
+        let digest = release_failure_digest(&payload).expect("digest");
+
+        assert!(
+            digest.summary.contains("git_recovered"),
+            "state must still be reported: {}",
+            digest.summary
+        );
+        assert!(!digest.summary.contains("without a reported error"));
+    }
+
+    /// A real failed step must keep its own diagnosis; the incomplete path is
+    /// only for releases that stopped without failing anything.
+    #[test]
+    fn failed_step_still_reports_the_step_failure() {
+        let mut payload = recovered_incomplete_payload();
+        payload["status"] = json!("partial");
+        payload["failure"] = json!({
+            "step": "git.push",
+            "type": "git.push",
+            "cause": "push declined due to repository rule violations",
+            "reproduction_commands": ["homeboy release demo --dry-run"],
+        });
+
+        let digest = release_failure_digest(&payload).expect("digest");
+
+        assert!(digest.summary.contains("git.push"), "{}", digest.summary);
+        assert!(
+            digest
+                .summary
+                .contains("push declined due to repository rule violations"),
+            "{}",
+            digest.summary
+        );
     }
 
     #[test]

@@ -521,6 +521,10 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         "warnings": warnings,
         "evidence_refs": evidence_refs,
         "failure": failure,
+        // An incomplete release already knows how to finish itself. Dropping
+        // this is what reported a recovered-but-unpublished release as an
+        // unexplained failure while holding the exact command (#14577).
+        "continuation_command": result.get("continuation_command").and_then(Value::as_str).map(bounded_release_text),
         "full_command": format!("homeboy release {} --full", bounded_release_text(result.get("component_id").and_then(Value::as_str).unwrap_or("<component>"))),
         "output": output_file.map(bounded_release_text),
     });
