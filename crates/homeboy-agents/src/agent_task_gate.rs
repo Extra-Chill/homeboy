@@ -2351,15 +2351,15 @@ impl SelectedGateEnvironment {
         if !enabled {
             return Ok(());
         }
-        let explicit_target = self
-            .values
-            .get("CARGO_TARGET_DIR")
-            .cloned()
-            .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
+        // A declared or inherited `CARGO_TARGET_DIR` describes the environment
+        // this gate runs in, not a target an operator chose for it. Forwarding
+        // it as a caller-owned explicit target would put two concurrent gates
+        // in one Cargo directory, which is the contention this lease removes.
+        // The value still reaches the child through `self.values`.
         let target = homeboy_core::cleanup::acquire_managed_cargo_target_for_environment(
             "agent-task-gate",
             cwd,
-            explicit_target.as_deref(),
+            None,
             &self.values,
         )?;
         // Store sizing is evidence only. A concurrent gate may update the
