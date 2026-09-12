@@ -2472,6 +2472,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn admission_refresh_classifies_fresh_stale_absent_and_unavailable_evidence() {
+        let fresh = lab_runner_readiness_from_refresh_observations(
+            None,
+            vec![Ok(default_lab_candidate(
+                "fresh",
+                RunnerTunnelMode::Reverse,
+                true,
+            ))],
+        )
+        .expect("fresh bounded evidence is admitted");
+        assert_eq!(fresh.state, LabRunnerReadinessState::ConnectedReady);
+        assert_eq!(fresh.selected_runner_id.as_deref(), Some("fresh"));
+
+        let mut stale_candidate = default_lab_candidate("stale", RunnerTunnelMode::Reverse, true);
+        stale_candidate.admission_fresh = false;
+        let stale = lab_runner_readiness_from_refresh_observations(None, vec![Ok(stale_candidate)])
+            .expect("stale bounded evidence remains classified");
+        assert_eq!(stale.state, LabRunnerReadinessState::Stale);
+        assert!(stale.selected_runner_id.is_none());
+
+        let absent = lab_runner_readiness_from_refresh_observations(None, Vec::new())
+            .expect("an empty bounded inventory is an absence observation");
+        assert_eq!(absent.state, LabRunnerReadinessState::Absent);
+        assert!(absent.selected_runner_id.is_none());
+
+        let mut unavailable_candidate =
+            default_lab_candidate("unavailable", RunnerTunnelMode::Reverse, true);
+        unavailable_candidate.active_jobs_available = false;
+        let unavailable =
+            lab_runner_readiness_from_refresh_observations(None, vec![Ok(unavailable_candidate)])
+                .expect("unavailable bounded evidence remains classified");
+        assert_eq!(
+            unavailable.state,
+            LabRunnerReadinessState::ConnectedIneligible
+        );
+        assert!(unavailable.selected_runner_id.is_none());
+    }
+
     /// #11106's counter-property. Reverse runners now report an `unverified`
     /// daemon where they previously reported nothing at all. That must rank
     /// them below a verified peer without fencing them, because fencing every
