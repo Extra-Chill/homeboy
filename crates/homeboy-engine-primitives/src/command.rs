@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
 #[cfg(unix)]
+type AdoptedGuard = Option<(u32, Option<u32>, u64)>;
+#[cfg(unix)]
 const PROCESS_TREE_TERM_GRACE: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const PROCESS_TREE_KILL_GRACE: Duration = Duration::from_secs(2);
@@ -81,10 +83,36 @@ pub fn process_is_running(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_state(pid: u32) -> Option<char> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinuxProcStat {
+    state: char,
+    parent_pid: u32,
+    starttime_ticks: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_stat(pid: u32) -> Option<LinuxProcStat> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    fields.split_whitespace().next()?.chars().next()
+    parse_linux_proc_stat(&stat)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_proc_stat(stat: &str) -> Option<LinuxProcStat> {
+    let after_command = stat.rsplit_once(") ")?.1;
+    let mut fields = after_command.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let parent_pid = fields.next()?.parse().ok()?;
+    let starttime_ticks = after_command.split_whitespace().nth(19)?.parse().ok()?;
+    Some(LinuxProcStat {
+        state,
+        parent_pid,
+        starttime_ticks,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_state(pid: u32) -> Option<char> {
+    linux_process_stat(pid).map(|stat| stat.state)
 }
 
 /// Keeps an isolated child tree owned by the controller that spawned it.
@@ -119,6 +147,7 @@ impl ControllerChildGuard {
     pub fn prepare(command: &mut Command) -> io::Result<Self> {
         #[cfg(unix)]
         {
+            enable_child_subreaper()?;
             #[cfg(target_os = "linux")]
             let guard_id = CHILD_GUARD_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             #[cfg(target_os = "linux")]
@@ -229,7 +258,7 @@ impl ControllerChildGuard {
         {
             let _ = deadline;
             self.observe_owned_processes(child.id())?;
-            terminate_owned_processes_and_reap(child, &self.owned_processes)
+            terminate_owned_processes_and_reap(child, &self.owned_processes, self.adopted_guard()?)
         }
 
         #[cfg(windows)]
@@ -273,7 +302,11 @@ impl ControllerChildGuard {
             // Its ordinary descendants remain in the isolated process group;
             // drain that group before handling tracked session escapees.
             terminate_remaining_process_group(root_pid)?;
-            terminate_owned_processes_after_root_exit(root_pid, &self.owned_processes)
+            terminate_owned_processes_after_root_exit(
+                root_pid,
+                &self.owned_processes,
+                self.adopted_guard()?,
+            )
         }
 
         #[cfg(not(unix))]
@@ -297,19 +330,25 @@ impl ControllerChildGuard {
             .owned_processes
             .lock()
             .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
-        #[cfg(target_os = "linux")]
-        let adopted = Some((
-            self.controller_pid,
-            *self
-                .guard_pid
-                .lock()
-                .map_err(|_| io::Error::other("guard PID lock poisoned"))?,
-            self.guard_id,
-        ));
-        #[cfg(not(target_os = "linux"))]
-        let adopted = None;
-        extend_owned_processes(&mut owned, root_pid, &snapshot, adopted);
+        extend_owned_processes(&mut owned, root_pid, &snapshot, self.adopted_guard()?);
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn adopted_guard(&self) -> io::Result<AdoptedGuard> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Some((
+                self.controller_pid,
+                *self
+                    .guard_pid
+                    .lock()
+                    .map_err(|_| io::Error::other("guard PID lock poisoned"))?,
+                self.guard_id,
+            )))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(None)
     }
 
     #[cfg(windows)]
@@ -1396,10 +1435,40 @@ fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
 struct UnixProcessIdentity {
     pid: u32,
     parent_pid: u32,
+    #[cfg(not(target_os = "linux"))]
     started_at: String,
+    #[cfg(target_os = "linux")]
+    starttime_ticks: u64,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
+    let mut processes = Vec::new();
+    let entries = std::fs::read_dir("/proc")
+        .map_err(|error| io::Error::other(format!("process identity discovery failed: {error}")))?;
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 || pid > i32::MAX as u32 {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(parsed) = parse_linux_proc_stat(&stat) else {
+            continue;
+        };
+        processes.push(UnixProcessIdentity {
+            pid,
+            parent_pid: parsed.parent_pid,
+            starttime_ticks: parsed.starttime_ticks,
+        });
+    }
+    Ok(processes)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
     let output = Command::new("ps")
         .env("PATH", "/usr/bin:/bin")
@@ -1432,7 +1501,7 @@ fn extend_owned_processes(
     owned: &mut Vec<UnixProcessIdentity>,
     root_pid: u32,
     snapshot: &[UnixProcessIdentity],
-    adopted: Option<(u32, Option<u32>, u64)>,
+    adopted: AdoptedGuard,
 ) {
     if owned.is_empty() {
         if let Some(root) = snapshot.iter().find(|process| process.pid == root_pid) {
@@ -1451,7 +1520,9 @@ fn extend_owned_processes(
                         && Some(process.pid) != guard_pid
                         && process_has_guard_id(process.pid, guard_id)
                 });
-            if adopted_descendant || owned.iter().any(|known| known.pid == process.parent_pid) {
+            if adopted_descendant
+                || owned_contains_matching_parent(owned, snapshot, process.parent_pid)
+            {
                 owned.push(process.clone());
                 changed = true;
             }
@@ -1480,16 +1551,107 @@ fn process_has_guard_id(_pid: u32, _guard_id: u64) -> bool {
 }
 
 #[cfg(unix)]
-fn live_owned_pids(owned: &[UnixProcessIdentity], snapshot: &[UnixProcessIdentity]) -> Vec<u32> {
-    owned
-        .iter()
-        .filter_map(|known| {
-            snapshot
+fn owned_identity_matches(known: &UnixProcessIdentity, current: &UnixProcessIdentity) -> bool {
+    if known.pid != current.pid {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        known.starttime_ticks == current.starttime_ticks
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        known.started_at == current.started_at
+    }
+}
+
+#[cfg(unix)]
+fn owned_contains_matching_parent(
+    owned: &[UnixProcessIdentity],
+    snapshot: &[UnixProcessIdentity],
+    parent_pid: u32,
+) -> bool {
+    owned.iter().any(|known| {
+        known.pid == parent_pid
+            && snapshot
                 .iter()
-                .any(|process| process.pid == known.pid && process.started_at == known.started_at)
-                .then_some(known.pid)
-        })
-        .collect()
+                .any(|current| owned_identity_matches(known, current))
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedPresence {
+    Gone,
+    Reused,
+    Live,
+    Zombie { parent_pid: u32 },
+}
+
+#[cfg(target_os = "linux")]
+fn interpret_owned_stat_contents(
+    pid: u32,
+    result: io::Result<String>,
+) -> io::Result<Option<LinuxProcStat>> {
+    match result {
+        Ok(body) => parse_linux_proc_stat(&body).map(Some).ok_or_else(|| {
+            io::Error::other(format!("owned process {pid} has invalid stat metadata"))
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io::Error::other(format!(
+            "owned process {pid} identity is unverifiable: {error}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_owned_identity(known: &UnixProcessIdentity) -> io::Result<OwnedPresence> {
+    let Some(stat) = interpret_owned_stat_contents(
+        known.pid,
+        std::fs::read_to_string(format!("/proc/{}/stat", known.pid)),
+    )?
+    else {
+        return Ok(OwnedPresence::Gone);
+    };
+    if stat.starttime_ticks != known.starttime_ticks {
+        return Ok(OwnedPresence::Reused);
+    }
+    if stat.state == 'Z' {
+        return Ok(OwnedPresence::Zombie {
+            parent_pid: stat.parent_pid,
+        });
+    }
+    Ok(OwnedPresence::Live)
+}
+
+#[cfg(unix)]
+fn owned_runnable_pids(
+    owned: &[UnixProcessIdentity],
+    snapshot: &[UnixProcessIdentity],
+) -> io::Result<Vec<u32>> {
+    let mut runnable = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        let _ = snapshot;
+        for known in owned {
+            if matches!(inspect_owned_identity(known)?, OwnedPresence::Live) {
+                runnable.push(known.pid);
+            }
+        }
+        return Ok(runnable);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        for known in owned {
+            let Some(current) = snapshot.iter().find(|process| process.pid == known.pid) else {
+                continue;
+            };
+            if owned_identity_matches(known, current) && process_is_running(known.pid) {
+                runnable.push(known.pid);
+            }
+        }
+        Ok(runnable)
+    }
 }
 
 #[cfg(unix)]
@@ -1497,10 +1659,11 @@ fn signal_owned_processes(
     owned: &mut Vec<UnixProcessIdentity>,
     root_pid: u32,
     signal: libc::c_int,
+    adopted: AdoptedGuard,
 ) -> io::Result<Vec<u32>> {
     let snapshot = unix_process_snapshot()?;
-    extend_owned_processes(owned, root_pid, &snapshot, None);
-    let pids = live_owned_pids(owned, &snapshot);
+    extend_owned_processes(owned, root_pid, &snapshot, adopted);
+    let pids = owned_runnable_pids(owned, &snapshot)?;
     signal_pids(&pids, signal);
     Ok(pids)
 }
@@ -1509,6 +1672,7 @@ fn signal_owned_processes(
 fn terminate_owned_processes_and_reap(
     child: &mut Child,
     owned_processes: &Mutex<Vec<UnixProcessIdentity>>,
+    adopted: AdoptedGuard,
 ) -> io::Result<ExitStatus> {
     enable_child_subreaper()?;
     let root_pid = child.id();
@@ -1516,7 +1680,7 @@ fn terminate_owned_processes_and_reap(
         .lock()
         .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
     signal_process_group(root_pid, libc::SIGTERM)?;
-    signal_owned_processes(&mut owned, root_pid, libc::SIGTERM)?;
+    signal_owned_processes(&mut owned, root_pid, libc::SIGTERM, adopted)?;
     let mut status = child.try_wait()?;
     if !wait_for_owned_process_exit(
         child,
@@ -1525,9 +1689,10 @@ fn terminate_owned_processes_and_reap(
         PROCESS_TREE_TERM_GRACE,
         libc::SIGTERM,
         &mut status,
+        adopted,
     )? {
         signal_process_group(root_pid, libc::SIGKILL)?;
-        signal_owned_processes(&mut owned, root_pid, libc::SIGKILL)?;
+        signal_owned_processes(&mut owned, root_pid, libc::SIGKILL, adopted)?;
         if !wait_for_owned_process_exit(
             child,
             root_pid,
@@ -1535,6 +1700,7 @@ fn terminate_owned_processes_and_reap(
             PROCESS_TREE_KILL_GRACE,
             libc::SIGKILL,
             &mut status,
+            adopted,
         )? {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -1549,25 +1715,28 @@ fn terminate_owned_processes_and_reap(
 fn terminate_owned_processes_after_root_exit(
     root_pid: u32,
     owned_processes: &Mutex<Vec<UnixProcessIdentity>>,
+    adopted: AdoptedGuard,
 ) -> io::Result<()> {
     let mut owned = owned_processes
         .lock()
         .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
-    signal_owned_processes(&mut owned, root_pid, libc::SIGTERM)?;
+    signal_owned_processes(&mut owned, root_pid, libc::SIGTERM, adopted)?;
     if wait_for_owned_process_exit_without_child(
         root_pid,
         &mut owned,
         PROCESS_TREE_TERM_GRACE,
         libc::SIGTERM,
+        adopted,
     )? {
         return Ok(());
     }
-    signal_owned_processes(&mut owned, root_pid, libc::SIGKILL)?;
+    signal_owned_processes(&mut owned, root_pid, libc::SIGKILL, adopted)?;
     if wait_for_owned_process_exit_without_child(
         root_pid,
         &mut owned,
         PROCESS_TREE_KILL_GRACE,
         libc::SIGKILL,
+        adopted,
     )? {
         return Ok(());
     }
@@ -1585,17 +1754,20 @@ fn wait_for_owned_process_exit(
     grace: Duration,
     signal: libc::c_int,
     status: &mut Option<ExitStatus>,
+    adopted: AdoptedGuard,
 ) -> io::Result<bool> {
     let deadline = std::time::Instant::now() + grace;
     loop {
         let snapshot = unix_process_snapshot()?;
-        extend_owned_processes(owned, root_pid, &snapshot, None);
-        signal_pids(&live_owned_pids(owned, &snapshot), signal);
+        extend_owned_processes(owned, root_pid, &snapshot, adopted);
+        signal_pids(&owned_runnable_pids(owned, &snapshot)?, signal);
         if status.is_none() {
             *status = child.try_wait()?;
         }
-        reap_exited_process_group_children(root_pid);
-        if live_owned_pids(owned, &snapshot).is_empty() {
+        if status.is_some() {
+            reap_exited_process_group_children(root_pid);
+        }
+        if owned_processes_are_drained(owned, &snapshot, root_pid, adopted)? {
             return Ok(true);
         }
         if std::time::Instant::now() >= deadline {
@@ -1611,20 +1783,125 @@ fn wait_for_owned_process_exit_without_child(
     owned: &mut Vec<UnixProcessIdentity>,
     grace: Duration,
     signal: libc::c_int,
+    adopted: AdoptedGuard,
 ) -> io::Result<bool> {
     let deadline = std::time::Instant::now() + grace;
     loop {
         let snapshot = unix_process_snapshot()?;
-        extend_owned_processes(owned, root_pid, &snapshot, None);
-        signal_pids(&live_owned_pids(owned, &snapshot), signal);
+        extend_owned_processes(owned, root_pid, &snapshot, adopted);
+        signal_pids(&owned_runnable_pids(owned, &snapshot)?, signal);
         reap_exited_process_group_children(root_pid);
-        if live_owned_pids(owned, &snapshot).is_empty() {
+        if owned_processes_are_drained(owned, &snapshot, root_pid, adopted)? {
             return Ok(true);
         }
         if std::time::Instant::now() >= deadline {
             return Ok(false);
         }
         thread::sleep(PROCESS_TREE_POLL_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn owned_processes_are_drained(
+    owned: &[UnixProcessIdentity],
+    snapshot: &[UnixProcessIdentity],
+    root_pid: u32,
+    adopted: AdoptedGuard,
+) -> io::Result<bool> {
+    if !owned_runnable_pids(owned, snapshot)?.is_empty() {
+        return Ok(false);
+    }
+    reap_verified_adopted_zombies(owned, root_pid, adopted)?;
+    for known in owned {
+        if !owned_identity_is_absent(known, snapshot, root_pid, adopted)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn owned_identity_is_absent(
+    known: &UnixProcessIdentity,
+    snapshot: &[UnixProcessIdentity],
+    root_pid: u32,
+    adopted: AdoptedGuard,
+) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = snapshot;
+        Ok(match inspect_owned_identity(known)? {
+            OwnedPresence::Gone | OwnedPresence::Reused => true,
+            OwnedPresence::Live => false,
+            OwnedPresence::Zombie { parent_pid } => {
+                if known.pid == root_pid {
+                    false
+                } else if let Some((controller_pid, guard_pid, _)) = adopted {
+                    Some(known.pid) == guard_pid
+                        || controller_pid != std::process::id()
+                        || parent_pid != controller_pid
+                } else {
+                    true
+                }
+            }
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (root_pid, adopted);
+        Ok(!owned_runnable_pids(std::slice::from_ref(known), snapshot)?.contains(&known.pid))
+    }
+}
+
+#[cfg(unix)]
+fn reap_verified_adopted_zombies(
+    owned: &[UnixProcessIdentity],
+    root_pid: u32,
+    adopted: AdoptedGuard,
+) -> io::Result<()> {
+    let Some((controller_pid, guard_pid, _)) = adopted else {
+        return Ok(());
+    };
+    if controller_pid != std::process::id() {
+        return Ok(());
+    }
+    for known in owned {
+        if known.pid == root_pid || Some(known.pid) == guard_pid {
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let OwnedPresence::Zombie { parent_pid } = inspect_owned_identity(known)? {
+                if parent_pid == controller_pid {
+                    waitpid_exact_nohang(known.pid)?;
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = known;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn waitpid_exact_nohang(pid: u32) -> io::Result<bool> {
+    loop {
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if reaped == pid as libc::pid_t {
+            return Ok(true);
+        }
+        if reaped == 0 {
+            return Ok(false);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ECHILD) => return Ok(false),
+            _ => return Err(error),
+        }
     }
 }
 
@@ -1797,6 +2074,7 @@ fn wait_for_process_group_exit_without_child(root_pid: u32, grace: Duration) -> 
 #[cfg(all(test, target_os = "linux"))]
 mod process_group_liveness_tests {
     use super::*;
+    use std::io;
     use std::process::{Command, Stdio};
 
     /// A process group whose only remaining member is a zombie is not alive.
@@ -1859,6 +2137,42 @@ mod process_group_liveness_tests {
         );
 
         let _ = terminate_process_tree_and_reap(&mut child);
+    }
+
+    #[test]
+    fn parse_linux_proc_stat_handles_command_names_with_spaces() {
+        let stat = "123 (name with spaces) Z 1 456 456 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 4242 extra";
+        let parsed = parse_linux_proc_stat(stat).expect("parse");
+        assert_eq!(parsed.state, 'Z');
+        assert_eq!(parsed.parent_pid, 1);
+        assert_eq!(parsed.starttime_ticks, 4242);
+    }
+
+    #[test]
+    fn owned_stat_not_found_is_gone() {
+        let gone = interpret_owned_stat_contents(
+            42,
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing")),
+        )
+        .expect("not found is gone");
+        assert!(gone.is_none());
+    }
+
+    #[test]
+    fn owned_stat_permission_denied_is_unverifiable() {
+        let error = interpret_owned_stat_contents(
+            42,
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+        )
+        .expect_err("permission denied cannot prove drain");
+        assert!(error.to_string().contains("unverifiable"));
+    }
+
+    #[test]
+    fn owned_stat_invalid_metadata_is_unverifiable() {
+        let error = interpret_owned_stat_contents(42, Ok("not-a-stat".to_string()))
+            .expect_err("invalid metadata cannot prove drain");
+        assert!(error.to_string().contains("invalid stat metadata"));
     }
 }
 
@@ -1942,6 +2256,326 @@ mod supervisor_zombie_guard_tests {
         );
         let _ = sibling.kill();
         let _ = sibling.wait();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod adopted_child_reaping_tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::process::CommandExt;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "subprocess fixture for a rapidly reparented guarded descendant"]
+    fn guarded_fast_double_fork_fixture() {
+        let target = std::env::var("HOMEBOY_ADOPTED_DAEMON_TARGET").expect("target");
+        let pid_file = std::env::var("HOMEBOY_ADOPTED_DAEMON_PID_FILE").expect("pid file");
+        let script = CString::new(format!(
+            "printf '%s' $$ > {}; sleep 0.25; printf stale > {}; sleep 30",
+            crate::shell::quote_path(&pid_file),
+            crate::shell::quote_path(&target),
+        ))
+        .expect("fixture script");
+        let shell = c"/bin/sh";
+        let shell_name = c"sh";
+        let command_flag = c"-c";
+
+        let intermediate = unsafe { libc::fork() };
+        assert_ne!(intermediate, -1, "fork intermediate");
+        if intermediate == 0 {
+            let daemon = unsafe { libc::fork() };
+            if daemon < 0 {
+                unsafe { libc::_exit(2) };
+            }
+            if daemon > 0 {
+                unsafe { libc::_exit(0) };
+            }
+            if unsafe { libc::setsid() } == -1 {
+                unsafe { libc::_exit(3) };
+            }
+            let max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+            for fd in 0..if max > 0 { max as i32 } else { 1024 } {
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            unsafe {
+                libc::execl(
+                    shell.as_ptr(),
+                    shell_name.as_ptr(),
+                    command_flag.as_ptr(),
+                    script.as_ptr(),
+                    std::ptr::null::<libc::c_char>(),
+                );
+                libc::_exit(4);
+            }
+        }
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(intermediate, &mut status, 0) },
+            intermediate,
+            "reap intermediate"
+        );
+    }
+
+    #[test]
+    fn extend_owned_processes_does_not_follow_a_reused_parent_pid() {
+        let mut owned = vec![UnixProcessIdentity {
+            pid: 10,
+            parent_pid: 1,
+            starttime_ticks: 100,
+        }];
+        let snapshot = vec![
+            UnixProcessIdentity {
+                pid: 10,
+                parent_pid: 1,
+                starttime_ticks: 999,
+            },
+            UnixProcessIdentity {
+                pid: 11,
+                parent_pid: 10,
+                starttime_ticks: 200,
+            },
+        ];
+        extend_owned_processes(&mut owned, 10, &snapshot, None);
+        assert!(
+            owned.iter().all(|process| process.pid != 11),
+            "a child of a reused parent PID must not be adopted"
+        );
+        assert_eq!(owned[0].starttime_ticks, 100);
+    }
+
+    #[test]
+    fn extend_owned_processes_follows_a_still_matching_parent() {
+        let mut owned = vec![UnixProcessIdentity {
+            pid: 10,
+            parent_pid: 1,
+            starttime_ticks: 100,
+        }];
+        let snapshot = vec![
+            UnixProcessIdentity {
+                pid: 10,
+                parent_pid: 1,
+                starttime_ticks: 100,
+            },
+            UnixProcessIdentity {
+                pid: 11,
+                parent_pid: 10,
+                starttime_ticks: 200,
+            },
+        ];
+        extend_owned_processes(&mut owned, 10, &snapshot, None);
+        assert!(
+            owned
+                .iter()
+                .any(|process| process.pid == 11 && process.starttime_ticks == 200),
+            "a child of a still-matching parent remains owned"
+        );
+    }
+
+    #[test]
+    fn adopted_zombie_waitpid_consumes_only_owned_descendant_status() {
+        let mut sibling = Command::new("sh");
+        sibling
+            .args(["-c", "exec sleep 30"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut sibling = sibling.spawn().expect("spawn unrelated child");
+        let sibling_pid = sibling.id();
+        let sibling_ticks = linux_process_stat(sibling_pid)
+            .expect("sibling start identity")
+            .starttime_ticks;
+
+        let child_pid = unsafe { libc::fork() };
+        assert_ne!(child_pid, -1, "fork adopted child");
+        if child_pid == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        let child_pid = child_pid as u32;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let child_stat = loop {
+            if let Some(stat) = linux_process_stat(child_pid) {
+                if stat.state == 'Z' && stat.parent_pid == std::process::id() {
+                    break stat;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "forked child never became an owned zombie"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        let owned = vec![UnixProcessIdentity {
+            pid: child_pid,
+            parent_pid: std::process::id(),
+            starttime_ticks: child_stat.starttime_ticks,
+        }];
+        reap_verified_adopted_zombies(&owned, sibling_pid, Some((std::process::id(), None, 1)))
+            .expect("reap owned adopted zombie");
+        assert_eq!(
+            inspect_owned_identity(&owned[0]).expect("owned descendant after reap"),
+            OwnedPresence::Gone,
+            "owned adopted zombie must be gone after its wait status is consumed"
+        );
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        assert_eq!(
+            reaped, -1,
+            "owned descendant wait status must already be consumed"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        assert!(
+            sibling.try_wait().expect("sibling status").is_none(),
+            "sibling Child status must remain available"
+        );
+        assert_eq!(
+            linux_process_stat(sibling_pid).map(|stat| stat.starttime_ticks),
+            Some(sibling_ticks)
+        );
+        let _ = sibling.kill();
+        let _ = sibling.wait();
+    }
+
+    fn wait_for_recorded_pid(path: &Path, deadline: Instant) -> u32 {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    return pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "double-fork fixture did not publish its PID"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn cleanup_recorded_linux_process(pid: u32, starttime_ticks: u64) {
+        let Some(stat) = linux_process_stat(pid) else {
+            return;
+        };
+        if stat.starttime_ticks != starttime_ticks {
+            return;
+        }
+        if process_is_running(pid) {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        let Some(stat) = linux_process_stat(pid) else {
+            return;
+        };
+        if stat.starttime_ticks == starttime_ticks
+            && stat.state == 'Z'
+            && stat.parent_pid == std::process::id()
+        {
+            let mut status = 0;
+            unsafe {
+                libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG);
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_completion_reaps_double_fork_setsid_closed_fd_without_touching_sibling() {
+        let mut sibling = Command::new("sh");
+        sibling
+            .args(["-c", "exec sleep 30"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut sibling = sibling.spawn().expect("spawn unrelated child");
+        let sibling_pid = sibling.id();
+        let sibling_ticks = linux_process_stat(sibling_pid)
+            .expect("sibling start identity")
+            .starttime_ticks;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let target = workspace.path().join("target");
+        let pid_file = workspace.path().join("daemon.pid");
+        std::fs::write(&target, b"original").expect("write target");
+        let test_binary = std::env::current_exe().expect("test executable");
+        let mut command = Command::new(&test_binary);
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "command::adopted_child_reaping_tests::guarded_fast_double_fork_fixture",
+                "--nocapture",
+            ])
+            .env("HOMEBOY_ADOPTED_DAEMON_TARGET", &target)
+            .env("HOMEBOY_ADOPTED_DAEMON_PID_FILE", &pid_file)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+        let mut child = command.spawn().expect("spawn double-fork root");
+        guard.attach(&child).expect("attach guard");
+        let daemon_pid = wait_for_recorded_pid(&pid_file, Instant::now() + Duration::from_secs(2));
+        let daemon_ticks = linux_process_stat(daemon_pid)
+            .expect("daemon start identity")
+            .starttime_ticks;
+
+        let supervised = wait_with_bounded_output_supervised_guarded(
+            &mut child,
+            &mut guard,
+            4096,
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+            || false,
+            |_, _| Ok(()),
+        );
+        if supervised.is_err() {
+            cleanup_recorded_linux_process(daemon_pid, daemon_ticks);
+        }
+        let supervised = supervised.expect("root completion contains reparented descendant");
+        assert_eq!(
+            supervised.termination,
+            SupervisedCommandTermination::Completed
+        );
+        thread::sleep(Duration::from_millis(350));
+        if std::fs::read(&target).ok().as_deref() != Some(b"original".as_slice())
+            || process_is_running(daemon_pid)
+                && linux_process_stat(daemon_pid)
+                    .is_some_and(|stat| stat.starttime_ticks == daemon_ticks)
+        {
+            cleanup_recorded_linux_process(daemon_pid, daemon_ticks);
+        }
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            b"original",
+            "descriptor-closing daemon mutated after root completion"
+        );
+        let daemon_still_same =
+            linux_process_stat(daemon_pid).is_some_and(|stat| stat.starttime_ticks == daemon_ticks);
+        assert!(
+            !daemon_still_same || !process_is_running(daemon_pid),
+            "adopted double-fork descendant remained runnable"
+        );
+
+        let sibling_stat = linux_process_stat(sibling_pid);
+        assert!(
+            sibling.try_wait().expect("sibling status").is_none(),
+            "an unrelated child must not be reaped"
+        );
+        assert_eq!(
+            sibling_stat.map(|stat| stat.starttime_ticks),
+            Some(sibling_ticks),
+            "unrelated child identity must remain the recorded process"
+        );
+        let _ = sibling.kill();
+        let _ = sibling.wait();
+        cleanup_recorded_linux_process(daemon_pid, daemon_ticks);
     }
 }
 
