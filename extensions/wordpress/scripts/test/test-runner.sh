@@ -150,6 +150,51 @@ homeboy_wordpress_manifest_standalone_php_test_paths() {
     printf '%s\n' "$declared_paths"
 }
 
+# The manifest's `wordpress` entries are the booted-WordPress half of the same
+# declaration. A full suite has to execute them for the same reason it executes
+# the standalone half: a declared test that no route claims is reported as a
+# pass without ever running.
+homeboy_wordpress_manifest_wordpress_test_paths() {
+    if [ -n "${HOMEBOY_WORDPRESS_MANIFEST_WORDPRESS_TEST_PATHS_LOADED+x}" ]; then
+        printf '%s\n' "$HOMEBOY_WORDPRESS_MANIFEST_WORDPRESS_TEST_PATHS"
+        return 0
+    fi
+
+    local manifest_path="${HOMEBOY_WORDPRESS_TEST_MANIFEST:-${PLUGIN_PATH}/homeboy-test-manifest.json}"
+    local declared_paths
+
+    if [ ! -e "$manifest_path" ]; then
+        HOMEBOY_WORDPRESS_MANIFEST_WORDPRESS_TEST_PATHS=""
+        HOMEBOY_WORDPRESS_MANIFEST_WORDPRESS_TEST_PATHS_LOADED=1
+        return 0
+    fi
+
+    declared_paths="$(jq -r '
+        if type != "object" or .schema != "homeboy/test-manifest/v1" then
+            error("expected schema homeboy/test-manifest/v1")
+        elif (.tests | type) != "object" then
+            error("expected tests object")
+        else
+            (.default_environment // "wordpress") as $defaultEnvironment
+            | .tests
+            | to_entries[]
+            | (.value.environment // $defaultEnvironment) as $environment
+            | if $environment == "wordpress" or $environment == "standalone-php" then
+                (select($environment == "wordpress") | .key)
+              else
+                error("unsupported environment " + ($environment | tostring))
+              end
+        end
+    ' "$manifest_path" 2>/dev/null)" || {
+        echo "ERROR: invalid WordPress test manifest: ${manifest_path}" >&2
+        return 2
+    }
+
+    HOMEBOY_WORDPRESS_MANIFEST_WORDPRESS_TEST_PATHS="$declared_paths"
+    HOMEBOY_WORDPRESS_MANIFEST_WORDPRESS_TEST_PATHS_LOADED=1
+    printf '%s\n' "$declared_paths"
+}
+
 homeboy_wordpress_is_manifest_standalone_php_test_file() {
     local test_file="$1"
     local declared_path
@@ -1306,6 +1351,31 @@ homeboy_wordpress_write_host_php_results() {
     fi
 }
 
+# Select the booted-WordPress smokes a full suite must dispatch. Only executable
+# smoke shapes are routed; a declared support file is recorded as an explicit
+# exclusion so the ledger still accounts for every manifest entry.
+homeboy_wordpress_collect_full_suite_wordpress_smoke_files() {
+    local declared_path
+
+    FULL_SUITE_WORDPRESS_SMOKE_FILES=""
+    FULL_SUITE_WORDPRESS_SMOKE_SELECTED=0
+    FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED=0
+
+    homeboy_wordpress_manifest_wordpress_test_paths >/dev/null || return $?
+
+    while IFS= read -r declared_path; do
+        [ -n "$declared_path" ] || continue
+        if ! homeboy_wordpress_is_php_smoke_file "$declared_path"; then
+            echo "FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED:${declared_path}:reason=unsupported_test_shape"
+            FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED=$((FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED + 1))
+            continue
+        fi
+        FULL_SUITE_WORDPRESS_SMOKE_FILES+="${FULL_SUITE_WORDPRESS_SMOKE_FILES:+$'\n'}${declared_path}"
+        FULL_SUITE_WORDPRESS_SMOKE_SELECTED=$((FULL_SUITE_WORDPRESS_SMOKE_SELECTED + 1))
+        echo "FULL_SUITE_WORDPRESS_SMOKE_ROUTE:${declared_path}:runner=host-smoke-wp"
+    done <<< "$HOMEBOY_WORDPRESS_MANIFEST_WORDPRESS_TEST_PATHS"
+}
+
 homeboy_wordpress_replay_test_shard() {
     local test_file test_rel declared_status
     local phpunit_files=""
@@ -1604,6 +1674,15 @@ fi
 # explicit diagnostic targets. The declaration uses the same classifier and
 # bounded host-PHP runner as changed scopes.
 homeboy_wordpress_collect_full_suite_standalone_php_files || exit $?
+# A mixed changed-file scope reaches this tail for its PHPUnit half. Selecting
+# the manifest's WordPress half there would widen that review into a full-suite
+# run, so it is collected only when nothing narrowed this invocation.
+FULL_SUITE_WORDPRESS_SMOKE_FILES=""
+FULL_SUITE_WORDPRESS_SMOKE_SELECTED=0
+FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED=0
+if [ -z "${HOMEBOY_CHANGED_TEST_FILES:-}" ] && [ -z "$TARGET_FILE" ]; then
+    homeboy_wordpress_collect_full_suite_wordpress_smoke_files || exit $?
+fi
 full_suite_phpunit_root="$(homeboy_wordpress_full_suite_phpunit_root || true)"
 full_suite_phpunit_status=0
 if [ -n "$full_suite_phpunit_root" ]; then
@@ -1620,12 +1699,43 @@ if [ -n "$FULL_SUITE_STANDALONE_PHP_FILES" ]; then
 fi
 echo "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=$((FULL_SUITE_STANDALONE_PHP_SELECTED + FULL_SUITE_STANDALONE_PHP_EXCLUDED)) selected=${FULL_SUITE_STANDALONE_PHP_SELECTED} routed=${FULL_SUITE_STANDALONE_PHP_ROUTED} excluded=${FULL_SUITE_STANDALONE_PHP_EXCLUDED} passed=${WORDPRESS_STANDALONE_PHP_SMOKE_PASSED:-0} failed=${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0}"
 
+# The booted-WordPress half of the manifest runs in the same suite. Its status
+# is carried rather than discarded, so a declared WordPress smoke can fail the
+# gate instead of disappearing from it.
+full_suite_wordpress_smoke_status=0
+full_suite_wordpress_smoke_passed=0
+full_suite_wordpress_smoke_failed=0
+if [ -n "$FULL_SUITE_WORDPRESS_SMOKE_FILES" ]; then
+    # The backend reports its own counts on stdout. Tee keeps the live progress
+    # markers while capturing the summary, so this suite can reconcile executed
+    # tests instead of inferring them from an exit status alone.
+    full_suite_wordpress_smoke_log="$(mktemp "${TMPDIR:-/tmp}/homeboy-wordpress-full-suite-smoke.XXXXXX")"
+    set +e
+    HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$FULL_SUITE_WORDPRESS_SMOKE_FILES" bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}" 2>&1 | tee "$full_suite_wordpress_smoke_log"
+    full_suite_wordpress_smoke_status="${PIPESTATUS[0]}"
+    set -e
+    full_suite_wordpress_smoke_summary="$(grep -E '^HOST_SMOKE_SUMMARY:' "$full_suite_wordpress_smoke_log" | tail -1 || true)"
+    if [ -n "$full_suite_wordpress_smoke_summary" ]; then
+        full_suite_wordpress_smoke_passed="$(printf '%s' "$full_suite_wordpress_smoke_summary" | sed -n 's/.*passed=\([0-9]*\).*/\1/p')"
+        full_suite_wordpress_smoke_failed="$(printf '%s' "$full_suite_wordpress_smoke_summary" | sed -n 's/.*failed=\([0-9]*\).*/\1/p')"
+    fi
+    full_suite_wordpress_smoke_passed="${full_suite_wordpress_smoke_passed:-0}"
+    full_suite_wordpress_smoke_failed="${full_suite_wordpress_smoke_failed:-0}"
+    rm -f "$full_suite_wordpress_smoke_log"
+fi
+if [ -z "${HOMEBOY_CHANGED_TEST_FILES:-}" ] && [ -z "$TARGET_FILE" ]; then
+    echo "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=$((FULL_SUITE_WORDPRESS_SMOKE_SELECTED + FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED)) selected=${FULL_SUITE_WORDPRESS_SMOKE_SELECTED} routed=${FULL_SUITE_WORDPRESS_SMOKE_SELECTED} excluded=${FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED}"
+fi
+if [ "$full_suite_standalone_status" -eq 0 ] && [ "$full_suite_wordpress_smoke_status" -ne 0 ]; then
+    full_suite_standalone_status="$full_suite_wordpress_smoke_status"
+fi
+
 if [ "$full_suite_phpunit_status" -eq 1 ]; then
-    if [ "$FULL_SUITE_STANDALONE_PHP_SELECTED" -gt 0 ]; then
+    if [ "$FULL_SUITE_STANDALONE_PHP_SELECTED" -gt 0 ] || [ "$FULL_SUITE_WORDPRESS_SMOKE_SELECTED" -gt 0 ]; then
         homeboy_wordpress_write_host_php_results \
-            "$FULL_SUITE_STANDALONE_PHP_SELECTED" \
-            "${WORDPRESS_STANDALONE_PHP_SMOKE_PASSED:-0}" \
-            "${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0}" \
+            "$((FULL_SUITE_STANDALONE_PHP_SELECTED + FULL_SUITE_WORDPRESS_SMOKE_SELECTED))" \
+            "$(( ${WORDPRESS_STANDALONE_PHP_SMOKE_PASSED:-0} + full_suite_wordpress_smoke_passed ))" \
+            "$(( ${WORDPRESS_STANDALONE_PHP_SMOKE_FAILED:-0} + full_suite_wordpress_smoke_failed ))" \
             "full-suite-host-php" || exit $?
         exit "$full_suite_standalone_status"
     else

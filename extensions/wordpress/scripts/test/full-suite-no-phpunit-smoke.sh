@@ -19,6 +19,21 @@ echo "PHPUNIT_RUNTIME_INVOKED"
 SH
 chmod +x "$runtime_stub"
 
+smoke_runner_stub="${TMPDIR}/host-smoke-wp.sh"
+cat > "$smoke_runner_stub" <<'SH'
+#!/usr/bin/env bash
+# Stands in for the booted-WordPress backend: records the exact selection it was
+# handed and reports counts in the backend's own summary contract.
+echo "HOST_SMOKE_WP_INVOKED:${HOMEBOY_WORDPRESS_HOST_SMOKE_FILES:-none}"
+count=0
+while IFS= read -r smoke_file; do
+    [ -n "$smoke_file" ] || continue
+    count=$((count + 1))
+done <<< "${HOMEBOY_WORDPRESS_HOST_SMOKE_FILES:-}"
+echo "HOST_SMOKE_SUMMARY:passed=${count} failed=0"
+SH
+chmod +x "$smoke_runner_stub"
+
 cat > "$results_writer" <<'SH'
 homeboy_write_test_results() {
     jq -n --argjson total "$1" --argjson passed "$2" --argjson failed "$3" --argjson skipped "$4" --arg source "$5" \
@@ -32,6 +47,7 @@ run_router() {
     HOMEBOY_COMPONENT_PATH="$component" \
     HOMEBOY_COMPONENT_SHAPE="plugin" \
     HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="$runtime_stub" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="$smoke_runner_stub" \
         bash "${EXTENSION_PATH}/scripts/test/test-runner.sh"
 }
 
@@ -115,7 +131,9 @@ contract_routes="$(grep -cF "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/contract-smok
 jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/overlap-results.json" >/dev/null
 
 # default_environment makes listed entries standalone unless a per-file
-# environment overrides it; the override is excluded from the standalone suite.
+# environment overrides it. The override leaves the standalone suite and is
+# dispatched to the booted-WordPress backend in the same full-suite run, so a
+# declared WordPress smoke is executed rather than silently skipped.
 cat > "${component}/homeboy-test-manifest.json" <<'JSON'
 {
     "schema": "homeboy/test-manifest/v1",
@@ -136,7 +154,15 @@ if grep -Fq "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/overlapping-smoke.php:" "${TM
     echo "A per-file wordpress override must be excluded from the standalone suite." >&2
     exit 1
 fi
-jq -e '.total == 1 and .passed == 1 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/default-env-results.json" >/dev/null
+# The override is not merely excluded: it reaches the booted-WordPress backend.
+grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_ROUTE:tests/overlapping-smoke.php:runner=host-smoke-wp" "${TMPDIR}/default-env.out"
+grep -Fq "HOST_SMOKE_WP_INVOKED:tests/overlapping-smoke.php" "${TMPDIR}/default-env.out"
+# A declared support file is an explicit, counted exclusion rather than a
+# selection the backend would reject.
+grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED:tests/_stub-wp-and-rest.php:reason=unsupported_test_shape" "${TMPDIR}/default-env.out"
+grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=2 selected=1 routed=1 excluded=1" "${TMPDIR}/default-env.out"
+# Both halves of the manifest reconcile into one executed-test ledger.
+jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/default-env-results.json" >/dev/null
 
 HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"skip","wp_codebox_phpunit_test_root":"/unresolved/tests"}' run_router > "${TMPDIR}/explicit.out"
 grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/explicit.out"
