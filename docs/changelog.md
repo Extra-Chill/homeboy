@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.5] - 2026-09-12
+
+### Fixed
+- restore controller-death watcher cleanup
+- require explicit account credential selection
+
 ## [0.373.4] - 2026-09-12
 
 ### Fixed
