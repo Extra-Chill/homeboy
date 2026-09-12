@@ -25,9 +25,12 @@ pub(super) fn sync_validation_dependency_workspaces(
     local_path: &Path,
     remote_path: &str,
     excludes: &[String],
+    selected_dependency_ids: Option<&[String]>,
 ) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
     let mut synced = Vec::new();
-    for dependency in validation_dependency_workspaces(local_path, excludes)? {
+    for dependency in
+        validation_dependency_workspaces(local_path, excludes, selected_dependency_ids)?
+    {
         let remote_dependency_path = format!(
             "{}/{}",
             parent_remote_path(remote_path),
@@ -60,8 +63,12 @@ struct PreparedValidationDependencyWorkspace {
 fn validation_dependency_workspaces(
     local_path: &Path,
     excludes: &[String],
+    selected_dependency_ids: Option<&[String]>,
 ) -> Result<Vec<PreparedValidationDependencyWorkspace>> {
-    let dependency_ids = homeboy_core::hygiene::validation_dependency_ids(local_path)?;
+    let dependency_ids = match selected_dependency_ids {
+        Some(ids) => ids.to_vec(),
+        None => homeboy_core::hygiene::validation_dependency_ids(local_path)?,
+    };
     if dependency_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -425,6 +432,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
             )
@@ -521,6 +529,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
             )
@@ -601,6 +610,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
             )
@@ -674,6 +684,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
             )
@@ -765,6 +776,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
             )
@@ -823,6 +835,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
             )
@@ -866,8 +879,8 @@ mod tests {
             )
             .expect("source manifest");
 
-            let err =
-                validation_dependency_workspaces(&source, &[]).expect_err("missing dependency");
+            let err = validation_dependency_workspaces(&source, &[], None)
+                .expect_err("missing dependency");
 
             assert_eq!(err.details["field"], "validation_dependencies");
             assert!(err.message.contains("shared-runtime"));

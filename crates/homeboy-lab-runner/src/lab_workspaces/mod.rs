@@ -189,6 +189,7 @@ pub(super) fn sync_extra_lab_workspaces(
                 git_fetch_refs: extra.git_fetch_refs.clone(),
                 snapshot_includes: extra.snapshot_includes.clone(),
                 allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )?
@@ -385,9 +386,15 @@ pub(super) fn lab_workspace_mapping_metadata(
     })
 }
 
-pub(super) fn lab_extra_workspaces(source_path: &Path) -> Result<Vec<ExtraLabWorkspace>> {
+pub(super) fn lab_extra_workspaces(
+    source_path: &Path,
+    settings: &[(String, serde_json::Value)],
+) -> Result<Vec<ExtraLabWorkspace>> {
     let mut workspaces = accepted_extra_lab_workspaces()?;
-    workspaces.extend(discovered_validation_dependency_workspaces(source_path)?);
+    workspaces.extend(discovered_validation_dependency_workspaces(
+        source_path,
+        settings,
+    )?);
     Ok(workspaces)
 }
 
@@ -541,6 +548,7 @@ pub(super) fn sync_lab_runtime_overlays(
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: overlay.workspace.snapshot_includes.clone(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )

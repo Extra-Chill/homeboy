@@ -180,19 +180,7 @@ impl NativeWorktreeProvider {
                         None,
                     ));
                 }
-                let safety = worktree::safety_report_for_provider(record)?;
-                if safety.worktree_missing || !safety.safe {
-                    let mut reasons = safety.reasons;
-                    if safety.worktree_missing {
-                        reasons.push("worktree directory is missing".to_string());
-                    }
-                    return Err(Error::validation_invalid_argument(
-                        "to_worktree",
-                        format!("native worktree `{handle}` is not safe for use"),
-                        Some(handle.to_string()),
-                        Some(reasons),
-                    ));
-                }
+                let record = worktree::resolve_active_task_for_provider_admission(handle)?;
                 (
                     WorktreeWorkspaceKind::TaskWorktree,
                     Some(record.branch.clone()),
@@ -782,6 +770,83 @@ mod tests {
                 .resolve("fixture@a?b")
                 .expect_err("colliding handle must not resolve another manifest");
             assert!(error.message.contains("does not match requested handle"));
+        });
+    }
+
+    #[test]
+    fn native_provider_admits_clean_committed_worktree_while_cleanup_retains_it() {
+        crate::test_support::with_isolated_home(|home| {
+            let source = home.path().join("Developer/fixture");
+            std::fs::create_dir_all(&source).expect("source checkout");
+            for args in [
+                vec!["init", "-q", "-b", "main"],
+                vec!["config", "user.email", "homeboy@example.test"],
+                vec!["config", "user.name", "Homeboy Test"],
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("initialize source")
+                    .success());
+            }
+            std::fs::write(source.join("README"), "fixture\n").expect("fixture file");
+            assert!(std::process::Command::new("git")
+                .args(["add", "README"])
+                .current_dir(&source)
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args(["commit", "-q", "-m", "fixture"])
+                .current_dir(&source)
+                .status()
+                .expect("commit fixture")
+                .success());
+            crate::test_support::write_component_registration(home.path(), "fixture", &source);
+            let created = worktree::create(worktree::WorktreeCreateOptions {
+                component_id: "fixture".to_string(),
+                branch: "fix/admission".to_string(),
+                from: Some("main".to_string()),
+                task_url: None,
+                run_id: None,
+                cleanup_policy: None,
+                require_handoff_freshness: false,
+            })
+            .expect("create task worktree");
+            let path = PathBuf::from(&created.record.worktree_path);
+            std::fs::write(path.join("change"), "committed\n").expect("candidate change");
+            assert!(NativeWorktreeProvider
+                .resolve(&created.record.id)
+                .is_err_and(|error| error.message.contains("not safe for reuse")));
+            assert!(resolve_native_worktree_mutation_target(&created.record.id)
+                .expect("resolve dirty task mutation target")
+                .is_some());
+            assert!(std::process::Command::new("git")
+                .args(["add", "change"])
+                .current_dir(&path)
+                .status()
+                .expect("stage candidate")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args(["commit", "-q", "-m", "candidate"])
+                .current_dir(&path)
+                .status()
+                .expect("commit candidate")
+                .success());
+
+            assert!(NativeWorktreeProvider
+                .resolve(&created.record.id)
+                .expect("committed task worktree is reusable")
+                .is_some());
+            let error = worktree::remove(worktree::WorktreeRemoveOptions {
+                id: created.record.id,
+                force: false,
+                cleanup_branch: false,
+                allow_unmerged_branch: false,
+            })
+            .expect_err("cleanup must retain unpushed committed worktree");
+            assert!(error.message.contains("not safe to remove"));
         });
     }
 }

@@ -910,6 +910,71 @@ fn verify_linked_worktree_identity(source: &Path, worktree: &Path, branch: &str)
     Ok(())
 }
 
+pub(super) fn resolve_active_task_for_provider_admission_with_store(
+    id: &str,
+    store_dir: &Path,
+) -> Result<TaskWorktreeRecord> {
+    with_task_worktree_registry_read_lock(|| {
+        let record = read_record(store_dir, id)?;
+        if record.state != TaskWorktreeState::Active {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                format!("native worktree `{id}` is no longer active"),
+                Some(id.to_string()),
+                None,
+            ));
+        }
+
+        let source = resolved_source_checkout(&record)?;
+        let raw_worktree = Path::new(&record.worktree_path);
+        let worktree = match raw_worktree.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                normalize_missing_path(raw_worktree)
+            }
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(record.worktree_path.clone()),
+                ));
+            }
+        };
+        let worktree_missing = !raw_worktree.exists();
+        let parent = source.parent().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "source checkout has no parent: {}",
+                source.display()
+            ))
+        })?;
+        let primary_checkout = source == worktree;
+        let path_contained = worktree.starts_with(parent) && worktree != source;
+        let mut reasons = Vec::new();
+        if worktree_missing {
+            reasons.push("worktree directory is missing".to_string());
+        }
+        if !worktree_missing && is_dirty_until(&worktree, None)? {
+            reasons.push("dirty worktree".to_string());
+        }
+        if primary_checkout {
+            reasons.push("refuses to use primary checkout as a task worktree".to_string());
+        }
+        if !path_contained {
+            reasons.push("worktree path is outside the component checkout parent".to_string());
+        }
+        if !reasons.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                format!("native worktree `{id}` is not safe for reuse"),
+                Some(id.to_string()),
+                Some(reasons),
+            ));
+        }
+
+        verify_linked_worktree_identity(&source, &worktree, &record.branch)?;
+        Ok(record)
+    })
+}
+
 fn resolve_gitdir_pointer(base: &Path, pointer: &str) -> Option<PathBuf> {
     let pointer = resolve_gitdir_pointer_path(base, pointer);
     pointer.canonicalize().ok()

@@ -140,6 +140,7 @@ fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() 
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         );
@@ -221,6 +222,7 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -362,6 +364,7 @@ fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
                 git_fetch_refs: vec![pinned_base.clone()],
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -439,6 +442,7 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -753,6 +757,7 @@ fn runner_snapshot_includes_override_generated_output_excludes() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -799,6 +804,7 @@ fn runner_snapshot_excludes_extend_default_snapshot_policy() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -843,6 +849,7 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1025,6 +1032,7 @@ fn test_sync_workspace() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1101,6 +1109,7 @@ fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1222,6 +1231,7 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         };
         let (first, _) =
@@ -1267,6 +1277,7 @@ fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_
                 git_fetch_refs: vec!["refs/heads/trunk".to_string()],
                 snapshot_includes: vec!["src/**".to_string()],
                 allow_dirty_lab_workspace: true,
+                validation_dependency_ids: None,
                 run_isolation_token: Some("run-123".to_string()),
             },
         )
@@ -1347,6 +1358,7 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1477,6 +1489,7 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -2321,6 +2334,7 @@ fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         };
 

@@ -10,7 +10,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use homeboy_core::component::{self, TargetSpec};
 use homeboy_core::{Error, Result};
 
 use super::lab_workspaces::{
@@ -307,67 +306,68 @@ pub(super) fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> 
 
 pub(super) fn discovered_validation_dependency_workspaces(
     source_path: &Path,
+    settings: &[(String, serde_json::Value)],
 ) -> Result<Vec<ExtraLabWorkspace>> {
-    let source_path_string = source_path.display().to_string();
-    let Ok(target) = component::resolve_target(TargetSpec {
-        component_id: None,
-        path_override: Some(&source_path_string),
-        project: None,
-        capability: None,
-        allow_synthetic: true,
-        accept_bare_directory: true,
-        ..TargetSpec::default()
-    }) else {
-        return Ok(Vec::new());
-    };
-    let Some(extensions) = target.component.extensions.as_ref() else {
-        return Ok(Vec::new());
-    };
-
     let mut workspaces = Vec::new();
-    for config in extensions.values() {
-        let Some(dependencies) = config.settings.get("validation_dependencies") else {
-            continue;
-        };
-        let Some(dependencies) = dependencies.as_array() else {
-            continue;
-        };
-        for dependency in dependencies.iter().filter_map(|value| value.as_str()) {
-            let path = resolve_dependency_workspace_path(dependency)?;
-            workspaces.push(ExtraLabWorkspace {
-                role: "dependency".to_string(),
-                path,
-                snapshot_includes: Vec::new(),
-                git_fetch_refs: Vec::new(),
-                allow_dirty_lab_workspace: false,
-                source_provenance: None,
-            });
-        }
+    for dependency in
+        homeboy_core::hygiene::effective_validation_dependency_ids(source_path, settings)?
+    {
+        let path = resolve_dependency_workspace_path(source_path, &dependency)?;
+        workspaces.push(ExtraLabWorkspace {
+            role: "dependency".to_string(),
+            path,
+            snapshot_includes: Vec::new(),
+            git_fetch_refs: Vec::new(),
+            allow_dirty_lab_workspace: false,
+            source_provenance: None,
+        });
     }
 
     Ok(workspaces)
 }
 
-pub(super) fn resolve_dependency_workspace_path(dependency: &str) -> Result<PathBuf> {
-    let expanded = shellexpand::tilde(dependency).to_string();
-    if Path::new(&expanded).is_dir() {
-        return canonical_existing_dir(&expanded, "validation_dependencies");
+pub(crate) fn take_validation_dependency_settings(
+    args: &[String],
+) -> Result<(Vec<String>, Option<Vec<(String, serde_json::Value)>>)> {
+    let mut retained = Vec::with_capacity(args.len());
+    let mut selected = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            retained.push(arg.clone());
+            retained.extend(iter.cloned());
+            break;
+        }
+        if arg != "--homeboy-validation-dependencies-json" {
+            retained.push(arg.clone());
+            continue;
+        }
+        let raw = iter.next().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "homeboy-validation-dependencies-json",
+                "missing effective validation dependency setting value",
+                None,
+                None,
+            )
+        })?;
+        let value = serde_json::from_str(raw).map_err(|error| {
+            Error::validation_invalid_argument(
+                "validation_dependencies",
+                format!("invalid effective validation dependency setting: {error}"),
+                Some(raw.clone()),
+                None,
+            )
+        })?;
+        selected = Some(vec![("validation_dependencies".to_string(), value)]);
     }
+    Ok((retained, selected))
+}
 
-    let component = component::resolve_effective(Some(dependency), None, None).map_err(|err| {
-        Error::validation_invalid_argument(
-            "validation_dependencies",
-            format!(
-                "Runner workspace sync cannot resolve validation dependency `{dependency}` to a local checkout: {}",
-                err.message
-            ),
-            Some(dependency.to_string()),
-            Some(vec![
-                format!("Register the dependency component locally, or pass an explicit checkout path via {LAB_EXTRA_WORKSPACES_JSON_ENV}."),
-            ]),
-        )
-    })?;
-    canonical_existing_dir(&component.local_path, "validation_dependencies")
+pub(super) fn resolve_dependency_workspace_path(
+    source_path: &Path,
+    dependency: &str,
+) -> Result<PathBuf> {
+    homeboy_core::hygiene::resolve_validation_dependency_path(source_path, dependency)
 }
 
 pub(super) fn canonical_existing_dir(path: &str, field: &str) -> Result<PathBuf> {
@@ -432,4 +432,42 @@ pub(super) fn preflight_runtime_overlay_install_argv(
         local_path,
         remote_workdir,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_validation_dependency_setting_selects_the_staged_workspace() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let source = root.path().join("source");
+        let selected = root.path().join("selected");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::create_dir_all(&selected).expect("selected dependency");
+        std::fs::write(
+            source.join("homeboy.json"),
+            r#"{"validation_dependencies":["dirty-manifest"]}"#,
+        )
+        .expect("manifest");
+        let args = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "test".to_string(),
+            "--homeboy-validation-dependencies-json".to_string(),
+            serde_json::json!([selected]).to_string(),
+        ];
+
+        let workspaces = discovered_validation_dependency_workspaces(
+            &source,
+            &take_validation_dependency_settings(&args)
+                .expect("settings")
+                .1
+                .unwrap_or_default(),
+        )
+        .expect("discover selected dependency");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].path, selected.canonicalize().unwrap());
+    }
 }
