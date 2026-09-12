@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.0] - 2026-09-12
+
+### Added
+- give standalone smokes their declared dependency roots
+
 ## [3.47.2] - 2026-09-12
 
 ### Fixed
