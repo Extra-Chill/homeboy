@@ -11,7 +11,7 @@ use super::persistence::{
     apply_event_retention, job_not_found, lookup_tombstone, timestamp_ms, validate_transition,
     ReplayTombstoneKind,
 };
-use super::store::{JobStore, RemoteRunnerSubmission, StoredJob};
+use super::store::{JobStore, LocalRunnerJob, RemoteRunnerSubmission, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::engine::command::CommandCaptureMetadata;
 use crate::env_materialization_plan::EnvMaterializationPlan;
@@ -717,6 +717,10 @@ pub(super) struct StoredRemoteRunnerJob {
     /// provider boundary after the worker has materialized its inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) execution_receipt: Option<RemoteRunnerExecutionReceipt>,
+    /// Durable direction fence set before runner-side staged-source work starts.
+    /// A selected job remains queued and retryable until direct adoption.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) direct_execution_selected: bool,
 }
 
 #[derive(Deserialize)]
@@ -733,6 +737,8 @@ struct StoredRemoteRunnerJobCompat {
     execution_context_id: Option<String>,
     #[serde(default)]
     execution_receipt: Option<RemoteRunnerExecutionReceipt>,
+    #[serde(default)]
+    direct_execution_selected: bool,
 }
 
 impl<'de> Deserialize<'de> for StoredRemoteRunnerJob {
@@ -782,6 +788,7 @@ impl<'de> Deserialize<'de> for StoredRemoteRunnerJob {
             workspace_owner_lease: stored.workspace_owner_lease.or(legacy_owner_lease),
             execution_context_id: stored.execution_context_id,
             execution_receipt: stored.execution_receipt,
+            direct_execution_selected: stored.direct_execution_selected,
         })
     }
 }
@@ -966,7 +973,371 @@ fn execution_context_id_from_evidence(stored: &StoredJob) -> Result<Option<Strin
     }
 }
 
+/// Only the sealed staging pipeline may convert a reverse submission into a
+/// direct daemon child. Ordinary remote runner jobs remain reverse-only.
+fn is_runner_staged_execution(stored: &StoredJob) -> bool {
+    stored.job.operation == "runner_staged_execution"
+        && stored.remote_runner.as_ref().is_some_and(|remote| {
+            remote
+                .envelope
+                .metadata
+                .get("staged_source_artifact")
+                .is_some()
+                && remote
+                    .envelope
+                    .metadata
+                    .get("staged_workspace_materialization")
+                    .is_some()
+        })
+}
+
 impl JobStore {
+    /// Return the immutable, redacted envelope of one still-queued reverse job.
+    /// This is intentionally unavailable after direct adoption or terminalization
+    /// so callers cannot treat historical reverse input as new admission work.
+    pub fn queued_staged_execution(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+    ) -> Result<Option<RunnerExecutionEnvelope>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        if stored.job.target_runner_id.as_deref() != Some(runner_id) {
+            return Err(Error::validation_invalid_argument(
+                "runner_id",
+                "staged execution belongs to a different runner",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        Ok(
+            (stored.job.status == JobStatus::Queued && is_runner_staged_execution(stored))
+                .then(|| {
+                    stored
+                        .remote_runner
+                        .as_ref()
+                        .map(|remote| remote.envelope.clone())
+                })
+                .flatten(),
+        )
+    }
+
+    /// Read the sealed staged envelope for either its queued reverse record or
+    /// a previously adopted direct record. Adoption retains this provenance so
+    /// a replacement daemon can replay the exact UUID.
+    pub fn staged_direct_execution_envelope(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+    ) -> Result<Option<RunnerExecutionEnvelope>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        if stored.job.target_runner_id.as_deref() != Some(runner_id) {
+            return Err(Error::validation_invalid_argument(
+                "runner_id",
+                "staged execution belongs to a different runner",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        if is_runner_staged_execution(stored) {
+            return Ok(stored
+                .remote_runner
+                .as_ref()
+                .map(|remote| remote.envelope.clone()));
+        }
+        Ok(stored.events.iter().rev().find_map(|event| {
+            let data = event.data.as_ref()?;
+            (data.get("phase").and_then(Value::as_str) == Some("staged_execution_adopted"))
+                .then(|| data.get("staged_execution_envelope"))?
+                .cloned()
+                .and_then(|envelope| serde_json::from_value(envelope).ok())
+        }))
+    }
+
+    /// Select direct execution before any runner-side source preparation. This
+    /// durable direction fence and reverse claiming share the same transaction,
+    /// so exactly one execution path can win for a staged job.
+    pub fn select_staged_direct_execution(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+    ) -> Result<Option<RunnerExecutionEnvelope>> {
+        let deliveries = self
+            .credential_deliveries
+            .lock()
+            .expect("credential delivery mutex poisoned");
+        if deliveries.contains_key(&job_id) {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "staged execution has reverse credential authority and cannot be selected directly",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let selection = self.durable_transaction(|inner| {
+            let stored = inner.jobs.get_mut(&job_id).ok_or_else(|| job_not_found(job_id))?;
+            if stored.job.target_runner_id.as_deref() != Some(runner_id) {
+                return Err(Error::validation_invalid_argument(
+                    "runner_id",
+                    "staged execution belongs to a different runner",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if stored.local_runner.is_some() || stored.job.status.is_terminal() {
+                return Ok(None);
+            }
+            if stored.job.status != JobStatus::Queued || stored.job.claim_id.is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "staged execution is already claimed or is not queued",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if !is_runner_staged_execution(stored) {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not a runner-staged execution",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            let (envelope, selected_now) = {
+                let remote = stored
+                    .remote_runner
+                    .as_mut()
+                    .expect("staged job has remote record");
+                if remote.execution_context_id.is_some()
+                    || remote.execution_receipt.is_some()
+                    || remote.workspace_claim_binding().is_some()
+                    || remote.workspace_owner_lease().is_some()
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "job_id",
+                        "staged execution requires reverse-runner authority and cannot be selected directly",
+                        Some(job_id.to_string()),
+                        None,
+                    ));
+                }
+                let selected_now = !remote.direct_execution_selected;
+                remote.direct_execution_selected = true;
+                (remote.envelope.clone(), selected_now)
+            };
+            if selected_now {
+                stored.job.updated_at_ms = timestamp_ms();
+                Self::append_event_already_locked(
+                    self,
+                    inner,
+                    job_id,
+                    JobEventKind::Progress,
+                    Some("staged direct execution selected".to_string()),
+                    Some(serde_json::json!({ "phase": "staged_direct_execution_selected" })),
+                )?;
+            }
+            Ok(Some(envelope))
+        });
+        drop(deliveries);
+        selection
+    }
+
+    /// Atomically turn one exact queued reverse submission into the existing
+    /// daemon-local execution lifecycle. The submission index and event history
+    /// remain attached to the same UUID; clearing `remote_runner` prevents any
+    /// reverse worker from subsequently claiming it.
+    pub(crate) fn adopt_queued_staged_execution_for_local_runner(
+        &self,
+        job_id: Uuid,
+        expected_envelope: &RunnerExecutionEnvelope,
+        local_runner: LocalRunnerJob,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Value,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+    ) -> Result<(Job, bool)> {
+        // Reverse claiming holds this mutex before taking the durable store
+        // lock. Keep this guard through the durable conversion so credential
+        // delivery cannot appear between the rejection check and commit.
+        let deliveries = self
+            .credential_deliveries
+            .lock()
+            .expect("credential delivery mutex poisoned");
+        if deliveries.contains_key(&job_id) {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "staged execution has an unconsumed reverse credential delivery",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let adoption = self.durable_transaction(|inner| {
+            let stored = inner.jobs.get_mut(&job_id).ok_or_else(|| job_not_found(job_id))?;
+            if stored.local_runner.is_some() {
+                return Ok((stored.job.clone(), false));
+            }
+            if stored.job.status.is_terminal() {
+                return Ok((stored.job.clone(), false));
+            }
+            if stored.job.status != JobStatus::Queued || stored.job.claim_id.is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "staged execution is already claimed or is not queued",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if stored.job.target_runner_id.as_deref() != Some(local_runner.runner_id.as_str()) {
+                return Err(Error::validation_invalid_argument(
+                    "runner_id",
+                    "staged execution belongs to a different runner",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            let remote = stored.remote_runner.as_ref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not a queued staged reverse execution",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if !is_runner_staged_execution(stored) {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not a runner-staged execution",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if !remote.direct_execution_selected {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "staged execution was not selected for direct execution",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if &remote.envelope != expected_envelope {
+                return Err(Error::validation_invalid_argument(
+                    "expected_envelope",
+                    "staged execution envelope does not match the durable submission",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if remote.execution_context_id.is_some()
+                || remote.execution_receipt.is_some()
+                || remote.workspace_claim_binding().is_some()
+                || remote.workspace_owner_lease().is_some()
+            {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "staged execution requires reverse-runner authority and cannot be directly adopted",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            stored.local_runner = Some(local_runner);
+            stored.remote_runner = None;
+            stored.job.operation = "runner.exec".to_string();
+            // This daemon generation owns the pre-worker handoff. A later
+            // generation may recover only if no child reservation was recorded.
+            stored.job.daemon_lease_id = self.daemon_lease_id.clone();
+            stored.job.source_snapshot = source_snapshot;
+            stored.job.path_materialization_plan = path_materialization_plan;
+            stored.job.updated_at_ms = timestamp_ms();
+            Self::append_event_already_locked(
+                self,
+                inner,
+                job_id,
+                JobEventKind::Progress,
+                Some("queued staged execution adopted for direct daemon execution".to_string()),
+                Some(serde_json::json!({
+                    "phase": "staged_execution_adopted",
+                    "staged_execution_envelope": expected_envelope,
+                    "local_execution": metadata,
+                })),
+            )?;
+            Ok((
+                inner.jobs.get(&job_id).expect("adopted job exists").job.clone(),
+                true,
+            ))
+        });
+        drop(deliveries);
+        adoption
+    }
+
+    /// Take over a queued adopted job only after the daemon lifecycle has
+    /// proved the exact previous lease dead. A merely different lease is not
+    /// ownership evidence: its worker may still be waiting for capacity.
+    pub(crate) fn recover_proven_dead_adopted_staged_direct_execution(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        proven_dead_lease_id: &str,
+    ) -> Result<Option<Job>> {
+        let Some(current_lease_id) = self.daemon_lease_id.as_deref() else {
+            return Ok(None);
+        };
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let Some(local) = stored.local_runner.as_ref() else {
+                return Ok(None);
+            };
+            if local.runner_id != runner_id {
+                return Err(Error::validation_invalid_argument(
+                    "runner_id",
+                    "adopted staged execution belongs to a different runner",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if stored.job.status != JobStatus::Queued || stored.local_child.is_some() {
+                return Ok(None);
+            }
+            let Some(previous_lease_id) = stored.job.daemon_lease_id.clone() else {
+                return Ok(None);
+            };
+            if previous_lease_id == current_lease_id {
+                return Ok(None);
+            }
+            if previous_lease_id != proven_dead_lease_id {
+                return Err(Error::validation_invalid_argument(
+                    "proven_dead_lease_id",
+                    "adopted staged execution is not owned by the proven-dead daemon lease",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            stored.job.daemon_lease_id = Some(current_lease_id.to_string());
+            stored.job.updated_at_ms = timestamp_ms();
+            let job = stored.job.clone();
+            Self::append_event_already_locked(
+                self,
+                inner,
+                job_id,
+                JobEventKind::Progress,
+                Some("abandoned staged direct pre-worker handoff recovered".to_string()),
+                Some(serde_json::json!({
+                    "phase": "staged_direct_execution_recovered",
+                    "proven_dead_lease_id": previous_lease_id,
+                    "daemon_lease_id": current_lease_id,
+                })),
+            )?;
+            Ok(Some(job))
+        })
+    }
+
     pub fn remote_runner_workspace_claim_binding(
         &self,
         job_id: Uuid,
@@ -1153,6 +1524,7 @@ impl JobStore {
                     workspace_owner_lease,
                     execution_context_id: None,
                     execution_receipt: None,
+                    direct_execution_selected: false,
                 },
             },
             now,
@@ -1334,6 +1706,7 @@ impl JobStore {
                 workspace_owner_lease: public_request.workspace_owner_lease,
                 execution_context_id: None,
                 execution_receipt: None,
+                direct_execution_selected: false,
             },
         };
         self.admit_remote_runner_job(admission, now)
@@ -1623,6 +1996,11 @@ impl JobStore {
                 .values()
                 .filter(|stored| {
                     stored.remote_runner.is_some()
+                        && !stored
+                            .remote_runner
+                            .as_ref()
+                            .expect("filtered remote runner job has request")
+                            .direct_execution_selected
                         && stored.job.status == JobStatus::Queued
                         && stored.job.target_runner_id.as_deref() == Some(runner_id)
                         && project_matches(stored.job.target_project_id.as_deref(), project_id)
@@ -2094,7 +2472,10 @@ impl JobStore {
                 .jobs
                 .get(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
-            if stored.remote_runner.is_none() {
+            let adopted_direct = stored.local_runner.as_ref().is_some_and(|local| {
+                stored.job.target_runner_id.as_deref() == Some(local.runner_id.as_str())
+            });
+            if stored.remote_runner.is_none() && !adopted_direct {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
                     "job is not a remote runner job",

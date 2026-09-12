@@ -25,10 +25,14 @@ Cleanup still refuses unpushed work, and promotion's existing authorized dirty
 candidate path is preserved. This does not change historical records' base refs
 or correct inflated cleanup counts caused by stale local base branches.
 
-The controller also refuses sealed staging for direct-SSH sessions, whose
+At the #14589 boundary, the controller refused sealed staging for direct-SSH sessions, whose
 daemon currently has no consumer for that queue. Reverse-worker staging is
 unchanged. This is a preventive capability correction only: it does not execute
 or recover previously queued direct jobs. The v1 request wire shape is unchanged.
+
+The subsequent [direct staged-execution repair](direct-staged-execution.md)
+adds capability-negotiated execution and same-store recovery. The evidence below
+remains the historical #14589 verification and live replay boundary.
 
 ## Repository-Native Verification
 

@@ -776,7 +776,8 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
     }
 
     fn supports_capability(&self, capability: &str) -> bool {
-        self.session.mode == RunnerTunnelMode::Reverse
+        (self.session.mode == RunnerTunnelMode::Reverse
+            || self.capabilities.iter().any(|candidate| candidate == crate::runner_staging_operation::DIRECT_RUNNER_STAGED_EXECUTION_CAPABILITY))
             && self
                 .capabilities
                 .iter()
@@ -806,7 +807,7 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
             RunnerTunnelMode::DirectSsh => {
                 let data = crate::execution::daemon_api_post_json_for_session_with_broker_token(
                     &self.session,
-                    "/runner/staging",
+                    "/runner/staging/direct",
                     &body,
                     self.broker_token.as_deref(),
                 )?;
@@ -967,8 +968,56 @@ impl RunnerStagingMaterializer for SealedPayloadMaterializer {
 struct ProductionStagingProvider;
 
 impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionStagingProvider {
+    fn stage_direct(
+        &self,
+        request: serde_json::Value,
+        jobs: &homeboy_core::api_jobs::JobStore,
+    ) -> Result<serde_json::Value> {
+        let response = self.stage(request, jobs)?;
+        let receipt: RemoteRunnerStagingReceipt =
+            serde_json::from_value(response["receipt"].clone()).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("decode durable staging receipt".to_string()),
+                )
+            })?;
+        let job_id = uuid::Uuid::parse_str(&receipt.handoff.runner_job_id).map_err(|error| {
+            Error::internal_unexpected(format!("invalid staged job identity: {error}"))
+        })?;
+        let root = homeboy_core::paths::runner_session_file(&receipt.handoff.runner_id)?
+            .with_file_name(format!("{}-staging", receipt.handoff.runner_id));
+        let store = RunnerStagingStore::open(
+            root.join("store.json"),
+            receipt.handoff.runner_id.clone(),
+            SealedPayloadMaterializer { root },
+        )?;
+        // Serialize replay preparation before any source writes. The durable
+        // direct selection separately excludes competing reverse-worker claims.
+        let _preparation = store.admission_lock()?;
+        if let Some(envelope) =
+            jobs.staged_direct_execution_envelope(job_id, &receipt.handoff.runner_id)?
+        {
+            homeboy_core::daemon::enqueue_staged_direct_exec(
+                jobs,
+                job_id,
+                envelope.clone(),
+                envelope,
+                None,
+            )?;
+        } else if jobs.get(job_id)?.claim_id.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "runner_staging",
+                "staged job is already claimed by a reverse worker",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        Ok(response)
+    }
+
     fn capabilities(&self, _runner_id: &str) -> Result<Vec<String>> {
         let mut capabilities = vec![
+            crate::runner_staging_operation::DIRECT_RUNNER_STAGED_EXECUTION_CAPABILITY.to_string(),
             REMOTE_RUNNER_STAGING_CAPABILITY_V1.to_string(),
             REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
             REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
@@ -1044,7 +1093,7 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                     cwd: workspace
                         .as_ref()
                         .map(|workspace| workspace.remote_cwd.clone()),
-                    env: Default::default(),
+                    env: envelope.handoff.recipe.job_override_env.clone(),
                     source_snapshot: None,
                     require_paths: Vec::new(),
                     extension_env_providers: Vec::new(),
@@ -1055,6 +1104,17 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                     "staged_workspace_materialization": workspace,
                 });
                 execution.mutation_policy.capture_patch = envelope.handoff.recipe.capture_patch;
+                execution.secret_env = Some(
+                    homeboy_core::secret_env_plan::SecretEnvPlan::from_secret_env_names(
+                        envelope.handoff.recipe.secret_env_names.clone(),
+                    ),
+                );
+                execution.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
+                    source: Some("sealed-staging".to_string()),
+                    kind: Some("runner_staged_execution".to_string()),
+                    durable_run_id: Some(envelope.handoff.run_id.clone()),
+                    ..Default::default()
+                });
                 let job = jobs.submit_runner_api_request(
                     homeboy_runner_contract::RunnerApiSubmitRequest {
                         schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA
@@ -1371,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn production_staging_refuses_direct_and_submits_reverse_with_paired_bearer_tokens() {
+    fn production_staging_requires_direct_execution_capability_and_preserves_reverse_transport() {
         let request = envelope();
         let receipt = RemoteRunnerStagingReceipt {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
@@ -1388,7 +1448,7 @@ mod tests {
             },
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 3);
+        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 4);
         let broker_token = "paired-staging-token".to_string();
         let direct_session = production_session(RunnerTunnelMode::DirectSsh, &endpoint);
         assert!(
@@ -1409,6 +1469,14 @@ mod tests {
         let error = submit_remote_runner_staging(&mut direct, &request)
             .expect_err("direct staging has no staged-source consumer");
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
+
+        direct.capabilities.push(
+            crate::runner_staging_operation::DIRECT_RUNNER_STAGED_EXECUTION_CAPABILITY.to_string(),
+        );
+        assert_eq!(
+            submit_remote_runner_staging(&mut direct, &request).expect("capable direct staging"),
+            receipt
+        );
 
         let reverse_session = production_session(RunnerTunnelMode::Reverse, &endpoint);
         assert!(
@@ -1438,6 +1506,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "/runner/staging/capabilities",
+                "/runner/staging/direct",
                 "/runner/staging/capabilities",
                 "/runner/staging",
             ]
@@ -1445,6 +1514,61 @@ mod tests {
         assert!(paths.iter().all(|(_, canonical, authorization)| {
             canonical == &broker_token && authorization == &format!("Bearer {broker_token}")
         }));
+    }
+
+    #[test]
+    fn production_direct_transport_requires_the_direct_execution_capability_and_uses_direct_route()
+    {
+        let request = envelope();
+        let receipt = RemoteRunnerStagingReceipt {
+            schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
+            handoff: DirectLabHandoffReceipt::accepted(&request.handoff, "runner-stage-direct"),
+            artifacts: RunnerStagingArtifacts {
+                lifecycle_id: "lifecycle-direct".to_string(),
+                source_artifact_id: "source-direct".to_string(),
+                workspace_artifact_id: "workspace-direct".to_string(),
+                source_artifact: request
+                    .materialization
+                    .source_artifact
+                    .as_ref()
+                    .map(crate::runner_staging_operation::SourceArtifactTransfer::descriptor),
+            },
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 1);
+        let mut direct = ProductionRunnerStagingTransport {
+            runner_id: "runner-1".to_string(),
+            session: production_session(RunnerTunnelMode::DirectSsh, &endpoint),
+            capabilities: vec![
+                REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
+                crate::runner_staging_operation::DIRECT_RUNNER_STAGED_EXECUTION_CAPABILITY
+                    .to_string(),
+            ],
+            broker_token: Some("direct-token".to_string()),
+        };
+
+        assert_eq!(
+            submit_remote_runner_staging(&mut direct, &request).expect("direct stage"),
+            receipt
+        );
+        assert_eq!(seen.lock().expect("paths")[0].0, "/runner/staging/direct");
+
+        let unsupported = ProductionRunnerStagingTransport {
+            runner_id: "runner-1".to_string(),
+            session: production_session(RunnerTunnelMode::DirectSsh, "http://127.0.0.1:9"),
+            capabilities: vec![
+                REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
+                REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
+            ],
+            broker_token: None,
+        };
+        assert!(
+            !unsupported.supports_capability(REMOTE_RUNNER_STAGING_CAPABILITY),
+            "an old direct daemon must fail capability negotiation before staging"
+        );
     }
 
     fn production_session(mode: RunnerTunnelMode, endpoint: &str) -> RunnerSession {

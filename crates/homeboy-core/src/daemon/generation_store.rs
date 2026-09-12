@@ -233,6 +233,90 @@ pub(super) fn record_job(job_id: &str, lease_id: &str) -> Result<()> {
     })
 }
 
+/// Move a queued job away from the exact daemon lease proven dead during
+/// startup recovery. Ordinary admission retries intentionally retain their
+/// original owner; only the owner-locked death proof may use this transfer.
+pub(super) fn transfer_proven_dead_job(
+    job_id: &str,
+    proven_dead_lease_id: &str,
+    replacement: &DaemonState,
+) -> Result<()> {
+    mutate_registry(|registry| {
+        let registry = registry.as_mut().ok_or_else(|| {
+            Error::internal_unexpected("local daemon recovery has no generation registry")
+        })?;
+        if registry
+            .generations
+            .generations
+            .get(proven_dead_lease_id)
+            .is_none_or(|generation| generation.endpoint.lease_id != proven_dead_lease_id)
+        {
+            return Err(Error::validation_invalid_argument(
+                "proven_dead_lease_id",
+                "proven-dead daemon lease is not an exact generation endpoint",
+                Some(proven_dead_lease_id.to_string()),
+                None,
+            ));
+        }
+        let owner = registry
+            .generations
+            .job_owner(job_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "recovered job has no durable daemon generation owner",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?
+            .to_string();
+        let replacement_lease_id = &replacement.lease_id;
+        if owner != proven_dead_lease_id && owner != *replacement_lease_id {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "recovered job is owned by a different daemon generation",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+
+        if !registry
+            .generations
+            .generations
+            .contains_key(replacement_lease_id)
+        {
+            registry.generations.begin(
+                replacement_lease_id.clone(),
+                LocalDaemonEndpoint::from_state(replacement),
+            );
+        }
+        if owner == *replacement_lease_id {
+            return Ok(());
+        }
+
+        let completed = registry.completed_jobs.contains(job_id);
+        registry
+            .generations
+            .job_owners
+            .insert(job_id.to_string(), replacement_lease_id.clone());
+        if !completed {
+            let old = registry
+                .generations
+                .generations
+                .get_mut(proven_dead_lease_id)
+                .expect("proven-dead generation was validated");
+            old.active_jobs = old.active_jobs.saturating_sub(1);
+            let replacement = registry
+                .generations
+                .generations
+                .get_mut(replacement_lease_id)
+                .expect("replacement generation was inserted or found");
+            replacement.active_jobs += 1;
+        }
+        Ok(())
+    })
+}
+
 pub(super) fn activate(state: &DaemonState) -> Result<()> {
     mutate_registry(|registry| {
         let registry = registry.as_mut().ok_or_else(|| {
@@ -501,6 +585,49 @@ mod tests {
                     .expect("owner")
                     .lease_id,
                 "A"
+            );
+        });
+    }
+
+    #[test]
+    fn proven_dead_transfer_moves_only_recovered_jobs_once() {
+        with_isolated_home(|_| {
+            let a = state("A", "127.0.0.1:1001");
+            let b = state("B", "127.0.0.1:1002");
+            seed(&a).expect("seed A");
+            record_job("recovered", "A").expect("record recovered job");
+            record_job("terminal", "A").expect("record terminal job");
+            record_job("other", "A").expect("record other job");
+            mark_job_terminal("terminal").expect("mark terminal job");
+
+            transfer_proven_dead_job("recovered", "A", &b).expect("transfer recovered job");
+            transfer_proven_dead_job("terminal", "A", &b).expect("transfer terminal job");
+            // The same recovery can be retried without moving active counts again.
+            transfer_proven_dead_job("recovered", "A", &b).expect("repeat transfer");
+
+            assert_eq!(
+                endpoint_for_job("recovered")
+                    .expect("route recovered")
+                    .expect("replacement endpoint")
+                    .lease_id,
+                "B"
+            );
+            assert_eq!(
+                endpoint_for_job("other")
+                    .expect("route unrelated")
+                    .expect("original endpoint")
+                    .lease_id,
+                "A"
+            );
+            let registry = read_registry().expect("read registry").expect("registry");
+            assert_eq!(registry.generations.generations["A"].active_jobs, 1);
+            assert_eq!(registry.generations.generations["B"].active_jobs, 1);
+
+            let before = registry.clone();
+            assert!(transfer_proven_dead_job("other", "wrong", &b).is_err());
+            assert_eq!(
+                read_registry().expect("read unchanged registry"),
+                Some(before)
             );
         });
     }
