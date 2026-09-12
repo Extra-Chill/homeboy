@@ -1,9 +1,10 @@
 use homeboy_engine_primitives::content_hash;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::agent_task_service::DerivedCookBaselineCapability;
 
@@ -252,11 +253,46 @@ impl AgentTaskScheduler {
         plan: AgentTaskPlan,
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> AgentTaskAggregate {
-        self.run_with_cancellation_and_derived_cook_baseline(
+        // Production cancellation is durable: a separate controller can mark
+        // the run cancelled while this scheduler owns provider children. Bridge
+        // that record into the same token gates and providers already poll.
+        let cancellation = AgentTaskCancellationToken::default();
+        let watcher = self.durable_cancellation_watcher(&cancellation);
+        let aggregate = self.run_with_cancellation_and_derived_cook_baseline(
             plan,
-            AgentTaskCancellationToken::default(),
+            cancellation,
             derived_cook_baseline,
-        )
+        );
+        if let Some((stopped, watcher)) = watcher {
+            stopped.store(true, Ordering::SeqCst);
+            let _ = watcher.join();
+        }
+        aggregate
+    }
+
+    fn durable_cancellation_watcher(
+        &self,
+        cancellation: &AgentTaskCancellationToken,
+    ) -> Option<(Arc<AtomicBool>, thread::JoinHandle<()>)> {
+        let run_id = self.run_id.clone()?;
+        let store = self.durable_lifecycle_store().ok()?.clone();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let watcher_stopped = Arc::clone(&stopped);
+        let watcher_cancellation = cancellation.clone();
+        Some((
+            stopped,
+            thread::spawn(move || {
+                while !watcher_stopped.load(Ordering::SeqCst) {
+                    if store.read_record(&run_id).is_ok_and(|record| {
+                        record.state == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
+                    }) {
+                        watcher_cancellation.cancel();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+            }),
+        ))
     }
 
     #[cfg(test)]
@@ -634,6 +670,7 @@ impl AgentTaskScheduler {
                             AgentTaskScheduleSupport::record_resource_wait(
                                 task,
                                 &running,
+                                &plan.options.resource_budget,
                                 &mut events,
                             );
                         }

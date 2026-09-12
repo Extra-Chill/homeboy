@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs4::fs_std::FileExt;
 use homeboy_engine_primitives::content_hash;
@@ -17,10 +17,14 @@ const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
+const CACHE_CURRENT: &str = ".homeboy-cache-current";
+const CACHE_STAGING_PREFIX: &str = ".homeboy-cache-staging-";
 const SEED_MARKER_FILE: &str = ".homeboy-seeded-at-ms";
 const EXPLICIT_TARGET_FILE: &str = ".homeboy-explicit-cargo-target.json";
 const CALLER_OWNED_EXPLICIT_TARGET: &str = "caller-owned explicit Cargo target";
 const LEGACY_LIFECYCLE_INFERRED: &str = "legacy lifecycle metadata inferred";
+const CARGO_TARGET_LEASE_WAIT: Duration = Duration::from_secs(30);
+const CARGO_TARGET_LEASE_POLL: Duration = Duration::from_millis(25);
 static ISOLATED_TARGET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -111,9 +115,8 @@ pub struct ManagedCargoTarget {
     /// A worktree-private store (see `acquire_managed_cargo_target_for_compatibility`)
     /// promotes artifacts it produced back to this base store on release, so
     /// the next worktree provisioned for the same repository identity seeds
-    /// warmer. The `SystemTime` is when this store was seeded from base:
-    /// only files touched since then are new output worth promoting.
-    promote_to: Option<(PathBuf, SystemTime)>,
+    /// warmer.
+    promote_to: Option<PathBuf>,
     _lease: Option<SharedCargoTargetLease>,
 }
 
@@ -151,15 +154,33 @@ impl ManagedCargoTarget {
     pub fn size_bytes(&self) -> Result<u64> {
         path_size(&self.target_dir)
     }
+
+    /// Publish this completed run's cache projection. Build callers invoke this
+    /// explicitly so publication failures remain visible to the owning workflow.
+    pub fn publish(&mut self) -> Result<()> {
+        let Some(base_dir) = self.promote_to.take() else {
+            return Ok(());
+        };
+        let publication_owner = format!("warm-cache-publication:{}", self.owner);
+        with_base_store_publication_lock(&base_dir, &publication_owner, || {
+            publish_cargo_cache(&self.target_dir, &base_dir)
+        })
+    }
 }
 
 impl Drop for ManagedCargoTarget {
     fn drop(&mut self) {
         // Best-effort warmth hand-off: promoting is never a build
-        // correctness requirement, only an optimization for the next
-        // worktree that seeds from this repository identity's base store.
-        if let Some((base_dir, seeded_at)) = self.promote_to.take() {
-            hardlink_tree_since(&self.target_dir, &base_dir, Some(seeded_at));
+        // correctness requirement, only an optimization for the next run
+        // that seeds from this repository identity's base store.
+        if let Some(base_dir) = self.promote_to.take() {
+            // Readers take the same exclusive publication lock before seeding.
+            // This makes the complete cache projection visible as one operation,
+            // rather than exposing a concurrent seed to a partly copied store.
+            let publication_owner = format!("warm-cache-publication:{}", self.owner);
+            let _ = with_base_store_publication_lock(&base_dir, &publication_owner, || {
+                publish_cargo_cache(&self.target_dir, &base_dir)
+            });
         }
     }
 }
@@ -202,11 +223,12 @@ pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
 }
 
-/// Resolve Cargo output for an explicit managed-execution declaration.
+/// Resolve Cargo output for managed execution.
 ///
-/// An explicit caller target is authoritative, including a relative target
-/// used to intentionally keep output in the checkout. Otherwise this acquires
-/// a stable shared-store lease for the complete child lifetime.
+/// Managed children always receive a leased target of their own. In particular,
+/// an inherited or declared `CARGO_TARGET_DIR` cannot make concurrent managed
+/// work write into the same Cargo directory. The shared store is only a warm
+/// artifact cache, not a build destination.
 pub fn acquire_managed_cargo_target(
     owner: &str,
     source_path: &Path,
@@ -217,13 +239,13 @@ pub fn acquire_managed_cargo_target(
 
 /// Acquire a fresh, leased target for a single managed run. This prevents a
 /// mutable checkout's local output from becoming part of the build lifecycle.
-/// An explicit target remains authoritative for callers that deliberately
-/// manage their own output location.
 pub fn acquire_isolated_cargo_target(
     owner: &str,
     source_path: &Path,
     explicit_target: Option<&str>,
 ) -> Result<ManagedCargoTarget> {
+    // A caller-owned explicit target stays the caller's, so isolation applies
+    // only to the shared managed root this function otherwise leases.
     if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
         return acquire_explicit_cargo_target(owner, source_path, target);
     }
@@ -268,8 +290,8 @@ pub fn acquire_managed_cargo_target_with_compatibility(
 }
 
 /// Acquire a target using compatibility collected from the exact child
-/// environment. This keeps provider attempts, retries, and controller gates in
-/// the same store when their execution declarations are the same.
+/// environment. Compatibility selects the shared warm cache used to seed each
+/// run-private store.
 pub fn acquire_managed_cargo_target_for_environment(
     owner: &str,
     source_path: &Path,
@@ -290,7 +312,7 @@ pub fn acquire_managed_cargo_target_for_environment(
     )
 }
 
-/// Acquire a worktree-private Cargo target seeded from the shared,
+/// Acquire a run-private Cargo target seeded from the shared,
 /// repository-identity-keyed base store.
 ///
 /// Every worktree compatible with a given repository identity used to
@@ -300,14 +322,13 @@ pub fn acquire_managed_cargo_target_for_environment(
 /// parallel cost roughly one build's wall time each, one at a time, rather
 /// than running concurrently.
 ///
-/// Instead, each worktree gets its own physical store, keyed by the
-/// repository identity plus its own canonical checkout path, so concurrent
-/// worktrees never contend for the same Cargo lock. A freshly created
-/// worktree store is seeded once from the base store via hard links (an
-/// inode-table update, not a data copy, so it costs no meaningful time or
-/// disk regardless of target size); releasing a worktree store promotes the
-/// artifacts it produced back to base, so the next worktree provisioned
-/// against the same identity seeds warm too.
+/// Instead, each managed run gets its own physical store. A worktree-local
+/// store is not enough: direct gates and controller recovery can overlap in
+/// one checkout, and Cargo would serialize those builds behind its target lock.
+/// A freshly created store is seeded from a copy-only projection of immutable
+/// artifacts. Cargo's locks and state are excluded, so neither seeding nor
+/// promotion shares a mutable inode with an active build. Releasing it promotes
+/// its new immutable artifacts back to base, so later runs still start warm.
 fn acquire_managed_cargo_target_for_compatibility(
     owner: &str,
     source_path: &Path,
@@ -320,6 +341,15 @@ fn acquire_managed_cargo_target_for_compatibility(
 
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
+    acquire_managed_cargo_target_for_compatibility_in(&root, owner, source_path, compatibility)
+}
+
+fn acquire_managed_cargo_target_for_compatibility_in(
+    root: &Path,
+    owner: &str,
+    _source_path: &Path,
+    compatibility: &CargoTargetCompatibility,
+) -> Result<ManagedCargoTarget> {
     let base_owner = format!("{owner}:{}", compatibility.identity());
     let base_dir = shared_store_dir(&root, &base_owner);
     // Touch the base store's liveness so it isn't reclaimed as unused while
@@ -331,39 +361,38 @@ fn acquire_managed_cargo_target_for_compatibility(
         SystemTime::now(),
     )?);
 
-    let canonical_source =
-        fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
-    let worktree_owner = format!(
-        "{base_owner}:worktree:{}",
-        canonical_source.to_string_lossy()
+    let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let run_owner = format!(
+        "{base_owner}:run:{}:{started}:{sequence}",
+        std::process::id()
     );
-    let lease = acquire_shared_cargo_target_in(&root, &worktree_owner, SystemTime::now())?;
-    let seeded_at = seed_worktree_cargo_target(&base_dir, lease.target_dir())?;
+    let lease = acquire_shared_cargo_target_in(&root, &run_owner, SystemTime::now())?;
+    seed_worktree_cargo_target(&base_dir, lease.target_dir())?;
 
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
-        resolution: "shared",
+        resolution: "isolated",
         owner: owner.to_string(),
-        promote_to: Some((base_dir, seeded_at)),
+        promote_to: Some(base_dir),
         _lease: Some(lease),
     })
 }
 
-/// Seed a freshly created worktree-private Cargo target from the shared base
-/// store once, recorded by a marker so later acquisitions of the same
-/// worktree store (repeat gate/provider runs in one worktree) skip the walk
-/// and simply keep using the store as Cargo left it.
-fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<SystemTime> {
-    let marker = private_dir.join(SEED_MARKER_FILE);
-    if let Some(seeded_at) = read_marker_time(&marker) {
-        return Ok(seeded_at);
-    }
-    let seeded_at = SystemTime::now();
+/// Seed a freshly created run-private Cargo target from the shared base store.
+fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<()> {
     if base_dir.exists() {
-        hardlink_tree_since(base_dir, private_dir, None);
+        let seed_owner = read_owner(private_dir)
+            .map(|owner| format!("warm-cache-seed:{owner}"))
+            .unwrap_or_else(|| "warm-cache-seed:unknown".to_string());
+        with_base_store_publication_lock(base_dir, &seed_owner, || {
+            copy_cargo_cache(&cache_projection(base_dir), private_dir, false)
+        })?;
     }
-    write_marker_time(&marker, seeded_at)?;
-    Ok(seeded_at)
+    Ok(())
 }
 
 fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
@@ -373,22 +402,6 @@ fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
     ))
 }
 
-fn read_marker_time(path: &Path) -> Option<SystemTime> {
-    let millis: u64 = fs::read_to_string(path).ok()?.trim().parse().ok()?;
-    Some(UNIX_EPOCH + Duration::from_millis(millis))
-}
-
-fn write_marker_time(path: &Path, time: SystemTime) -> Result<()> {
-    fs::write(
-        path,
-        time.duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .to_string(),
-    )
-    .map_err(|error| io_error(error, "write Cargo target seed marker"))
-}
-
 /// Homeboy's own store-lifecycle sidecars. These describe the store, not
 /// Cargo's output, and must never be seeded or promoted between stores.
 fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
@@ -396,51 +409,212 @@ fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
         || name == LEASE_FILE
         || name == OWNER_FILE
         || name == LAST_USED_FILE
+        || name == CACHE_CURRENT
+        || name
+            .to_str()
+            .is_some_and(|name| name.starts_with(CACHE_STAGING_PREFIX))
         || name == SEED_MARKER_FILE
         || name == EXPLICIT_TARGET_FILE
 }
 
-/// Hard-link every regular file under `from` into `to`, mirroring the
-/// relative directory structure. A destination file that already exists is
-/// left in place (first writer wins), and per-entry errors are tolerated:
-/// seeding and promotion are a warmth optimization, never a build
-/// correctness requirement, and Cargo's own fingerprinting inside the
-/// destination store recompiles anything genuinely missing or stale.
-///
-/// `since`, when set, skips files last modified before that time: seeding
-/// copies an entire base store, but promotion only wants artifacts this
-/// worktree actually produced since it was seeded.
-fn hardlink_tree_since(from: &Path, to: &Path, since: Option<SystemTime>) {
-    let Ok(entries) = fs::read_dir(from) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// Synchronize a Cargo cache projection without transferring Cargo's live lock.
+/// Callers hold the base store's exclusive publication lock, so a seed sees a
+/// complete projection and a promotion cannot race another promotion. Files are
+/// copied to a sibling temporary inode and renamed into place, so a cache file
+/// is never observed half-written even if a future reader misses that lock.
+fn cache_projection(base_dir: &Path) -> PathBuf {
+    let current = base_dir.join(CACHE_CURRENT);
+    if current.exists() {
+        current
+    } else {
+        base_dir.to_path_buf()
+    }
+}
+
+/// Materialize a complete cache projection before it becomes reachable by a
+/// reader. The base directory remains a lifecycle/lock container; its current
+/// cache is a separately published directory.
+fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
+    let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging = base_dir.join(format!(
+        "{CACHE_STAGING_PREFIX}{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir(&staging)
+        .map_err(|error| io_error(error, "create Cargo cache publication staging"))?;
+    let current = cache_projection(base_dir);
+    let result = (|| {
+        if current != base_dir {
+            copy_cargo_cache(&current, &staging, true)?;
+        } else {
+            copy_cargo_cache(base_dir, &staging, true)?;
+        }
+        copy_cargo_cache(from, &staging, true)?;
+        let published = base_dir.join(CACHE_CURRENT);
+        let previous = base_dir.join(format!("{CACHE_STAGING_PREFIX}previous-{sequence}"));
+        if published.exists() {
+            fs::rename(&published, &previous)
+                .map_err(|error| io_error(error, "stage previous Cargo cache publication"))?;
+        }
+        if let Err(error) = fs::rename(&staging, &published) {
+            if previous.exists() {
+                let _ = fs::rename(&previous, &published);
+            }
+            return Err(io_error(error, "publish complete Cargo cache projection"));
+        }
+        if previous.exists() {
+            fs::remove_dir_all(&previous)
+                .map_err(|error| io_error(error, "remove superseded Cargo cache projection"))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() && staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn copy_cargo_cache(from: &Path, to: &Path, replace_existing: bool) -> Result<()> {
+    for entry in
+        fs::read_dir(from).map_err(|error| io_error(error, "read Cargo cache projection"))?
+    {
+        let entry = entry.map_err(|error| io_error(error, "read Cargo cache entry"))?;
         let name = entry.file_name();
-        if is_lifecycle_sidecar(&name) {
+        if is_lifecycle_sidecar(&name) || is_cargo_coordination_state(&name) {
             continue;
         }
         let source = entry.path();
-        let Ok(metadata) = fs::symlink_metadata(&source) else {
-            continue;
-        };
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| io_error(error, "stat Cargo cache entry"))?;
         let dest = to.join(&name);
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            if fs::create_dir_all(&dest).is_ok() {
-                hardlink_tree_since(&source, &dest, since);
-            }
+            fs::create_dir_all(&dest)
+                .map_err(|error| io_error(error, "create Cargo cache directory"))?;
+            copy_cargo_cache(&source, &dest, replace_existing)?;
             continue;
         }
-        if let Some(since) = since {
-            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-            if modified < since {
-                continue;
-            }
-        }
-        if dest.exists() {
+        if dest.exists() && !replace_existing {
             continue;
         }
-        let _ = fs::hard_link(&source, &dest);
+        let temporary = dest.with_extension(format!(
+            "homeboy-publish-{}",
+            ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::copy(&source, &temporary)
+            .map_err(|error| io_error(error, "copy Cargo cache artifact"))?;
+        fs::rename(&temporary, &dest)
+            .map_err(|error| io_error(error, "install Cargo cache artifact"))?;
     }
+    Ok(())
+}
+
+fn is_cargo_coordination_state(name: &std::ffi::OsStr) -> bool {
+    // Fingerprints and incremental outputs are safe in a run-private target and
+    // are essential to Cargo's warm path. Only its live lock and probe result
+    // must not cross target boundaries.
+    matches!(name.to_str(), Some(".cargo-lock" | ".rustc_info.json"))
+}
+
+fn with_base_store_publication_lock<T>(
+    base_dir: &Path,
+    owner: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_base_store_publication_lock_until(
+        base_dir,
+        owner,
+        Instant::now() + CARGO_TARGET_LEASE_WAIT,
+        operation,
+    )
+}
+
+fn with_base_store_publication_lock_until<T>(
+    base_dir: &Path,
+    owner: &str,
+    deadline: Instant,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(base_dir.join(LOCK_FILE))
+        .map_err(|error| io_error(error, "open Cargo cache publication lock"))?;
+    let started = Instant::now();
+    let mut contention_polls = 0_u64;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => break,
+            Ok(false) => contention_polls = contention_polls.saturating_add(1),
+            Err(error) => return Err(io_error(error, "lock Cargo cache publication")),
+        }
+        if Instant::now() >= deadline {
+            return Err(cargo_target_publication_wait_error(
+                base_dir,
+                owner,
+                started.elapsed(),
+                "deadline_exhausted",
+                contention_polls,
+            ));
+        }
+        std::thread::sleep(CARGO_TARGET_LEASE_POLL);
+    }
+    write_lifecycle(base_dir, Some(owner), SystemTime::now())?;
+    let result = operation();
+    FileExt::unlock(&lock).map_err(|error| io_error(error, "unlock Cargo cache publication"))?;
+    let _ = fs::remove_file(base_dir.join(LEASE_FILE));
+    let _ = write_last_used(base_dir, SystemTime::now());
+    result
+}
+
+fn cargo_target_publication_wait_error(
+    target_dir: &Path,
+    waiting_owner: &str,
+    waited: Duration,
+    reason: &str,
+    contention_polls: u64,
+) -> Error {
+    let holder_owner = read_owner(target_dir).unwrap_or_else(|| "unknown".to_string());
+    let holder_lease_age_ms = fs::metadata(target_dir.join(LEASE_FILE))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or_default()
+                .as_millis()
+        });
+    let mut error = Error::validation_invalid_argument(
+        "shared_cargo_target",
+        format!(
+            "warm Cargo cache publication lock {reason} after {} ms; holder `{holder_owner}` has {} observed contention polls",
+            waited.as_millis(),
+            contention_polls,
+        ),
+        Some(target_dir.display().to_string()),
+        Some(vec![
+            "retry after the reported warm-cache holder finishes".to_string(),
+            "homeboy cleanup --include shared-cargo-targets --apply".to_string(),
+        ]),
+    )
+    .with_retryable(true)
+    .with_hint("Retry after the reported warm-cache holder finishes.")
+    .with_hint("If the holder is stale, inspect and clean cache stores with `homeboy cleanup --include shared-cargo-targets --apply`.");
+    error.details["waiting_owner"] = json!(waiting_owner);
+    error.details["holder_owner"] = json!(holder_owner);
+    error.details["lock_path"] = json!(target_dir.join(LOCK_FILE));
+    error.details["waited_ms"] = json!(waited.as_millis());
+    error.details["reason"] = json!(reason);
+    error.details["queue"] = json!({
+        "contention_polls": contention_polls,
+        "position": "unknown",
+    });
+    error.details["progress"] = json!({
+        "holder_lease_present": holder_lease_age_ms.is_some(),
+        "holder_lease_age_ms": holder_lease_age_ms,
+    });
+    error
 }
 
 fn resolve_explicit_cargo_target(source_path: &Path, target: &str) -> PathBuf {
@@ -539,7 +713,6 @@ fn cargo_compatibility_environment_name(name: &str) -> bool {
             | "CARGO_ENCODED_RUSTFLAGS"
             | "CARGO_INCREMENTAL"
             | "CARGO_PROFILE"
-            | "CARGO_TARGET_DIR"
             | "RUSTC"
             | "RUSTC_WRAPPER"
             | "RUSTC_WORKSPACE_WRAPPER"
@@ -621,6 +794,22 @@ pub(crate) fn acquire_shared_cargo_target_in(
     owner: &str,
     now: SystemTime,
 ) -> Result<SharedCargoTargetLease> {
+    acquire_shared_cargo_target_in_until(
+        root,
+        owner,
+        now,
+        Instant::now() + CARGO_TARGET_LEASE_WAIT,
+        || false,
+    )
+}
+
+fn acquire_shared_cargo_target_in_until(
+    root: &Path,
+    owner: &str,
+    now: SystemTime,
+    deadline: Instant,
+    cancellation_requested: impl Fn() -> bool,
+) -> Result<SharedCargoTargetLease> {
     let target_dir = shared_store_dir(root, owner);
     fs::create_dir_all(&target_dir)
         .map_err(|error| io_error(error, "create shared Cargo target"))?;
@@ -631,10 +820,64 @@ pub(crate) fn acquire_shared_cargo_target_in(
         .write(true)
         .open(target_dir.join(LOCK_FILE))
         .map_err(|error| io_error(error, "open shared Cargo target lock"))?;
-    lock.lock_shared()
-        .map_err(|error| io_error(error, "lock shared Cargo target"))?;
+    let started = Instant::now();
+    loop {
+        if cancellation_requested() {
+            return Err(cargo_target_lease_wait_error(
+                &target_dir,
+                owner,
+                started.elapsed(),
+                "cancelled",
+            ));
+        }
+        match FileExt::try_lock_shared(&lock) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) => return Err(io_error(error, "lock shared Cargo target")),
+        }
+        if Instant::now() >= deadline {
+            return Err(cargo_target_lease_wait_error(
+                &target_dir,
+                owner,
+                started.elapsed(),
+                "deadline_exhausted",
+            ));
+        }
+        std::thread::sleep(
+            CARGO_TARGET_LEASE_POLL.min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
     write_lifecycle(&target_dir, Some(owner), now)?;
     Ok(SharedCargoTargetLease { target_dir, lock })
+}
+
+fn cargo_target_lease_wait_error(
+    target_dir: &Path,
+    owner: &str,
+    waited: Duration,
+    reason: &str,
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "shared_cargo_target",
+        format!(
+            "shared Cargo target lease {reason} after {} ms; active cleanup or another Homeboy process may hold {}",
+            waited.as_millis(),
+            target_dir.join(LOCK_FILE).display()
+        ),
+        Some(target_dir.display().to_string()),
+        Some(vec![
+            "retry after the active Homeboy operation finishes".to_string(),
+            "homeboy cleanup --include shared-cargo-targets --apply".to_string(),
+        ]),
+    )
+    .with_retryable(true)
+    .with_hint("Retry after the active Homeboy operation finishes.")
+    .with_hint("If no operation is active, inspect and clean stale cache stores with `homeboy cleanup --include shared-cargo-targets --apply`.");
+    error.details["owner"] = json!(owner);
+    error.details["lock_path"] = json!(target_dir.join(LOCK_FILE));
+    error.details["waited_ms"] = json!(waited.as_millis());
+    error.details["reason"] = json!(reason);
+    error
 }
 
 pub fn cleanup_shared_cargo_targets(
@@ -1782,6 +2025,376 @@ mod tests {
         drop(lease);
         assert!(!lease_path(root.path()).join(LEASE_FILE).exists());
     }
+
+    #[test]
+    fn cleanup_reclaims_worktree_private_targets_after_their_leases_release() {
+        let root = TempDir::new().unwrap();
+        let worktree = TempDir::new().unwrap();
+        fs::write(worktree.path().join("Cargo.lock"), "lock-a").unwrap();
+        let compatibility = cargo_target_compatibility(worktree.path(), &[]);
+        let target = acquire_managed_cargo_target_for_compatibility_in(
+            root.path(),
+            "gate",
+            worktree.path(),
+            &compatibility,
+        )
+        .unwrap();
+        let target_path = target.target_dir().to_path_buf();
+        fs::write(target_path.join("artifact"), b"payload").unwrap();
+        drop(target);
+
+        let now = SystemTime::now();
+        write_last_used(
+            &target_path,
+            now.checked_sub(Duration::from_secs(61)).unwrap(),
+        )
+        .unwrap();
+        let mut cleanup_options = options(root.path(), true, now);
+        cleanup_options.max_bytes = 100;
+        let output = cleanup_shared_cargo_targets(cleanup_options).unwrap();
+
+        assert_eq!(output.applied_count, 1);
+        assert!(!target_path.exists());
+    }
+
+    #[test]
+    fn independent_worktrees_hold_distinct_private_target_locks_concurrently() {
+        let root = TempDir::new().unwrap();
+        let first_worktree = TempDir::new().unwrap();
+        let second_worktree = TempDir::new().unwrap();
+        for worktree in [&first_worktree, &second_worktree] {
+            fs::write(worktree.path().join("Cargo.lock"), "lock-a").unwrap();
+        }
+        let compatibility = cargo_target_compatibility(first_worktree.path(), &[]);
+        let barrier = std::sync::Barrier::new(2);
+        let targets = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                barrier.wait();
+                acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "gate",
+                    first_worktree.path(),
+                    &compatibility,
+                )
+                .unwrap()
+            });
+            let second = scope.spawn(|| {
+                barrier.wait();
+                acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "gate",
+                    second_worktree.path(),
+                    &compatibility,
+                )
+                .unwrap()
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        assert_ne!(targets.0.target_dir(), targets.1.target_dir());
+        assert!(targets.0.target_dir().join(LOCK_FILE).is_file());
+        assert!(targets.1.target_dir().join(LOCK_FILE).is_file());
+    }
+
+    #[test]
+    fn concurrent_runner_refresh_builds_use_isolated_targets_and_publish_warmth() {
+        let root = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        fs::write(workspace.path().join("Cargo.lock"), "lock-a").unwrap();
+        let compatibility = cargo_target_compatibility(workspace.path(), &[]);
+        let barrier = std::sync::Barrier::new(2);
+        let targets = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                let target = acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "runner-refresh:runner-a",
+                    workspace.path(),
+                    &compatibility,
+                )
+                .unwrap();
+                barrier.wait();
+                fs::write(target.target_dir().join("runner-a-artifact"), b"a").unwrap();
+                target.target_dir().to_path_buf()
+            });
+            let second = scope.spawn(|| {
+                let target = acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "runner-refresh:runner-a",
+                    workspace.path(),
+                    &compatibility,
+                )
+                .unwrap();
+                barrier.wait();
+                fs::write(target.target_dir().join("runner-b-artifact"), b"b").unwrap();
+                target.target_dir().to_path_buf()
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        assert_ne!(targets.0, targets.1, "refreshes must not share Cargo locks");
+        let base = shared_store_dir(
+            root.path(),
+            &format!("runner-refresh:runner-a:{}", compatibility.identity()),
+        );
+        let projection = cache_projection(&base);
+        assert!(projection.join("runner-a-artifact").exists());
+        assert!(projection.join("runner-b-artifact").exists());
+    }
+
+    #[test]
+    fn warmed_cache_concurrent_real_builds_publish_complete_cargo_state() {
+        let root = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        fs::create_dir(workspace.path().join("src")).unwrap();
+        fs::write(
+            workspace.path().join("Cargo.toml"),
+            "[package]\nname = \"warmed-cache-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(workspace.path().join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        fs::write(workspace.path().join("Cargo.lock"), "").unwrap();
+        let compatibility = cargo_target_compatibility(workspace.path(), &[]);
+
+        let warm = acquire_managed_cargo_target_for_compatibility_in(
+            root.path(),
+            "gate",
+            workspace.path(),
+            &compatibility,
+        )
+        .unwrap();
+        cargo_build(workspace.path(), warm.target_dir());
+        drop(warm);
+
+        let base = shared_store_dir(root.path(), &format!("gate:{}", compatibility.identity()));
+        let projection = cache_projection(&base);
+        let immutable = first_regular_file(&projection.join("debug/deps"))
+            .expect("warm build should promote a reusable Cargo artifact");
+        let immutable_relative = immutable
+            .strip_prefix(&projection)
+            .expect("warm artifact lives in the shared base")
+            .to_path_buf();
+        assert!(
+            projection.join("debug/.fingerprint").is_dir(),
+            "promotion retains Cargo's real fingerprint warmth"
+        );
+        for path in [
+            projection.join("debug/.cargo-lock"),
+            projection.join("debug/.fingerprint/state"),
+            projection.join("debug/incremental/state"),
+            projection.join(".rustc_info.json"),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"mutable").unwrap();
+        }
+
+        let barrier = std::sync::Barrier::new(2);
+        let targets = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                let target = acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "gate",
+                    workspace.path(),
+                    &compatibility,
+                )
+                .unwrap();
+                assert_seed_is_immutable(&target, &immutable, &immutable_relative);
+                barrier.wait();
+                cargo_build(workspace.path(), target.target_dir());
+                target.target_dir().to_path_buf()
+            });
+            let second = scope.spawn(|| {
+                let target = acquire_managed_cargo_target_for_compatibility_in(
+                    root.path(),
+                    "gate",
+                    workspace.path(),
+                    &compatibility,
+                )
+                .unwrap();
+                assert_seed_is_immutable(&target, &immutable, &immutable_relative);
+                barrier.wait();
+                cargo_build(workspace.path(), target.target_dir());
+                target.target_dir().to_path_buf()
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        assert_ne!(targets.0, targets.1);
+        assert!(targets.0.join("debug").is_dir());
+        assert!(targets.1.join("debug").is_dir());
+        for path in [
+            projection.join("debug/.cargo-lock"),
+            projection.join(".rustc_info.json"),
+        ] {
+            assert!(
+                !path.exists(),
+                "mutable Cargo coordination state is never republished: {}",
+                path.display()
+            );
+        }
+        for path in [
+            projection.join("debug/.fingerprint/state"),
+            projection.join("debug/incremental/state"),
+        ] {
+            assert!(
+                path.exists(),
+                "Cargo warmth state is retained: {}",
+                path.display()
+            );
+        }
+    }
+
+    fn cargo_build(workspace: &Path, target: &Path) {
+        assert!(
+            std::process::Command::new("cargo")
+                .args(["build", "--quiet"])
+                .current_dir(workspace)
+                .env("CARGO_TARGET_DIR", target)
+                .status()
+                .unwrap()
+                .success(),
+            "fixture Cargo build should succeed"
+        );
+    }
+
+    fn first_regular_file(path: &Path) -> Option<PathBuf> {
+        for entry in fs::read_dir(path).ok()?.flatten() {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if metadata.is_file() {
+                return Some(path);
+            }
+            if metadata.is_dir() {
+                if let Some(file) = first_regular_file(&path) {
+                    return Some(file);
+                }
+            }
+        }
+        None
+    }
+
+    fn assert_seed_is_immutable(
+        target: &ManagedCargoTarget,
+        base_artifact: &Path,
+        artifact_relative: &Path,
+    ) {
+        let private_artifact = target.target_dir().join(artifact_relative);
+        assert_eq!(
+            fs::read(&private_artifact).unwrap(),
+            fs::read(base_artifact).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            assert_ne!(
+                fs::metadata(base_artifact).unwrap().ino(),
+                fs::metadata(&private_artifact).unwrap().ino(),
+                "warm artifacts must be copied, never hard-linked"
+            );
+        }
+        for state in ["debug/.cargo-lock", ".rustc_info.json"] {
+            assert!(
+                !target.target_dir().join(state).exists(),
+                "Cargo coordination state must not be seeded: {state}"
+            );
+        }
+        for state in ["debug/.fingerprint/state", "debug/incremental/state"] {
+            assert!(
+                target.target_dir().join(state).exists(),
+                "Cargo warmth state must be seeded: {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_lease_wait_is_bounded_cancellable_and_actionable() {
+        let root = TempDir::new().unwrap();
+        let owner = "contended";
+        let lease = acquire_shared_cargo_target_in(root.path(), owner, SystemTime::now()).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lease.target_dir().join(LOCK_FILE))
+            .unwrap();
+        drop(lease);
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let timeout = match acquire_shared_cargo_target_in_until(
+            root.path(),
+            owner,
+            SystemTime::now(),
+            Instant::now() + Duration::from_millis(10),
+            || false,
+        ) {
+            Ok(_) => panic!("exclusive holder must bound shared lease waiting"),
+            Err(error) => error,
+        };
+        assert_eq!(timeout.details["reason"], "deadline_exhausted");
+        assert_eq!(timeout.details["owner"], owner);
+        assert!(timeout.retryable == Some(true));
+        assert!(!timeout.hints.is_empty());
+
+        let cancelled = match acquire_shared_cargo_target_in_until(
+            root.path(),
+            owner,
+            SystemTime::now(),
+            Instant::now() + Duration::from_secs(1),
+            || true,
+        ) {
+            Ok(_) => panic!("cancelled wait must not sleep behind a lease"),
+            Err(error) => error,
+        };
+        assert_eq!(cancelled.details["reason"], "cancelled");
+    }
+
+    #[test]
+    fn publication_lock_contention_reports_durable_holder_and_progress() {
+        let root = TempDir::new().unwrap();
+        let base = shared_store_dir(root.path(), "warm-cache-base");
+        fs::create_dir_all(&base).unwrap();
+        write_lifecycle(
+            &base,
+            Some("warm-cache-publication:runner-refresh:42"),
+            SystemTime::now(),
+        )
+        .unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(base.join(LOCK_FILE))
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let error = with_base_store_publication_lock_until(
+            &base,
+            "warm-cache-seed:runner-refresh:99",
+            Instant::now() + Duration::from_millis(10),
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.details["reason"], "deadline_exhausted");
+        assert_eq!(
+            error.details["holder_owner"],
+            "warm-cache-publication:runner-refresh:42"
+        );
+        assert_eq!(
+            error.details["waiting_owner"],
+            "warm-cache-seed:runner-refresh:99"
+        );
+        assert!(error.details["waited_ms"].as_u64().unwrap_or_default() >= 10);
+        assert!(
+            error.details["queue"]["contention_polls"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
+        assert_eq!(error.details["progress"]["holder_lease_present"], true);
+        assert!(error.details["progress"]["holder_lease_age_ms"].is_number());
+    }
+
     fn lease_path(root: &Path) -> PathBuf {
         fs::read_dir(root).unwrap().next().unwrap().unwrap().path()
     }
