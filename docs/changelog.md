@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.2] - 2026-09-12
+
+### Changed
+- Stop parallel verification serializing on Cargo locks
+
+### Fixed
+- align portable preflight gates
+- honor dependency overrides and admit reusable task worktrees
+
 ## [0.373.1] - 2026-09-12
 
 ### Fixed
